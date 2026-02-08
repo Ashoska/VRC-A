@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Power
 import androidx.compose.material.icons.filled.Settings
@@ -40,14 +41,17 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.Divider
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.NavigationDrawerItem
+import androidx.compose.material3.NavigationDrawerItemDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -57,6 +61,7 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -78,6 +83,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.compose.runtime.collectAsState
 import com.scrapw.chatbox.ui.ChatboxViewModel
 import kotlinx.coroutines.launch
 
@@ -108,67 +114,122 @@ fun ChatboxScreen(
     var page by rememberSaveable { mutableStateOf(AppPage.Home) }
     var showSettingsSheet by remember { mutableStateOf(false) }
 
-    Scaffold(
-        topBar = {
-            CenterAlignedTopAppBar(
-                title = { Text("Chatbox") },
-                actions = {
-                    IconButton(onClick = { showSettingsSheet = true }) {
-                        Icon(Icons.Filled.Settings, contentDescription = "Settings")
-                    }
+    // ✅ Mobile SlimeVR-style: left drawer (hamburger), NO bottom nav
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
+
+    fun select(p: AppPage) {
+        page = p
+        scope.launch { drawerState.close() }
+    }
+
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            ModalDrawerSheet {
+                Spacer(Modifier.height(8.dp))
+
+                Text(
+                    text = "Chatbox",
+                    style = MaterialTheme.typography.titleLarge,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                )
+
+                DrawerItem(
+                    label = "Home",
+                    selected = page == AppPage.Home,
+                    icon = Icons.Filled.Home
+                ) { select(AppPage.Home) }
+
+                DrawerItem(
+                    label = "Automations",
+                    selected = page == AppPage.Automations,
+                    icon = Icons.Filled.Sync
+                ) { select(AppPage.Automations) }
+
+                DrawerItem(
+                    label = "Music",
+                    selected = page == AppPage.Music,
+                    icon = Icons.Filled.MusicNote
+                ) { select(AppPage.Music) }
+
+                DrawerItem(
+                    label = "Debug",
+                    selected = page == AppPage.Debug,
+                    icon = Icons.Filled.BugReport
+                ) { select(AppPage.Debug) }
+
+                Spacer(Modifier.weight(1f))
+
+                // Settings lives in drawer (like SlimeVR). It opens your existing sheet.
+                DrawerItem(
+                    label = "Settings",
+                    selected = false,
+                    icon = Icons.Filled.Settings
+                ) {
+                    showSettingsSheet = true
+                    scope.launch { drawerState.close() }
                 }
-            )
-        },
-        bottomBar = { BottomNav(current = page, onSelect = { page = it }) }
-    ) { padding ->
-        Box(
-            Modifier
-                .fillMaxSize()
-                .padding(padding)
-        ) {
-            when (page) {
-                AppPage.Home -> HomePage(chatboxViewModel, onOpenSettings = { showSettingsSheet = true })
-                AppPage.Automations -> AutomationsPage(chatboxViewModel)
-                AppPage.Music -> NowPlayingPage(chatboxViewModel)
-                AppPage.Debug -> DebugPage(chatboxViewModel)
+
+                Spacer(Modifier.height(12.dp))
             }
         }
+    ) {
+        Scaffold(
+            topBar = {
+                CenterAlignedTopAppBar(
+                    title = { Text("Chatbox") },
+                    navigationIcon = {
+                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                            Icon(Icons.Filled.Menu, contentDescription = "Open menu")
+                        }
+                    },
+                    actions = {
+                        // Optional: keep gear too (doesn't change logic).
+                        IconButton(onClick = { showSettingsSheet = true }) {
+                            Icon(Icons.Filled.Settings, contentDescription = "Settings")
+                        }
+                    }
+                )
+            }
+            // ✅ no bottom bar
+        ) { padding ->
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+            ) {
+                when (page) {
+                    AppPage.Home -> HomePage(chatboxViewModel, onOpenSettings = { showSettingsSheet = true })
+                    AppPage.Automations -> AutomationsPage(chatboxViewModel)
+                    AppPage.Music -> NowPlayingPage(chatboxViewModel)
+                    AppPage.Debug -> DebugPage(chatboxViewModel)
+                }
+            }
 
-        if (showSettingsSheet) {
-            SettingsSheet(
-                vm = chatboxViewModel,
-                onDismiss = { showSettingsSheet = false }
-            )
+            if (showSettingsSheet) {
+                SettingsSheet(
+                    vm = chatboxViewModel,
+                    onDismiss = { showSettingsSheet = false }
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun BottomNav(
-    current: AppPage,
-    onSelect: (AppPage) -> Unit
-) {
-    NavigationBar {
-        BottomItem(AppPage.Home, current, Icons.Filled.Home, onSelect)
-        BottomItem(AppPage.Automations, current, Icons.Filled.Sync, onSelect)
-        BottomItem(AppPage.Music, current, Icons.Filled.MusicNote, onSelect)
-        BottomItem(AppPage.Debug, current, Icons.Filled.BugReport, onSelect)
-    }
-}
-
-@Composable
-private fun BottomItem(
-    page: AppPage,
-    current: AppPage,
+private fun DrawerItem(
+    label: String,
+    selected: Boolean,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
-    onSelect: (AppPage) -> Unit
+    onClick: () -> Unit
 ) {
-    val selected = (page == current)
-    NavigationBarItem(
+    NavigationDrawerItem(
+        label = { Text(label) },
         selected = selected,
-        onClick = { onSelect(page) },
-        icon = { Icon(icon, contentDescription = page.title) },
-        label = { Text(page.title, maxLines = 1) }
+        onClick = onClick,
+        icon = { Icon(icon, contentDescription = null) },
+        modifier = Modifier.padding(NavigationDrawerItemDefaults.ItemPadding)
     )
 }
 
@@ -408,8 +469,6 @@ private fun HomePage(
                         icon = Icons.Filled.CheckCircle,
                         primary = "Send"
                     ) {
-                        // safest “test” without changing behavior: send Now Playing once if enabled, else send AFK once if enabled,
-                        // else send Manual message (if present), else do nothing.
                         when {
                             vm.spotifyEnabled -> vm.sendNowPlayingOnce()
                             vm.afkEnabled -> vm.sendAfkNow()
