@@ -1,5 +1,10 @@
+// app/src/main/kotlin/com/scrapw/chatbox/ChatboxScreen.kt
 package com.scrapw.chatbox
 
+import android.content.Context
+import android.os.PowerManager
+import android.provider.Settings
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -15,18 +20,52 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Power
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.Divider
+import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -43,11 +82,15 @@ import com.scrapw.chatbox.ui.ChatboxViewModel
 import kotlinx.coroutines.launch
 
 private enum class AppPage(val title: String) {
-    Dashboard("Dashboard"),
-    Cycle("Cycle"),
-    NowPlaying("Now Playing"),
-    Debug("Debug"),
-    Info("Info")
+    Home("Home"),
+    Automations("Automations"),
+    Music("Music"),
+    Debug("Debug")
+}
+
+private enum class AutomationsTab(val title: String) {
+    AFK("AFK"),
+    Cycle("Cycle")
 }
 
 private enum class InfoTab(val title: String) {
@@ -62,15 +105,21 @@ private enum class InfoTab(val title: String) {
 fun ChatboxScreen(
     chatboxViewModel: ChatboxViewModel = viewModel(factory = ChatboxViewModel.Factory)
 ) {
-    var page by rememberSaveable { mutableStateOf(AppPage.Dashboard) }
+    var page by rememberSaveable { mutableStateOf(AppPage.Home) }
+    var showSettingsSheet by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
             CenterAlignedTopAppBar(
-                title = { Text("VRC-A") }
+                title = { Text("Chatbox") },
+                actions = {
+                    IconButton(onClick = { showSettingsSheet = true }) {
+                        Icon(Icons.Filled.Settings, contentDescription = "Settings")
+                    }
+                }
             )
         },
-        bottomBar = { SlimBottomBar(current = page, onSelect = { page = it }) }
+        bottomBar = { BottomNav(current = page, onSelect = { page = it }) }
     ) { padding ->
         Box(
             Modifier
@@ -78,65 +127,49 @@ fun ChatboxScreen(
                 .padding(padding)
         ) {
             when (page) {
-                AppPage.Dashboard -> DashboardPage(chatboxViewModel)
-                AppPage.Cycle -> CyclePage(chatboxViewModel)
-                AppPage.NowPlaying -> NowPlayingPage(chatboxViewModel)
+                AppPage.Home -> HomePage(chatboxViewModel, onOpenSettings = { showSettingsSheet = true })
+                AppPage.Automations -> AutomationsPage(chatboxViewModel)
+                AppPage.Music -> NowPlayingPage(chatboxViewModel)
                 AppPage.Debug -> DebugPage(chatboxViewModel)
-                AppPage.Info -> InfoPage()
             }
+        }
+
+        if (showSettingsSheet) {
+            SettingsSheet(
+                vm = chatboxViewModel,
+                onDismiss = { showSettingsSheet = false }
+            )
         }
     }
 }
 
 @Composable
-private fun SlimBottomBar(
+private fun BottomNav(
     current: AppPage,
     onSelect: (AppPage) -> Unit
 ) {
-    Surface(tonalElevation = 3.dp) {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            BottomTab(AppPage.Dashboard, current, Icons.Filled.Home, onSelect)
-            BottomTab(AppPage.Cycle, current, Icons.Filled.Sync, onSelect)
-            BottomTab(AppPage.NowPlaying, current, Icons.Filled.MusicNote, onSelect)
-            BottomTab(AppPage.Debug, current, Icons.Filled.BugReport, onSelect)
-            BottomTab(AppPage.Info, current, Icons.Filled.Info, onSelect)
-        }
+    NavigationBar {
+        BottomItem(AppPage.Home, current, Icons.Filled.Home, onSelect)
+        BottomItem(AppPage.Automations, current, Icons.Filled.Sync, onSelect)
+        BottomItem(AppPage.Music, current, Icons.Filled.MusicNote, onSelect)
+        BottomItem(AppPage.Debug, current, Icons.Filled.BugReport, onSelect)
     }
 }
 
 @Composable
-private fun BottomTab(
+private fun BottomItem(
     page: AppPage,
     current: AppPage,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     onSelect: (AppPage) -> Unit
 ) {
-    val selected = page == current
-    val contentColor =
-        if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-
-    Column(
-        Modifier
-            .widthIn(min = 64.dp)
-            .clickable { onSelect(page) }
-            .padding(horizontal = 8.dp, vertical = 6.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Icon(icon, contentDescription = page.title, tint = contentColor)
-        Spacer(Modifier.height(2.dp))
-        Text(
-            text = page.title,
-            style = MaterialTheme.typography.labelSmall,
-            color = contentColor,
-            maxLines = 1
-        )
-    }
+    val selected = (page == current)
+    NavigationBarItem(
+        selected = selected,
+        onClick = { onSelect(page) },
+        icon = { Icon(icon, contentDescription = page.title) },
+        label = { Text(page.title, maxLines = 1) }
+    )
 }
 
 @Composable
@@ -155,6 +188,7 @@ private fun PageContainer(content: @Composable ColumnScope.() -> Unit) {
 private fun SectionCard(
     title: String,
     subtitle: String? = null,
+    actions: (@Composable RowScope.() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
     ElevatedCard {
@@ -162,18 +196,35 @@ private fun SectionCard(
             Modifier.padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Text(text = title, style = MaterialTheme.typography.titleMedium)
-            if (!subtitle.isNullOrBlank()) {
-                Text(text = subtitle, style = MaterialTheme.typography.bodySmall)
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(text = title, style = MaterialTheme.typography.titleMedium)
+                    if (!subtitle.isNullOrBlank()) {
+                        Text(text = subtitle, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                if (actions != null) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), content = actions)
+                }
             }
             content()
         }
     }
 }
 
+/* =========================
+   HOME (Preview + Wizard)
+   ========================= */
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun DashboardPage(vm: ChatboxViewModel) {
+private fun HomePage(
+    vm: ChatboxViewModel,
+    onOpenSettings: () -> Unit
+) {
     val uiState by vm.messengerUiState.collectAsState()
     val ctx = LocalContext.current
 
@@ -184,68 +235,30 @@ private fun DashboardPage(vm: ChatboxViewModel) {
         if (ipInput.text.isBlank()) ipInput = TextFieldValue(uiState.ipAddress)
     }
 
-    var showSystemSheet by remember { mutableStateOf(false) }
-    if (showSystemSheet) {
-        ModalBottomSheet(
-            onDismissRequest = { showSystemSheet = false }
-        ) {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Text("System & Permissions", style = MaterialTheme.typography.titleMedium)
+    var wizardExpanded by rememberSaveable { mutableStateOf(true) }
+    var testSentOnce by rememberSaveable { mutableStateOf(false) }
 
-                ElevatedCard {
-                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text(
-                            "These keep VRC-A reliable (Now Playing, overlays, fewer Android kills).",
-                            style = MaterialTheme.typography.bodySmall
-                        )
+    // Status checks (safe + lightweight)
+    val overlayGranted = remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
+    LaunchedEffect(Unit) { overlayGranted.value = Settings.canDrawOverlays(ctx) }
 
-                        Button(
-                            onClick = { ctx.startActivity(vm.notificationAccessIntent()) },
-                            modifier = Modifier.fillMaxWidth()
-                        ) { Text("Open Notification Access") }
+    val pm = remember(ctx) { ctx.getSystemService(Context.POWER_SERVICE) as PowerManager }
+    val batteryOk = remember { mutableStateOf(pm.isIgnoringBatteryOptimizations(ctx.packageName)) }
+    LaunchedEffect(Unit) { batteryOk.value = pm.isIgnoringBatteryOptimizations(ctx.packageName) }
 
-                        OutlinedButton(
-                            onClick = { ctx.startActivity(vm.overlayPermissionIntent()) },
-                            modifier = Modifier.fillMaxWidth()
-                        ) { Text("Open Overlay Permission") }
-
-                        OutlinedButton(
-                            onClick = { ctx.startActivity(vm.batteryOptimizationIntent()) },
-                            modifier = Modifier.fillMaxWidth()
-                        ) { Text("Disable Battery Optimization (request)") }
-                    }
-                }
-
-                Spacer(Modifier.height(8.dp))
-            }
-        }
-    }
+    val notifOk = vm.listenerConnected // proxy for Notification Access being granted + running
+    val ipOk = uiState.ipAddress.isNotBlank() && uiState.ipAddress != "127.0.0.1"
 
     PageContainer {
         SectionCard(
             title = "VRChat Preview",
-            subtitle = "Live preview of exactly what will appear in VRChat."
-        ) {
-            // VM already enforces 144 chars; UI enforces 9 lines.
-            val previewTextRaw = vm.debugLastCombinedOsc.ifBlank { "(nothing active)" }
-            val previewText = remember(previewTextRaw) { vrChatSafePreview(previewTextRaw) }
-
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            subtitle = "Exactly what will appear in your chatbox.",
+            actions = {
                 AssistChip(
-                    onClick = { showSystemSheet = true },
-                    label = { Text("System") },
+                    onClick = { onOpenSettings() },
+                    label = { Text("Setup") },
                     leadingIcon = { Icon(Icons.Filled.Settings, contentDescription = null) }
                 )
-
                 Button(
                     onClick = { vm.killStopAndClear() },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
@@ -253,10 +266,10 @@ private fun DashboardPage(vm: ChatboxViewModel) {
                     Text("KILL", color = MaterialTheme.colorScheme.onError)
                 }
             }
+        ) {
+            val previewTextRaw = vm.debugLastCombinedOsc.ifBlank { "(nothing active)" }
+            val previewText = remember(previewTextRaw) { vrChatSafePreview(previewTextRaw) }
 
-            Spacer(Modifier.height(8.dp))
-
-            // ✅ Centered bubble + wrap + 9-line UI cap (VRChat-ish)
             Box(
                 Modifier
                     .fillMaxWidth()
@@ -292,7 +305,6 @@ private fun DashboardPage(vm: ChatboxViewModel) {
                     }
                 }
 
-                // Avatar silhouette
                 Canvas(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -323,26 +335,88 @@ private fun DashboardPage(vm: ChatboxViewModel) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("Quick Toggles", style = MaterialTheme.typography.titleSmall)
 
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("AFK")
-                        Switch(
-                            checked = vm.afkEnabled,
-                            onCheckedChange = { vm.setAfkEnabledFlag(it) }
-                        )
+                    ToggleRow("AFK", vm.afkEnabled) { vm.setAfkEnabledFlag(it) }
+                    ToggleRow("Cycle", vm.cycleEnabled) { vm.setCycleEnabledFlag(it) }
+                    ToggleRow("Now Playing", vm.spotifyEnabled) { vm.setSpotifyEnabledFlag(it) }
+                }
+            }
+        }
+
+        SectionCard(
+            title = "Setup Wizard",
+            subtitle = "Do these once for stable OSC + Now Playing.",
+            actions = {
+                IconButton(onClick = { wizardExpanded = !wizardExpanded }) {
+                    Icon(
+                        imageVector = if (wizardExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                        contentDescription = null
+                    )
+                }
+            }
+        ) {
+            AnimatedVisibility(visible = wizardExpanded) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    WizardStep(
+                        number = 1,
+                        title = "Enable Notification Access",
+                        subtitle = "Required for Now Playing detection.",
+                        done = notifOk,
+                        icon = Icons.Filled.MusicNote,
+                        primary = "Open"
+                    ) { ctx.startActivity(vm.notificationAccessIntent()) }
+
+                    WizardStep(
+                        number = 2,
+                        title = "Allow Overlay permission",
+                        subtitle = "Only needed if you use the overlay.",
+                        done = overlayGranted.value,
+                        icon = Icons.Filled.Bolt,
+                        primary = "Open"
+                    ) {
+                        ctx.startActivity(vm.overlayPermissionIntent())
+                        overlayGranted.value = Settings.canDrawOverlays(ctx)
                     }
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("Cycle")
-                        Switch(
-                            checked = vm.cycleEnabled,
-                            onCheckedChange = { vm.setCycleEnabledFlag(it) }
-                        )
+
+                    WizardStep(
+                        number = 3,
+                        title = "Disable Battery Optimization",
+                        subtitle = "Stops Android pausing the app while screen is off.",
+                        done = batteryOk.value,
+                        icon = Icons.Filled.Power,
+                        primary = "Request"
+                    ) {
+                        ctx.startActivity(vm.batteryOptimizationIntent())
+                        batteryOk.value = pm.isIgnoringBatteryOptimizations(ctx.packageName)
                     }
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("Now Playing")
-                        Switch(
-                            checked = vm.spotifyEnabled,
-                            onCheckedChange = { vm.setSpotifyEnabledFlag(it) }
-                        )
+
+                    WizardStep(
+                        number = 4,
+                        title = "Set Headset IP",
+                        subtitle = "Quest/PC IP on the same Wi-Fi.",
+                        done = ipOk,
+                        icon = Icons.Filled.Wifi,
+                        primary = "Apply"
+                    ) {
+                        vm.ipAddressApply(ipInput.text.trim())
+                    }
+
+                    WizardStep(
+                        number = 5,
+                        title = "Test Send",
+                        subtitle = "Sends your current combined preview once.",
+                        done = testSentOnce,
+                        icon = Icons.Filled.CheckCircle,
+                        primary = "Send"
+                    ) {
+                        // safest “test” without changing behavior: send Now Playing once if enabled, else send AFK once if enabled,
+                        // else send Manual message (if present), else do nothing.
+                        when {
+                            vm.spotifyEnabled -> vm.sendNowPlayingOnce()
+                            vm.afkEnabled -> vm.sendAfkNow()
+                            vm.messageText.value.text.isNotBlank() -> vm.sendMessage()
+                            else -> vm.killStopAndClear()
+                        }
+                        testSentOnce = true
                     }
                 }
             }
@@ -350,7 +424,7 @@ private fun DashboardPage(vm: ChatboxViewModel) {
 
         SectionCard(
             title = "Connection",
-            subtitle = "Enter your headset IP then tap Apply."
+            subtitle = "Headset IP (Quest / PC)."
         ) {
             OutlinedTextField(
                 value = ipInput,
@@ -399,8 +473,82 @@ private fun DashboardPage(vm: ChatboxViewModel) {
 }
 
 @Composable
-private fun CyclePage(vm: ChatboxViewModel) {
+private fun ToggleRow(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(label)
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+@Composable
+private fun WizardStep(
+    number: Int,
+    title: String,
+    subtitle: String,
+    done: Boolean,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    primary: String,
+    onPrimary: () -> Unit
+) {
+    ElevatedCard(
+        colors = if (done) CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer
+        ) else CardDefaults.elevatedCardColors()
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(icon, contentDescription = null)
+            Spacer(Modifier.width(10.dp))
+
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "$number. $title",
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    if (done) {
+                        Icon(
+                            Icons.Filled.CheckCircle,
+                            contentDescription = "Done",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            TextButton(onClick = onPrimary) {
+                Text(primary)
+                Spacer(Modifier.width(4.dp))
+                Icon(Icons.Filled.ChevronRight, contentDescription = null)
+            }
+        }
+    }
+}
+
+/* =========================
+   AUTOMATIONS (AFK + Cycle)
+   ========================= */
+
+@Composable
+private fun AutomationsPage(vm: ChatboxViewModel) {
     val scope = rememberCoroutineScope()
+    var tab by rememberSaveable { mutableStateOf(AutomationsTab.AFK) }
 
     val cycleLineFields = remember { mutableStateMapOf<Int, TextFieldValue>() }
     fun syncCycleLineFieldsFromVm() {
@@ -431,247 +579,260 @@ private fun CyclePage(vm: ChatboxViewModel) {
     }
 
     PageContainer {
-        SectionCard(
-            title = "AFK (top line)",
-            subtitle = "AFK always appears above Cycle + Music."
-        ) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("AFK enabled")
-                Switch(
-                    checked = vm.afkEnabled,
-                    onCheckedChange = { vm.setAfkEnabledFlag(it) }
-                )
-            }
-
-            OutlinedTextField(
-                value = vm.afkMessage,
-                onValueChange = { vm.updateAfkText(it) },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                label = { Text("AFK text") }
-            )
-
-            ElevatedCard {
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickable { vm.updateAfkPresetsCollapsed(!vm.afkPresetsCollapsed) },
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text("AFK Presets (3)", style = MaterialTheme.typography.titleSmall)
-                            if (vm.afkPresetsCollapsed) {
-                                Text(
-                                    afkPresetsPreview(),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-                        Icon(
-                            imageVector = if (vm.afkPresetsCollapsed) Icons.Filled.ExpandMore else Icons.Filled.ExpandLess,
-                            contentDescription = null
+        ElevatedCard {
+            Column(Modifier.padding(10.dp)) {
+                TabRow(selectedTabIndex = tab.ordinal) {
+                    AutomationsTab.entries.forEachIndexed { idx, t ->
+                        Tab(
+                            selected = (tab.ordinal == idx),
+                            onClick = { tab = t },
+                            text = { Text(t.title) }
                         )
-                    }
-
-                    if (!vm.afkPresetsCollapsed) {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            (1..3).forEach { slot ->
-                                ElevatedCard {
-                                    Column(
-                                        Modifier.padding(10.dp),
-                                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                                    ) {
-                                        val preview = vm.getAfkPresetPreview(slot).ifBlank { "(empty)" }
-                                        Text("Preset $slot — $preview")
-
-                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                            OutlinedButton(
-                                                onClick = { scope.launch { vm.loadAfkPreset(slot) } },
-                                                modifier = Modifier.weight(1f)
-                                            ) { Text("Load") }
-
-                                            Button(
-                                                onClick = { scope.launch { vm.saveAfkPreset(slot, vm.afkMessage) } },
-                                                modifier = Modifier.weight(1f)
-                                            ) { Text("Save") }
-                                        }
-                                    }
-                                }
-                            }
-                        }
                     }
                 }
             }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(
-                    onClick = { vm.startAfkSender() },
-                    modifier = Modifier.weight(1f),
-                    enabled = vm.afkEnabled
-                ) { Text("Start") }
-
-                OutlinedButton(
-                    onClick = { vm.stopAfkSender(clearFromChatbox = true) },
-                    modifier = Modifier.weight(1f)
-                ) { Text("Stop") }
-            }
-
-            OutlinedButton(
-                onClick = { vm.sendAfkNow() },
-                modifier = Modifier.fillMaxWidth(),
-                enabled = vm.afkEnabled
-            ) { Text("Send once") }
         }
 
-        SectionCard(
-            title = "Cycle Messages",
-            subtitle = "Up to 10 lines. Stop clears instantly."
-        ) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("Cycle enabled")
-                Switch(
-                    checked = vm.cycleEnabled,
-                    onCheckedChange = { vm.setCycleEnabledFlag(it) }
-                )
-            }
-
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (vm.cycleLines.isEmpty()) {
-                    Text("No lines yet. Tap Add Line.", style = MaterialTheme.typography.bodySmall)
-                }
-
-                vm.cycleLines.forEachIndexed { idx, _ ->
-                    val fieldValue = cycleLineFields[idx] ?: TextFieldValue(vm.cycleLines.getOrNull(idx).orEmpty())
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedTextField(
-                            value = fieldValue,
-                            onValueChange = { newValue ->
-                                cycleLineFields[idx] = newValue
-                                vm.updateCycleLine(idx, newValue.text)
-                            },
-                            modifier = Modifier.weight(1f),
-                            singleLine = true,
-                            label = { Text("Line ${idx + 1}") }
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        IconButton(onClick = { vm.removeCycleLine(idx) }) {
-                            Icon(Icons.Filled.Delete, contentDescription = "Remove line")
-                        }
-                    }
-                }
-
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = { vm.addCycleLine() },
-                        enabled = vm.cycleLines.size < 10,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Icon(Icons.Filled.Add, contentDescription = null)
-                        Spacer(Modifier.width(6.dp))
-                        Text("Add line (${vm.cycleLines.size}/10)")
-                    }
-
-                    OutlinedButton(
-                        onClick = { vm.clearCycleLines() },
-                        enabled = vm.cycleLines.isNotEmpty(),
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Clear") }
-                }
-            }
-
-            Text(
-                text = "Cycle speed: fixed at 10 seconds",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            ElevatedCard {
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+        when (tab) {
+            AutomationsTab.AFK -> {
+                SectionCard(
+                    title = "AFK",
+                    subtitle = "AFK always appears above Cycle + Music."
                 ) {
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickable { vm.updateCyclePresetsCollapsed(!vm.cyclePresetsCollapsed) },
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text("Cycle Presets (5)", style = MaterialTheme.typography.titleSmall)
-                            if (vm.cyclePresetsCollapsed) {
-                                Text(
-                                    cyclePresetsPreview(),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    ToggleRow("AFK enabled", vm.afkEnabled) { vm.setAfkEnabledFlag(it) }
+
+                    OutlinedTextField(
+                        value = vm.afkMessage,
+                        onValueChange = { vm.updateAfkText(it) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("AFK text") }
+                    )
+
+                    ElevatedCard {
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clickable { vm.updateAfkPresetsCollapsed(!vm.afkPresetsCollapsed) },
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("AFK Presets (3)", style = MaterialTheme.typography.titleSmall)
+                                    if (vm.afkPresetsCollapsed) {
+                                        Text(
+                                            afkPresetsPreview(),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                                Icon(
+                                    imageVector = if (vm.afkPresetsCollapsed) Icons.Filled.ExpandMore else Icons.Filled.ExpandLess,
+                                    contentDescription = null
                                 )
                             }
-                        }
-                        Icon(
-                            imageVector = if (vm.cyclePresetsCollapsed) Icons.Filled.ExpandMore else Icons.Filled.ExpandLess,
-                            contentDescription = null
-                        )
-                    }
 
-                    if (!vm.cyclePresetsCollapsed) {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            (1..5).forEach { slot ->
-                                ElevatedCard {
-                                    Column(
-                                        Modifier.padding(10.dp),
-                                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                                    ) {
-                                        val preview = vm.getCyclePresetPreview(slot).ifBlank { "(empty)" }
-                                        Text("Preset $slot — $preview")
+                            if (!vm.afkPresetsCollapsed) {
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    (1..3).forEach { slot ->
+                                        ElevatedCard {
+                                            Column(
+                                                Modifier.padding(10.dp),
+                                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                val preview = vm.getAfkPresetPreview(slot).ifBlank { "(empty)" }
+                                                Text("Preset $slot — $preview")
 
-                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                            OutlinedButton(
-                                                onClick = { scope.launch { vm.loadCyclePreset(slot) } },
-                                                modifier = Modifier.weight(1f)
-                                            ) { Text("Load") }
+                                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                    OutlinedButton(
+                                                        onClick = { scope.launch { vm.loadAfkPreset(slot) } },
+                                                        modifier = Modifier.weight(1f)
+                                                    ) { Text("Load") }
 
-                                            Button(
-                                                onClick = { scope.launch { vm.saveCyclePreset(slot, vm.cycleLines.toList()) } },
-                                                modifier = Modifier.weight(1f)
-                                            ) { Text("Save") }
+                                                    Button(
+                                                        onClick = { scope.launch { vm.saveAfkPreset(slot, vm.afkMessage) } },
+                                                        modifier = Modifier.weight(1f)
+                                                    ) { Text("Save") }
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
                     }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = { vm.startAfkSender() },
+                            modifier = Modifier.weight(1f),
+                            enabled = vm.afkEnabled
+                        ) { Text("Start") }
+
+                        OutlinedButton(
+                            onClick = { vm.stopAfkSender(clearFromChatbox = true) },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Stop") }
+                    }
+
+                    OutlinedButton(
+                        onClick = { vm.sendAfkNow() },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = vm.afkEnabled
+                    ) { Text("Send once") }
                 }
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(
-                    onClick = { vm.startCycle() },
-                    modifier = Modifier.weight(1f),
-                    enabled = vm.cycleEnabled && vm.cycleLines.any { it.trim().isNotEmpty() }
-                ) { Text("Start") }
+            AutomationsTab.Cycle -> {
+                SectionCard(
+                    title = "Cycle",
+                    subtitle = "Up to 10 lines. Stop clears instantly."
+                ) {
+                    ToggleRow("Cycle enabled", vm.cycleEnabled) { vm.setCycleEnabledFlag(it) }
 
-                OutlinedButton(
-                    onClick = { vm.stopCycle(clearFromChatbox = true) },
-                    modifier = Modifier.weight(1f)
-                ) { Text("Stop") }
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (vm.cycleLines.isEmpty()) {
+                            Text("No lines yet. Tap Add Line.", style = MaterialTheme.typography.bodySmall)
+                        }
+
+                        vm.cycleLines.forEachIndexed { idx, _ ->
+                            val fieldValue =
+                                cycleLineFields[idx] ?: TextFieldValue(vm.cycleLines.getOrNull(idx).orEmpty())
+
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                OutlinedTextField(
+                                    value = fieldValue,
+                                    onValueChange = { newValue ->
+                                        cycleLineFields[idx] = newValue
+                                        vm.updateCycleLine(idx, newValue.text)
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                    singleLine = true,
+                                    label = { Text("Line ${idx + 1}") }
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                IconButton(onClick = { vm.removeCycleLine(idx) }) {
+                                    Icon(Icons.Filled.Delete, contentDescription = "Remove line")
+                                }
+                            }
+                        }
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(
+                                onClick = { vm.addCycleLine() },
+                                enabled = vm.cycleLines.size < 10,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(Icons.Filled.Add, contentDescription = null)
+                                Spacer(Modifier.width(6.dp))
+                                Text("Add line (${vm.cycleLines.size}/10)")
+                            }
+
+                            OutlinedButton(
+                                onClick = { vm.clearCycleLines() },
+                                enabled = vm.cycleLines.isNotEmpty(),
+                                modifier = Modifier.weight(1f)
+                            ) { Text("Clear") }
+                        }
+                    }
+
+                    Text(
+                        text = "Cycle speed: fixed at 10 seconds",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    ElevatedCard {
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .clickable { vm.updateCyclePresetsCollapsed(!vm.cyclePresetsCollapsed) },
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("Cycle Presets (5)", style = MaterialTheme.typography.titleSmall)
+                                    if (vm.cyclePresetsCollapsed) {
+                                        Text(
+                                            cyclePresetsPreview(),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                                Icon(
+                                    imageVector = if (vm.cyclePresetsCollapsed) Icons.Filled.ExpandMore else Icons.Filled.ExpandLess,
+                                    contentDescription = null
+                                )
+                            }
+
+                            if (!vm.cyclePresetsCollapsed) {
+                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    (1..5).forEach { slot ->
+                                        ElevatedCard {
+                                            Column(
+                                                Modifier.padding(10.dp),
+                                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                val preview = vm.getCyclePresetPreview(slot).ifBlank { "(empty)" }
+                                                Text("Preset $slot — $preview")
+
+                                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                    OutlinedButton(
+                                                        onClick = { scope.launch { vm.loadCyclePreset(slot) } },
+                                                        modifier = Modifier.weight(1f)
+                                                    ) { Text("Load") }
+
+                                                    Button(
+                                                        onClick = { scope.launch { vm.saveCyclePreset(slot, vm.cycleLines.toList()) } },
+                                                        modifier = Modifier.weight(1f)
+                                                    ) { Text("Save") }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = { vm.startCycle() },
+                            modifier = Modifier.weight(1f),
+                            enabled = vm.cycleEnabled && vm.cycleLines.any { it.trim().isNotEmpty() }
+                        ) { Text("Start") }
+
+                        OutlinedButton(
+                            onClick = { vm.stopCycle(clearFromChatbox = true) },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Stop") }
+                    }
+                }
             }
         }
     }
 }
 
+/* =========================
+   MUSIC (Now Playing)
+   ========================= */
+
 /**
- * ✅ Always-animating preset preview (fixes “bars stop animating after selecting”)
- * No VM setters involved.
+ * Always-animating preset preview (no VM setters involved).
  */
 @Composable
 private fun MusicPresetPreviewText(
@@ -701,24 +862,11 @@ private fun NowPlayingPage(vm: ChatboxViewModel) {
 
     PageContainer {
         SectionCard(
-            title = "Now Playing (phone music)",
+            title = "Now Playing",
             subtitle = "Uses Notification Access. Stop clears instantly."
         ) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("Enable Now Playing block")
-                Switch(
-                    checked = vm.spotifyEnabled,
-                    onCheckedChange = { vm.setSpotifyEnabledFlag(it) }
-                )
-            }
-
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("Demo mode (testing)")
-                Switch(
-                    checked = vm.spotifyDemoEnabled,
-                    onCheckedChange = { vm.setSpotifyDemoFlag(it) }
-                )
-            }
+            ToggleRow("Enable Now Playing block", vm.spotifyEnabled) { vm.setSpotifyEnabledFlag(it) }
+            ToggleRow("Demo mode (testing)", vm.spotifyDemoEnabled) { vm.setSpotifyDemoFlag(it) }
 
             OutlinedButton(
                 onClick = { ctx.startActivity(vm.notificationAccessIntent()) },
@@ -794,6 +942,10 @@ private fun NowPlayingPage(vm: ChatboxViewModel) {
     }
 }
 
+/* =========================
+   DEBUG
+   ========================= */
+
 @Composable
 private fun DebugPage(vm: ChatboxViewModel) {
     PageContainer {
@@ -834,38 +986,106 @@ private fun DebugPage(vm: ChatboxViewModel) {
     }
 }
 
-@Composable
-private fun InfoPage() {
-    var tab by rememberSaveable { mutableStateOf(InfoTab.Overview) }
+/* =========================
+   SETTINGS SHEET (Permissions + Info)
+   ========================= */
 
-    val overview = remember {
-        """
-VRC-A (VRChat Assistant)
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SettingsSheet(
+    vm: ChatboxViewModel,
+    onDismiss: () -> Unit
+) {
+    val ctx = LocalContext.current
+    var infoTab by rememberSaveable { mutableStateOf(InfoTab.Overview) }
+
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.Settings, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Settings & Setup", style = MaterialTheme.typography.titleMedium)
+            }
+
+            ElevatedCard {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "These help Chatbox keep sending while your screen is off.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+
+                    Button(
+                        onClick = { ctx.startActivity(vm.notificationAccessIntent()) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Open Notification Access") }
+
+                    OutlinedButton(
+                        onClick = { ctx.startActivity(vm.overlayPermissionIntent()) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Open Overlay Permission") }
+
+                    OutlinedButton(
+                        onClick = { ctx.startActivity(vm.batteryOptimizationIntent()) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Disable Battery Optimization (request)") }
+                }
+            }
+
+            Divider()
+
+            Text("Info", style = MaterialTheme.typography.titleSmall)
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                InfoTab.entries.forEach { t ->
+                    val selected = (t == infoTab)
+                    val colors =
+                        if (selected) ButtonDefaults.buttonColors()
+                        else ButtonDefaults.outlinedButtonColors()
+
+                    Button(
+                        onClick = { infoTab = t },
+                        colors = colors,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                    ) { Text(t.title) }
+                }
+            }
+
+            val overview = remember {
+                """
+Chatbox (VRChat Assistant)
 Made by: Ashoska Mitsu Sisko
 
-Dashboard shows a live VR-style preview so you always know what will appear in VRChat.
+Home shows a live VR-style preview so you always know what will appear in VRChat.
 Use KILL to instantly stop everything and clear the chatbox.
-        """.trimIndent()
-    }
+                """.trimIndent()
+            }
 
-    val tutorial = remember {
-        """
+            val tutorial = remember {
+                """
 TUTORIAL
 
 1) VRChat → Settings → OSC → Enable OSC
 2) Phone + headset on same Wi-Fi
 3) Find headset IP (Wi-Fi → network → Advanced)
-4) Dashboard → Connection → Apply
+4) Home → Connection → Apply
 5) Manual Send to test
 
 Now Playing:
-Dashboard → System → Notification Access → enable VRC-A
-Restart VRC-A, play music, then Now Playing → Start.
-        """.trimIndent()
-    }
+Settings → Notification Access → enable Chatbox
+Restart Chatbox, play music, then Music → Start.
+                """.trimIndent()
+            }
 
-    val help = remember {
-        """
+            val help = remember {
+                """
 TROUBLESHOOT
 
 Nothing appears in VRChat:
@@ -877,41 +1097,23 @@ Now Playing blank:
 - Enable Notification Access
 - Restart app
 - Start playing music (notification must exist)
-        """.trimIndent()
-    }
 
-    val fullDoc = remember {
-        """
-VRC-A
-
-Dashboard is the control center.
-If anything gets stuck sending: press KILL (stops + clears VRChat).
-        """.trimIndent()
-    }
-
-    PageContainer {
-        SectionCard(
-            title = "Information",
-            subtitle = "Overview, tutorial, and troubleshooting."
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                InfoTab.entries.forEach { t ->
-                    val selected = (t == tab)
-                    val colors = if (selected) ButtonDefaults.buttonColors()
-                    else ButtonDefaults.outlinedButtonColors()
-
-                    Button(
-                        onClick = { tab = t },
-                        colors = colors,
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                    ) { Text(t.title) }
-                }
+Stops sending when screen is off:
+- Disable Battery Optimization
+- Keep notifications allowed
+                """.trimIndent()
             }
 
-            val text = when (tab) {
+            val fullDoc = remember {
+                """
+Chatbox
+
+Home is the control center.
+If anything gets stuck sending: press KILL (stops + clears VRChat).
+                """.trimIndent()
+            }
+
+            val text = when (infoTab) {
                 InfoTab.Overview -> overview
                 InfoTab.Tutorial -> tutorial
                 InfoTab.Troubleshoot -> help
@@ -924,6 +1126,13 @@ If anything gets stuck sending: press KILL (stops + clears VRChat).
                     style = MaterialTheme.typography.bodyMedium,
                     fontFamily = FontFamily.Monospace
                 )
+            }
+
+            Spacer(Modifier.height(6.dp))
+            OutlinedButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Filled.Info, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Close")
             }
         }
     }
