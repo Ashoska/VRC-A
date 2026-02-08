@@ -20,7 +20,7 @@ android {
         minSdk 26
         targetSdk 34
 
-        // keep your current values, change later when we automate versioning
+        // keep these for now (we can automate later)
         versionCode 4
         versionName "v1.0.3"
 
@@ -31,13 +31,11 @@ android {
     }
 
     signingConfigs {
-        // Normal debug signing (Android Studio / default)
-        debug { }
-
-        // Release signing ONLY if keystore.properties exists (CI secrets)
+        // ✅ Proper release config
         release {
             if (keystorePropertiesFile.exists()) {
-                storeFile file(keystoreProperties['storeFile'])
+                // ✅ IMPORTANT: resolve from repo root to avoid app/app path bugs
+                storeFile rootProject.file(keystoreProperties['storeFile'])
                 storePassword keystoreProperties['storePassword']
                 keyAlias keystoreProperties['keyAlias']
                 keyPassword keystoreProperties['keyPassword']
@@ -47,7 +45,7 @@ android {
 
     buildTypes {
         debug {
-            signingConfig signingConfigs.debug
+            // debug stays debug-signed automatically
         }
 
         release {
@@ -55,7 +53,7 @@ android {
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
 
-            // If secrets exist, sign release. If not, it will try unsigned and may fail on validateSigning.
+            // ✅ Only sign if keystore.properties exists (CI secrets are present)
             if (keystorePropertiesFile.exists()) {
                 signingConfig signingConfigs.release
             }
@@ -66,23 +64,19 @@ android {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
     }
-
     kotlinOptions {
         jvmTarget = '1.8'
         freeCompilerArgs += [
                 '-opt-in=androidx.compose.material3.ExperimentalMaterial3Api'
         ]
     }
-
     buildFeatures {
         compose true
         buildConfig true
     }
-
     composeOptions {
         kotlinCompilerExtensionVersion '1.5.9'
     }
-
     packagingOptions {
         resources {
             excludes += '/META-INF/{AL2.0,LGPL2.1}'
