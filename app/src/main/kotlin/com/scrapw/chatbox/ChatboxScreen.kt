@@ -81,6 +81,7 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -114,11 +115,13 @@ private enum class AppPage(val title: String) {
     Debug("Debug")
 }
 
+// ✅ Renamed to avoid clashing with LegacyPagesAndSettingsPage.kt
 private enum class ChatboxAutomationsTab(val title: String) {
     AFK("AFK"),
     Cycle("Cycle")
 }
 
+// ✅ Renamed to avoid future collisions
 private enum class ChatboxInfoTab(val title: String) {
     Overview("Overview"),
     Help("Help")
@@ -127,13 +130,9 @@ private enum class ChatboxInfoTab(val title: String) {
 /** Simple persisted UI prefs (no VM changes required). */
 private object UiPrefs {
     private const val FILE = "vrca_ui_prefs"
-
     private const val KEY_SPOTIFY_ENABLED = "spotify_enabled"
     private const val KEY_SPOTIFY_DEMO = "spotify_demo"
     private const val KEY_SPOTIFY_PRESET = "spotify_preset"
-
-    // ✅ NEW: Setup Wizard collapsed state (persists across app relaunch)
-    private const val KEY_SETUP_WIZARD_COLLAPSED = "setup_wizard_collapsed"
 
     fun readSpotifyEnabled(ctx: Context): Boolean =
         ctx.getSharedPreferences(FILE, MODE_PRIVATE).getBoolean(KEY_SPOTIFY_ENABLED, false)
@@ -155,14 +154,6 @@ private object UiPrefs {
     fun writeSpotifyPreset(ctx: Context, v: Int) {
         ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit().putInt(KEY_SPOTIFY_PRESET, v.coerceIn(1, 5)).apply()
     }
-
-    // ✅ Setup wizard persisted collapsed state
-    fun readSetupWizardCollapsed(ctx: Context): Boolean =
-        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getBoolean(KEY_SETUP_WIZARD_COLLAPSED, false)
-
-    fun writeSetupWizardCollapsed(ctx: Context, collapsed: Boolean) {
-        ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit().putBoolean(KEY_SETUP_WIZARD_COLLAPSED, collapsed).apply()
-    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -177,10 +168,13 @@ fun ChatboxScreen(
     var showSettingsSheet by remember { mutableStateOf(false) }
     var showInfoSheet by remember { mutableStateOf(false) }
 
-    val drawerState = androidx.compose.material3.rememberDrawerState(initialValue = DrawerValue.Closed)
+    // Drawer (mobile replica)
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
 
+    // Snackbars for safe error messaging (e.g. IP apply crash guard)
     val snackbarHostState = remember { SnackbarHostState() }
 
+    // Persisted UI state applied to VM once on start
     LaunchedEffect(Unit) {
         chatboxViewModel.setSpotifyEnabledFlag(UiPrefs.readSpotifyEnabled(ctx))
         chatboxViewModel.setSpotifyDemoFlag(UiPrefs.readSpotifyDemo(ctx))
@@ -239,16 +233,13 @@ fun ChatboxScreen(
                             snackbarHostState = snackbarHostState,
                             onOpenSettings = { showSettingsSheet = true }
                         )
-
                         AppPage.Automations -> AutomationsPage(chatboxViewModel)
-
                         AppPage.Music -> NowPlayingPage(
                             vm = chatboxViewModel,
                             onPersistSpotifyEnabled = { UiPrefs.writeSpotifyEnabled(ctx, it) },
                             onPersistSpotifyDemo = { UiPrefs.writeSpotifyDemo(ctx, it) },
                             onPersistSpotifyPreset = { UiPrefs.writeSpotifyPreset(ctx, it) }
                         )
-
                         AppPage.Debug -> DebugPage(chatboxViewModel)
                     }
                 }
@@ -269,7 +260,7 @@ fun ChatboxScreen(
 }
 
 /* =========================
-   LEFT NAV DRAWER
+   LEFT NAV DRAWER (clean + boxed)
    ========================= */
 
 @Composable
@@ -446,13 +437,13 @@ private fun SectionCard(
 }
 
 /* =========================
-   HOME (Setup Wizard persists collapsed across relaunch)
+   HOME (Preview + Tutorial panel)
    ========================= */
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun HomePage(
-    vm: com.scrapw.chatbox.ui.ChatboxViewModel,
+    vm: ChatboxViewModel,
     snackbarHostState: SnackbarHostState,
     onOpenSettings: () -> Unit
 ) {
@@ -463,16 +454,14 @@ private fun HomePage(
     val connectionBring = remember { BringIntoViewRequester() }
     val manualSendBring = remember { BringIntoViewRequester() }
 
-    var ipInput by rememberSaveable { mutableStateOf(uiState.ipAddress) }
+    var ipInput by rememberSaveable(saver = TextFieldValue.Saver) {
+        mutableStateOf(TextFieldValue(uiState.ipAddress))
+    }
     LaunchedEffect(uiState.ipAddress) {
-        if (ipInput.isBlank()) ipInput = uiState.ipAddress
+        if (ipInput.text.isBlank()) ipInput = TextFieldValue(uiState.ipAddress)
     }
 
-    // ✅ FIX: persisted wizard collapsed state (across app relaunch)
-    var tutorialCollapsed by rememberSaveable { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        tutorialCollapsed = UiPrefs.readSetupWizardCollapsed(ctx)
-    }
+    var tutorialExpanded by rememberSaveable { mutableStateOf(true) }
 
     val overlayGranted = remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
     LaunchedEffect(Unit) { overlayGranted.value = Settings.canDrawOverlays(ctx) }
@@ -581,21 +570,16 @@ private fun HomePage(
             title = "Setup Tutorial",
             subtitle = "Tap each step to open settings or jump to the right place.",
             actions = {
-                IconButton(
-                    onClick = {
-                        tutorialCollapsed = !tutorialCollapsed
-                        UiPrefs.writeSetupWizardCollapsed(ctx, tutorialCollapsed)
-                    }
-                ) {
+                IconButton(onClick = { tutorialExpanded = !tutorialExpanded }) {
                     Icon(
-                        imageVector = if (tutorialCollapsed) Icons.Filled.ExpandMore else Icons.Filled.ExpandLess,
+                        imageVector = if (tutorialExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
                         contentDescription = null
                     )
                 }
             }
         ) {
             AnimatedVisibility(
-                visible = !tutorialCollapsed,
+                visible = tutorialExpanded,
                 enter = fadeIn() + slideInVertically(initialOffsetY = { it / 3 }),
                 exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 3 })
             ) {
@@ -679,7 +663,7 @@ private fun HomePage(
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Button(
                         onClick = {
-                            val ip = ipInput.trim()
+                            val ip = ipInput.text.trim()
                             runCatching { vm.ipAddressApply(ip) }
                                 .onFailure {
                                     scope.launch {
@@ -691,7 +675,7 @@ private fun HomePage(
                     ) { Text("Apply") }
 
                     OutlinedButton(
-                        onClick = { ipInput = uiState.ipAddress },
+                        onClick = { ipInput = TextFieldValue(uiState.ipAddress) },
                         modifier = Modifier.weight(1f)
                     ) { Text("Reset") }
                 }
@@ -792,7 +776,7 @@ private fun TutorialStep(
    ========================= */
 
 @Composable
-private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
+private fun AutomationsPage(vm: ChatboxViewModel) {
     val scope = rememberCoroutineScope()
     var tab by rememberSaveable { mutableStateOf(ChatboxAutomationsTab.AFK) }
 
@@ -1082,12 +1066,12 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
 }
 
 /* =========================
-   MUSIC
+   MUSIC (Now Playing) + persistence
    ========================= */
 
 @Composable
 private fun NowPlayingPage(
-    vm: com.scrapw.chatbox.ui.ChatboxViewModel,
+    vm: ChatboxViewModel,
     onPersistSpotifyEnabled: (Boolean) -> Unit,
     onPersistSpotifyDemo: (Boolean) -> Unit,
     onPersistSpotifyPreset: (Int) -> Unit
@@ -1195,7 +1179,7 @@ private fun NowPlayingPage(
    ========================= */
 
 @Composable
-private fun DebugPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
+private fun DebugPage(vm: ChatboxViewModel) {
     PageContainer {
         SectionCard(
             title = "Listener",
@@ -1235,13 +1219,13 @@ private fun DebugPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
 }
 
 /* =========================
-   SETTINGS SHEET
+   SETTINGS SHEET (clean)
    ========================= */
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsSheet(
-    vm: com.scrapw.chatbox.ui.ChatboxViewModel,
+    vm: ChatboxViewModel,
     onDismiss: () -> Unit
 ) {
     val ctx = LocalContext.current
@@ -1346,7 +1330,7 @@ private fun SettingsRow(
 }
 
 /* =========================
-   INFO SHEET
+   INFO SHEET (moved to drawer; cleaner)
    ========================= */
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1379,9 +1363,11 @@ private fun InfoSheet(onDismiss: () -> Unit) {
                         }
                     }
 
+                    // ✅ FIX: put your name back (Ashoska Mitsu Sisko)
                     val overview = remember {
                         """
 VRC-A (VRChat Assistant)
+by Ashoska Mitsu Sisko
 
 • Sends OSC chatbox text to your Quest/PC target
 • Includes: AFK, Cycle, Now Playing, Manual Send
