@@ -11,7 +11,36 @@ if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
 }
 
+// ✅ Base version you wanted
+def baseVersion = "1.0"
+
+// ✅ CI auto-versioning (GitHub Actions sets GITHUB_RUN_NUMBER)
+// - On GitHub: versionCode = run number, versionName = v1.0.<run>
+// - Locally: falls back to your last known values unless you override with -PVERSION_CODE / -PVERSION_NAME
+def ciRunNumber = System.getenv("GITHUB_RUN_NUMBER")
+
+def resolvedVersionCode = (
+        project.findProperty("VERSION_CODE")
+                ?: (ciRunNumber ?: "4")
+).toString().toInteger()
+
+def resolvedVersionName = (
+        project.findProperty("VERSION_NAME")
+                ?: (ciRunNumber ? "v${baseVersion}.${ciRunNumber}" : "v1.0.3")
+).toString()
+
 android {
+    signingConfigs {
+        debug {
+            if (keystorePropertiesFile.exists()) {
+                storeFile file(keystoreProperties['storeFile'])
+                storePassword keystoreProperties['storePassword']
+                keyAlias keystoreProperties['keyAlias']
+                keyPassword keystoreProperties['keyPassword']
+            }
+        }
+    }
+
     namespace 'com.scrapw.chatbox'
     compileSdk 34
 
@@ -20,17 +49,9 @@ android {
         minSdk 26
         targetSdk 34
 
-        // -------------------------
-        // Auto versioning for CI
-        // - GitHub Actions sets GITHUB_RUN_NUMBER (1,2,3,...)
-        // - Local builds fallback to 1
-        // -------------------------
-        def runNumber = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInteger()
-        versionCode runNumber
-
-        // Change base if you want (example v1.0.123)
-        def baseVersion = "1.0"
-        versionName "v${baseVersion}.${runNumber}"
+        // ✅ Auto-updated in CI, stable locally
+        versionCode resolvedVersionCode
+        versionName resolvedVersionName
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -38,44 +59,15 @@ android {
         }
     }
 
-    signingConfigs {
-        // Keep debug unsigned-by-you locally (Android Studio handles debug signing),
-        // but allow CI/local to sign debug if keystore.properties exists (optional).
-        debug {
-            if (keystorePropertiesFile.exists()) {
-                storeFile file(keystoreProperties['storeFile'])
-                storePassword keystoreProperties['storePassword']
-                keyAlias keystoreProperties['keyAlias']
-                keyPassword keystoreProperties['keyPassword']
-            }
-        }
-
-        // Proper release signing (used by release buildType)
-        release {
-            if (keystorePropertiesFile.exists()) {
-                storeFile file(keystoreProperties['storeFile'])
-                storePassword keystoreProperties['storePassword']
-                keyAlias keystoreProperties['keyAlias']
-                keyPassword keystoreProperties['keyPassword']
-            }
-        }
-    }
-
     buildTypes {
-        debug {
-            // If you WANT debug to be signed by your release key when available:
-            // signingConfig signingConfigs.debug
-            // Otherwise leave it alone (default debug keystore).
-        }
-
         release {
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
 
-            // Use proper release signing (only when keystore.properties exists)
+            // ✅ Only signs if keystore.properties exists (created by workflow when secrets exist)
             if (keystorePropertiesFile.exists()) {
-                signingConfig signingConfigs.release
+                signingConfig signingConfigs.debug
             }
         }
     }
@@ -84,23 +76,19 @@ android {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
     }
-
     kotlinOptions {
         jvmTarget = '1.8'
         freeCompilerArgs += [
                 '-opt-in=androidx.compose.material3.ExperimentalMaterial3Api'
         ]
     }
-
     buildFeatures {
         compose true
         buildConfig true
     }
-
     composeOptions {
         kotlinCompilerExtensionVersion '1.5.9'
     }
-
     packagingOptions {
         resources {
             excludes += '/META-INF/{AL2.0,LGPL2.1}'
