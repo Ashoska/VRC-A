@@ -4,12 +4,16 @@ package com.scrapw.chatbox
 import android.content.Context
 import android.os.PowerManager
 import android.provider.Settings
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -34,6 +38,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -61,6 +66,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.Divider
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -81,7 +87,6 @@ import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
-import androidx.compose.material3.DrawerValue
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -256,7 +261,7 @@ private fun DrawerContent(
             Spacer(Modifier.height(6.dp))
             HorizontalDivider()
 
-            // Icon grouping: “Setup / Permissions” button grouped under a small section
+            // ✅ Icon grouping: “Setup / Permissions” grouped under its own section
             DrawerSectionHeader("Setup")
             DrawerItem(
                 title = "Settings & Permissions",
@@ -391,7 +396,7 @@ private fun HomePage(
     val batteryOk = remember { mutableStateOf(pm.isIgnoringBatteryOptimizations(ctx.packageName)) }
     LaunchedEffect(Unit) { batteryOk.value = pm.isIgnoringBatteryOptimizations(ctx.packageName) }
 
-    val notifOk = vm.listenerConnected // proxy for Notification Access being granted + running
+    val notifOk = vm.listenerConnected
     val ipOk = uiState.ipAddress.isNotBlank() && uiState.ipAddress != "127.0.0.1"
 
     PageContainer {
@@ -983,24 +988,29 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
    MUSIC (Now Playing)
    ========================= */
 
+/**
+ * ✅ Fixed: always animating using an infinite transition (no logic changes).
+ */
 @Composable
 private fun MusicPresetPreviewText(
     previewTextProvider: (Float) -> String
 ) {
-    // keep your existing always-animating preview, but lighter weight
-    val t by animateFloatAsState(
+    val infinite = rememberInfiniteTransition(label = "musicPresetPreview")
+    val tState = infinite.animateFloat(
+        initialValue = 0f,
         targetValue = 1f,
-        animationSpec = spring(),
-        label = "music_preview_t"
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 2200, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "musicPresetPreviewT"
     )
-    // We still call provider with a changing float using a tiny animated content trick
-    AnimatedContent(targetState = System.currentTimeMillis() / 200L, label = "music_preview_tick") {
-        Text(
-            text = previewTextProvider(((it % 1000).toFloat() / 1000f).coerceIn(0f, 1f)),
-            style = MaterialTheme.typography.bodyMedium,
-            fontFamily = FontFamily.Monospace
-        )
-    }
+
+    Text(
+        text = previewTextProvider(tState.value),
+        style = MaterialTheme.typography.bodyMedium,
+        fontFamily = FontFamily.Monospace
+    )
 }
 
 @Composable
@@ -1196,7 +1206,7 @@ private fun SettingsSheet(
                         title = "Headset IP",
                         subtitle = "Set this on Home → Connection.",
                         primary = "Go"
-                    ) { onDismiss() } // keep UI-only; user sets IP on Home page
+                    ) { onDismiss() } // UI-only: IP is set on Home page
                 }
             }
 
