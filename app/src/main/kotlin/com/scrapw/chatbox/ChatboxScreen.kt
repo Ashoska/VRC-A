@@ -38,7 +38,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -46,19 +45,16 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bolt
-import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Power
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -110,14 +106,15 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.scrapw.chatbox.ui.AppNav
 import com.scrapw.chatbox.ui.ChatboxViewModel
 import kotlinx.coroutines.launch
 
-private enum class AppPage(val title: String) {
-    Home("Home"),
-    Automations("Automations"),
-    Music("Music"),
-    Debug("Debug")
+private enum class AppPage(val title: String, val key: String) {
+    Home("Home", AppNav.KEY_HOME),
+    Automations("Automations", AppNav.KEY_AUTOMATIONS),
+    Music("Music", AppNav.KEY_MUSIC),
+    Debug("Debug", AppNav.KEY_DEBUG)
 }
 
 private enum class AutomationsTab(val title: String) {
@@ -149,13 +146,22 @@ fun ChatboxScreen(
         gesturesEnabled = true,
         drawerContent = {
             DrawerContent(
-                current = page,
-                onSelect = { chosen ->
-                    page = chosen
-                    scope.launch { drawerState.close() }
-                },
-                onOpenSettings = {
-                    showSettingsSheet = true
+                currentKey = page.key,
+                onSelectKey = { key ->
+                    if (key == AppNav.KEY_SETTINGS) {
+                        showSettingsSheet = true
+                        scope.launch { drawerState.close() }
+                        return@DrawerContent
+                    }
+
+                    page = when (key) {
+                        AppNav.KEY_HOME -> AppPage.Home
+                        AppNav.KEY_AUTOMATIONS -> AppPage.Automations
+                        AppNav.KEY_MUSIC -> AppPage.Music
+                        AppNav.KEY_DEBUG -> AppPage.Debug
+                        else -> AppPage.Home
+                    }
+
                     scope.launch { drawerState.close() }
                 }
             )
@@ -206,14 +212,13 @@ fun ChatboxScreen(
 }
 
 /* =========================
-   LEFT NAV DRAWER (Mobile replica)
+   LEFT NAV DRAWER (Icon grouping)
    ========================= */
 
 @Composable
 private fun DrawerContent(
-    current: AppPage,
-    onSelect: (AppPage) -> Unit,
-    onOpenSettings: () -> Unit
+    currentKey: String,
+    onSelectKey: (String) -> Unit
 ) {
     Surface(
         modifier = Modifier
@@ -232,42 +237,18 @@ private fun DrawerContent(
                 style = MaterialTheme.typography.titleLarge
             )
 
-            DrawerSectionHeader("Main")
-            DrawerItem(
-                title = AppPage.Home.title,
-                icon = Icons.Filled.Home,
-                selected = current == AppPage.Home
-            ) { onSelect(AppPage.Home) }
-
-            DrawerItem(
-                title = AppPage.Automations.title,
-                icon = Icons.Filled.Sync,
-                selected = current == AppPage.Automations
-            ) { onSelect(AppPage.Automations) }
-
-            DrawerItem(
-                title = AppPage.Music.title,
-                icon = Icons.Filled.MusicNote,
-                selected = current == AppPage.Music
-            ) { onSelect(AppPage.Music) }
-
-            DrawerSectionHeader("Tools")
-            DrawerItem(
-                title = AppPage.Debug.title,
-                icon = Icons.Filled.BugReport,
-                selected = current == AppPage.Debug
-            ) { onSelect(AppPage.Debug) }
-
-            Spacer(Modifier.height(6.dp))
-            HorizontalDivider()
-
-            // ✅ Icon grouping: “Setup / Permissions” grouped under its own section
-            DrawerSectionHeader("Setup")
-            DrawerItem(
-                title = "Settings & Permissions",
-                icon = Icons.Filled.Settings,
-                selected = false
-            ) { onOpenSettings() }
+            AppNav.sections.forEach { section ->
+                DrawerSectionHeader(section.title)
+                section.items.forEach { item ->
+                    DrawerItem(
+                        title = item.title,
+                        icon = item.icon,
+                        selected = (item.key == currentKey),
+                        onClick = { onSelectKey(item.key) }
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+            }
 
             Spacer(Modifier.weight(1f))
 
@@ -396,7 +377,7 @@ private fun HomePage(
     val batteryOk = remember { mutableStateOf(pm.isIgnoringBatteryOptimizations(ctx.packageName)) }
     LaunchedEffect(Unit) { batteryOk.value = pm.isIgnoringBatteryOptimizations(ctx.packageName) }
 
-    val notifOk = vm.listenerConnected
+    val notifOk = vm.listenerConnected // proxy for Notification Access being granted + running
     val ipOk = uiState.ipAddress.isNotBlank() && uiState.ipAddress != "127.0.0.1"
 
     PageContainer {
@@ -455,6 +436,7 @@ private fun HomePage(
                     }
                 }
 
+                // (UI-only) subtle silhouette like your original
                 Canvas(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -988,13 +970,11 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
    MUSIC (Now Playing)
    ========================= */
 
-/**
- * ✅ Fixed: always animating using an infinite transition (no logic changes).
- */
 @Composable
 private fun MusicPresetPreviewText(
     previewTextProvider: (Float) -> String
 ) {
+    // ✅ Always animating (smooth + stable, UI-only)
     val infinite = rememberInfiniteTransition(label = "musicPresetPreview")
     val tState = infinite.animateFloat(
         initialValue = 0f,
@@ -1169,7 +1149,6 @@ private fun SettingsSheet(
                 Text("Settings & Setup", style = MaterialTheme.typography.titleMedium)
             }
 
-            // ✅ Icon-grouped sections (matches screenshot “grouping” style)
             ElevatedCard {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     SettingsGroupHeader("Permissions")
@@ -1205,8 +1184,8 @@ private fun SettingsSheet(
                         icon = Icons.Filled.Wifi,
                         title = "Headset IP",
                         subtitle = "Set this on Home → Connection.",
-                        primary = "Go"
-                    ) { onDismiss() } // UI-only: IP is set on Home page
+                        primary = "OK"
+                    ) { /* UI-only: set IP on Home */ }
                 }
             }
 
