@@ -115,13 +115,11 @@ private enum class AppPage(val title: String) {
     Debug("Debug")
 }
 
-// ✅ Renamed to avoid clashing with LegacyPagesAndSettingsPage.kt
 private enum class ChatboxAutomationsTab(val title: String) {
     AFK("AFK"),
     Cycle("Cycle")
 }
 
-// ✅ Renamed to avoid future collisions
 private enum class ChatboxInfoTab(val title: String) {
     Overview("Overview"),
     Help("Help")
@@ -168,13 +166,10 @@ fun ChatboxScreen(
     var showSettingsSheet by remember { mutableStateOf(false) }
     var showInfoSheet by remember { mutableStateOf(false) }
 
-    // Drawer (mobile replica)
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
-
-    // Snackbars for safe error messaging (e.g. IP apply crash guard)
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // Persisted UI state applied to VM once on start
+    // Apply persisted music UI settings once
     LaunchedEffect(Unit) {
         chatboxViewModel.setSpotifyEnabledFlag(UiPrefs.readSpotifyEnabled(ctx))
         chatboxViewModel.setSpotifyDemoFlag(UiPrefs.readSpotifyDemo(ctx))
@@ -233,13 +228,16 @@ fun ChatboxScreen(
                             snackbarHostState = snackbarHostState,
                             onOpenSettings = { showSettingsSheet = true }
                         )
+
                         AppPage.Automations -> AutomationsPage(chatboxViewModel)
+
                         AppPage.Music -> NowPlayingPage(
                             vm = chatboxViewModel,
                             onPersistSpotifyEnabled = { UiPrefs.writeSpotifyEnabled(ctx, it) },
                             onPersistSpotifyDemo = { UiPrefs.writeSpotifyDemo(ctx, it) },
                             onPersistSpotifyPreset = { UiPrefs.writeSpotifyPreset(ctx, it) }
                         )
+
                         AppPage.Debug -> DebugPage(chatboxViewModel)
                     }
                 }
@@ -260,7 +258,7 @@ fun ChatboxScreen(
 }
 
 /* =========================
-   LEFT NAV DRAWER (clean + boxed)
+   LEFT NAV DRAWER
    ========================= */
 
 @Composable
@@ -408,18 +406,19 @@ private fun SectionCard(
                         .weight(1f)
                         .padding(end = 10.dp)
                 ) {
+                    // ✅ FIX: don't cut off titles like "VRChat Preview"
                     Text(
                         text = title,
                         style = MaterialTheme.typography.titleMedium,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
+                        maxLines = 4,
+                        overflow = TextOverflow.Clip
                     )
                     if (!subtitle.isNullOrBlank()) {
                         Text(
                             text = subtitle,
                             style = MaterialTheme.typography.bodySmall,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
+                            maxLines = 6,
+                            overflow = TextOverflow.Clip
                         )
                     }
                 }
@@ -437,7 +436,7 @@ private fun SectionCard(
 }
 
 /* =========================
-   HOME (Preview + Tutorial panel)
+   HOME
    ========================= */
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -454,8 +453,9 @@ private fun HomePage(
     val connectionBring = remember { BringIntoViewRequester() }
     val manualSendBring = remember { BringIntoViewRequester() }
 
-    var ipInput by rememberSaveable(saver = TextFieldValue.Saver) {
-        mutableStateOf(TextFieldValue(uiState.ipAddress))
+    // ✅ FIX: rememberSaveable must store TextFieldValue itself (NOT a MutableState with a TextFieldValue saver)
+    var ipInput by rememberSaveable(stateSaver = TextFieldValue.Saver) {
+        TextFieldValue(uiState.ipAddress)
     }
     LaunchedEffect(uiState.ipAddress) {
         if (ipInput.text.isBlank()) ipInput = TextFieldValue(uiState.ipAddress)
@@ -590,11 +590,7 @@ private fun HomePage(
                         subtitle = "VRChat → Settings → OSC → Enable OSC.",
                         icon = Icons.Filled.Bolt,
                         primary = "How"
-                    ) {
-                        scope.launch {
-                            snackbarHostState.showSnackbar("Open VRChat → Settings → OSC → Enable OSC")
-                        }
-                    }
+                    ) { scope.launch { snackbarHostState.showSnackbar("Open VRChat → Settings → OSC → Enable OSC") } }
 
                     TutorialStep(
                         number = 1,
@@ -652,7 +648,7 @@ private fun HomePage(
             Column(Modifier.bringIntoViewRequester(connectionBring)) {
                 OutlinedTextField(
                     value = ipInput,
-                    onValueChange = { ipInput = it },
+                    onValueChange = { v: TextFieldValue -> ipInput = v },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     label = { Text("Headset IP address") },
@@ -694,7 +690,7 @@ private fun HomePage(
             Column(Modifier.bringIntoViewRequester(manualSendBring)) {
                 OutlinedTextField(
                     value = vm.messageText.value,
-                    onValueChange = { vm.onMessageTextChange(it) },
+                    onValueChange = { v: TextFieldValue -> vm.onMessageTextChange(v) },
                     modifier = Modifier.fillMaxWidth(),
                     minLines = 2,
                     label = { Text("Message") }
@@ -752,7 +748,7 @@ private fun TutorialStep(
                 Text(
                     text = "$number. $title",
                     style = MaterialTheme.typography.titleSmall,
-                    maxLines = 1,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
@@ -772,7 +768,7 @@ private fun TutorialStep(
 }
 
 /* =========================
-   AUTOMATIONS (AFK + Cycle)
+   AUTOMATIONS
    ========================= */
 
 @Composable
@@ -780,7 +776,9 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
     val scope = rememberCoroutineScope()
     var tab by rememberSaveable { mutableStateOf(ChatboxAutomationsTab.AFK) }
 
+    // local TextFieldValue buffers for cycle lines
     val cycleLineFields = remember { mutableStateMapOf<Int, TextFieldValue>() }
+
     fun syncCycleLineFieldsFromVm() {
         val valid = vm.cycleLines.indices.toSet()
         cycleLineFields.keys.toList().forEach { if (it !in valid) cycleLineFields.remove(it) }
@@ -789,6 +787,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
             if (existing == null || existing.text != text) cycleLineFields[idx] = TextFieldValue(text)
         }
     }
+
     LaunchedEffect(vm.cycleLines.size) { syncCycleLineFieldsFromVm() }
     LaunchedEffect(vm.cycleLines.toList()) { syncCycleLineFieldsFromVm() }
 
@@ -833,7 +832,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
 
                     OutlinedTextField(
                         value = vm.afkMessage,
-                        onValueChange = { vm.updateAfkText(it) },
+                        onValueChange = { s: String -> vm.updateAfkText(s) },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
                         label = { Text("AFK text") }
@@ -937,15 +936,14 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
                         }
 
                         vm.cycleLines.forEachIndexed { idx, _ ->
-                            val fieldValue =
-                                cycleLineFields[idx] ?: TextFieldValue(vm.cycleLines.getOrNull(idx).orEmpty())
+                            val fieldValue = cycleLineFields[idx] ?: TextFieldValue(vm.cycleLines.getOrNull(idx).orEmpty())
 
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 OutlinedTextField(
                                     value = fieldValue,
-                                    onValueChange = { newValue ->
-                                        cycleLineFields[idx] = newValue
-                                        vm.updateCycleLine(idx, newValue.text)
+                                    onValueChange = { v: TextFieldValue ->
+                                        cycleLineFields[idx] = v
+                                        vm.updateCycleLine(idx, v.text)
                                     },
                                     modifier = Modifier.weight(1f),
                                     singleLine = true,
@@ -1066,7 +1064,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
 }
 
 /* =========================
-   MUSIC (Now Playing) + persistence
+   MUSIC
    ========================= */
 
 @Composable
@@ -1219,7 +1217,7 @@ private fun DebugPage(vm: ChatboxViewModel) {
 }
 
 /* =========================
-   SETTINGS SHEET (clean)
+   SETTINGS SHEET
    ========================= */
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1270,10 +1268,7 @@ private fun SettingsSheet(
                 }
             }
 
-            Spacer(Modifier.height(6.dp))
             OutlinedButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) {
-                Icon(Icons.Filled.Info, contentDescription = null)
-                Spacer(Modifier.width(8.dp))
                 Text("Close")
             }
         }
@@ -1317,7 +1312,7 @@ private fun SettingsRow(
         Spacer(Modifier.width(10.dp))
 
         Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(title, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
 
@@ -1330,7 +1325,7 @@ private fun SettingsRow(
 }
 
 /* =========================
-   INFO SHEET (moved to drawer; cleaner)
+   INFO SHEET (name restored)
    ========================= */
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1363,7 +1358,6 @@ private fun InfoSheet(onDismiss: () -> Unit) {
                         }
                     }
 
-                    // ✅ FIX: put your name back (Ashoska Mitsu Sisko)
                     val overview = remember {
                         """
 VRC-A (VRChat Assistant)
