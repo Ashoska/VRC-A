@@ -7,6 +7,12 @@ import android.os.PowerManager
 import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -85,13 +91,13 @@ import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -131,7 +137,6 @@ private object UiPrefs {
     private const val KEY_SPOTIFY_ENABLED = "spotify_enabled"
     private const val KEY_SPOTIFY_DEMO = "spotify_demo"
     private const val KEY_SPOTIFY_PRESET = "spotify_preset"
-
     private const val KEY_TUTORIAL_EXPANDED = "tutorial_expanded"
 
     fun readSpotifyEnabled(ctx: Context): Boolean =
@@ -461,13 +466,15 @@ private fun HomePage(
     val connectionBring = remember { BringIntoViewRequester() }
     val manualSendBring = remember { BringIntoViewRequester() }
 
-    // ✅ FIX ONLY: use String state (no TextFieldValue delegate issues)
-    var ipInput by rememberSaveable { mutableStateOf(uiState.ipAddress) }
+    // Keep as TextFieldValue state (no delegate) so it compiles reliably.
+    val ipInputState = rememberSaveable(saver = TextFieldValue.Saver) {
+        mutableStateOf(TextFieldValue(uiState.ipAddress))
+    }
     LaunchedEffect(uiState.ipAddress) {
-        if (ipInput.isBlank()) ipInput = uiState.ipAddress
+        if (ipInputState.value.text.isBlank()) ipInputState.value = TextFieldValue(uiState.ipAddress)
     }
 
-    // ✅ Persisted setup wizard collapse state
+    // Persist tutorial expanded/collapsed across reopen
     var tutorialExpanded by rememberSaveable { mutableStateOf(UiPrefs.readTutorialExpanded(ctx)) }
 
     val overlayGranted = remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
@@ -579,9 +586,8 @@ private fun HomePage(
             actions = {
                 IconButton(
                     onClick = {
-                        val v = !tutorialExpanded
-                        tutorialExpanded = v
-                        UiPrefs.writeTutorialExpanded(ctx, v)
+                        tutorialExpanded = !tutorialExpanded
+                        UiPrefs.writeTutorialExpanded(ctx, tutorialExpanded)
                     }
                 ) {
                     Icon(
@@ -660,8 +666,8 @@ private fun HomePage(
         ) {
             Column(Modifier.bringIntoViewRequester(connectionBring)) {
                 OutlinedTextField(
-                    value = ipInput,
-                    onValueChange = { v: String -> ipInput = v },
+                    value = ipInputState.value,
+                    onValueChange = { v: TextFieldValue -> ipInputState.value = v },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     label = { Text("Headset IP address") },
@@ -672,7 +678,7 @@ private fun HomePage(
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Button(
                         onClick = {
-                            val ip = ipInput.trim()
+                            val ip = ipInputState.value.text.trim()
                             runCatching { vm.ipAddressApply(ip) }
                                 .onFailure {
                                     scope.launch {
@@ -684,7 +690,7 @@ private fun HomePage(
                     ) { Text("Apply") }
 
                     OutlinedButton(
-                        onClick = { ipInput = uiState.ipAddress },
+                        onClick = { ipInputState.value = TextFieldValue(uiState.ipAddress) },
                         modifier = Modifier.weight(1f)
                     ) { Text("Reset") }
                 }
@@ -1088,6 +1094,18 @@ private fun NowPlayingPage(
 ) {
     val ctx = LocalContext.current
 
+    // ✅ THIS is what restores animated preset previews:
+    val transition = rememberInfiniteTransition(label = "music_preview")
+    val t by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1400, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "t"
+    )
+
     PageContainer {
         SectionCard(
             title = "Now Playing",
@@ -1140,7 +1158,8 @@ private fun NowPlayingPage(
                             Column(Modifier.weight(1f)) {
                                 Text(text = name, style = MaterialTheme.typography.titleSmall)
                                 Text(
-                                    text = vm.renderMusicPresetPreview(p, 0.5f),
+                                    // ✅ animated preview
+                                    text = vm.renderMusicPresetPreview(p, t),
                                     style = MaterialTheme.typography.bodyMedium,
                                     fontFamily = FontFamily.Monospace
                                 )
