@@ -2,65 +2,146 @@
 package com.scrapw.chatbox
 
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.PowerManager
 import android.provider.Settings
+import android.util.Patterns
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.material3.DrawerValue
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Power
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.Divider
+import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.NavigationDrawerItemDefaults
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
-import androidx.compose.runtime.*
+import androidx.compose.material3.DrawerValue
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.scrapw.chatbox.ui.ChatboxViewModel
 import kotlinx.coroutines.launch
 
 /**
- * NOTE:
- * - Enums renamed to avoid collisions with legacy files.
- * - Info moved to its own page (open from drawer).
+ * IMPORTANT:
+ * - We intentionally do NOT declare enums named "AutomationsTab" etc. because your legacy screens already have those.
+ * - These are uniquely named to avoid redeclaration compiler errors.
  */
-
 private enum class ChatboxPage(val title: String, val icon: ImageVector) {
     Home("Home", Icons.Filled.Home),
     Automations("Automations", Icons.Filled.Sync),
     Music("Music", Icons.Filled.MusicNote),
     Debug("Debug", Icons.Filled.BugReport),
-    Info("Info", Icons.Filled.Info)
 }
 
 private enum class ChatboxAutomationsTab(val title: String) {
     AFK("AFK"),
     Cycle("Cycle")
+}
+
+private enum class ChatboxInfoTab(val title: String) {
+    Overview("Overview"),
+    Tutorial("Tutorial"),
+    Help("Help"),
+    FullDoc("Full Doc")
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -69,33 +150,49 @@ fun ChatboxScreen(
     chatboxViewModel: ChatboxViewModel = viewModel(factory = ChatboxViewModel.Factory)
 ) {
     var page by rememberSaveable { mutableStateOf(ChatboxPage.Home) }
+
+    // Settings sheet is now ONLY “settings & permissions”
     var showSettingsSheet by remember { mutableStateOf(false) }
+
+    // Info moves into the drawer as requested
+    var showInfoSheet by remember { mutableStateOf(false) }
 
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
 
-    val snackbarHostState = remember { SnackbarHostState() }
+    val snack = remember { SnackbarHostState() }
 
     ModalNavigationDrawer(
         drawerState = drawerState,
+        gesturesEnabled = true,
+        scrimColor = MaterialTheme.colorScheme.scrim.copy(alpha = 0.55f),
         drawerContent = {
-            SlimeDrawer(
+            DrawerContent(
                 current = page,
-                onSelect = { chosen: ChatboxPage ->
+                onSelect = { chosen ->
                     page = chosen
                     scope.launch { drawerState.close() }
                 },
                 onOpenSettings = {
                     showSettingsSheet = true
                     scope.launch { drawerState.close() }
+                },
+                onOpenInfo = {
+                    showInfoSheet = true
+                    scope.launch { drawerState.close() }
                 }
             )
         }
     ) {
         Scaffold(
-            snackbarHost = { SnackbarHost(snackbarHostState) },
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background)
+                .navigationBarsPadding()
+                .imePadding(),
             topBar = {
                 CenterAlignedTopAppBar(
+                    modifier = Modifier.statusBarsPadding(),
                     title = { Text("Chatbox") },
                     navigationIcon = {
                         IconButton(onClick = { scope.launch { drawerState.open() } }) {
@@ -109,25 +206,27 @@ fun ChatboxScreen(
                     }
                 )
             },
-            contentWindowInsets = WindowInsets(0)
+            // Don’t zero out insets; that’s what caused edge/clipping on some devices.
+            contentWindowInsets = WindowInsets(0),
+            snackbarHost = { SnackbarHost(snack) }
         ) { padding ->
             Box(
                 Modifier
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                Crossfade(targetState = page, label = "page_xfade") { p: ChatboxPage ->
+                // UI-only transitions (doesn't touch features)
+                Crossfade(targetState = page, label = "page_crossfade") { p ->
                     when (p) {
                         ChatboxPage.Home -> HomePage(
                             vm = chatboxViewModel,
-                            snackbar = snackbarHostState,
-                            onOpenSettings = { showSettingsSheet = true }
+                            onOpenSettings = { showSettingsSheet = true },
+                            snack = snack
                         )
 
                         ChatboxPage.Automations -> AutomationsPage(chatboxViewModel)
                         ChatboxPage.Music -> NowPlayingPage(chatboxViewModel)
                         ChatboxPage.Debug -> DebugPage(chatboxViewModel)
-                        ChatboxPage.Info -> InfoPage()
                     }
                 }
             }
@@ -138,108 +237,110 @@ fun ChatboxScreen(
                     onDismiss = { showSettingsSheet = false }
                 )
             }
+
+            if (showInfoSheet) {
+                InfoSheet(onDismiss = { showInfoSheet = false })
+            }
         }
     }
 }
 
 /* =========================
-   NAV DRAWER (Slime-ish)
+   DRAWER (make it look like a real menu with item backgrounds)
    ========================= */
 
 @Composable
-private fun SlimeDrawer(
+private fun DrawerContent(
     current: ChatboxPage,
     onSelect: (ChatboxPage) -> Unit,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
+    onOpenInfo: () -> Unit
 ) {
-    val cs = MaterialTheme.colorScheme
-
     Surface(
         modifier = Modifier
             .fillMaxHeight()
-            .widthIn(min = 300.dp, max = 380.dp),
-        color = cs.surface,
-        tonalElevation = 2.dp
+            .widthIn(min = 300.dp, max = 360.dp)
+            .statusBarsPadding()
+            .navigationBarsPadding(),
+        tonalElevation = 2.dp,
+        color = MaterialTheme.colorScheme.surface
     ) {
         Column(
             modifier = Modifier
                 .fillMaxHeight()
-                .padding(horizontal = 16.dp)
-                .padding(top = 18.dp, bottom = 12.dp),
+                .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Text(
-                text = "Navigation",
-                style = MaterialTheme.typography.headlineSmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+            Text("Navigation", style = MaterialTheme.typography.headlineSmall)
 
-            DrawerHeader("MAIN")
+            DrawerSectionHeader("MAIN")
 
             DrawerNavItem(
                 title = ChatboxPage.Home.title,
                 icon = ChatboxPage.Home.icon,
-                selected = current == ChatboxPage.Home
-            ) { onSelect(ChatboxPage.Home) }
-
+                selected = current == ChatboxPage.Home,
+                onClick = { onSelect(ChatboxPage.Home) }
+            )
             DrawerNavItem(
                 title = ChatboxPage.Automations.title,
                 icon = ChatboxPage.Automations.icon,
-                selected = current == ChatboxPage.Automations
-            ) { onSelect(ChatboxPage.Automations) }
-
+                selected = current == ChatboxPage.Automations,
+                onClick = { onSelect(ChatboxPage.Automations) }
+            )
             DrawerNavItem(
                 title = ChatboxPage.Music.title,
                 icon = ChatboxPage.Music.icon,
-                selected = current == ChatboxPage.Music
-            ) { onSelect(ChatboxPage.Music) }
+                selected = current == ChatboxPage.Music,
+                onClick = { onSelect(ChatboxPage.Music) }
+            )
 
-            Spacer(Modifier.height(4.dp))
-            DrawerHeader("TOOLS")
+            Spacer(Modifier.height(8.dp))
 
+            DrawerSectionHeader("TOOLS")
             DrawerNavItem(
                 title = ChatboxPage.Debug.title,
                 icon = ChatboxPage.Debug.icon,
-                selected = current == ChatboxPage.Debug
-            ) { onSelect(ChatboxPage.Debug) }
+                selected = current == ChatboxPage.Debug,
+                onClick = { onSelect(ChatboxPage.Debug) }
+            )
 
-            Spacer(Modifier.height(4.dp))
-            DrawerHeader("SETUP")
+            Spacer(Modifier.height(8.dp))
 
+            DrawerSectionHeader("SETUP")
             DrawerNavItem(
                 title = "Settings & Permissions",
                 icon = Icons.Filled.Settings,
-                selected = false
-            ) { onOpenSettings() }
-
+                selected = false,
+                onClick = onOpenSettings
+            )
             DrawerNavItem(
                 title = "Info",
                 icon = Icons.Filled.Info,
-                selected = current == ChatboxPage.Info
-            ) { onSelect(ChatboxPage.Info) }
+                selected = false,
+                onClick = onOpenInfo
+            )
 
             Spacer(Modifier.weight(1f))
+
+            Divider()
+            Spacer(Modifier.height(6.dp))
 
             Text(
                 text = "VRC-A / Chatbox",
                 style = MaterialTheme.typography.bodySmall,
-                color = cs.onSurfaceVariant,
-                modifier = Modifier.padding(bottom = 6.dp)
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-
-            Spacer(Modifier.windowInsetsBottomHeight(WindowInsets.navigationBars))
         }
     }
 }
 
 @Composable
-private fun DrawerHeader(text: String) {
+private fun DrawerSectionHeader(text: String) {
     Text(
         text = text,
-        style = MaterialTheme.typography.labelMedium,
+        style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(top = 8.dp, bottom = 2.dp)
+        modifier = Modifier.padding(top = 6.dp, bottom = 2.dp)
     )
 }
 
@@ -250,25 +351,29 @@ private fun DrawerNavItem(
     selected: Boolean,
     onClick: () -> Unit
 ) {
-    val cs = MaterialTheme.colorScheme
-
+    // Use NavigationDrawerItem but ensure it has a visible container when selected + a subtle container when unselected
     NavigationDrawerItem(
-        label = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        label = {
+            Text(
+                title,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.titleMedium
+            )
+        },
         selected = selected,
         onClick = onClick,
         icon = { Icon(icon, contentDescription = null) },
+        modifier = Modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.large,
         colors = NavigationDrawerItemDefaults.colors(
-            selectedContainerColor = cs.primary.copy(alpha = 0.18f),
-            selectedTextColor = cs.onSurface,
-            selectedIconColor = cs.onSurface,
-            unselectedContainerColor = cs.surface,
-            unselectedTextColor = cs.onSurfaceVariant,
-            unselectedIconColor = cs.onSurfaceVariant
-        ),
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 2.dp)
+            selectedContainerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.65f),
+            unselectedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f),
+            selectedTextColor = MaterialTheme.colorScheme.onSecondaryContainer,
+            unselectedTextColor = MaterialTheme.colorScheme.onSurface,
+            selectedIconColor = MaterialTheme.colorScheme.onSecondaryContainer,
+            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     )
 }
 
@@ -282,7 +387,7 @@ private fun PageContainer(content: @Composable ColumnScope.() -> Unit) {
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(14.dp),
+            .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
         content = content
     )
@@ -297,7 +402,7 @@ private fun SectionCard(
 ) {
     ElevatedCard(
         colors = CardDefaults.elevatedCardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
+            containerColor = MaterialTheme.colorScheme.surface
         )
     ) {
         Column(
@@ -308,17 +413,8 @@ private fun SectionCard(
                 Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(end = 10.dp)
-                ) {
-                    Text(
-                        text = title,
-                        style = MaterialTheme.typography.titleLarge,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                Column(Modifier.weight(1f)) {
+                    Text(text = title, style = MaterialTheme.typography.titleLarge)
                     if (!subtitle.isNullOrBlank()) {
                         Text(
                             text = subtitle,
@@ -327,13 +423,8 @@ private fun SectionCard(
                         )
                     }
                 }
-
                 if (actions != null) {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        content = actions
-                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), content = actions)
                 }
             }
             content()
@@ -341,36 +432,19 @@ private fun SectionCard(
     }
 }
 
-@Composable
-private fun ToggleRow(
-    label: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
-) {
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(label)
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
-    }
-}
-
 /* =========================
-   HOME (Preview + Wizard)
+   HOME
    ========================= */
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun HomePage(
     vm: ChatboxViewModel,
-    snackbar: SnackbarHostState,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
+    snack: SnackbarHostState
 ) {
     val uiState by vm.messengerUiState.collectAsState()
     val ctx = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
 
     var ipInput by rememberSaveable(stateSaver = TextFieldValue.Saver) {
@@ -381,34 +455,30 @@ private fun HomePage(
     }
 
     var wizardExpanded by rememberSaveable { mutableStateOf(true) }
-    var userTestSent by rememberSaveable { mutableStateOf(false) }
 
+    // Wizard “done” states must reflect real device state (no fake ticks)
     val overlayGranted = remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
+    LaunchedEffect(Unit) { overlayGranted.value = Settings.canDrawOverlays(ctx) }
+
     val pm = remember(ctx) { ctx.getSystemService(Context.POWER_SERVICE) as PowerManager }
     val batteryOk = remember { mutableStateOf(pm.isIgnoringBatteryOptimizations(ctx.packageName)) }
-
-    DisposableEffect(lifecycleOwner) {
-        val obs = LifecycleEventObserver { _, e ->
-            if (e == Lifecycle.Event.ON_RESUME) {
-                overlayGranted.value = Settings.canDrawOverlays(ctx)
-                batteryOk.value = pm.isIgnoringBatteryOptimizations(ctx.packageName)
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(obs)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
-    }
+    LaunchedEffect(Unit) { batteryOk.value = pm.isIgnoringBatteryOptimizations(ctx.packageName) }
 
     val notifOk = vm.listenerConnected
     val ipOk = uiState.ipAddress.isNotBlank() && uiState.ipAddress != "127.0.0.1"
+
+    // Test-send: only tick if an actual send attempt happens
+    var testSentOk by rememberSaveable { mutableStateOf(false) }
 
     PageContainer {
         SectionCard(
             title = "VRChat Preview",
             subtitle = "Exactly what will appear in your chatbox.",
             actions = {
+                // Make Setup match the theme (no weird chip color)
                 OutlinedButton(
                     onClick = onOpenSettings,
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp)
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
                 ) {
                     Icon(Icons.Filled.Settings, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
@@ -417,36 +487,30 @@ private fun HomePage(
 
                 Button(
                     onClick = { vm.killStopAndClear() },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.error,
-                        contentColor = MaterialTheme.colorScheme.onError
-                    ),
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp)
-                ) { Text("KILL") }
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("KILL", color = MaterialTheme.colorScheme.onError)
+                }
             }
         ) {
             val previewTextRaw = vm.debugLastCombinedOsc.ifBlank { "(nothing active)" }
             val previewText = remember(previewTextRaw) { vrChatSafePreview(previewTextRaw) }
 
-            Box(
-                Modifier
+            // Improve contrast: explicit container colors
+            Surface(
+                modifier = Modifier
                     .fillMaxWidth()
-                    .height(280.dp)
+                    .heightIn(min = 260.dp),
+                tonalElevation = 2.dp,
+                shape = MaterialTheme.shapes.extraLarge,
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
             ) {
-                Surface(
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .widthIn(max = 520.dp)
-                        .fillMaxWidth(0.94f),
-                    tonalElevation = 2.dp,
-                    color = MaterialTheme.colorScheme.surface,
-                    shape = MaterialTheme.shapes.extraLarge
-                ) {
+                Box(Modifier.fillMaxSize()) {
                     Box(
-                        Modifier
-                            .heightIn(min = 96.dp)
-                            .padding(14.dp)
-                            .fillMaxWidth(),
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(top = 18.dp)
+                            .fillMaxWidth(0.92f),
                         contentAlignment = Alignment.Center
                     ) {
                         SelectionContainer {
@@ -462,40 +526,41 @@ private fun HomePage(
                             )
                         }
                     }
-                }
 
-                Canvas(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(bottom = 6.dp)
-                        .height(200.dp)
-                        .width(170.dp)
-                ) {
-                    val w = size.width
-                    val h = size.height
+                    Canvas(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 8.dp)
+                            .height(200.dp)
+                            .width(170.dp)
+                    ) {
+                        val w = size.width
+                        val h = size.height
 
-                    drawCircle(
-                        color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.07f),
-                        radius = w * 0.18f,
-                        center = Offset(w * 0.5f, h * 0.20f)
-                    )
+                        drawCircle(
+                            color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.08f),
+                            radius = w * 0.18f,
+                            center = Offset(w * 0.5f, h * 0.20f)
+                        )
 
-                    val path = Path().apply {
-                        moveTo(w * 0.50f, h * 0.36f)
-                        cubicTo(w * 0.18f, h * 0.40f, w * 0.18f, h * 0.96f, w * 0.50f, h * 0.98f)
-                        cubicTo(w * 0.82f, h * 0.96f, w * 0.82f, h * 0.40f, w * 0.50f, h * 0.36f)
-                        close()
+                        val path = Path().apply {
+                            moveTo(w * 0.50f, h * 0.36f)
+                            cubicTo(w * 0.18f, h * 0.40f, w * 0.18f, h * 0.96f, w * 0.50f, h * 0.98f)
+                            cubicTo(w * 0.82f, h * 0.96f, w * 0.82f, h * 0.40f, w * 0.50f, h * 0.36f)
+                            close()
+                        }
+                        drawPath(path, color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.06f))
                     }
-                    drawPath(path, color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.06f))
                 }
             }
 
             ElevatedCard(
-                colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)
+                colors = CardDefaults.elevatedCardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                )
             ) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("Quick Toggles", style = MaterialTheme.typography.titleMedium)
-
                     ToggleRow("AFK", vm.afkEnabled) { vm.setAfkEnabledFlag(it) }
                     ToggleRow("Cycle", vm.cycleEnabled) { vm.setCycleEnabledFlag(it) }
                     ToggleRow("Now Playing", vm.spotifyEnabled) { vm.setSpotifyEnabledFlag(it) }
@@ -517,10 +582,11 @@ private fun HomePage(
         ) {
             AnimatedVisibility(
                 visible = wizardExpanded,
-                enter = fadeIn() + slideInHorizontally(initialOffsetX = { it / 8 }),
-                exit = fadeOut() + slideOutHorizontally(targetOffsetX = { it / 8 })
+                enter = fadeIn() + slideInVertically(initialOffsetY = { it / 6 }),
+                exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 6 })
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    // 0) OSC in VRChat (can't deep link reliably, so "How" opens help sheet)
                     WizardStep(
                         number = 0,
                         title = "Enable OSC in VRChat",
@@ -529,12 +595,10 @@ private fun HomePage(
                         icon = Icons.Filled.Bolt,
                         primary = "How"
                     ) {
-                        scope.launch {
-                            snackbar.currentSnackbarData?.dismiss()
-                            snackbar.showSnackbar(
-                                message = "VRChat → Settings → OSC → Enable OSC",
-                                withDismissAction = true
-                            )
+                        // Open VRChat OSC docs / a page (best effort)
+                        runCatching {
+                            val url = "https://docs.vrchat.com/docs/osc-overview"
+                            ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
                         }
                     }
 
@@ -554,7 +618,10 @@ private fun HomePage(
                         done = overlayGranted.value,
                         icon = Icons.Filled.Bolt,
                         primary = "Open"
-                    ) { ctx.startActivity(vm.overlayPermissionIntent()) }
+                    ) {
+                        ctx.startActivity(vm.overlayPermissionIntent())
+                        overlayGranted.value = Settings.canDrawOverlays(ctx)
+                    }
 
                     WizardStep(
                         number = 3,
@@ -563,7 +630,10 @@ private fun HomePage(
                         done = batteryOk.value,
                         icon = Icons.Filled.Power,
                         primary = "Request"
-                    ) { ctx.startActivity(vm.batteryOptimizationIntent()) }
+                    ) {
+                        ctx.startActivity(vm.batteryOptimizationIntent())
+                        batteryOk.value = pm.isIgnoringBatteryOptimizations(ctx.packageName)
+                    }
 
                     WizardStep(
                         number = 4,
@@ -573,42 +643,40 @@ private fun HomePage(
                         icon = Icons.Filled.Wifi,
                         primary = "Apply"
                     ) {
-                        vm.ipAddressApply(ipInput.text.trim())
-                        if (ipInput.text.trim().isBlank()) {
-                            scope.launch {
-                                snackbar.showSnackbar("Enter an IP first.", withDismissAction = true)
-                            }
+                        // Prevent crash: validate + guard
+                        val ip = ipInput.text.trim()
+                        val looksLikeIp = Patterns.IP_ADDRESS.matcher(ip).matches()
+                        if (!looksLikeIp) {
+                            scope.launch { snack.showSnackbar("Invalid IP address") }
+                            return@WizardStep
                         }
+                        runCatching { vm.ipAddressApply(ip) }
+                            .onFailure { scope.launch { snack.showSnackbar("Failed to apply IP") } }
                     }
 
                     WizardStep(
                         number = 5,
                         title = "Test Send",
                         subtitle = "Only ticks if something actually sends.",
-                        done = userTestSent,
+                        done = testSentOk,
                         icon = Icons.Filled.CheckCircle,
                         primary = "Send"
                     ) {
-                        val didSend = when {
-                            vm.spotifyEnabled -> { vm.sendNowPlayingOnce(); true }
-                            vm.afkEnabled -> { vm.sendAfkNow(); true }
-                            vm.messageText.value.text.isNotBlank() -> { vm.sendMessage(); true }
+                        // Only “done” if we actually attempt a send that makes sense
+                        val attempted = when {
+                            vm.spotifyEnabled -> {
+                                vm.sendNowPlayingOnce(); true
+                            }
+                            vm.afkEnabled -> {
+                                vm.sendAfkNow(); true
+                            }
+                            vm.messageText.value.text.isNotBlank() -> {
+                                vm.sendMessage(); true
+                            }
                             else -> false
                         }
-
-                        if (didSend) {
-                            userTestSent = true
-                            scope.launch {
-                                snackbar.showSnackbar("Sent test to VRChat.", withDismissAction = true)
-                            }
-                        } else {
-                            scope.launch {
-                                snackbar.showSnackbar(
-                                    "Nothing to send. Enable Now Playing/AFK or type a Manual message.",
-                                    withDismissAction = true
-                                )
-                            }
-                        }
+                        if (attempted) testSentOk = true
+                        else scope.launch { snack.showSnackbar("Nothing to send yet (enable AFK/Music or type a message)") }
                     }
                 }
             }
@@ -620,7 +688,7 @@ private fun HomePage(
         ) {
             OutlinedTextField(
                 value = ipInput,
-                onValueChange = { newValue: TextFieldValue -> ipInput = newValue },
+                onValueChange = { ipInput = it },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
                 label = { Text("Headset IP address") },
@@ -630,7 +698,16 @@ private fun HomePage(
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Button(
-                    onClick = { vm.ipAddressApply(ipInput.text.trim()) },
+                    onClick = {
+                        val ip = ipInput.text.trim()
+                        val ok = Patterns.IP_ADDRESS.matcher(ip).matches()
+                        if (!ok) {
+                            scope.launch { snack.showSnackbar("Invalid IP address") }
+                        } else {
+                            runCatching { vm.ipAddressApply(ip) }
+                                .onFailure { scope.launch { snack.showSnackbar("Failed to apply IP") } }
+                        }
+                    },
                     modifier = Modifier.weight(1f)
                 ) { Text("Apply") }
 
@@ -666,6 +743,18 @@ private fun HomePage(
 }
 
 @Composable
+private fun ToggleRow(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        Text(label, style = MaterialTheme.typography.titleMedium)
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+@Composable
 private fun WizardStep(
     number: Int,
     title: String,
@@ -675,25 +764,34 @@ private fun WizardStep(
     primary: String,
     onPrimary: () -> Unit
 ) {
-    val cs = MaterialTheme.colorScheme
-    ElevatedCard(
-        colors = CardDefaults.elevatedCardColors(
-            containerColor = if (done) cs.primary.copy(alpha = 0.16f) else cs.surface
-        )
+    // Fix the “weird box behind” bug by NOT layering NavigationDrawerItem / extra surfaces.
+    // This is a single Surface with a single background color.
+    val bg by animateColorAsState(
+        targetValue = if (done) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f)
+        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.30f),
+        label = "wizard_step_bg"
+    )
+
+    Surface(
+        color = bg,
+        shape = MaterialTheme.shapes.large,
+        tonalElevation = 0.dp,
+        modifier = Modifier.fillMaxWidth()
     ) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(12.dp),
+                .clickable { onPrimary() }
+                .padding(horizontal = 12.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Surface(
-                modifier = Modifier.size(36.dp),
+                modifier = Modifier.size(38.dp),
                 shape = MaterialTheme.shapes.medium,
-                color = cs.surfaceVariant
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.55f)
             ) {
                 Box(contentAlignment = Alignment.Center) {
-                    Icon(icon, contentDescription = null, tint = cs.onSurfaceVariant)
+                    Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface)
                 }
             }
 
@@ -703,23 +801,23 @@ private fun WizardStep(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = "$number. $title",
-                        style = MaterialTheme.typography.titleSmall,
+                        style = MaterialTheme.typography.titleMedium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                     Spacer(Modifier.width(8.dp))
                     if (done) {
                         Icon(
-                            Icons.Filled.CheckCircle,
+                            Icons.Filled.Check,
                             contentDescription = "Done",
-                            tint = cs.primary
+                            tint = MaterialTheme.colorScheme.primary
                         )
                     }
                 }
                 Text(
                     text = subtitle,
                     style = MaterialTheme.typography.bodySmall,
-                    color = cs.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 
@@ -771,7 +869,9 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
 
     PageContainer {
         ElevatedCard(
-            colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            colors = CardDefaults.elevatedCardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
+            )
         ) {
             Column(Modifier.padding(10.dp)) {
                 TabRow(selectedTabIndex = tab.ordinal) {
@@ -803,7 +903,9 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
                     )
 
                     ElevatedCard(
-                        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)
+                        colors = CardDefaults.elevatedCardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
+                        )
                     ) {
                         Column(
                             Modifier
@@ -819,7 +921,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Column(Modifier.weight(1f)) {
-                                    Text("AFK Presets (3)", style = MaterialTheme.typography.titleSmall)
+                                    Text("AFK Presets (3)", style = MaterialTheme.typography.titleMedium)
                                     if (vm.afkPresetsCollapsed) {
                                         Text(
                                             afkPresetsPreview(),
@@ -842,7 +944,9 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
                                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                     (1..3).forEach { slot ->
                                         ElevatedCard(
-                                            colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                                            colors = CardDefaults.elevatedCardColors(
+                                                containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.75f)
+                                            )
                                         ) {
                                             Column(
                                                 Modifier.padding(10.dp),
@@ -951,7 +1055,9 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
                     )
 
                     ElevatedCard(
-                        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)
+                        colors = CardDefaults.elevatedCardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
+                        )
                     ) {
                         Column(
                             Modifier
@@ -967,7 +1073,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Column(Modifier.weight(1f)) {
-                                    Text("Cycle Presets (5)", style = MaterialTheme.typography.titleSmall)
+                                    Text("Cycle Presets (5)", style = MaterialTheme.typography.titleMedium)
                                     if (vm.cyclePresetsCollapsed) {
                                         Text(
                                             cyclePresetsPreview(),
@@ -990,7 +1096,9 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
                                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                     (1..5).forEach { slot ->
                                         ElevatedCard(
-                                            colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                                            colors = CardDefaults.elevatedCardColors(
+                                                containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.75f)
+                                            )
                                         ) {
                                             Column(
                                                 Modifier.padding(10.dp),
@@ -1037,8 +1145,30 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
 }
 
 /* =========================
-   MUSIC
+   MUSIC (restore real animation for preset previews)
    ========================= */
+
+@Composable
+private fun MusicPresetPreviewText(
+    previewTextProvider: (Float) -> String
+) {
+    val infinite = rememberInfiniteTransition(label = "musicPresetPreview")
+    val tState = infinite.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 2200, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "musicPresetPreviewT"
+    )
+
+    Text(
+        text = previewTextProvider(tState.value),
+        style = MaterialTheme.typography.bodyMedium,
+        fontFamily = FontFamily.Monospace
+    )
+}
 
 @Composable
 private fun NowPlayingPage(vm: ChatboxViewModel) {
@@ -1063,7 +1193,7 @@ private fun NowPlayingPage(vm: ChatboxViewModel) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
-            Text("Progress bar preset:", style = MaterialTheme.typography.labelLarge)
+            Text("Progress bar preset:", style = MaterialTheme.typography.titleMedium)
 
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 (1..5).forEach { p ->
@@ -1071,30 +1201,25 @@ private fun NowPlayingPage(vm: ChatboxViewModel) {
                     val name = vm.getMusicPresetName(p)
 
                     ElevatedCard(
-                        colors = CardDefaults.elevatedCardColors(
-                            containerColor = if (selected)
-                                MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
-                            else MaterialTheme.colorScheme.surfaceVariant
+                        colors = if (selected) CardDefaults.elevatedCardColors(
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f)
+                        ) else CardDefaults.elevatedCardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
                         )
                     ) {
                         Row(
                             Modifier
                                 .fillMaxWidth()
-                                .padding(10.dp)
+                                .padding(12.dp)
                                 .clickable { vm.updateSpotifyPreset(p) },
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(Modifier.weight(1f)) {
-                                Text(text = name, style = MaterialTheme.typography.titleSmall)
-                                Text(
-                                    text = vm.renderMusicPresetPreview(p, 0.42f),
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontFamily = FontFamily.Monospace,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
+                                Text(text = name, style = MaterialTheme.typography.titleMedium)
+                                MusicPresetPreviewText { t -> vm.renderMusicPresetPreview(p, t) }
                             }
-                            if (selected) Text("Selected", style = MaterialTheme.typography.labelMedium)
+                            if (selected) Text("Selected", style = MaterialTheme.typography.labelLarge)
                         }
                     }
                 }
@@ -1178,63 +1303,7 @@ private fun DebugPage(vm: ChatboxViewModel) {
 }
 
 /* =========================
-   INFO PAGE
-   ========================= */
-
-@Composable
-private fun InfoPage() {
-    PageContainer {
-        SectionCard(
-            title = "Info",
-            subtitle = "Quick reference."
-        ) {
-            Text(
-                text = "Chatbox (VRChat Assistant)\nMade by: Ashoska Mitsu Sisko",
-                style = MaterialTheme.typography.bodyLarge
-            )
-
-            Spacer(Modifier.height(6.dp))
-
-            ElevatedCard(
-                colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)
-            ) {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Tutorial", style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        "1) VRChat → Settings → OSC → Enable OSC\n" +
-                            "2) Phone + headset on same Wi-Fi\n" +
-                            "3) Find headset IP (Wi-Fi → network → Advanced)\n" +
-                            "4) Home → Connection → Apply\n" +
-                            "5) Manual Send to test\n\n" +
-                            "Now Playing:\n" +
-                            "Settings → Notification Access → enable Chatbox\n" +
-                            "Restart Chatbox, play music, then Music → Start.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-
-            ElevatedCard(
-                colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)
-            ) {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Troubleshoot", style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        "- Nothing appears: check IP + OSC enabled + same Wi-Fi\n" +
-                            "- Now Playing blank: enable access, restart app, play music\n" +
-                            "- Stops screen-off: disable battery optimization",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-        }
-    }
-}
-
-/* =========================
-   SETTINGS SHEET
+   SETTINGS SHEET (permissions only)
    ========================= */
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1249,7 +1318,8 @@ private fun SettingsSheet(
         Column(
             Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
+                .padding(16.dp)
+                .navigationBarsPadding(),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -1259,7 +1329,9 @@ private fun SettingsSheet(
             }
 
             ElevatedCard(
-                colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                colors = CardDefaults.elevatedCardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
+                )
             ) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     SettingsGroupHeader("PERMISSIONS")
@@ -1292,8 +1364,131 @@ private fun SettingsSheet(
                 Spacer(Modifier.width(8.dp))
                 Text("Close")
             }
+        }
+    }
+}
 
-            Spacer(Modifier.windowInsetsBottomHeight(WindowInsets.navigationBars))
+/* =========================
+   INFO SHEET (moved out of Settings into drawer)
+   ========================= */
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun InfoSheet(onDismiss: () -> Unit) {
+    var infoTab by rememberSaveable { mutableStateOf(ChatboxInfoTab.Overview) }
+
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+                .navigationBarsPadding(),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.Info, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Info", style = MaterialTheme.typography.titleLarge)
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                ChatboxInfoTab.entries.forEach { t ->
+                    val selected = (t == infoTab)
+                    val colors =
+                        if (selected) ButtonDefaults.buttonColors()
+                        else ButtonDefaults.outlinedButtonColors()
+
+                    Button(
+                        onClick = { infoTab = t },
+                        colors = colors,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                    ) { Text(t.title) }
+                }
+            }
+
+            val overview = remember {
+                """
+Chatbox (VRChat Assistant)
+Made by: Ashoska Mitsu Sisko
+
+Home shows a live VR-style preview so you always know what will appear in VRChat.
+Use KILL to instantly stop everything and clear the chatbox.
+                """.trimIndent()
+            }
+
+            val tutorial = remember {
+                """
+TUTORIAL
+
+0) VRChat → Settings → OSC → Enable OSC
+1) Phone + headset on same Wi-Fi
+2) Find headset IP (Wi-Fi → network → Advanced)
+3) Home → Connection → Apply
+4) Manual Send to test
+
+Now Playing:
+Settings → Notification Access → enable Chatbox
+Restart Chatbox, play music, then Music → Start.
+                """.trimIndent()
+            }
+
+            val help = remember {
+                """
+HELP
+
+Nothing appears in VRChat:
+- Check IP
+- OSC enabled
+- Same Wi-Fi
+
+Now Playing blank:
+- Enable Notification Access
+- Restart app
+- Start playing music (notification must exist)
+
+Stops sending when screen is off:
+- Disable Battery Optimization
+- Keep notifications allowed
+                """.trimIndent()
+            }
+
+            val fullDoc = remember {
+                """
+Chatbox
+
+Home is the control center.
+If anything gets stuck sending: press KILL (stops + clears VRChat).
+                """.trimIndent()
+            }
+
+            val text = when (infoTab) {
+                ChatboxInfoTab.Overview -> overview
+                ChatboxInfoTab.Tutorial -> tutorial
+                ChatboxInfoTab.Help -> help
+                ChatboxInfoTab.FullDoc -> fullDoc
+            }
+
+            ElevatedCard(
+                colors = CardDefaults.elevatedCardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
+                )
+            ) {
+                SelectionContainer {
+                    Text(
+                        modifier = Modifier.padding(12.dp),
+                        text = text,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+            }
+
+            OutlinedButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) {
+                Text("Close")
+            }
         }
     }
 }
@@ -1302,7 +1497,7 @@ private fun SettingsSheet(
 private fun SettingsGroupHeader(text: String) {
     Text(
         text = text,
-        style = MaterialTheme.typography.labelMedium,
+        style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant
     )
 }
@@ -1323,19 +1518,19 @@ private fun SettingsRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Surface(
-            modifier = Modifier.size(40.dp),
+            modifier = Modifier.size(36.dp),
             shape = MaterialTheme.shapes.medium,
-            color = MaterialTheme.colorScheme.surface
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
         ) {
             Box(contentAlignment = Alignment.Center) {
-                Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                Icon(icon, contentDescription = null)
             }
         }
 
-        Spacer(Modifier.width(12.dp))
+        Spacer(Modifier.width(10.dp))
 
         Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
 
