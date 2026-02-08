@@ -415,11 +415,13 @@ private fun SectionCard(
                         overflow = TextOverflow.Ellipsis
                     )
                     if (!subtitle.isNullOrBlank()) {
+                        // ✅ Fix: don't ellipsize early; allow wrapping so the preview subtitle isn't cut
                         Text(
                             text = subtitle,
                             style = MaterialTheme.typography.bodySmall,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
+                            maxLines = 3,
+                            overflow = TextOverflow.Clip,
+                            softWrap = true
                         )
                     }
                 }
@@ -1363,9 +1365,11 @@ private fun InfoSheet(onDismiss: () -> Unit) {
                         }
                     }
 
+                    // ✅ Fix: re-add your name
                     val overview = remember {
                         """
 VRC-A (VRChat Assistant)
+Made by: Ashoska Mitsu Sisko
 
 • Sends OSC chatbox text to your Quest/PC target
 • Includes: AFK, Cycle, Now Playing, Manual Send
