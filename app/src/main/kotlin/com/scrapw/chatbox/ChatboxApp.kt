@@ -5,8 +5,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.scrapw.chatbox.ui.ChatboxViewModel
 
 @Composable
-fun ChatboxApp(
-    chatboxViewModel: ChatboxViewModel = viewModel(factory = ChatboxViewModel.Factory)
-) {
-    ChatboxScreen(chatboxViewModel = chatboxViewModel)
+fun ChatboxApp() {
+    val vm: ChatboxViewModel = viewModel(factory = ChatboxViewModel.Factory)
+    ChatboxScreen(chatboxViewModel = vm)
 }
