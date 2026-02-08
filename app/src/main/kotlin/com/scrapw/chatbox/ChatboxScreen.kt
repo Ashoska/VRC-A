@@ -132,7 +132,6 @@ private object UiPrefs {
     private const val KEY_SPOTIFY_DEMO = "spotify_demo"
     private const val KEY_SPOTIFY_PRESET = "spotify_preset"
 
-    // ✅ FIX: persist Setup Tutorial collapse across tab switching + app reopen
     private const val KEY_TUTORIAL_EXPANDED = "tutorial_expanded"
 
     fun readSpotifyEnabled(ctx: Context): Boolean =
@@ -156,7 +155,6 @@ private object UiPrefs {
         ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit().putInt(KEY_SPOTIFY_PRESET, v.coerceIn(1, 5)).apply()
     }
 
-    // ✅ Setup tutorial collapse persistence
     fun readTutorialExpanded(ctx: Context): Boolean =
         ctx.getSharedPreferences(FILE, MODE_PRIVATE).getBoolean(KEY_TUTORIAL_EXPANDED, true)
 
@@ -463,19 +461,14 @@ private fun HomePage(
     val connectionBring = remember { BringIntoViewRequester() }
     val manualSendBring = remember { BringIntoViewRequester() }
 
-    var ipInput by rememberSaveable(saver = TextFieldValue.Saver) {
-        mutableStateOf(TextFieldValue(uiState.ipAddress))
-    }
+    // ✅ FIX ONLY: use String state (no TextFieldValue delegate issues)
+    var ipInput by rememberSaveable { mutableStateOf(uiState.ipAddress) }
     LaunchedEffect(uiState.ipAddress) {
-        if (ipInput.text.isBlank()) ipInput = TextFieldValue(uiState.ipAddress)
+        if (ipInput.isBlank()) ipInput = uiState.ipAddress
     }
 
-    // ✅ ONLY FIX: tutorial collapse persists across tab switching + app reopen
+    // ✅ Persisted setup wizard collapse state
     var tutorialExpanded by rememberSaveable { mutableStateOf(UiPrefs.readTutorialExpanded(ctx)) }
-    fun setTutorialExpanded(v: Boolean) {
-        tutorialExpanded = v
-        UiPrefs.writeTutorialExpanded(ctx, v)
-    }
 
     val overlayGranted = remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
     LaunchedEffect(Unit) { overlayGranted.value = Settings.canDrawOverlays(ctx) }
@@ -584,7 +577,13 @@ private fun HomePage(
             title = "Setup Tutorial",
             subtitle = "Tap each step to open settings or jump to the right place.",
             actions = {
-                IconButton(onClick = { setTutorialExpanded(!tutorialExpanded) }) {
+                IconButton(
+                    onClick = {
+                        val v = !tutorialExpanded
+                        tutorialExpanded = v
+                        UiPrefs.writeTutorialExpanded(ctx, v)
+                    }
+                ) {
                     Icon(
                         imageVector = if (tutorialExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
                         contentDescription = null
@@ -662,7 +661,7 @@ private fun HomePage(
             Column(Modifier.bringIntoViewRequester(connectionBring)) {
                 OutlinedTextField(
                     value = ipInput,
-                    onValueChange = { v: TextFieldValue -> ipInput = v },
+                    onValueChange = { v: String -> ipInput = v },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     label = { Text("Headset IP address") },
@@ -673,7 +672,7 @@ private fun HomePage(
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Button(
                         onClick = {
-                            val ip = ipInput.text.trim()
+                            val ip = ipInput.trim()
                             runCatching { vm.ipAddressApply(ip) }
                                 .onFailure {
                                     scope.launch {
@@ -685,7 +684,7 @@ private fun HomePage(
                     ) { Text("Apply") }
 
                     OutlinedButton(
-                        onClick = { ipInput = TextFieldValue(uiState.ipAddress) },
+                        onClick = { ipInput = uiState.ipAddress },
                         modifier = Modifier.weight(1f)
                     ) { Text("Reset") }
                 }
