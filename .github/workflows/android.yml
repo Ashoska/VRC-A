@@ -22,11 +22,10 @@ jobs:
       - name: Gradle cache
         uses: gradle/actions/setup-gradle@v3
 
-      # ✅ Fix: gradlew permission denied
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
-      # ✅ Create keystore + keystore.properties ONLY if secrets exist
+      # Create signing files ONLY if secrets exist
       - name: Create signing files (if secrets set)
         shell: bash
         env:
@@ -42,10 +41,8 @@ jobs:
             exit 0
           fi
 
-          # ✅ Write keystore to repo root (matches build.gradle rootProject.file)
           echo "$KEYSTORE_B64" | base64 -d > release.keystore
 
-          # ✅ keystore.properties stored at repo root
           cat > keystore.properties <<EOF
           storeFile=release.keystore
           storePassword=$KEYSTORE_PASSWORD
@@ -58,7 +55,7 @@ jobs:
       - name: Build Debug APK
         run: ./gradlew :app:assembleDebug
 
-      - name: Build Release APK (signed if secrets exist)
+      - name: Build Release APK
         run: ./gradlew :app:assembleRelease
 
       - name: Upload Debug APK
