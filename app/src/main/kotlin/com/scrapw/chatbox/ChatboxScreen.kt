@@ -431,7 +431,7 @@ private fun HomePage(
     PageContainer {
         SectionCard(
             title = "VRChat Preview",
-            subtitle = "Exactly what will appear in your chatbox.",
+            subtitle = "Exactly what will appear in VRChat.",
             actions = {
                 AssistChip(
                     onClick = { onOpenSettings() },
