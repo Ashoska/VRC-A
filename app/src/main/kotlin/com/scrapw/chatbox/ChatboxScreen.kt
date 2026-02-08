@@ -132,7 +132,7 @@ private object UiPrefs {
     private const val KEY_SPOTIFY_DEMO = "spotify_demo"
     private const val KEY_SPOTIFY_PRESET = "spotify_preset"
 
-    // ✅ ONLY: persist Setup Tutorial collapse/expand
+    // ✅ persists Setup Tutorial expanded/collapsed
     private const val KEY_TUTORIAL_EXPANDED = "tutorial_expanded"
 
     fun readSpotifyEnabled(ctx: Context): Boolean =
@@ -462,7 +462,8 @@ private fun HomePage(
     val connectionBring = remember { BringIntoViewRequester() }
     val manualSendBring = remember { BringIntoViewRequester() }
 
-    // ✅ FIX: ipInput must be TextFieldValue (not MutableState), so NO `.value` anywhere.
+    // ✅ FIX: THIS MUST BE `var ... by rememberSaveable { mutableStateOf(...) }`
+    // (do NOT assign rememberSaveable(...) directly into a TextFieldValue variable)
     var ipInput by rememberSaveable(saver = TextFieldValue.Saver) {
         mutableStateOf(TextFieldValue(uiState.ipAddress))
     }
@@ -470,8 +471,8 @@ private fun HomePage(
         if (ipInput.text.isBlank()) ipInput = TextFieldValue(uiState.ipAddress)
     }
 
-    // ✅ ONLY: persist tutorial expand/collapse across reopen
-    var tutorialExpanded by rememberSaveable { mutableStateOf(UiPrefs.readTutorialExpanded(ctx)) }
+    // ✅ Persist tutorial collapse across reopen using SharedPreferences
+    var tutorialExpanded by remember { mutableStateOf(UiPrefs.readTutorialExpanded(ctx)) }
 
     val overlayGranted = remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
     LaunchedEffect(Unit) { overlayGranted.value = Settings.canDrawOverlays(ctx) }
