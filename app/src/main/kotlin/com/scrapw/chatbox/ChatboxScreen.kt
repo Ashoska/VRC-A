@@ -90,12 +90,14 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -458,11 +460,26 @@ private fun HomePage(
     val connectionBring = remember { BringIntoViewRequester() }
     val manualSendBring = remember { BringIntoViewRequester() }
 
-    var ipInput by rememberSaveable(saver = TextFieldValue.Saver) {
+    // ✅ FIX (your compile error): rememberSaveable saver must match the returned type.
+    // We want MutableState<TextFieldValue>, so we provide a Saver for MutableState<TextFieldValue>.
+    val textFieldValueStateSaver: Saver<MutableState<TextFieldValue>, Any> = remember {
+        Saver(
+            save = { state ->
+                // Use the built-in TextFieldValue.Saver to produce a Bundle-safe "Any"
+                with(TextFieldValue.Saver) { save(state.value) }!!
+            },
+            restore = { restored ->
+                mutableStateOf(with(TextFieldValue.Saver) { restore(restored) }!!)
+            }
+        )
+    }
+
+    val ipInputState = rememberSaveable(saver = textFieldValueStateSaver) {
         mutableStateOf(TextFieldValue(uiState.ipAddress))
     }
+
     LaunchedEffect(uiState.ipAddress) {
-        if (ipInput.text.isBlank()) ipInput = TextFieldValue(uiState.ipAddress)
+        if (ipInputState.value.text.isBlank()) ipInputState.value = TextFieldValue(uiState.ipAddress)
     }
 
     var tutorialExpanded by rememberSaveable { mutableStateOf(true) }
@@ -651,8 +668,8 @@ private fun HomePage(
         ) {
             Column(Modifier.bringIntoViewRequester(connectionBring)) {
                 OutlinedTextField(
-                    value = ipInput,
-                    onValueChange = { v: TextFieldValue -> ipInput = v },
+                    value = ipInputState.value,
+                    onValueChange = { v: TextFieldValue -> ipInputState.value = v },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     label = { Text("Headset IP address") },
@@ -663,7 +680,7 @@ private fun HomePage(
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Button(
                         onClick = {
-                            val ip = ipInput.text.trim()
+                            val ip = ipInputState.value.text.trim()
                             runCatching { vm.ipAddressApply(ip) }
                                 .onFailure {
                                     scope.launch {
@@ -675,7 +692,7 @@ private fun HomePage(
                     ) { Text("Apply") }
 
                     OutlinedButton(
-                        onClick = { ipInput = TextFieldValue(uiState.ipAddress) },
+                        onClick = { ipInputState.value = TextFieldValue(uiState.ipAddress) },
                         modifier = Modifier.weight(1f)
                     ) { Text("Reset") }
                 }
@@ -1079,7 +1096,7 @@ private fun NowPlayingPage(
 ) {
     val ctx = LocalContext.current
 
-    // ✅ Animated clock for preset previews (was static -> no animation)
+    // ✅ Animated clock for preset previews
     val infinite = rememberInfiniteTransition(label = "preset_preview")
     val t by infinite.animateFloat(
         initialValue = 0f,
