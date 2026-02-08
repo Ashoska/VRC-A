@@ -4,16 +4,9 @@ package com.scrapw.chatbox
 import android.content.Context
 import android.content.Context.MODE_PRIVATE
 import android.os.PowerManager
-import android.os.SystemClock
 import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -67,6 +60,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.Divider
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -88,7 +82,6 @@ import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
-import androidx.compose.material3.DrawerValue
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -97,7 +90,6 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -122,11 +114,13 @@ private enum class AppPage(val title: String) {
     Debug("Debug")
 }
 
+// ✅ Renamed to avoid clashing with LegacyPagesAndSettingsPage.kt
 private enum class ChatboxAutomationsTab(val title: String) {
     AFK("AFK"),
     Cycle("Cycle")
 }
 
+// ✅ Renamed to avoid future collisions
 private enum class ChatboxInfoTab(val title: String) {
     Overview("Overview"),
     Help("Help")
@@ -138,6 +132,9 @@ private object UiPrefs {
     private const val KEY_SPOTIFY_ENABLED = "spotify_enabled"
     private const val KEY_SPOTIFY_DEMO = "spotify_demo"
     private const val KEY_SPOTIFY_PRESET = "spotify_preset"
+
+    // ✅ NEW: persist Setup Tutorial collapse/expand state (survives tab switching + app restart)
+    private const val KEY_TUTORIAL_EXPANDED = "tutorial_expanded"
 
     fun readSpotifyEnabled(ctx: Context): Boolean =
         ctx.getSharedPreferences(FILE, MODE_PRIVATE).getBoolean(KEY_SPOTIFY_ENABLED, false)
@@ -159,6 +156,13 @@ private object UiPrefs {
     fun writeSpotifyPreset(ctx: Context, v: Int) {
         ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit().putInt(KEY_SPOTIFY_PRESET, v.coerceIn(1, 5)).apply()
     }
+
+    fun readTutorialExpanded(ctx: Context): Boolean =
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getBoolean(KEY_TUTORIAL_EXPANDED, true)
+
+    fun writeTutorialExpanded(ctx: Context, v: Boolean) {
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit().putBoolean(KEY_TUTORIAL_EXPANDED, v).apply()
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -169,13 +173,17 @@ fun ChatboxScreen(
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var page by rememberSaveable { mutableStateOf(AppPage.Home) }
+    var page by remember { mutableStateOf(AppPage.Home) }
     var showSettingsSheet by remember { mutableStateOf(false) }
     var showInfoSheet by remember { mutableStateOf(false) }
 
+    // Drawer (mobile replica)
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+
+    // Snackbars for safe error messaging (e.g. IP apply crash guard)
     val snackbarHostState = remember { SnackbarHostState() }
 
+    // Persisted UI state applied to VM once on start
     LaunchedEffect(Unit) {
         chatboxViewModel.setSpotifyEnabledFlag(UiPrefs.readSpotifyEnabled(ctx))
         chatboxViewModel.setSpotifyDemoFlag(UiPrefs.readSpotifyDemo(ctx))
@@ -234,13 +242,16 @@ fun ChatboxScreen(
                             snackbarHostState = snackbarHostState,
                             onOpenSettings = { showSettingsSheet = true }
                         )
+
                         AppPage.Automations -> AutomationsPage(chatboxViewModel)
+
                         AppPage.Music -> NowPlayingPage(
                             vm = chatboxViewModel,
                             onPersistSpotifyEnabled = { UiPrefs.writeSpotifyEnabled(ctx, it) },
                             onPersistSpotifyDemo = { UiPrefs.writeSpotifyDemo(ctx, it) },
                             onPersistSpotifyPreset = { UiPrefs.writeSpotifyPreset(ctx, it) }
                         )
+
                         AppPage.Debug -> DebugPage(chatboxViewModel)
                     }
                 }
@@ -261,7 +272,7 @@ fun ChatboxScreen(
 }
 
 /* =========================
-   LEFT NAV DRAWER
+   LEFT NAV DRAWER (clean + boxed)
    ========================= */
 
 @Composable
@@ -412,14 +423,14 @@ private fun SectionCard(
                     Text(
                         text = title,
                         style = MaterialTheme.typography.titleMedium,
-                        maxLines = 3,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
                     if (!subtitle.isNullOrBlank()) {
                         Text(
                             text = subtitle,
                             style = MaterialTheme.typography.bodySmall,
-                            maxLines = 4,
+                            maxLines = 2,
                             overflow = TextOverflow.Ellipsis
                         )
                     }
@@ -438,7 +449,7 @@ private fun SectionCard(
 }
 
 /* =========================
-   HOME
+   HOME (Preview + Tutorial panel)
    ========================= */
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -455,14 +466,23 @@ private fun HomePage(
     val connectionBring = remember { BringIntoViewRequester() }
     val manualSendBring = remember { BringIntoViewRequester() }
 
-    var ipInput by rememberSaveable(stateSaver = TextFieldValue.Saver) {
+    var ipInput by remember(stateSaver = TextFieldValue.Saver) {
         mutableStateOf(TextFieldValue(uiState.ipAddress))
     }
     LaunchedEffect(uiState.ipAddress) {
         if (ipInput.text.isBlank()) ipInput = TextFieldValue(uiState.ipAddress)
     }
 
-    var tutorialExpanded by rememberSaveable { mutableStateOf(true) }
+    // ✅ FIX: Persist tutorial expanded/collapsed across:
+    // - tab switching (HomePage gets disposed)
+    // - app restart
+    var tutorialExpanded by remember {
+        mutableStateOf(UiPrefs.readTutorialExpanded(ctx))
+    }
+    fun setTutorialExpanded(v: Boolean) {
+        tutorialExpanded = v
+        UiPrefs.writeTutorialExpanded(ctx, v)
+    }
 
     val overlayGranted = remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
     LaunchedEffect(Unit) { overlayGranted.value = Settings.canDrawOverlays(ctx) }
@@ -557,17 +577,6 @@ private fun HomePage(
                 }
             }
 
-            if (vm.cycleTrimWarning.isNotBlank()) {
-                ElevatedCard(
-                    colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)
-                ) {
-                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("Warning", style = MaterialTheme.typography.titleSmall)
-                        Text(vm.cycleTrimWarning, style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-            }
-
             ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("Quick Toggles", style = MaterialTheme.typography.titleSmall)
@@ -582,7 +591,7 @@ private fun HomePage(
             title = "Setup Tutorial",
             subtitle = "Tap each step to open settings or jump to the right place.",
             actions = {
-                IconButton(onClick = { tutorialExpanded = !tutorialExpanded }) {
+                IconButton(onClick = { setTutorialExpanded(!tutorialExpanded) }) {
                     Icon(
                         imageVector = if (tutorialExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
                         contentDescription = null
@@ -784,13 +793,13 @@ private fun TutorialStep(
 }
 
 /* =========================
-   AUTOMATIONS
+   AUTOMATIONS (AFK + Cycle)
    ========================= */
 
 @Composable
 private fun AutomationsPage(vm: ChatboxViewModel) {
     val scope = rememberCoroutineScope()
-    var tab by rememberSaveable { mutableStateOf(ChatboxAutomationsTab.AFK) }
+    var tab by remember { mutableStateOf(ChatboxAutomationsTab.AFK) }
 
     val cycleLineFields = remember { mutableStateMapOf<Int, TextFieldValue>() }
     fun syncCycleLineFieldsFromVm() {
@@ -1078,7 +1087,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
 }
 
 /* =========================
-   MUSIC (Now Playing) + Animated previews
+   MUSIC (Now Playing) + persistence
    ========================= */
 
 @Composable
@@ -1089,18 +1098,6 @@ private fun NowPlayingPage(
     onPersistSpotifyPreset: (Int) -> Unit
 ) {
     val ctx = LocalContext.current
-
-    // ✅ Animated preview fraction (restores animated preset previews)
-    val infinite = rememberInfiniteTransition(label = "preset_preview_anim")
-    val t by infinite.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 3500, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "t"
-    )
 
     PageContainer {
         SectionCard(
@@ -1154,7 +1151,7 @@ private fun NowPlayingPage(
                             Column(Modifier.weight(1f)) {
                                 Text(text = name, style = MaterialTheme.typography.titleSmall)
                                 Text(
-                                    text = vm.renderMusicPresetPreview(p, t),
+                                    text = vm.renderMusicPresetPreview(p, 0.5f),
                                     style = MaterialTheme.typography.bodyMedium,
                                     fontFamily = FontFamily.Monospace
                                 )
@@ -1243,7 +1240,7 @@ private fun DebugPage(vm: ChatboxViewModel) {
 }
 
 /* =========================
-   SETTINGS SHEET
+   SETTINGS SHEET (clean)
    ========================= */
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1354,13 +1351,13 @@ private fun SettingsRow(
 }
 
 /* =========================
-   INFO SHEET (with your name restored)
+   INFO SHEET (moved to drawer; cleaner)
    ========================= */
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun InfoSheet(onDismiss: () -> Unit) {
-    var tab by rememberSaveable { mutableStateOf(ChatboxInfoTab.Overview) }
+    var tab by remember { mutableStateOf(ChatboxInfoTab.Overview) }
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
@@ -1390,7 +1387,6 @@ private fun InfoSheet(onDismiss: () -> Unit) {
                     val overview = remember {
                         """
 VRC-A (VRChat Assistant)
-by Ashoska Mitsu Sisko
 
 • Sends OSC chatbox text to your Quest/PC target
 • Includes: AFK, Cycle, Now Playing, Manual Send
