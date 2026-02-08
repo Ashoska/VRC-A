@@ -1,8 +1,7 @@
+// app/src/main/kotlin/com/scrapw/chatbox/ChatboxScreen.kt
 package com.scrapw.chatbox
 
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
@@ -25,6 +24,7 @@ import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.NavigationDrawerItemDefaults
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -45,9 +45,9 @@ import com.scrapw.chatbox.ui.ChatboxViewModel
 import kotlinx.coroutines.launch
 
 /**
- * IMPORTANT:
- * - Renamed enums to avoid collisions with legacy files (AutomationsTab etc).
- * - Info moved into its own page (opens from drawer).
+ * NOTE:
+ * - Enums renamed to avoid collisions with legacy files.
+ * - Info moved to its own page (open from drawer).
  */
 
 private enum class ChatboxPage(val title: String, val icon: ImageVector) {
@@ -81,7 +81,7 @@ fun ChatboxScreen(
         drawerContent = {
             SlimeDrawer(
                 current = page,
-                onSelect = { chosen ->
+                onSelect = { chosen: ChatboxPage ->
                     page = chosen
                     scope.launch { drawerState.close() }
                 },
@@ -116,7 +116,7 @@ fun ChatboxScreen(
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                Crossfade(targetState = page, label = "page_xfade") { p ->
+                Crossfade(targetState = page, label = "page_xfade") { p: ChatboxPage ->
                     when (p) {
                         ChatboxPage.Home -> HomePage(
                             vm = chatboxViewModel,
@@ -221,7 +221,6 @@ private fun SlimeDrawer(
 
             Spacer(Modifier.weight(1f))
 
-            // Footer placed properly with nav bar inset padding so it doesn't float awkwardly
             Text(
                 text = "VRC-A / Chatbox",
                 style = MaterialTheme.typography.bodySmall,
@@ -309,7 +308,6 @@ private fun SectionCard(
                 Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // ✅ Fix clipping: title column gets strict weight, actions row never overlaps
                 Column(
                     modifier = Modifier
                         .weight(1f)
@@ -373,6 +371,7 @@ private fun HomePage(
     val uiState by vm.messengerUiState.collectAsState()
     val ctx = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val scope = rememberCoroutineScope()
 
     var ipInput by rememberSaveable(stateSaver = TextFieldValue.Saver) {
         mutableStateOf(TextFieldValue(uiState.ipAddress))
@@ -384,9 +383,7 @@ private fun HomePage(
     var wizardExpanded by rememberSaveable { mutableStateOf(true) }
     var userTestSent by rememberSaveable { mutableStateOf(false) }
 
-    // permission states need refresh when user comes back from system screens
     val overlayGranted = remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
-
     val pm = remember(ctx) { ctx.getSystemService(Context.POWER_SERVICE) as PowerManager }
     val batteryOk = remember { mutableStateOf(pm.isIgnoringBatteryOptimizations(ctx.packageName)) }
 
@@ -409,7 +406,6 @@ private fun HomePage(
             title = "VRChat Preview",
             subtitle = "Exactly what will appear in your chatbox.",
             actions = {
-                // ✅ Setup button now matches theme
                 OutlinedButton(
                     onClick = onOpenSettings,
                     contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp)
@@ -419,7 +415,6 @@ private fun HomePage(
                     Text("Setup")
                 }
 
-                // ✅ KILL: themed (not random pink)
                 Button(
                     onClick = { vm.killStopAndClear() },
                     colors = ButtonDefaults.buttonColors(
@@ -469,7 +464,6 @@ private fun HomePage(
                     }
                 }
 
-                // subtle “avatar silhouette”
                 Canvas(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -535,11 +529,13 @@ private fun HomePage(
                         icon = Icons.Filled.Bolt,
                         primary = "How"
                     ) {
-                        snackbar.currentSnackbarData?.dismiss()
-                        snackbar.showSnackbar(
-                            "VRChat → Settings → OSC → Enable OSC",
-                            withDismissAction = true
-                        )
+                        scope.launch {
+                            snackbar.currentSnackbarData?.dismiss()
+                            snackbar.showSnackbar(
+                                message = "VRChat → Settings → OSC → Enable OSC",
+                                withDismissAction = true
+                            )
+                        }
                     }
 
                     WizardStep(
@@ -558,9 +554,7 @@ private fun HomePage(
                         done = overlayGranted.value,
                         icon = Icons.Filled.Bolt,
                         primary = "Open"
-                    ) {
-                        ctx.startActivity(vm.overlayPermissionIntent())
-                    }
+                    ) { ctx.startActivity(vm.overlayPermissionIntent()) }
 
                     WizardStep(
                         number = 3,
@@ -569,9 +563,7 @@ private fun HomePage(
                         done = batteryOk.value,
                         icon = Icons.Filled.Power,
                         primary = "Request"
-                    ) {
-                        ctx.startActivity(vm.batteryOptimizationIntent())
-                    }
+                    ) { ctx.startActivity(vm.batteryOptimizationIntent()) }
 
                     WizardStep(
                         number = 4,
@@ -583,7 +575,9 @@ private fun HomePage(
                     ) {
                         vm.ipAddressApply(ipInput.text.trim())
                         if (ipInput.text.trim().isBlank()) {
-                            snackbar.showSnackbar("Enter an IP first.", withDismissAction = true)
+                            scope.launch {
+                                snackbar.showSnackbar("Enter an IP first.", withDismissAction = true)
+                            }
                         }
                     }
 
@@ -604,12 +598,16 @@ private fun HomePage(
 
                         if (didSend) {
                             userTestSent = true
-                            snackbar.showSnackbar("Sent test to VRChat.", withDismissAction = true)
+                            scope.launch {
+                                snackbar.showSnackbar("Sent test to VRChat.", withDismissAction = true)
+                            }
                         } else {
-                            snackbar.showSnackbar(
-                                "Nothing to send. Enable Now Playing/AFK or type a Manual message.",
-                                withDismissAction = true
-                            )
+                            scope.launch {
+                                snackbar.showSnackbar(
+                                    "Nothing to send. Enable Now Playing/AFK or type a Manual message.",
+                                    withDismissAction = true
+                                )
+                            }
                         }
                     }
                 }
@@ -622,7 +620,7 @@ private fun HomePage(
         ) {
             OutlinedTextField(
                 value = ipInput,
-                onValueChange = { ipInput = it },
+                onValueChange = { newValue: TextFieldValue -> ipInput = newValue },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
                 label = { Text("Headset IP address") },
@@ -704,7 +702,7 @@ private fun WizardStep(
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        text = if (number >= 0) "$number. $title" else title,
+                        text = "$number. $title",
                         style = MaterialTheme.typography.titleSmall,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -1180,7 +1178,7 @@ private fun DebugPage(vm: ChatboxViewModel) {
 }
 
 /* =========================
-   INFO PAGE (moved out of sheet)
+   INFO PAGE
    ========================= */
 
 @Composable
@@ -1188,7 +1186,7 @@ private fun InfoPage() {
     PageContainer {
         SectionCard(
             title = "Info",
-            subtitle = "Quick reference + links."
+            subtitle = "Quick reference."
         ) {
             Text(
                 text = "Chatbox (VRChat Assistant)\nMade by: Ashoska Mitsu Sisko",
@@ -1236,7 +1234,7 @@ private fun InfoPage() {
 }
 
 /* =========================
-   SETTINGS SHEET (clean, not messy)
+   SETTINGS SHEET
    ========================= */
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1375,3 +1373,4 @@ private fun vrChatSafePreview(input: String): String {
         line.split(" ").joinToString(" ") { breakLongToken(it) }
     }
 }
+```0
