@@ -1,73 +1,71 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- App -->
     <string name="app_name">Chatbox</string>
 
-    <!-- Overlay -->
-    <string name="overlay_permission_request">Chatbox needs Overlay permission to show the floating UI.</string>
-
-    <!-- UI: Home / Wizard / Settings -->
-    <string name="ui_setup">Setup</string>
-    <string name="ui_settings_setup_title">Settings &amp; Setup</string>
-    <string name="ui_setup_wizard_title">Setup Wizard</string>
-    <string name="ui_setup_wizard_subtitle">Do these once for stable OSC + Now Playing.</string>
-
-    <string name="ui_step_notif_title">Enable Notification Access</string>
-    <string name="ui_step_notif_subtitle">Required for Now Playing detection.</string>
-    <string name="ui_step_overlay_title">Allow Overlay permission</string>
-    <string name="ui_step_overlay_subtitle">Only needed if you use the overlay.</string>
-    <string name="ui_step_battery_title">Disable Battery Optimization</string>
-    <string name="ui_step_battery_subtitle">Stops Android pausing the app while the screen is off.</string>
-    <string name="ui_step_ip_title">Set Headset IP</string>
-    <string name="ui_step_ip_subtitle">Quest / PC IP on the same Wi-Fi.</string>
-    <string name="ui_step_test_title">Test Send</string>
-    <string name="ui_step_test_subtitle">Sends your current combined preview once.</string>
-
-    <!-- Actions -->
-    <string name="ui_action_open">Open</string>
-    <string name="ui_action_request">Request</string>
-    <string name="ui_action_apply">Apply</string>
-    <string name="ui_action_send">Send</string>
-    <string name="ui_action_close">Close</string>
-    <string name="ui_action_reset">Reset</string>
-
-    <!-- Pages -->
-    <string name="ui_tab_home">Home</string>
-    <string name="ui_tab_automations">Automations</string>
-    <string name="ui_tab_music">Music</string>
-    <string name="ui_tab_debug">Debug</string>
-
-    <!-- Sections -->
-    <string name="ui_preview_title">VRChat Preview</string>
-    <string name="ui_preview_subtitle">Exactly what will appear in your chatbox.</string>
-
-    <string name="ui_quick_toggles">Quick Toggles</string>
-    <string name="ui_toggle_afk">AFK</string>
-    <string name="ui_toggle_cycle">Cycle</string>
-    <string name="ui_toggle_now_playing">Now Playing</string>
-
-    <string name="ui_connection_title">Connection</string>
-    <string name="ui_connection_subtitle">Headset IP (Quest / PC).</string>
-    <string name="ui_headset_ip_label">Headset IP address</string>
-    <string name="ui_headset_ip_placeholder">Example: 192.168.1.23</string>
-    <string name="ui_current_target">Current target:</string>
-
-    <string name="ui_manual_send_title">Manual Send</string>
-    <string name="ui_manual_send_subtitle">One-off message (doesn’t affect AFK/Cycle/Now Playing).</string>
-    <string name="ui_manual_send_label">Message</string>
-
-    <!-- Settings sheet permissions card -->
-    <string name="ui_settings_permissions_blurb">These help Chatbox keep sending while your screen is off.</string>
-    <string name="ui_settings_open_notification_access">Open Notification Access</string>
-    <string name="ui_settings_open_overlay_permission">Open Overlay Permission</string>
-    <string name="ui_settings_disable_battery_optimization">Disable Battery Optimization (request)</string>
-
-    <!-- Info -->
-    <string name="ui_info_title">Info</string>
-    <string name="ui_info_overview">Overview</string>
-    <string name="ui_info_tutorial">Tutorial</string>
-    <string name="ui_info_help">Help</string>
-    <string name="ui_info_full_doc">Full Doc</string>
-
-    <!-- Misc -->
-    <string name="ui_kill">KILL</string>
+    <!-- Settings / labels (these were being removed because there was no default) -->
+    <string name="about">About</string>
+    <string name="accessibility">Accessibility</string>
+    <string name="always_show_keyboard">Always show keyboard</string>
+    <string name="always_show_keyboard_desc">Keep the keyboard open when the overlay is shown.</string>
+    <string name="apply_ip_address">Apply IP address</string>
+    <string name="back_button">Back</string>
+    <string name="button_haptic">Button haptics</string>
+    <string name="button_haptic_desc">Vibrate slightly when tapping buttons.</string>
+    <string name="dependencies">Dependencies</string>
+    <string name="display_ip_edit_bar">Show IP edit bar</string>
+    <string name="display_message_options">Show message options</string>
+    <string name="download_latest_version">Download latest version</string>
+    <string name="edit_ip_address">Edit IP address</string>
+    <string name="empty_conversation">No messages yet.</string>
+    <string name="enable_chatbox_floating_button">Enable floating button</string>
+    <string name="enter_your_ip_here">Enter your IP here</string>
+    <string name="faq">FAQ</string>
+    <string name="floating_button">Floating button</string>
+    <string name="fullscreen">Fullscreen</string>
+    <string name="fullscreen_desc">Use the whole screen for the overlay.</string>
+    <string name="information">Information</string>
+    <string name="invalid_ip_address">Invalid IP address</string>
+    <string name="ip_address">IP address</string>
+    <string name="it_can_help_to_send_chatbox_in_vrchat_mobile_desc">This can help send chatbox messages in VRChat Mobile.</string>
+    <string name="keep_conversation_overlay_open">Keep overlay open</string>
+    <string name="keep_conversation_overlay_open_desc">Keep the conversation overlay open after sending.</string>
+    <string name="layout">Layout</string>
+    <string name="license">License</string>
+    <string name="message">Message</string>
+    <string name="message_card_copy">Copy</string>
+    <string name="message_card_restore">Restore</string>
+    <string name="msg_real_time_long">Send updates in real time.</string>
+    <string name="msg_real_time_short">Real time</string>
+    <string name="msg_send_immediately_long">Send immediately when you press send.</string>
+    <string name="msg_send_immediately_short">Send immediately</string>
+    <string name="msg_trigger_notification_sfx_long">Play a sound when a message is sent.</string>
+    <string name="msg_trigger_notification_sfx_short">Notification sound</string>
+    <string name="msg_typing_indicator_long">Show a typing indicator effect in chat.</string>
+    <string name="msg_typing_indicator_short">Typing indicator</string>
+    <string name="open_chatbox">Open Chatbox</string>
+    <string name="osc_host">OSC host</string>
+    <string name="overlay_lock_messenger">Lock overlay</string>
+    <string name="overlay_unlock_messenger">Unlock overlay</string>
+    <string name="port">Port</string>
+    <string name="project">Project</string>
+    <string name="real_time_sending">Real time sending</string>
+    <string name="real_time_sending_desc">Continuously update the VRChat chatbox.</string>
+    <string name="release_page">Release page</string>
+    <string name="send">Send</string>
+    <string name="send_a_feedback">Send feedback</string>
+    <string name="send_message_directly">Send directly</string>
+    <string name="send_message_directly_desc">Send messages directly without extra steps.</string>
+    <string name="send_to_localhost">Send to localhost</string>
+    <string name="send_to_localhost_desc">Send OSC to 127.0.0.1.</string>
+    <string name="settings">Settings</string>
+    <string name="settings_button">Settings</string>
+    <string name="show_message_typing_indicator">Show typing indicator</string>
+    <string name="show_message_typing_indicator_desc">Add a typing indicator effect to messages.</string>
+    <string name="source_code">Source code</string>
+    <string name="stashed">Stashed</string>
+    <string name="trigger_notification_sound">Trigger notification sound</string>
+    <string name="trigger_notification_sound_desc">Play a sound when sending.</string>
+    <string name="update_available">Update available</string>
+    <string name="write_a_message">Write a message</string>
 </resources>
