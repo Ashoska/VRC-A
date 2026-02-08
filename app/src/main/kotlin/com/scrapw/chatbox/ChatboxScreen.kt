@@ -90,6 +90,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -133,9 +134,6 @@ private object UiPrefs {
     private const val KEY_SPOTIFY_DEMO = "spotify_demo"
     private const val KEY_SPOTIFY_PRESET = "spotify_preset"
 
-    // ✅ NEW: persist Setup Tutorial collapse/expand state (survives tab switching + app restart)
-    private const val KEY_TUTORIAL_EXPANDED = "tutorial_expanded"
-
     fun readSpotifyEnabled(ctx: Context): Boolean =
         ctx.getSharedPreferences(FILE, MODE_PRIVATE).getBoolean(KEY_SPOTIFY_ENABLED, false)
 
@@ -156,13 +154,6 @@ private object UiPrefs {
     fun writeSpotifyPreset(ctx: Context, v: Int) {
         ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit().putInt(KEY_SPOTIFY_PRESET, v.coerceIn(1, 5)).apply()
     }
-
-    fun readTutorialExpanded(ctx: Context): Boolean =
-        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getBoolean(KEY_TUTORIAL_EXPANDED, true)
-
-    fun writeTutorialExpanded(ctx: Context, v: Boolean) {
-        ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit().putBoolean(KEY_TUTORIAL_EXPANDED, v).apply()
-    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -173,7 +164,7 @@ fun ChatboxScreen(
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var page by remember { mutableStateOf(AppPage.Home) }
+    var page by rememberSaveable { mutableStateOf(AppPage.Home) }
     var showSettingsSheet by remember { mutableStateOf(false) }
     var showInfoSheet by remember { mutableStateOf(false) }
 
@@ -242,16 +233,13 @@ fun ChatboxScreen(
                             snackbarHostState = snackbarHostState,
                             onOpenSettings = { showSettingsSheet = true }
                         )
-
                         AppPage.Automations -> AutomationsPage(chatboxViewModel)
-
                         AppPage.Music -> NowPlayingPage(
                             vm = chatboxViewModel,
                             onPersistSpotifyEnabled = { UiPrefs.writeSpotifyEnabled(ctx, it) },
                             onPersistSpotifyDemo = { UiPrefs.writeSpotifyDemo(ctx, it) },
                             onPersistSpotifyPreset = { UiPrefs.writeSpotifyPreset(ctx, it) }
                         )
-
                         AppPage.Debug -> DebugPage(chatboxViewModel)
                     }
                 }
@@ -466,23 +454,15 @@ private fun HomePage(
     val connectionBring = remember { BringIntoViewRequester() }
     val manualSendBring = remember { BringIntoViewRequester() }
 
-    var ipInput by remember(stateSaver = TextFieldValue.Saver) {
+    // ✅ FIX: Compose uses `saver`, not `stateSaver`
+    var ipInput by rememberSaveable(saver = TextFieldValue.Saver) {
         mutableStateOf(TextFieldValue(uiState.ipAddress))
     }
     LaunchedEffect(uiState.ipAddress) {
         if (ipInput.text.isBlank()) ipInput = TextFieldValue(uiState.ipAddress)
     }
 
-    // ✅ FIX: Persist tutorial expanded/collapsed across:
-    // - tab switching (HomePage gets disposed)
-    // - app restart
-    var tutorialExpanded by remember {
-        mutableStateOf(UiPrefs.readTutorialExpanded(ctx))
-    }
-    fun setTutorialExpanded(v: Boolean) {
-        tutorialExpanded = v
-        UiPrefs.writeTutorialExpanded(ctx, v)
-    }
+    var tutorialExpanded by rememberSaveable { mutableStateOf(true) }
 
     val overlayGranted = remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
     LaunchedEffect(Unit) { overlayGranted.value = Settings.canDrawOverlays(ctx) }
@@ -591,7 +571,7 @@ private fun HomePage(
             title = "Setup Tutorial",
             subtitle = "Tap each step to open settings or jump to the right place.",
             actions = {
-                IconButton(onClick = { setTutorialExpanded(!tutorialExpanded) }) {
+                IconButton(onClick = { tutorialExpanded = !tutorialExpanded }) {
                     Icon(
                         imageVector = if (tutorialExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
                         contentDescription = null
@@ -799,7 +779,7 @@ private fun TutorialStep(
 @Composable
 private fun AutomationsPage(vm: ChatboxViewModel) {
     val scope = rememberCoroutineScope()
-    var tab by remember { mutableStateOf(ChatboxAutomationsTab.AFK) }
+    var tab by rememberSaveable { mutableStateOf(ChatboxAutomationsTab.AFK) }
 
     val cycleLineFields = remember { mutableStateMapOf<Int, TextFieldValue>() }
     fun syncCycleLineFieldsFromVm() {
@@ -1357,7 +1337,7 @@ private fun SettingsRow(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun InfoSheet(onDismiss: () -> Unit) {
-    var tab by remember { mutableStateOf(ChatboxInfoTab.Overview) }
+    var tab by rememberSaveable { mutableStateOf(ChatboxInfoTab.Overview) }
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
