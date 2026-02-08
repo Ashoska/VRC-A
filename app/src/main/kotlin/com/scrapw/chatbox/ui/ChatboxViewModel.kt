@@ -1,4 +1,4 @@
-// ChatboxViewModel.kt
+// app/src/main/kotlin/com/scrapw/chatbox/ui/ChatboxViewModel.kt
 package com.scrapw.chatbox.ui
 
 import android.content.Intent
@@ -353,6 +353,10 @@ class ChatboxViewModel(
     var combinedPreviewText by mutableStateOf("")
         private set
 
+    // ✅ NEW: warning shown when Cycle had to be trimmed/dropped to preserve Now Playing
+    var cycleTrimWarning by mutableStateOf("")
+        private set
+
     private val afkPresetTexts = mutableStateListOf("", "", "")
     private val cyclePresetMessages = mutableStateListOf("", "", "", "", "")
     private val cyclePresetIntervals = mutableStateListOf(
@@ -425,7 +429,6 @@ class ChatboxViewModel(
         uiTickJob = viewModelScope.launch {
             while (true) {
                 tickNowPlayingMovement()
-                // recompute paused/playing for preview even with no new notifications
                 nowPlayingIsPlaying = computeDisplayedPlaying()
                 rebuildCombinedPreviewOnly()
                 delay(UI_TICK_MS)
@@ -438,14 +441,12 @@ class ChatboxViewModel(
                 activePackage = if (s.activePackage.isBlank()) "(none)" else s.activePackage
                 nowPlayingDetected = s.detected
 
-                // Always keep timing/progress updated (bar + time)
                 nowPlayingDurationMs = s.durationMs
                 nowPlayingPositionMs = s.positionMs
                 nowPlayingPositionUpdateTimeMs = s.positionUpdateTimeMs
                 nowPlayingSpeed = s.playbackSpeed
                 nowPlayingReportedIsPlaying = s.isPlaying
 
-                // Track switch resets movement timers so we don't false-pause on skip/back
                 val key = "${s.title.trim()}|${s.artist.trim()}|${s.durationMs}"
                 val trackChanged = key != lastTrackKeyForInference && (s.title.isNotBlank() || s.artist.isNotBlank())
                 if (trackChanged) {
@@ -454,12 +455,10 @@ class ChatboxViewModel(
                     pauseCandidateSinceMs = 0L
                     inferredIsPlaying = true
 
-                    // reset tick position reference too
                     lastEffectivePosForTick = nowPlayingPositionMs.coerceAtLeast(0L)
                     lastEffectiveTickAtMs = System.currentTimeMillis()
                 }
 
-                // Stabilize metadata (keeps title aligned with track/progress)
                 stabilizeNowPlayingMetadata(
                     rawTitle = s.title,
                     rawArtist = s.artist,
@@ -469,7 +468,6 @@ class ChatboxViewModel(
                     inferredIsPlaying = inferredIsPlaying
                 )
 
-                // Final displayed state:
                 nowPlayingIsPlaying = computeDisplayedPlaying()
                 rebuildCombinedPreviewOnly()
             }
@@ -506,11 +504,7 @@ class ChatboxViewModel(
         lastEffectivePosForTick = eff
         lastEffectiveTickAtMs = nowMs
 
-        // Movement rules:
-        // - normal playing: dp should be positive over time
-        // - seeking: dp can jump big (positive or negative) — treat as movement
-        val moved =
-            dp >= 150L || abs(dp) >= 1_000L
+        val moved = dp >= 150L || abs(dp) >= 1_000L
 
         if (moved) {
             lastMovementAtMs = nowMs
@@ -519,7 +513,6 @@ class ChatboxViewModel(
             return
         }
 
-        // If system says paused or speed ~ 0, arm pause candidate (but don't instantly believe it)
         if (!nowPlayingReportedIsPlaying || abs(nowPlayingSpeed) < 0.01f) {
             if (pauseCandidateSinceMs == 0L) pauseCandidateSinceMs = nowMs
         } else {
@@ -531,7 +524,6 @@ class ChatboxViewModel(
         val now = System.currentTimeMillis()
         val noMoveForMs = now - lastMovementAtMs
 
-        // If explicitly paused for a bit, allow it to win
         val hardPause =
             !nowPlayingReportedIsPlaying &&
                 pauseCandidateSinceMs > 0L &&
@@ -540,7 +532,6 @@ class ChatboxViewModel(
         if (hardPause) return false
         if (noMoveForMs >= NO_MOVE_PAUSE_MS) return false
 
-        // otherwise it's playing
         return true
     }
 
@@ -874,7 +865,15 @@ class ChatboxViewModel(
         lastCombinedSendMs = nowMs
     }
 
+    /**
+     * Builds the final text WITH VRChat limits + priority rules:
+     * - AFK is highest priority
+     * - Now Playing must not be cut by Cycle
+     * - Cycle is trimmed/dropped first if the combined output would exceed 144 chars or 9 lines
+     */
     private fun buildCombinedText(cycleLineOverride: String?): String {
+        cycleTrimWarning = "" // reset for each build
+
         val afkLine = if (afkEnabled && afkMessage.trim().isNotEmpty()) afkMessage.trim() else ""
         val cycleLine = if (cycleEnabled) (cycleLineOverride ?: currentCycleLinePreview()) else ""
         val musicLines = if (spotifyEnabled) buildNowPlayingLines() else emptyList()
@@ -883,12 +882,25 @@ class ChatboxViewModel(
         debugLastCycleOsc = cycleLine
         debugLastMusicOsc = musicLines.joinToString("\n")
 
-        val lines = mutableListOf<String>()
-        if (afkLine.isNotBlank()) lines += afkLine
-        if (cycleLine.isNotBlank()) lines += cycleLine
-        lines.addAll(musicLines)
+        val rawLines = mutableListOf<LineWithPriority>()
+        if (afkLine.isNotBlank()) rawLines += LineWithPriority(text = afkLine, priority = Priority.AFK)
+        if (cycleLine.isNotBlank()) rawLines += LineWithPriority(text = cycleLine, priority = Priority.CYCLE)
+        for (m in musicLines) {
+            if (m.isNotBlank()) rawLines += LineWithPriority(text = m, priority = Priority.MUSIC)
+        }
 
-        val combined = joinWithLimits(lines, maxChars = VRC_MAX_CHARS, maxLines = VRC_MAX_LINES)
+        val limited = limitWithPriority(
+            lines = rawLines,
+            maxChars = VRC_MAX_CHARS,
+            maxLines = VRC_MAX_LINES
+        )
+
+        // If cycle got trimmed/dropped to protect music, show warning.
+        if (limited.cycleWasModifiedToPreserveMusic) {
+            cycleTrimWarning = "Cycle was trimmed to preserve Now Playing (VRChat limits)."
+        }
+
+        val combined = limited.text
         debugLastCombinedOsc = combined
         return combined
     }
@@ -915,6 +927,9 @@ class ChatboxViewModel(
         val safeTitle = title.takeIf { it != "(blank)" }?.trim().orEmpty()
         val safeArtist = artist.takeIf { it != "(blank)" }?.trim().orEmpty()
 
+        // --- Two-line rule (your request) ---
+        // We approximate "two lines" using the same line width used previously.
+        // If artist+title would exceed two lines, we drop artist until next track.
         val maxLine = 42
         val twoLineBudget = maxLine * 2
 
@@ -953,6 +968,105 @@ class ChatboxViewModel(
         val line3 = status.takeIf { it.isNotBlank() }
 
         return listOfNotNull(line1.takeIf { it.isNotBlank() }, line2.takeIf { it.isNotBlank() }, line3)
+    }
+
+    // =========================
+    // Priority limiter (Cycle is sacrificed before Music)
+    // =========================
+    private enum class Priority { AFK, MUSIC, CYCLE }
+
+    private data class LineWithPriority(val text: String, val priority: Priority)
+
+    private data class LimitedResult(
+        val text: String,
+        val cycleWasModifiedToPreserveMusic: Boolean
+    )
+
+    private fun limitWithPriority(
+        lines: List<LineWithPriority>,
+        maxChars: Int,
+        maxLines: Int
+    ): LimitedResult {
+        if (lines.isEmpty()) return LimitedResult("", false)
+
+        // Clean + initial cap by maxLines but not by dropping priorities yet.
+        val cleaned = lines
+            .map { it.copy(text = it.text.trim()) }
+            .filter { it.text.isNotEmpty() }
+            .toMutableList()
+
+        if (cleaned.isEmpty()) return LimitedResult("", false)
+
+        var cycleModifiedForMusic = false
+
+        // 1) Enforce line count by dropping lowest priority lines first (Cycle -> Music -> AFK)
+        while (cleaned.size > maxLines) {
+            val idxToRemove = cleaned.indexOfLast { it.priority == Priority.CYCLE }
+                .takeIf { it >= 0 }
+                ?: cleaned.indexOfLast { it.priority == Priority.MUSIC }
+                    .takeIf { it >= 0 }
+                ?: cleaned.indexOfLast { it.priority == Priority.AFK }
+
+            if (idxToRemove >= 0) {
+                if (cleaned[idxToRemove].priority == Priority.CYCLE) cycleModifiedForMusic = true
+                cleaned.removeAt(idxToRemove)
+            } else {
+                break
+            }
+        }
+
+        // 2) Enforce char count by trimming Cycle first, then Music, then AFK (last resort)
+        fun totalLen(list: List<LineWithPriority>): Int {
+            var sum = 0
+            list.forEachIndexed { idx, l ->
+                sum += l.text.length
+                if (idx != list.lastIndex) sum += 1 // newline
+            }
+            return sum
+        }
+
+        fun trimLineAt(index: Int, needToRemove: Int) {
+            val original = cleaned[index].text
+            if (original.isEmpty()) return
+            // We remove enough chars, but keep at least 1 char + ellipsis if possible.
+            val newLen = (original.length - needToRemove).coerceAtLeast(1)
+            val trimmed = if (newLen >= 2) original.take(newLen - 1) + "…" else "…"
+            if (cleaned[index].priority == Priority.CYCLE) cycleModifiedForMusic = true
+            cleaned[index] = cleaned[index].copy(text = trimmed)
+        }
+
+        var len = totalLen(cleaned)
+        while (len > maxChars && cleaned.isNotEmpty()) {
+            val excess = len - maxChars
+
+            val cycleIdx = cleaned.indexOfLast { it.priority == Priority.CYCLE }
+            val musicIdx = cleaned.indexOfLast { it.priority == Priority.MUSIC }
+            val afkIdx = cleaned.indexOfLast { it.priority == Priority.AFK }
+
+            when {
+                cycleIdx >= 0 -> trimLineAt(cycleIdx, excess + 1)
+                musicIdx >= 0 -> trimLineAt(musicIdx, excess + 1)
+                afkIdx >= 0 -> trimLineAt(afkIdx, excess + 1)
+                else -> break
+            }
+
+            // If after trimming we still exceed badly, as a last resort drop cycle line entirely.
+            len = totalLen(cleaned)
+            if (len > maxChars) {
+                val dropCycle = cleaned.indexOfLast { it.priority == Priority.CYCLE }
+                if (dropCycle >= 0 && cleaned.size > 1) {
+                    cycleModifiedForMusic = true
+                    cleaned.removeAt(dropCycle)
+                    len = totalLen(cleaned)
+                } else {
+                    // can't drop safely; stop looping
+                    break
+                }
+            }
+        }
+
+        val out = cleaned.joinToString("\n") { it.text }
+        return LimitedResult(out, cycleModifiedForMusic)
     }
 
     // =========================
@@ -1064,29 +1178,6 @@ class ChatboxViewModel(
         val m = totalSec / 60L
         val s = (totalSec % 60L).toInt()
         return "${m}:${s.toString().padStart(2, '0')}"
-    }
-
-    private fun joinWithLimits(lines: List<String>, maxChars: Int, maxLines: Int): String {
-        if (lines.isEmpty()) return ""
-
-        val clean = lines.map { it.trim() }.filter { it.isNotEmpty() }.take(maxLines)
-        if (clean.isEmpty()) return ""
-
-        val out = ArrayList<String>(clean.size)
-        var total = 0
-
-        for (line in clean) {
-            val add = if (out.isEmpty()) line.length else (1 + line.length)
-            if (total + add > maxChars) {
-                val remain = maxChars - total - (if (out.isEmpty()) 0 else 1)
-                if (remain >= 2) out.add(line.take(remain - 1) + "…")
-                break
-            }
-            out.add(line)
-            total += add
-        }
-
-        return out.joinToString("\n")
     }
 
     private fun sendToVrchatRaw(text: String, local: Boolean, addToConversation: Boolean) {
