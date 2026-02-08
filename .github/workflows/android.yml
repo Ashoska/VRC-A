@@ -22,7 +22,12 @@ jobs:
       - name: Gradle cache
         uses: gradle/actions/setup-gradle@v3
 
-      # Creates release.keystore + keystore.properties only when secrets exist
+      # ✅ Fix: gradlew is not executable on GitHub runner
+      - name: Make gradlew executable
+        shell: bash
+        run: chmod +x ./gradlew
+
+      # Create keystore + keystore.properties ONLY if secrets exist
       - name: Create signing files (if secrets set)
         shell: bash
         env:
@@ -34,7 +39,7 @@ jobs:
           set -e
 
           if [ -z "$KEYSTORE_B64" ]; then
-            echo "No signing secrets found. Release will be unsigned."
+            echo "No signing secrets found. Release will be unsigned (debug still builds)."
             exit 0
           fi
 
