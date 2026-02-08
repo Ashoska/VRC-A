@@ -353,7 +353,7 @@ class ChatboxViewModel(
     var combinedPreviewText by mutableStateOf("")
         private set
 
-    // ✅ NEW: warning shown when Cycle had to be trimmed/dropped to preserve Now Playing
+    // ✅ warning shown when Cycle/AFK had to be trimmed/dropped
     var cycleTrimWarning by mutableStateOf("")
         private set
 
@@ -424,7 +424,7 @@ class ChatboxViewModel(
             userPreferencesRepository.cyclePresetsCollapsed.collect { cyclePresetsCollapsed = it }
         }
 
-        // ✅ NEW: tick loop to keep pause detection honest even when notifications stop
+        // ✅ tick loop to keep pause detection honest even when notifications stop
         uiTickJob?.cancel()
         uiTickJob = viewModelScope.launch {
             while (true) {
@@ -866,10 +866,10 @@ class ChatboxViewModel(
     }
 
     /**
-     * Builds the final text WITH VRChat limits + priority rules:
-     * - AFK is highest priority
-     * - Now Playing must not be cut by Cycle
-     * - Cycle is trimmed/dropped first if the combined output would exceed 144 chars or 9 lines
+     * Builds the final text WITH VRChat limits + priority rules.
+     *
+     * USER REQUESTED PRIORITY ORDER (sacrificed first -> protected most):
+     *   Cycle  ->  AFK  ->  Music Status (Paused)  ->  Music
      */
     private fun buildCombinedText(cycleLineOverride: String?): String {
         cycleTrimWarning = "" // reset for each build
@@ -883,10 +883,14 @@ class ChatboxViewModel(
         debugLastMusicOsc = musicLines.joinToString("\n")
 
         val rawLines = mutableListOf<LineWithPriority>()
-        if (afkLine.isNotBlank()) rawLines += LineWithPriority(text = afkLine, priority = Priority.AFK)
         if (cycleLine.isNotBlank()) rawLines += LineWithPriority(text = cycleLine, priority = Priority.CYCLE)
+        if (afkLine.isNotBlank()) rawLines += LineWithPriority(text = afkLine, priority = Priority.AFK)
+
         for (m in musicLines) {
-            if (m.isNotBlank()) rawLines += LineWithPriority(text = m, priority = Priority.MUSIC)
+            val trimmed = m.trim()
+            if (trimmed.isBlank()) continue
+            val prio = if (trimmed.equals("Paused", ignoreCase = true)) Priority.MUSIC_STATUS else Priority.MUSIC
+            rawLines += LineWithPriority(text = trimmed, priority = prio)
         }
 
         val limited = limitWithPriority(
@@ -895,9 +899,8 @@ class ChatboxViewModel(
             maxLines = VRC_MAX_LINES
         )
 
-        // If cycle got trimmed/dropped to protect music, show warning.
-        if (limited.cycleWasModifiedToPreserveMusic) {
-            cycleTrimWarning = "Cycle was trimmed to preserve Now Playing (VRChat limits)."
+        if (limited.anyWasModified) {
+            cycleTrimWarning = "Text was trimmed to fit VRChat limits (144 chars / 9 lines)."
         }
 
         val combined = limited.text
@@ -928,8 +931,6 @@ class ChatboxViewModel(
         val safeArtist = artist.takeIf { it != "(blank)" }?.trim().orEmpty()
 
         // --- Two-line rule (your request) ---
-        // We approximate "two lines" using the same line width used previously.
-        // If artist+title would exceed two lines, we drop artist until next track.
         val maxLine = 42
         val twoLineBudget = maxLine * 2
 
@@ -967,21 +968,31 @@ class ChatboxViewModel(
         val line2 = listOf(bar, time).joinToString(" ").trim()
         val line3 = status.takeIf { it.isNotBlank() }
 
-        return listOfNotNull(line1.takeIf { it.isNotBlank() }, line2.takeIf { it.isNotBlank() }, line3)
+        return listOfNotNull(
+            line1.takeIf { it.isNotBlank() },
+            line2.takeIf { it.isNotBlank() },
+            line3
+        )
     }
 
     // =========================
-    // Priority limiter (Cycle is sacrificed before Music)
+    // Priority limiter
     // =========================
-    private enum class Priority { AFK, MUSIC, CYCLE }
+    private enum class Priority { CYCLE, AFK, MUSIC_STATUS, MUSIC }
 
     private data class LineWithPriority(val text: String, val priority: Priority)
 
     private data class LimitedResult(
         val text: String,
-        val cycleWasModifiedToPreserveMusic: Boolean
+        val anyWasModified: Boolean
     )
 
+    /**
+     * Enforces VRChat max chars + max lines.
+     *
+     * USER REQUESTED "sacrificed first -> protected most" order:
+     *   Cycle -> AFK -> Music Status -> Music
+     */
     private fun limitWithPriority(
         lines: List<LineWithPriority>,
         maxChars: Int,
@@ -989,7 +1000,6 @@ class ChatboxViewModel(
     ): LimitedResult {
         if (lines.isEmpty()) return LimitedResult("", false)
 
-        // Clean + initial cap by maxLines but not by dropping priorities yet.
         val cleaned = lines
             .map { it.copy(text = it.text.trim()) }
             .filter { it.text.isNotEmpty() }
@@ -997,25 +1007,29 @@ class ChatboxViewModel(
 
         if (cleaned.isEmpty()) return LimitedResult("", false)
 
-        var cycleModifiedForMusic = false
+        var modified = false
 
-        // 1) Enforce line count by dropping lowest priority lines first (Cycle -> Music -> AFK)
-        while (cleaned.size > maxLines) {
-            val idxToRemove = cleaned.indexOfLast { it.priority == Priority.CYCLE }
-                .takeIf { it >= 0 }
-                ?: cleaned.indexOfLast { it.priority == Priority.MUSIC }
-                    .takeIf { it >= 0 }
-                ?: cleaned.indexOfLast { it.priority == Priority.AFK }
-
-            if (idxToRemove >= 0) {
-                if (cleaned[idxToRemove].priority == Priority.CYCLE) cycleModifiedForMusic = true
-                cleaned.removeAt(idxToRemove)
-            } else {
-                break
-            }
+        // 1) Enforce max lines by dropping lowest priority first:
+        // Cycle -> AFK -> MusicStatus -> Music
+        fun indexToDrop(): Int {
+            val cycle = cleaned.indexOfFirst { it.priority == Priority.CYCLE }
+            if (cycle >= 0) return cycle
+            val afk = cleaned.indexOfFirst { it.priority == Priority.AFK }
+            if (afk >= 0) return afk
+            val status = cleaned.indexOfFirst { it.priority == Priority.MUSIC_STATUS }
+            if (status >= 0) return status
+            return cleaned.indexOfFirst { it.priority == Priority.MUSIC }
         }
 
-        // 2) Enforce char count by trimming Cycle first, then Music, then AFK (last resort)
+        while (cleaned.size > maxLines) {
+            val idx = indexToDrop()
+            if (idx < 0) break
+            cleaned.removeAt(idx)
+            modified = true
+        }
+
+        // 2) Enforce max chars by trimming lowest priority first:
+        // Cycle -> AFK -> MusicStatus -> Music
         fun totalLen(list: List<LineWithPriority>): Int {
             var sum = 0
             list.forEachIndexed { idx, l ->
@@ -1025,48 +1039,52 @@ class ChatboxViewModel(
             return sum
         }
 
+        fun pickTrimIndex(): Int {
+            val cycle = cleaned.indexOfFirst { it.priority == Priority.CYCLE }
+            if (cycle >= 0) return cycle
+            val afk = cleaned.indexOfFirst { it.priority == Priority.AFK }
+            if (afk >= 0) return afk
+            val status = cleaned.indexOfFirst { it.priority == Priority.MUSIC_STATUS }
+            if (status >= 0) return status
+            return cleaned.indexOfFirst { it.priority == Priority.MUSIC }
+        }
+
         fun trimLineAt(index: Int, needToRemove: Int) {
             val original = cleaned[index].text
             if (original.isEmpty()) return
-            // We remove enough chars, but keep at least 1 char + ellipsis if possible.
             val newLen = (original.length - needToRemove).coerceAtLeast(1)
             val trimmed = if (newLen >= 2) original.take(newLen - 1) + "…" else "…"
-            if (cleaned[index].priority == Priority.CYCLE) cycleModifiedForMusic = true
             cleaned[index] = cleaned[index].copy(text = trimmed)
+            modified = true
         }
 
         var len = totalLen(cleaned)
         while (len > maxChars && cleaned.isNotEmpty()) {
             val excess = len - maxChars
+            val idx = pickTrimIndex()
+            if (idx < 0) break
 
-            val cycleIdx = cleaned.indexOfLast { it.priority == Priority.CYCLE }
-            val musicIdx = cleaned.indexOfLast { it.priority == Priority.MUSIC }
-            val afkIdx = cleaned.indexOfLast { it.priority == Priority.AFK }
-
-            when {
-                cycleIdx >= 0 -> trimLineAt(cycleIdx, excess + 1)
-                musicIdx >= 0 -> trimLineAt(musicIdx, excess + 1)
-                afkIdx >= 0 -> trimLineAt(afkIdx, excess + 1)
-                else -> break
-            }
-
-            // If after trimming we still exceed badly, as a last resort drop cycle line entirely.
+            // Trim enough to fit, plus a bit to account for ellipsis
+            trimLineAt(idx, excess + 1)
             len = totalLen(cleaned)
-            if (len > maxChars) {
-                val dropCycle = cleaned.indexOfLast { it.priority == Priority.CYCLE }
-                if (dropCycle >= 0 && cleaned.size > 1) {
-                    cycleModifiedForMusic = true
-                    cleaned.removeAt(dropCycle)
+
+            // If still too long, drop lowest priority line (same order).
+            if (len > maxChars && cleaned.size > 1) {
+                val dropIdx = indexToDrop()
+                if (dropIdx >= 0) {
+                    cleaned.removeAt(dropIdx)
+                    modified = true
                     len = totalLen(cleaned)
                 } else {
-                    // can't drop safely; stop looping
                     break
                 }
             }
         }
 
-        val out = cleaned.joinToString("\n") { it.text }
-        return LimitedResult(out, cycleModifiedForMusic)
+        return LimitedResult(
+            text = cleaned.joinToString("\n") { it.text },
+            anyWasModified = modified
+        )
     }
 
     // =========================
