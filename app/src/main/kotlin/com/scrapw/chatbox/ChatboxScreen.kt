@@ -406,7 +406,6 @@ private fun SectionCard(
                         .weight(1f)
                         .padding(end = 10.dp)
                 ) {
-                    // ✅ FIX: don't cut off titles like "VRChat Preview"
                     Text(
                         text = title,
                         style = MaterialTheme.typography.titleMedium,
@@ -453,9 +452,9 @@ private fun HomePage(
     val connectionBring = remember { BringIntoViewRequester() }
     val manualSendBring = remember { BringIntoViewRequester() }
 
-    // ✅ FIX: rememberSaveable must store TextFieldValue itself (NOT a MutableState with a TextFieldValue saver)
-    var ipInput by rememberSaveable(stateSaver = TextFieldValue.Saver) {
-        TextFieldValue(uiState.ipAddress)
+    // ✅ FIX: use rememberSaveable + saver, but RETURN MutableState so `by` works.
+    var ipInput by rememberSaveable(saver = TextFieldValue.Saver) {
+        mutableStateOf(TextFieldValue(uiState.ipAddress))
     }
     LaunchedEffect(uiState.ipAddress) {
         if (ipInput.text.isBlank()) ipInput = TextFieldValue(uiState.ipAddress)
@@ -776,7 +775,6 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
     val scope = rememberCoroutineScope()
     var tab by rememberSaveable { mutableStateOf(ChatboxAutomationsTab.AFK) }
 
-    // local TextFieldValue buffers for cycle lines
     val cycleLineFields = remember { mutableStateMapOf<Int, TextFieldValue>() }
 
     fun syncCycleLineFieldsFromVm() {
