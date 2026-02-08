@@ -1,3 +1,4 @@
+// app/src/main/kotlin/com/scrapw/chatbox/MainActivity.kt
 package com.scrapw.chatbox
 
 import android.Manifest
@@ -10,10 +11,6 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import com.scrapw.chatbox.keepalive.ChatboxKeepAliveService
 import com.scrapw.chatbox.overlay.OverlayDaemon
@@ -30,7 +27,7 @@ class MainActivity : ComponentActivity() {
     private val notifPermLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { _ ->
-        // Even if denied, try to start anyway (some devices still allow FGS notif).
+        // Even if denied, try to start anyway (some devices still allow FGS).
         ChatboxKeepAliveService.start(applicationContext)
     }
 
@@ -38,7 +35,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
-        // Start keep-alive so OSC continues when screen turns off.
+        // Keep-alive for screen-off reliability.
         if (Build.VERSION.SDK_INT >= 33) {
             val granted = ContextCompat.checkSelfPermission(
                 this,
@@ -56,13 +53,10 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             ChatboxTheme {
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
-                ) {
-                    ChatboxApp()
-                }
+                // ✅ UI redesign lives in ChatboxScreen.kt; keep app wiring stable.
+                ChatboxApp()
             }
+            // ✅ Overlay stays as-is (no feature change).
             OverlayDaemon(this)
         }
     }
