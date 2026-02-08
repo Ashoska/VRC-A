@@ -11,12 +11,6 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
@@ -90,14 +84,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -140,6 +132,9 @@ private object UiPrefs {
     private const val KEY_SPOTIFY_DEMO = "spotify_demo"
     private const val KEY_SPOTIFY_PRESET = "spotify_preset"
 
+    // ✅ FIX: persist Setup Tutorial collapse across tab switching + app reopen
+    private const val KEY_TUTORIAL_EXPANDED = "tutorial_expanded"
+
     fun readSpotifyEnabled(ctx: Context): Boolean =
         ctx.getSharedPreferences(FILE, MODE_PRIVATE).getBoolean(KEY_SPOTIFY_ENABLED, false)
 
@@ -159,6 +154,14 @@ private object UiPrefs {
 
     fun writeSpotifyPreset(ctx: Context, v: Int) {
         ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit().putInt(KEY_SPOTIFY_PRESET, v.coerceIn(1, 5)).apply()
+    }
+
+    // ✅ Setup tutorial collapse persistence
+    fun readTutorialExpanded(ctx: Context): Boolean =
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getBoolean(KEY_TUTORIAL_EXPANDED, true)
+
+    fun writeTutorialExpanded(ctx: Context, v: Boolean) {
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit().putBoolean(KEY_TUTORIAL_EXPANDED, v).apply()
     }
 }
 
@@ -460,29 +463,19 @@ private fun HomePage(
     val connectionBring = remember { BringIntoViewRequester() }
     val manualSendBring = remember { BringIntoViewRequester() }
 
-    // ✅ FIX (your compile error): rememberSaveable saver must match the returned type.
-    // We want MutableState<TextFieldValue>, so we provide a Saver for MutableState<TextFieldValue>.
-    val textFieldValueStateSaver: Saver<MutableState<TextFieldValue>, Any> = remember {
-        Saver(
-            save = { state ->
-                // Use the built-in TextFieldValue.Saver to produce a Bundle-safe "Any"
-                with(TextFieldValue.Saver) { save(state.value) }!!
-            },
-            restore = { restored ->
-                mutableStateOf(with(TextFieldValue.Saver) { restore(restored) }!!)
-            }
-        )
-    }
-
-    val ipInputState = rememberSaveable(saver = textFieldValueStateSaver) {
+    var ipInput by rememberSaveable(saver = TextFieldValue.Saver) {
         mutableStateOf(TextFieldValue(uiState.ipAddress))
     }
-
     LaunchedEffect(uiState.ipAddress) {
-        if (ipInputState.value.text.isBlank()) ipInputState.value = TextFieldValue(uiState.ipAddress)
+        if (ipInput.text.isBlank()) ipInput = TextFieldValue(uiState.ipAddress)
     }
 
-    var tutorialExpanded by rememberSaveable { mutableStateOf(true) }
+    // ✅ ONLY FIX: tutorial collapse persists across tab switching + app reopen
+    var tutorialExpanded by rememberSaveable { mutableStateOf(UiPrefs.readTutorialExpanded(ctx)) }
+    fun setTutorialExpanded(v: Boolean) {
+        tutorialExpanded = v
+        UiPrefs.writeTutorialExpanded(ctx, v)
+    }
 
     val overlayGranted = remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
     LaunchedEffect(Unit) { overlayGranted.value = Settings.canDrawOverlays(ctx) }
@@ -591,7 +584,7 @@ private fun HomePage(
             title = "Setup Tutorial",
             subtitle = "Tap each step to open settings or jump to the right place.",
             actions = {
-                IconButton(onClick = { tutorialExpanded = !tutorialExpanded }) {
+                IconButton(onClick = { setTutorialExpanded(!tutorialExpanded) }) {
                     Icon(
                         imageVector = if (tutorialExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
                         contentDescription = null
@@ -668,8 +661,8 @@ private fun HomePage(
         ) {
             Column(Modifier.bringIntoViewRequester(connectionBring)) {
                 OutlinedTextField(
-                    value = ipInputState.value,
-                    onValueChange = { v: TextFieldValue -> ipInputState.value = v },
+                    value = ipInput,
+                    onValueChange = { v: TextFieldValue -> ipInput = v },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     label = { Text("Headset IP address") },
@@ -680,7 +673,7 @@ private fun HomePage(
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Button(
                         onClick = {
-                            val ip = ipInputState.value.text.trim()
+                            val ip = ipInput.text.trim()
                             runCatching { vm.ipAddressApply(ip) }
                                 .onFailure {
                                     scope.launch {
@@ -692,7 +685,7 @@ private fun HomePage(
                     ) { Text("Apply") }
 
                     OutlinedButton(
-                        onClick = { ipInputState.value = TextFieldValue(uiState.ipAddress) },
+                        onClick = { ipInput = TextFieldValue(uiState.ipAddress) },
                         modifier = Modifier.weight(1f)
                     ) { Text("Reset") }
                 }
@@ -1096,18 +1089,6 @@ private fun NowPlayingPage(
 ) {
     val ctx = LocalContext.current
 
-    // ✅ Animated clock for preset previews
-    val infinite = rememberInfiniteTransition(label = "preset_preview")
-    val t by infinite.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1400, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "t"
-    )
-
     PageContainer {
         SectionCard(
             title = "Now Playing",
@@ -1160,7 +1141,7 @@ private fun NowPlayingPage(
                             Column(Modifier.weight(1f)) {
                                 Text(text = name, style = MaterialTheme.typography.titleSmall)
                                 Text(
-                                    text = vm.renderMusicPresetPreview(p, t),
+                                    text = vm.renderMusicPresetPreview(p, 0.5f),
                                     style = MaterialTheme.typography.bodyMedium,
                                     fontFamily = FontFamily.Monospace
                                 )
