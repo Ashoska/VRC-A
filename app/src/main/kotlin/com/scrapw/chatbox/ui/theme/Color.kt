@@ -1,30 +1,36 @@
+// app/src/main/kotlin/com/scrapw/chatbox/ui/theme/Color.kt
 package com.scrapw.chatbox.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
 /**
- * UI-only color tokens.
- * These are kept for compatibility but aligned to the new “space” theme.
- * Logic/features are NOT affected.
+ * SlimeVR-ish dark palette (deep navy + purple accent).
+ * Keep this file as the single source of truth for custom colors.
  */
 
-// Legacy names (mapped to new palette so nothing breaks)
-val Purple80 = Color(0xFFCBB7FF)       // soft lavender
-val PurpleGrey80 = Color(0xFFCFCBEA)   // muted space grey
-val Pink80 = Color(0xFFFFB7D6)         // soft pink
+// Accents (purple/lavender)
+val SlimePurple = Color(0xFF9B7BFF)
+val SlimePurpleSoft = Color(0xFFB9A7FF)
+val SlimePurpleDeep = Color(0xFF6F52FF)
 
-val Purple40 = Color(0xFF6C4BD6)       // lavender primary
-val PurpleGrey40 = Color(0xFF2A2940)   // dark slate
-val Pink40 = Color(0xFFC2185B)         // accent pink
+// Blues / Teals used as secondary accents
+val SlimeCyan = Color(0xFF49C6FF)
+val SlimeBlue = Color(0xFF2D8CFF)
 
-// Extra UI helpers (optional, UI-only)
-val SpaceBackgroundDark = Color(0xFF0B0D14)
-val SpaceSurfaceDark = Color(0xFF0F1220)
-val SpaceSurfaceVariantDark = Color(0xFF171A2B)
+// Surfaces / panels
+val SlimeBg = Color(0xFF06121F)           // app background
+val SlimeSurface = Color(0xFF0A1A2B)      // main surfaces
+val SlimeSurface2 = Color(0xFF0E2236)     // panel / cards
+val SlimeSurface3 = Color(0xFF132B43)     // elevated panels
 
-val SpaceBackgroundLight = Color(0xFFF7F6FF)
-val SpaceSurfaceLight = Color(0xFFFBFAFF)
-val SpaceSurfaceVariantLight = Color(0xFFEAE7F8)
+// Text
+val SlimeText = Color(0xFFEAF0FF)
+val SlimeTextMuted = Color(0xFFB6C2DE)
 
-val SpaceOutlineDark = Color(0xFF2B2F45)
-val SpaceOutlineLight = Color(0xFFB9B3D3)
+// Borders / outlines
+val SlimeOutline = Color(0xFF203854)
+
+// Status colors
+val SlimeSuccess = Color(0xFF4EE39A)
+val SlimeWarning = Color(0xFFFFD166)
+val SlimeError = Color(0xFFFF6B6B)
