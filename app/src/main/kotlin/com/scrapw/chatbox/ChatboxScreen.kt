@@ -4,9 +4,16 @@ package com.scrapw.chatbox
 import android.content.Context
 import android.content.Context.MODE_PRIVATE
 import android.os.PowerManager
+import android.os.SystemClock
 import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -115,13 +122,11 @@ private enum class AppPage(val title: String) {
     Debug("Debug")
 }
 
-// ✅ Renamed to avoid clashing with LegacyPagesAndSettingsPage.kt
 private enum class ChatboxAutomationsTab(val title: String) {
     AFK("AFK"),
     Cycle("Cycle")
 }
 
-// ✅ Renamed to avoid future collisions
 private enum class ChatboxInfoTab(val title: String) {
     Overview("Overview"),
     Help("Help")
@@ -168,13 +173,9 @@ fun ChatboxScreen(
     var showSettingsSheet by remember { mutableStateOf(false) }
     var showInfoSheet by remember { mutableStateOf(false) }
 
-    // Drawer (mobile replica)
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
-
-    // Snackbars for safe error messaging (e.g. IP apply crash guard)
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // Persisted UI state applied to VM once on start
     LaunchedEffect(Unit) {
         chatboxViewModel.setSpotifyEnabledFlag(UiPrefs.readSpotifyEnabled(ctx))
         chatboxViewModel.setSpotifyDemoFlag(UiPrefs.readSpotifyDemo(ctx))
@@ -260,7 +261,7 @@ fun ChatboxScreen(
 }
 
 /* =========================
-   LEFT NAV DRAWER (clean + boxed)
+   LEFT NAV DRAWER
    ========================= */
 
 @Composable
@@ -411,17 +412,15 @@ private fun SectionCard(
                     Text(
                         text = title,
                         style = MaterialTheme.typography.titleMedium,
-                        maxLines = 2,
+                        maxLines = 3,
                         overflow = TextOverflow.Ellipsis
                     )
                     if (!subtitle.isNullOrBlank()) {
-                        // ✅ Fix: don't ellipsize early; allow wrapping so the preview subtitle isn't cut
                         Text(
                             text = subtitle,
                             style = MaterialTheme.typography.bodySmall,
-                            maxLines = 3,
-                            overflow = TextOverflow.Clip,
-                            softWrap = true
+                            maxLines = 4,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
@@ -439,7 +438,7 @@ private fun SectionCard(
 }
 
 /* =========================
-   HOME (Preview + Tutorial panel)
+   HOME
    ========================= */
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -555,6 +554,17 @@ private fun HomePage(
                         close()
                     }
                     drawPath(path, color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.06f))
+                }
+            }
+
+            if (vm.cycleTrimWarning.isNotBlank()) {
+                ElevatedCard(
+                    colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)
+                ) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Warning", style = MaterialTheme.typography.titleSmall)
+                        Text(vm.cycleTrimWarning, style = MaterialTheme.typography.bodySmall)
+                    }
                 }
             }
 
@@ -774,7 +784,7 @@ private fun TutorialStep(
 }
 
 /* =========================
-   AUTOMATIONS (AFK + Cycle)
+   AUTOMATIONS
    ========================= */
 
 @Composable
@@ -1068,7 +1078,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
 }
 
 /* =========================
-   MUSIC (Now Playing) + persistence
+   MUSIC (Now Playing) + Animated previews
    ========================= */
 
 @Composable
@@ -1079,6 +1089,18 @@ private fun NowPlayingPage(
     onPersistSpotifyPreset: (Int) -> Unit
 ) {
     val ctx = LocalContext.current
+
+    // ✅ Animated preview fraction (restores animated preset previews)
+    val infinite = rememberInfiniteTransition(label = "preset_preview_anim")
+    val t by infinite.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 3500, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "t"
+    )
 
     PageContainer {
         SectionCard(
@@ -1132,7 +1154,7 @@ private fun NowPlayingPage(
                             Column(Modifier.weight(1f)) {
                                 Text(text = name, style = MaterialTheme.typography.titleSmall)
                                 Text(
-                                    text = vm.renderMusicPresetPreview(p, 0.5f),
+                                    text = vm.renderMusicPresetPreview(p, t),
                                     style = MaterialTheme.typography.bodyMedium,
                                     fontFamily = FontFamily.Monospace
                                 )
@@ -1221,7 +1243,7 @@ private fun DebugPage(vm: ChatboxViewModel) {
 }
 
 /* =========================
-   SETTINGS SHEET (clean)
+   SETTINGS SHEET
    ========================= */
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1332,7 +1354,7 @@ private fun SettingsRow(
 }
 
 /* =========================
-   INFO SHEET (moved to drawer; cleaner)
+   INFO SHEET (with your name restored)
    ========================= */
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1365,11 +1387,10 @@ private fun InfoSheet(onDismiss: () -> Unit) {
                         }
                     }
 
-                    // ✅ Fix: re-add your name
                     val overview = remember {
                         """
 VRC-A (VRChat Assistant)
-Made by: Ashoska Mitsu Sisko
+by Ashoska Mitsu Sisko
 
 • Sends OSC chatbox text to your Quest/PC target
 • Includes: AFK, Cycle, Now Playing, Manual Send
