@@ -1,71 +1,101 @@
-<?xml version="1.0" encoding="utf-8"?>
+<!-- app/src/main/res/values/strings.xml -->
 <resources>
     <!-- App -->
     <string name="app_name">Chatbox</string>
 
-    <!-- Settings / labels (these were being removed because there was no default) -->
+    <!-- General / Info -->
     <string name="about">About</string>
-    <string name="accessibility">Accessibility</string>
-    <string name="always_show_keyboard">Always show keyboard</string>
-    <string name="always_show_keyboard_desc">Keep the keyboard open when the overlay is shown.</string>
-    <string name="apply_ip_address">Apply IP address</string>
-    <string name="back_button">Back</string>
-    <string name="button_haptic">Button haptics</string>
-    <string name="button_haptic_desc">Vibrate slightly when tapping buttons.</string>
-    <string name="dependencies">Dependencies</string>
-    <string name="display_ip_edit_bar">Show IP edit bar</string>
-    <string name="display_message_options">Show message options</string>
-    <string name="download_latest_version">Download latest version</string>
-    <string name="edit_ip_address">Edit IP address</string>
-    <string name="empty_conversation">No messages yet.</string>
-    <string name="enable_chatbox_floating_button">Enable floating button</string>
-    <string name="enter_your_ip_here">Enter your IP here</string>
-    <string name="faq">FAQ</string>
-    <string name="floating_button">Floating button</string>
-    <string name="fullscreen">Fullscreen</string>
-    <string name="fullscreen_desc">Use the whole screen for the overlay.</string>
     <string name="information">Information</string>
-    <string name="invalid_ip_address">Invalid IP address</string>
-    <string name="ip_address">IP address</string>
-    <string name="it_can_help_to_send_chatbox_in_vrchat_mobile_desc">This can help send chatbox messages in VRChat Mobile.</string>
-    <string name="keep_conversation_overlay_open">Keep overlay open</string>
-    <string name="keep_conversation_overlay_open_desc">Keep the conversation overlay open after sending.</string>
-    <string name="layout">Layout</string>
+    <string name="faq">FAQ</string>
     <string name="license">License</string>
-    <string name="message">Message</string>
-    <string name="message_card_copy">Copy</string>
-    <string name="message_card_restore">Restore</string>
-    <string name="msg_real_time_long">Send updates in real time.</string>
-    <string name="msg_real_time_short">Real time</string>
-    <string name="msg_send_immediately_long">Send immediately when you press send.</string>
-    <string name="msg_send_immediately_short">Send immediately</string>
-    <string name="msg_trigger_notification_sfx_long">Play a sound when a message is sent.</string>
-    <string name="msg_trigger_notification_sfx_short">Notification sound</string>
-    <string name="msg_typing_indicator_long">Show a typing indicator effect in chat.</string>
-    <string name="msg_typing_indicator_short">Typing indicator</string>
-    <string name="open_chatbox">Open Chatbox</string>
-    <string name="osc_host">OSC host</string>
-    <string name="overlay_lock_messenger">Lock overlay</string>
-    <string name="overlay_unlock_messenger">Unlock overlay</string>
-    <string name="port">Port</string>
     <string name="project">Project</string>
-    <string name="real_time_sending">Real time sending</string>
-    <string name="real_time_sending_desc">Continuously update the VRChat chatbox.</string>
+    <string name="dependencies">Dependencies</string>
+    <string name="source_code">Source code</string>
     <string name="release_page">Release page</string>
-    <string name="send">Send</string>
+    <string name="download_latest_version">Download latest version</string>
+    <string name="update_available">Update available</string>
     <string name="send_a_feedback">Send feedback</string>
-    <string name="send_message_directly">Send directly</string>
-    <string name="send_message_directly_desc">Send messages directly without extra steps.</string>
-    <string name="send_to_localhost">Send to localhost</string>
-    <string name="send_to_localhost_desc">Send OSC to 127.0.0.1.</string>
+
+    <!-- Accessibility -->
+    <string name="accessibility">Accessibility</string>
+
+    <!-- Navigation / Buttons -->
+    <string name="back_button">Back</string>
     <string name="settings">Settings</string>
     <string name="settings_button">Settings</string>
-    <string name="show_message_typing_indicator">Show typing indicator</string>
-    <string name="show_message_typing_indicator_desc">Add a typing indicator effect to messages.</string>
-    <string name="source_code">Source code</string>
-    <string name="stashed">Stashed</string>
-    <string name="trigger_notification_sound">Trigger notification sound</string>
-    <string name="trigger_notification_sound_desc">Play a sound when sending.</string>
-    <string name="update_available">Update available</string>
+
+    <!-- Connection -->
+    <string name="osc_host">OSC Host</string>
+    <string name="ip_address">IP address</string>
+    <string name="port">Port</string>
+    <string name="invalid_ip_address">Invalid IP address</string>
+    <string name="enter_your_ip_here">Enter your IP here</string>
+    <string name="edit_ip_address">Edit IP address</string>
+    <string name="apply_ip_address">Apply IP address</string>
+
+    <!-- Layout / UI -->
+    <string name="layout">Layout</string>
+    <string name="display_ip_edit_bar">Display IP edit bar</string>
+    <string name="display_message_options">Display message options</string>
+
+    <!-- Message / Chat -->
+    <string name="message">Message</string>
     <string name="write_a_message">Write a message</string>
+    <string name="send">Send</string>
+    <string name="stashed">Stashed</string>
+    <string name="empty_conversation">No messages yet</string>
+    <string name="message_card_copy">Copy</string>
+    <string name="message_card_restore">Restore</string>
+
+    <!-- Messaging options -->
+    <string name="real_time_sending">Real-time sending</string>
+    <string name="real_time_sending_desc">Send message updates as you type.</string>
+
+    <string name="trigger_notification_sound">Trigger notification sound</string>
+    <string name="trigger_notification_sound_desc">Play a notification sound when sending.</string>
+
+    <string name="show_message_typing_indicator">Show typing indicator</string>
+    <string name="show_message_typing_indicator_desc">Show typing state to VRChat while composing.</string>
+
+    <string name="send_message_directly">Send message directly</string>
+    <string name="send_message_directly_desc">Send without showing a preview step.</string>
+
+    <!-- Short/Long labels used in MessageOption.kt -->
+    <string name="msg_real_time_short">Real-time</string>
+    <string name="msg_real_time_long">Send updates as you type.</string>
+
+    <string name="msg_trigger_notification_sfx_short">SFX</string>
+    <string name="msg_trigger_notification_sfx_long">Trigger notification sound when sending.</string>
+
+    <string name="msg_typing_indicator_short">Typing</string>
+    <string name="msg_typing_indicator_long">Show typing indicator while composing.</string>
+
+    <string name="msg_send_immediately_short">Direct</string>
+    <string name="msg_send_immediately_long">Send directly without delay.</string>
+
+    <!-- Overlay / Floating -->
+    <string name="floating_button">Floating button</string>
+    <string name="enable_chatbox_floating_button">Enable floating button</string>
+
+    <string name="open_chatbox">Open Chatbox</string>
+
+    <string name="overlay_lock_messenger">Lock messenger</string>
+    <string name="overlay_unlock_messenger">Unlock messenger</string>
+    <string name="keep_conversation_overlay_open">Keep conversation open</string>
+    <string name="keep_conversation_overlay_open_desc">Keep the overlay conversation open while using other apps.</string>
+
+    <string name="send_to_localhost">Send to localhost</string>
+    <string name="send_to_localhost_desc">Send OSC to localhost instead of the configured host.</string>
+
+    <string name="overlay_permission_request">Overlay permission required</string>
+
+    <!-- Fullscreen / Keyboard -->
+    <string name="fullscreen">Fullscreen</string>
+    <string name="fullscreen_desc">Use fullscreen layout.</string>
+
+    <string name="always_show_keyboard">Always show keyboard</string>
+    <string name="always_show_keyboard_desc">Keep the keyboard open when possible.</string>
+
+    <!-- Misc / Help text -->
+    <string name="it_can_help_to_send_chatbox_in_vrchat_mobile_desc">It can help to send Chatbox in VRChat Mobile.</string>
 </resources>
