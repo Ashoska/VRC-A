@@ -460,12 +460,13 @@ private fun HomePage(
     val connectionBring = remember { BringIntoViewRequester() }
     val manualSendBring = remember { BringIntoViewRequester() }
 
-    // ✅ FIX: keep as TextFieldValue var (not a MutableState), so OutlinedTextField(value=...) matches.
-    var ipInput by rememberSaveable(saver = TextFieldValue.Saver) {
+    // ✅ FIX: DO NOT use `by` here (your build doesn't like delegating TextFieldValue via rememberSaveable).
+    // Keep it as MutableState<TextFieldValue> and use .value.
+    val ipInput = rememberSaveable(saver = TextFieldValue.Saver) {
         mutableStateOf(TextFieldValue(uiState.ipAddress))
     }
     LaunchedEffect(uiState.ipAddress) {
-        if (ipInput.text.isBlank()) ipInput = TextFieldValue(uiState.ipAddress)
+        if (ipInput.value.text.isBlank()) ipInput.value = TextFieldValue(uiState.ipAddress)
     }
 
     // ✅ Persist Setup Tutorial collapsed/expanded across reopen.
@@ -658,8 +659,8 @@ private fun HomePage(
         ) {
             Column(Modifier.bringIntoViewRequester(connectionBring)) {
                 OutlinedTextField(
-                    value = ipInput,
-                    onValueChange = { v: TextFieldValue -> ipInput = v },
+                    value = ipInput.value,
+                    onValueChange = { v: TextFieldValue -> ipInput.value = v },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     label = { Text("Headset IP address") },
@@ -670,7 +671,7 @@ private fun HomePage(
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Button(
                         onClick = {
-                            val ip = ipInput.text.trim()
+                            val ip = ipInput.value.text.trim()
                             runCatching { vm.ipAddressApply(ip) }
                                 .onFailure {
                                     scope.launch {
@@ -682,7 +683,7 @@ private fun HomePage(
                     ) { Text("Apply") }
 
                     OutlinedButton(
-                        onClick = { ipInput = TextFieldValue(uiState.ipAddress) },
+                        onClick = { ipInput.value = TextFieldValue(uiState.ipAddress) },
                         modifier = Modifier.weight(1f)
                     ) { Text("Reset") }
                 }
