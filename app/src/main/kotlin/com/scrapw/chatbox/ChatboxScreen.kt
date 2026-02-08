@@ -65,7 +65,6 @@ import androidx.compose.material3.Divider
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -117,7 +116,8 @@ private enum class AppPage(val title: String, val key: String) {
     Debug("Debug", AppNav.KEY_DEBUG)
 }
 
-private enum class AutomationsTab(val title: String) {
+// ✅ renamed to avoid conflict with LegacyPagesAndSettingsPage.kt
+private enum class ChatboxAutomationsTab(val title: String) {
     AFK("AFK"),
     Cycle("Cycle")
 }
@@ -137,7 +137,6 @@ fun ChatboxScreen(
     var page by rememberSaveable { mutableStateOf(AppPage.Home) }
     var showSettingsSheet by remember { mutableStateOf(false) }
 
-    // ✅ Mobile replica: left nav drawer (no bottom bar)
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
 
@@ -190,7 +189,6 @@ fun ChatboxScreen(
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                // ✅ Smooth page transitions (UI-only)
                 Crossfade(targetState = page, label = "page_crossfade") { p ->
                     when (p) {
                         AppPage.Home -> HomePage(chatboxViewModel, onOpenSettings = { showSettingsSheet = true })
@@ -212,7 +210,7 @@ fun ChatboxScreen(
 }
 
 /* =========================
-   LEFT NAV DRAWER (Icon grouping)
+   LEFT NAV DRAWER
    ========================= */
 
 @Composable
@@ -249,6 +247,8 @@ private fun DrawerContent(
                 }
                 Spacer(Modifier.height(6.dp))
             }
+
+            Divider()
 
             Spacer(Modifier.weight(1f))
 
@@ -347,7 +347,7 @@ private fun SectionCard(
 }
 
 /* =========================
-   HOME (Preview + Wizard)
+   HOME
    ========================= */
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -369,7 +369,6 @@ private fun HomePage(
     var wizardExpanded by rememberSaveable { mutableStateOf(true) }
     var testSentOnce by rememberSaveable { mutableStateOf(false) }
 
-    // Status checks (safe + lightweight)
     val overlayGranted = remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
     LaunchedEffect(Unit) { overlayGranted.value = Settings.canDrawOverlays(ctx) }
 
@@ -377,7 +376,7 @@ private fun HomePage(
     val batteryOk = remember { mutableStateOf(pm.isIgnoringBatteryOptimizations(ctx.packageName)) }
     LaunchedEffect(Unit) { batteryOk.value = pm.isIgnoringBatteryOptimizations(ctx.packageName) }
 
-    val notifOk = vm.listenerConnected // proxy for Notification Access being granted + running
+    val notifOk = vm.listenerConnected
     val ipOk = uiState.ipAddress.isNotBlank() && uiState.ipAddress != "127.0.0.1"
 
     PageContainer {
@@ -436,7 +435,6 @@ private fun HomePage(
                     }
                 }
 
-                // (UI-only) subtle silhouette like your original
                 Canvas(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -673,13 +671,13 @@ private fun WizardStep(
 }
 
 /* =========================
-   AUTOMATIONS (AFK + Cycle)
+   AUTOMATIONS
    ========================= */
 
 @Composable
 private fun AutomationsPage(vm: ChatboxViewModel) {
     val scope = rememberCoroutineScope()
-    var tab by rememberSaveable { mutableStateOf(AutomationsTab.AFK) }
+    var tab by rememberSaveable { mutableStateOf(ChatboxAutomationsTab.AFK) }
 
     val cycleLineFields = remember { mutableStateMapOf<Int, TextFieldValue>() }
     fun syncCycleLineFieldsFromVm() {
@@ -713,7 +711,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
         ElevatedCard {
             Column(Modifier.padding(10.dp)) {
                 TabRow(selectedTabIndex = tab.ordinal) {
-                    AutomationsTab.entries.forEachIndexed { idx, t ->
+                    ChatboxAutomationsTab.entries.forEachIndexed { idx, t ->
                         Tab(
                             selected = (tab.ordinal == idx),
                             onClick = { tab = t },
@@ -725,7 +723,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
         }
 
         when (tab) {
-            AutomationsTab.AFK -> {
+            ChatboxAutomationsTab.AFK -> {
                 SectionCard(
                     title = "AFK",
                     subtitle = "AFK always appears above Cycle + Music."
@@ -825,7 +823,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
                 }
             }
 
-            AutomationsTab.Cycle -> {
+            ChatboxAutomationsTab.Cycle -> {
                 SectionCard(
                     title = "Cycle",
                     subtitle = "Up to 10 lines. Stop clears instantly."
@@ -967,14 +965,13 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
 }
 
 /* =========================
-   MUSIC (Now Playing)
+   MUSIC
    ========================= */
 
 @Composable
 private fun MusicPresetPreviewText(
     previewTextProvider: (Float) -> String
 ) {
-    // ✅ Always animating (smooth + stable, UI-only)
     val infinite = rememberInfiniteTransition(label = "musicPresetPreview")
     val tState = infinite.animateFloat(
         initialValue = 0f,
@@ -1124,7 +1121,7 @@ private fun DebugPage(vm: ChatboxViewModel) {
 }
 
 /* =========================
-   SETTINGS SHEET (Icon-grouped)
+   SETTINGS SHEET (Icon grouped)
    ========================= */
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1173,19 +1170,6 @@ private fun SettingsSheet(
                         subtitle = "Stops Android pausing when screen is off.",
                         primary = "Request"
                     ) { ctx.startActivity(vm.batteryOptimizationIntent()) }
-                }
-            }
-
-            ElevatedCard {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    SettingsGroupHeader("Connection")
-
-                    SettingsRow(
-                        icon = Icons.Filled.Wifi,
-                        title = "Headset IP",
-                        subtitle = "Set this on Home → Connection.",
-                        primary = "OK"
-                    ) { /* UI-only: set IP on Home */ }
                 }
             }
 
@@ -1340,11 +1324,6 @@ private fun SettingsRow(
     }
 }
 
-/**
- * Makes preview behave nicer:
- * - Inserts zero-width breaks into long unbroken tokens so Text can wrap
- * - Keeps newlines intact
- */
 private fun vrChatSafePreview(input: String): String {
     val zwsp = '\u200B'
     val maxToken = 18
