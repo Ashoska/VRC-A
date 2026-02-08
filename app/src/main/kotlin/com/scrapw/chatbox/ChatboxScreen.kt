@@ -2,6 +2,7 @@
 package com.scrapw.chatbox
 
 import android.content.Context
+import android.content.Context.MODE_PRIVATE
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
@@ -10,6 +11,12 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
@@ -124,6 +131,35 @@ private enum class ChatboxInfoTab(val title: String) {
     Help("Help")
 }
 
+/** Simple persisted UI prefs (no VM changes required). */
+private object UiPrefs {
+    private const val FILE = "vrca_ui_prefs"
+    private const val KEY_SPOTIFY_ENABLED = "spotify_enabled"
+    private const val KEY_SPOTIFY_DEMO = "spotify_demo"
+    private const val KEY_SPOTIFY_PRESET = "spotify_preset"
+
+    fun readSpotifyEnabled(ctx: Context): Boolean =
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getBoolean(KEY_SPOTIFY_ENABLED, false)
+
+    fun writeSpotifyEnabled(ctx: Context, v: Boolean) {
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit().putBoolean(KEY_SPOTIFY_ENABLED, v).apply()
+    }
+
+    fun readSpotifyDemo(ctx: Context): Boolean =
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getBoolean(KEY_SPOTIFY_DEMO, false)
+
+    fun writeSpotifyDemo(ctx: Context, v: Boolean) {
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit().putBoolean(KEY_SPOTIFY_DEMO, v).apply()
+    }
+
+    fun readSpotifyPreset(ctx: Context): Int =
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getInt(KEY_SPOTIFY_PRESET, 1).coerceIn(1, 5)
+
+    fun writeSpotifyPreset(ctx: Context, v: Int) {
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit().putInt(KEY_SPOTIFY_PRESET, v.coerceIn(1, 5)).apply()
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatboxScreen(
@@ -138,6 +174,13 @@ fun ChatboxScreen(
 
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val snackbarHostState = remember { SnackbarHostState() }
+
+    // Apply persisted music UI settings once
+    LaunchedEffect(Unit) {
+        chatboxViewModel.setSpotifyEnabledFlag(UiPrefs.readSpotifyEnabled(ctx))
+        chatboxViewModel.setSpotifyDemoFlag(UiPrefs.readSpotifyDemo(ctx))
+        chatboxViewModel.updateSpotifyPreset(UiPrefs.readSpotifyPreset(ctx))
+    }
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -194,7 +237,12 @@ fun ChatboxScreen(
 
                         AppPage.Automations -> AutomationsPage(chatboxViewModel)
 
-                        AppPage.Music -> NowPlayingPage(chatboxViewModel)
+                        AppPage.Music -> NowPlayingPage(
+                            vm = chatboxViewModel,
+                            onPersistSpotifyEnabled = { UiPrefs.writeSpotifyEnabled(ctx, it) },
+                            onPersistSpotifyDemo = { UiPrefs.writeSpotifyDemo(ctx, it) },
+                            onPersistSpotifyPreset = { UiPrefs.writeSpotifyPreset(ctx, it) }
+                        )
 
                         AppPage.Debug -> DebugPage(chatboxViewModel)
                     }
@@ -410,10 +458,11 @@ private fun HomePage(
     val connectionBring = remember { BringIntoViewRequester() }
     val manualSendBring = remember { BringIntoViewRequester() }
 
-    val ipInput = remember { mutableStateOf(TextFieldValue(uiState.ipAddress)) }
+    var ipInput by rememberSaveable(saver = TextFieldValue.Saver) {
+        mutableStateOf(TextFieldValue(uiState.ipAddress))
+    }
     LaunchedEffect(uiState.ipAddress) {
-        // Keep local input in sync if user hasn't typed something else.
-        if (ipInput.value.text.isBlank()) ipInput.value = TextFieldValue(uiState.ipAddress)
+        if (ipInput.text.isBlank()) ipInput = TextFieldValue(uiState.ipAddress)
     }
 
     var tutorialExpanded by rememberSaveable { mutableStateOf(true) }
@@ -431,7 +480,7 @@ private fun HomePage(
     PageContainer {
         SectionCard(
             title = "VRChat Preview",
-            subtitle = "Exactly what will appear in VRChat.",
+            subtitle = "Exactly what will appear in your chatbox.",
             actions = {
                 AssistChip(
                     onClick = { onOpenSettings() },
@@ -448,10 +497,6 @@ private fun HomePage(
         ) {
             val previewTextRaw = vm.debugLastCombinedOsc.ifBlank { "(nothing active)" }
             val previewText = remember(previewTextRaw) { vrChatSafePreview(previewTextRaw) }
-
-            // ✅ FIX: don’t force ellipsis/maxLines in the preview.
-            // Let it wrap and allow scrolling inside the preview box.
-            val previewScroll = rememberScrollState()
 
             Box(
                 Modifier
@@ -471,19 +516,19 @@ private fun HomePage(
                         Modifier
                             .heightIn(min = 96.dp)
                             .padding(12.dp)
-                            .fillMaxWidth()
+                            .fillMaxWidth(),
+                        contentAlignment = Alignment.Center
                     ) {
                         SelectionContainer {
                             Text(
                                 text = previewText,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .verticalScroll(previewScroll),
+                                modifier = Modifier.fillMaxWidth(),
                                 fontFamily = FontFamily.Monospace,
                                 style = MaterialTheme.typography.bodyMedium,
                                 textAlign = TextAlign.Center,
                                 softWrap = true,
-                                overflow = TextOverflow.Clip
+                                maxLines = 9,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
@@ -606,8 +651,8 @@ private fun HomePage(
         ) {
             Column(Modifier.bringIntoViewRequester(connectionBring)) {
                 OutlinedTextField(
-                    value = ipInput.value,
-                    onValueChange = { v: TextFieldValue -> ipInput.value = v },
+                    value = ipInput,
+                    onValueChange = { v: TextFieldValue -> ipInput = v },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     label = { Text("Headset IP address") },
@@ -618,7 +663,7 @@ private fun HomePage(
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Button(
                         onClick = {
-                            val ip = ipInput.value.text.trim()
+                            val ip = ipInput.text.trim()
                             runCatching { vm.ipAddressApply(ip) }
                                 .onFailure {
                                     scope.launch {
@@ -630,7 +675,7 @@ private fun HomePage(
                     ) { Text("Apply") }
 
                     OutlinedButton(
-                        onClick = { ipInput.value = TextFieldValue(uiState.ipAddress) },
+                        onClick = { ipInput = TextFieldValue(uiState.ipAddress) },
                         modifier = Modifier.weight(1f)
                     ) { Text("Reset") }
                 }
@@ -1022,21 +1067,43 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
 }
 
 /* =========================
-   MUSIC / DEBUG / SETTINGS
-   (unchanged from your file)
+   MUSIC
    ========================= */
 
 @Composable
-private fun NowPlayingPage(vm: ChatboxViewModel) {
+private fun NowPlayingPage(
+    vm: ChatboxViewModel,
+    onPersistSpotifyEnabled: (Boolean) -> Unit,
+    onPersistSpotifyDemo: (Boolean) -> Unit,
+    onPersistSpotifyPreset: (Int) -> Unit
+) {
     val ctx = LocalContext.current
+
+    // ✅ Animated clock for preset previews (was static -> no animation)
+    val infinite = rememberInfiniteTransition(label = "preset_preview")
+    val t by infinite.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1400, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "t"
+    )
 
     PageContainer {
         SectionCard(
             title = "Now Playing",
             subtitle = "Uses Notification Access. Stop clears instantly."
         ) {
-            ToggleRow("Enable Now Playing block", vm.spotifyEnabled) { vm.setSpotifyEnabledFlag(it) }
-            ToggleRow("Demo mode (testing)", vm.spotifyDemoEnabled) { vm.setSpotifyDemoFlag(it) }
+            ToggleRow("Enable Now Playing block", vm.spotifyEnabled) {
+                vm.setSpotifyEnabledFlag(it)
+                onPersistSpotifyEnabled(it)
+            }
+            ToggleRow("Demo mode (testing)", vm.spotifyDemoEnabled) {
+                vm.setSpotifyDemoFlag(it)
+                onPersistSpotifyDemo(it)
+            }
 
             OutlinedButton(
                 onClick = { ctx.startActivity(vm.notificationAccessIntent()) },
@@ -1066,14 +1133,17 @@ private fun NowPlayingPage(vm: ChatboxViewModel) {
                             Modifier
                                 .fillMaxWidth()
                                 .padding(10.dp)
-                                .clickable { vm.updateSpotifyPreset(p) },
+                                .clickable {
+                                    vm.updateSpotifyPreset(p)
+                                    onPersistSpotifyPreset(p)
+                                },
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column(Modifier.weight(1f)) {
                                 Text(text = name, style = MaterialTheme.typography.titleSmall)
                                 Text(
-                                    text = vm.renderMusicPresetPreview(p, 0.5f),
+                                    text = vm.renderMusicPresetPreview(p, t),
                                     style = MaterialTheme.typography.bodyMedium,
                                     fontFamily = FontFamily.Monospace
                                 )
@@ -1117,6 +1187,10 @@ private fun NowPlayingPage(vm: ChatboxViewModel) {
     }
 }
 
+/* =========================
+   DEBUG
+   ========================= */
+
 @Composable
 private fun DebugPage(vm: ChatboxViewModel) {
     PageContainer {
@@ -1156,6 +1230,10 @@ private fun DebugPage(vm: ChatboxViewModel) {
         }
     }
 }
+
+/* =========================
+   SETTINGS SHEET
+   ========================= */
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1262,7 +1340,7 @@ private fun SettingsRow(
 }
 
 /* =========================
-   INFO SHEET (ONLY change = your name)
+   INFO SHEET (name restored)
    ========================= */
 
 @OptIn(ExperimentalMaterial3Api::class)
