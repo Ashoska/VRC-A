@@ -4,6 +4,8 @@ plugins {
     id 'com.mikepenz.aboutlibraries.plugin'
 }
 
+import java.util.Properties
+
 def keystorePropertiesFile = rootProject.file("keystore.properties")
 def keystoreProperties = new Properties()
 
@@ -11,7 +13,47 @@ if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
 }
 
+// ------------------------------
+// ✅ Auto versioning from GitHub Actions
+// - versionName: 1.0.<runNumber>
+// - versionCode: 100000 + runNumber
+// ------------------------------
+def ghRunNumberStr = System.getenv("GITHUB_RUN_NUMBER") ?: "0"
+def ghRunNumber = 0
+try {
+    ghRunNumber = Integer.parseInt(ghRunNumberStr)
+} catch (Exception ignored) {
+    ghRunNumber = 0
+}
+
+def baseMajor = 1
+def baseMinor = 0
+
+def computedVersionName = "${baseMajor}.${baseMinor}.${ghRunNumber}"
+def computedVersionCode = 100000 + ghRunNumber
+
 android {
+    signingConfigs {
+        debug {
+            if (keystorePropertiesFile.exists()) {
+                storeFile file(keystoreProperties['storeFile'])
+                storePassword keystoreProperties['storePassword']
+                keyAlias keystoreProperties['keyAlias']
+                keyPassword keystoreProperties['keyPassword']
+            }
+        }
+        // If you already have a release config elsewhere, keep it there.
+        // This project signs release using the same keystore.properties when present.
+        release {
+            if (keystorePropertiesFile.exists()) {
+                storeFile file(keystoreProperties['storeFile'])
+                storePassword keystoreProperties['storePassword']
+                keyAlias keystoreProperties['keyAlias']
+                keyPassword keystoreProperties['keyPassword']
+            }
+        }
+    }
+
     namespace 'com.scrapw.chatbox'
     compileSdk 34
 
@@ -20,32 +62,20 @@ android {
         minSdk 26
         targetSdk 34
 
-        // keep these for now (we can automate later)
-        versionCode 4
-        versionName "v1.0.3"
+        // ✅ AUTO
+        versionCode computedVersionCode
+        versionName computedVersionName
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
-        vectorDrawables {
-            useSupportLibrary true
-        }
-    }
-
-    signingConfigs {
-        // ✅ Proper release config
-        release {
-            if (keystorePropertiesFile.exists()) {
-                // ✅ IMPORTANT: resolve from repo root to avoid app/app path bugs
-                storeFile rootProject.file(keystoreProperties['storeFile'])
-                storePassword keystoreProperties['storePassword']
-                keyAlias keystoreProperties['keyAlias']
-                keyPassword keystoreProperties['keyPassword']
-            }
-        }
+        vectorDrawables { useSupportLibrary true }
     }
 
     buildTypes {
         debug {
-            // debug stays debug-signed automatically
+            // Debug can also be signed via keystore.properties if present
+            if (keystorePropertiesFile.exists()) {
+                signingConfig signingConfigs.debug
+            }
         }
 
         release {
@@ -53,7 +83,7 @@ android {
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
 
-            // ✅ Only sign if keystore.properties exists (CI secrets are present)
+            // ✅ Sign release only if keystore.properties exists (your workflow creates it)
             if (keystorePropertiesFile.exists()) {
                 signingConfig signingConfigs.release
             }
@@ -64,19 +94,23 @@ android {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
     }
+
     kotlinOptions {
         jvmTarget = '1.8'
         freeCompilerArgs += [
                 '-opt-in=androidx.compose.material3.ExperimentalMaterial3Api'
         ]
     }
+
     buildFeatures {
         compose true
         buildConfig true
     }
+
     composeOptions {
         kotlinCompilerExtensionVersion '1.5.9'
     }
+
     packagingOptions {
         resources {
             excludes += '/META-INF/{AL2.0,LGPL2.1}'
