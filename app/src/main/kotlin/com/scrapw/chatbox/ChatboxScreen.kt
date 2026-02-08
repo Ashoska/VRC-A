@@ -7,12 +7,6 @@ import android.os.PowerManager
 import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -455,7 +449,7 @@ private fun SectionCard(
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun HomePage(
-    vm: ChatboxViewModel,
+    vm: com.scrapw.chatbox.ui.ChatboxViewModel,
     snackbarHostState: SnackbarHostState,
     onOpenSettings: () -> Unit
 ) {
@@ -466,15 +460,17 @@ private fun HomePage(
     val connectionBring = remember { BringIntoViewRequester() }
     val manualSendBring = remember { BringIntoViewRequester() }
 
-    // Keep as TextFieldValue state (no delegate) so it compiles reliably.
+    // -------- FIX ONLY: ip input state (no delegation errors, no .value unresolved) --------
     val ipInputState = rememberSaveable(saver = TextFieldValue.Saver) {
         mutableStateOf(TextFieldValue(uiState.ipAddress))
     }
     LaunchedEffect(uiState.ipAddress) {
-        if (ipInputState.value.text.isBlank()) ipInputState.value = TextFieldValue(uiState.ipAddress)
+        if (ipInputState.value.text.isBlank()) {
+            ipInputState.value = TextFieldValue(uiState.ipAddress)
+        }
     }
+    // -------------------------------------------------------------------------------------
 
-    // Persist tutorial expanded/collapsed across reopen
     var tutorialExpanded by rememberSaveable { mutableStateOf(UiPrefs.readTutorialExpanded(ctx)) }
 
     val overlayGranted = remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
@@ -584,12 +580,10 @@ private fun HomePage(
             title = "Setup Tutorial",
             subtitle = "Tap each step to open settings or jump to the right place.",
             actions = {
-                IconButton(
-                    onClick = {
-                        tutorialExpanded = !tutorialExpanded
-                        UiPrefs.writeTutorialExpanded(ctx, tutorialExpanded)
-                    }
-                ) {
+                IconButton(onClick = {
+                    tutorialExpanded = !tutorialExpanded
+                    UiPrefs.writeTutorialExpanded(ctx, tutorialExpanded)
+                }) {
                     Icon(
                         imageVector = if (tutorialExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
                         contentDescription = null
@@ -791,7 +785,7 @@ private fun TutorialStep(
    ========================= */
 
 @Composable
-private fun AutomationsPage(vm: ChatboxViewModel) {
+private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
     val scope = rememberCoroutineScope()
     var tab by rememberSaveable { mutableStateOf(ChatboxAutomationsTab.AFK) }
 
@@ -1087,24 +1081,12 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
 
 @Composable
 private fun NowPlayingPage(
-    vm: ChatboxViewModel,
+    vm: com.scrapw.chatbox.ui.ChatboxViewModel,
     onPersistSpotifyEnabled: (Boolean) -> Unit,
     onPersistSpotifyDemo: (Boolean) -> Unit,
     onPersistSpotifyPreset: (Int) -> Unit
 ) {
     val ctx = LocalContext.current
-
-    // ✅ THIS is what restores animated preset previews:
-    val transition = rememberInfiniteTransition(label = "music_preview")
-    val t by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1400, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "t"
-    )
 
     PageContainer {
         SectionCard(
@@ -1158,8 +1140,7 @@ private fun NowPlayingPage(
                             Column(Modifier.weight(1f)) {
                                 Text(text = name, style = MaterialTheme.typography.titleSmall)
                                 Text(
-                                    // ✅ animated preview
-                                    text = vm.renderMusicPresetPreview(p, t),
+                                    text = vm.renderMusicPresetPreview(p, 0.5f),
                                     style = MaterialTheme.typography.bodyMedium,
                                     fontFamily = FontFamily.Monospace
                                 )
@@ -1208,7 +1189,7 @@ private fun NowPlayingPage(
    ========================= */
 
 @Composable
-private fun DebugPage(vm: ChatboxViewModel) {
+private fun DebugPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
     PageContainer {
         SectionCard(
             title = "Listener",
@@ -1254,7 +1235,7 @@ private fun DebugPage(vm: ChatboxViewModel) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsSheet(
-    vm: ChatboxViewModel,
+    vm: com.scrapw.chatbox.ui.ChatboxViewModel,
     onDismiss: () -> Unit
 ) {
     val ctx = LocalContext.current
