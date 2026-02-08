@@ -11,6 +11,23 @@ if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
 }
 
+// ✅ Auto versioning from GitHub Actions runs
+def ghRunNumberStr = System.getenv("GITHUB_RUN_NUMBER") ?: ""
+def ghRunAttemptStr = System.getenv("GITHUB_RUN_ATTEMPT") ?: "1"
+def ghRunNumber = 0
+def ghRunAttempt = 1
+try { ghRunNumber = ghRunNumberStr.isInteger() ? ghRunNumberStr.toInteger() : 0 } catch (ignored) { ghRunNumber = 0 }
+try { ghRunAttempt = ghRunAttemptStr.isInteger() ? ghRunAttemptStr.toInteger() : 1 } catch (ignored) { ghRunAttempt = 1 }
+
+// Base version you asked for
+def baseMajor = 1
+def baseMinor = 0
+
+// If running on GitHub Actions, bump automatically.
+// If building locally, keep your current values.
+def computedVersionCode = (ghRunNumber > 0) ? ghRunNumber : 4
+def computedVersionName = (ghRunNumber > 0) ? "v${baseMajor}.${baseMinor}.${ghRunNumber}" : "v1.0.3"
+
 android {
     namespace 'com.scrapw.chatbox'
     compileSdk 34
@@ -20,17 +37,16 @@ android {
         minSdk 26
         targetSdk 34
 
-        // (we'll automate these later — leaving yours for now)
-        versionCode 4
-        versionName "v1.0.3"
+        // ✅ Now increases automatically per workflow run
+        versionCode computedVersionCode
+        versionName computedVersionName
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary true }
     }
 
     signingConfigs {
-        // ✅ Do NOT override debug signing (let Android use default debug keystore)
-        // ✅ Only define "release" signing if keystore.properties exists
+        // ✅ Debug uses default debug keystore automatically (do not override)
         if (keystorePropertiesFile.exists()) {
             release {
                 def storeFilePath = keystoreProperties['storeFile']?.toString()?.trim()
@@ -38,7 +54,7 @@ android {
                     throw new GradleException("keystore.properties exists but storeFile is missing")
                 }
 
-                // ✅ IMPORTANT: resolve relative to ROOT project
+                // ✅ Resolve from ROOT so CI can find it
                 storeFile rootProject.file(storeFilePath)
                 storePassword keystoreProperties['storePassword']
                 keyAlias keystoreProperties['keyAlias']
@@ -49,7 +65,7 @@ android {
 
     buildTypes {
         debug {
-            // ✅ do nothing: keep default debug signing
+            // ✅ keep default
         }
 
         release {
@@ -57,7 +73,6 @@ android {
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
 
-            // ✅ Only sign release if signing config exists
             if (keystorePropertiesFile.exists()) {
                 signingConfig signingConfigs.release
             }
@@ -68,17 +83,21 @@ android {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
     }
+
     kotlinOptions {
         jvmTarget = '1.8'
         freeCompilerArgs += ['-opt-in=androidx.compose.material3.ExperimentalMaterial3Api']
     }
+
     buildFeatures {
         compose true
         buildConfig true
     }
+
     composeOptions {
         kotlinCompilerExtensionVersion '1.5.9'
     }
+
     packagingOptions {
         resources {
             excludes += '/META-INF/{AL2.0,LGPL2.1}'
