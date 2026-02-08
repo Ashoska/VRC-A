@@ -4,8 +4,6 @@ plugins {
     id 'com.mikepenz.aboutlibraries.plugin'
 }
 
-import java.util.Properties
-
 def keystorePropertiesFile = rootProject.file("keystore.properties")
 def keystoreProperties = new Properties()
 
@@ -13,47 +11,7 @@ if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
 }
 
-// ------------------------------
-// ✅ Auto versioning from GitHub Actions
-// - versionName: 1.0.<runNumber>
-// - versionCode: 100000 + runNumber
-// ------------------------------
-def ghRunNumberStr = System.getenv("GITHUB_RUN_NUMBER") ?: "0"
-def ghRunNumber = 0
-try {
-    ghRunNumber = Integer.parseInt(ghRunNumberStr)
-} catch (Exception ignored) {
-    ghRunNumber = 0
-}
-
-def baseMajor = 1
-def baseMinor = 0
-
-def computedVersionName = "${baseMajor}.${baseMinor}.${ghRunNumber}"
-def computedVersionCode = 100000 + ghRunNumber
-
 android {
-    signingConfigs {
-        debug {
-            if (keystorePropertiesFile.exists()) {
-                storeFile file(keystoreProperties['storeFile'])
-                storePassword keystoreProperties['storePassword']
-                keyAlias keystoreProperties['keyAlias']
-                keyPassword keystoreProperties['keyPassword']
-            }
-        }
-        // If you already have a release config elsewhere, keep it there.
-        // This project signs release using the same keystore.properties when present.
-        release {
-            if (keystorePropertiesFile.exists()) {
-                storeFile file(keystoreProperties['storeFile'])
-                storePassword keystoreProperties['storePassword']
-                keyAlias keystoreProperties['keyAlias']
-                keyPassword keystoreProperties['keyPassword']
-            }
-        }
-    }
-
     namespace 'com.scrapw.chatbox'
     compileSdk 34
 
@@ -62,20 +20,36 @@ android {
         minSdk 26
         targetSdk 34
 
-        // ✅ AUTO
-        versionCode computedVersionCode
-        versionName computedVersionName
+        // (we'll automate these later — leaving yours for now)
+        versionCode 4
+        versionName "v1.0.3"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary true }
     }
 
+    signingConfigs {
+        // ✅ Do NOT override debug signing (let Android use default debug keystore)
+        // ✅ Only define "release" signing if keystore.properties exists
+        if (keystorePropertiesFile.exists()) {
+            release {
+                def storeFilePath = keystoreProperties['storeFile']?.toString()?.trim()
+                if (storeFilePath == null || storeFilePath.isEmpty()) {
+                    throw new GradleException("keystore.properties exists but storeFile is missing")
+                }
+
+                // ✅ IMPORTANT: resolve relative to ROOT project
+                storeFile rootProject.file(storeFilePath)
+                storePassword keystoreProperties['storePassword']
+                keyAlias keystoreProperties['keyAlias']
+                keyPassword keystoreProperties['keyPassword']
+            }
+        }
+    }
+
     buildTypes {
         debug {
-            // Debug can also be signed via keystore.properties if present
-            if (keystorePropertiesFile.exists()) {
-                signingConfig signingConfigs.debug
-            }
+            // ✅ do nothing: keep default debug signing
         }
 
         release {
@@ -83,7 +57,7 @@ android {
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
 
-            // ✅ Sign release only if keystore.properties exists (your workflow creates it)
+            // ✅ Only sign release if signing config exists
             if (keystorePropertiesFile.exists()) {
                 signingConfig signingConfigs.release
             }
@@ -94,23 +68,17 @@ android {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
     }
-
     kotlinOptions {
         jvmTarget = '1.8'
-        freeCompilerArgs += [
-                '-opt-in=androidx.compose.material3.ExperimentalMaterial3Api'
-        ]
+        freeCompilerArgs += ['-opt-in=androidx.compose.material3.ExperimentalMaterial3Api']
     }
-
     buildFeatures {
         compose true
         buildConfig true
     }
-
     composeOptions {
         kotlinCompilerExtensionVersion '1.5.9'
     }
-
     packagingOptions {
         resources {
             excludes += '/META-INF/{AL2.0,LGPL2.1}'
