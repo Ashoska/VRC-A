@@ -11,27 +11,31 @@ if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
 }
 
-// ✅ Base version you wanted
-def baseVersion = "1.0"
-
-// ✅ CI auto-versioning (GitHub Actions sets GITHUB_RUN_NUMBER)
-// - On GitHub: versionCode = run number, versionName = v1.0.<run>
-// - Locally: falls back to your last known values unless you override with -PVERSION_CODE / -PVERSION_NAME
-def ciRunNumber = System.getenv("GITHUB_RUN_NUMBER")
-
-def resolvedVersionCode = (
-        project.findProperty("VERSION_CODE")
-                ?: (ciRunNumber ?: "4")
-).toString().toInteger()
-
-def resolvedVersionName = (
-        project.findProperty("VERSION_NAME")
-                ?: (ciRunNumber ? "v${baseVersion}.${ciRunNumber}" : "v1.0.3")
-).toString()
-
 android {
+    namespace 'com.scrapw.chatbox'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.scrapw.chatbox"
+        minSdk 26
+        targetSdk 34
+
+        // ✅ These will be overridden by CI automatically if you add the workflow step later.
+        versionCode 1
+        versionName "v1.0.0"
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        vectorDrawables {
+            useSupportLibrary true
+        }
+    }
+
     signingConfigs {
-        debug {
+        // ✅ Standard debug signing (Android Studio default keystore)
+        debug { }
+
+        // ✅ Release signing only if keystore.properties exists
+        release {
             if (keystorePropertiesFile.exists()) {
                 storeFile file(keystoreProperties['storeFile'])
                 storePassword keystoreProperties['storePassword']
@@ -41,33 +45,19 @@ android {
         }
     }
 
-    namespace 'com.scrapw.chatbox'
-    compileSdk 34
-
-    defaultConfig {
-        applicationId "com.scrapw.chatbox"
-        minSdk 26
-        targetSdk 34
-
-        // ✅ Auto-updated in CI, stable locally
-        versionCode resolvedVersionCode
-        versionName resolvedVersionName
-
-        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
-        vectorDrawables {
-            useSupportLibrary true
-        }
-    }
-
     buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
+
         release {
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
 
-            // ✅ Only signs if keystore.properties exists (created by workflow when secrets exist)
+            // ✅ Only sign release if keystore.properties exists
             if (keystorePropertiesFile.exists()) {
-                signingConfig signingConfigs.debug
+                signingConfig signingConfigs.release
             }
         }
     }
