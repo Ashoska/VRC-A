@@ -90,8 +90,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -131,6 +131,8 @@ private object UiPrefs {
     private const val KEY_SPOTIFY_ENABLED = "spotify_enabled"
     private const val KEY_SPOTIFY_DEMO = "spotify_demo"
     private const val KEY_SPOTIFY_PRESET = "spotify_preset"
+
+    // ✅ ONLY for setup wizard collapse persistence
     private const val KEY_TUTORIAL_EXPANDED = "tutorial_expanded"
 
     fun readSpotifyEnabled(ctx: Context): Boolean =
@@ -449,7 +451,7 @@ private fun SectionCard(
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun HomePage(
-    vm: com.scrapw.chatbox.ui.ChatboxViewModel,
+    vm: ChatboxViewModel,
     snackbarHostState: SnackbarHostState,
     onOpenSettings: () -> Unit
 ) {
@@ -460,7 +462,7 @@ private fun HomePage(
     val connectionBring = remember { BringIntoViewRequester() }
     val manualSendBring = remember { BringIntoViewRequester() }
 
-    // -------- FIX ONLY: ip input state (no delegation errors, no .value unresolved) --------
+    // ✅ FIX (ONLY): Keep this as MutableState<TextFieldValue> and always use `.value`
     val ipInputState = rememberSaveable(saver = TextFieldValue.Saver) {
         mutableStateOf(TextFieldValue(uiState.ipAddress))
     }
@@ -469,8 +471,8 @@ private fun HomePage(
             ipInputState.value = TextFieldValue(uiState.ipAddress)
         }
     }
-    // -------------------------------------------------------------------------------------
 
+    // ✅ ONLY: Persist setup wizard collapsed/expanded state across reopen
     var tutorialExpanded by rememberSaveable { mutableStateOf(UiPrefs.readTutorialExpanded(ctx)) }
 
     val overlayGranted = remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
@@ -785,7 +787,7 @@ private fun TutorialStep(
    ========================= */
 
 @Composable
-private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
+private fun AutomationsPage(vm: ChatboxViewModel) {
     val scope = rememberCoroutineScope()
     var tab by rememberSaveable { mutableStateOf(ChatboxAutomationsTab.AFK) }
 
@@ -1081,7 +1083,7 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
 
 @Composable
 private fun NowPlayingPage(
-    vm: com.scrapw.chatbox.ui.ChatboxViewModel,
+    vm: ChatboxViewModel,
     onPersistSpotifyEnabled: (Boolean) -> Unit,
     onPersistSpotifyDemo: (Boolean) -> Unit,
     onPersistSpotifyPreset: (Int) -> Unit
@@ -1189,7 +1191,7 @@ private fun NowPlayingPage(
    ========================= */
 
 @Composable
-private fun DebugPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
+private fun DebugPage(vm: ChatboxViewModel) {
     PageContainer {
         SectionCard(
             title = "Listener",
@@ -1235,7 +1237,7 @@ private fun DebugPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsSheet(
-    vm: com.scrapw.chatbox.ui.ChatboxViewModel,
+    vm: ChatboxViewModel,
     onDismiss: () -> Unit
 ) {
     val ctx = LocalContext.current
