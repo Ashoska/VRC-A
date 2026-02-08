@@ -15,26 +15,8 @@ android {
     namespace 'com.scrapw.chatbox'
     compileSdk 34
 
-    defaultConfig {
-        applicationId "com.scrapw.chatbox"
-        minSdk 26
-        targetSdk 34
-
-        // ✅ These will be overridden by CI automatically if you add the workflow step later.
-        versionCode 1
-        versionName "v1.0.0"
-
-        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
-        vectorDrawables {
-            useSupportLibrary true
-        }
-    }
-
     signingConfigs {
-        // ✅ Standard debug signing (Android Studio default keystore)
-        debug { }
-
-        // ✅ Release signing only if keystore.properties exists
+        // This will exist only on GitHub Actions (or if you later create keystore.properties locally)
         release {
             if (keystorePropertiesFile.exists()) {
                 storeFile file(keystoreProperties['storeFile'])
@@ -45,9 +27,28 @@ android {
         }
     }
 
+    defaultConfig {
+        applicationId "com.scrapw.chatbox"
+        minSdk 26
+        targetSdk 34
+
+        // ✅ Auto versioning from GitHub run number (so every workflow build increments)
+        // If building locally (no GITHUB_RUN_NUMBER), fallback to 1.
+        def runNumber = System.getenv("GITHUB_RUN_NUMBER")
+        def vc = (runNumber != null ? runNumber.toInteger() : 1)
+
+        versionCode vc
+        versionName "1.0.${vc}"
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        vectorDrawables {
+            useSupportLibrary true
+        }
+    }
+
     buildTypes {
         debug {
-            signingConfig signingConfigs.debug
+            // debug stays debug-signed automatically
         }
 
         release {
@@ -55,7 +56,7 @@ android {
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
 
-            // ✅ Only sign release if keystore.properties exists
+            // ✅ Only sign release if keystore.properties exists (i.e. secrets present on GitHub)
             if (keystorePropertiesFile.exists()) {
                 signingConfig signingConfigs.release
             }
