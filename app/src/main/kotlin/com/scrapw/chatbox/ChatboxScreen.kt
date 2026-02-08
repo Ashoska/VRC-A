@@ -454,12 +454,10 @@ private fun HomePage(
     val connectionBring = remember { BringIntoViewRequester() }
     val manualSendBring = remember { BringIntoViewRequester() }
 
-    // ✅ FIX: Compose uses `saver`, not `stateSaver`
-    var ipInput by rememberSaveable(saver = TextFieldValue.Saver) {
-        mutableStateOf(TextFieldValue(uiState.ipAddress))
-    }
+    // ✅ FIX: use String (Compose-stable) instead of TextFieldValue saver delegate
+    var ipInput by rememberSaveable { mutableStateOf(uiState.ipAddress) }
     LaunchedEffect(uiState.ipAddress) {
-        if (ipInput.text.isBlank()) ipInput = TextFieldValue(uiState.ipAddress)
+        if (ipInput.isBlank()) ipInput = uiState.ipAddress
     }
 
     var tutorialExpanded by rememberSaveable { mutableStateOf(true) }
@@ -664,7 +662,7 @@ private fun HomePage(
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Button(
                         onClick = {
-                            val ip = ipInput.text.trim()
+                            val ip = ipInput.trim()
                             runCatching { vm.ipAddressApply(ip) }
                                 .onFailure {
                                     scope.launch {
@@ -676,7 +674,7 @@ private fun HomePage(
                     ) { Text("Apply") }
 
                     OutlinedButton(
-                        onClick = { ipInput = TextFieldValue(uiState.ipAddress) },
+                        onClick = { ipInput = uiState.ipAddress },
                         modifier = Modifier.weight(1f)
                     ) { Text("Reset") }
                 }
