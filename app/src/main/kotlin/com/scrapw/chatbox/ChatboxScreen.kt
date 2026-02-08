@@ -1,102 +1,37 @@
-// app/src/main/kotlin/com/scrapw/chatbox/ChatboxScreen.kt
 package com.scrapw.chatbox
 
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
-import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Bolt
-import androidx.compose.material.icons.filled.BugReport
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.MusicNote
-import androidx.compose.material.icons.filled.Power
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Sync
-import androidx.compose.material.icons.filled.Wifi
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CenterAlignedTopAppBar
-import androidx.compose.material3.Divider
-import androidx.compose.material3.ElevatedCard
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.ModalNavigationDrawer
-import androidx.compose.material3.NavigationDrawerItem
-import androidx.compose.material3.NavigationDrawerItemDefaults
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberDrawerState
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
 import androidx.compose.material3.DrawerValue
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
+import androidx.compose.material3.NavigationDrawerItemDefaults
+import androidx.compose.material3.rememberDrawerState
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
@@ -105,29 +40,27 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.scrapw.chatbox.ui.ChatboxViewModel
 import kotlinx.coroutines.launch
 
-private enum class AppPage(val title: String) {
-    Home("Home"),
-    Automations("Automations"),
-    Music("Music"),
-    Debug("Debug"),
-    Info("Info")
+/**
+ * IMPORTANT:
+ * - Renamed enums to avoid collisions with legacy files (AutomationsTab etc).
+ * - Info moved into its own page (opens from drawer).
+ */
+
+private enum class ChatboxPage(val title: String, val icon: ImageVector) {
+    Home("Home", Icons.Filled.Home),
+    Automations("Automations", Icons.Filled.Sync),
+    Music("Music", Icons.Filled.MusicNote),
+    Debug("Debug", Icons.Filled.BugReport),
+    Info("Info", Icons.Filled.Info)
 }
 
-private enum class AutomationsTab(val title: String) {
+private enum class ChatboxAutomationsTab(val title: String) {
     AFK("AFK"),
     Cycle("Cycle")
-}
-
-private enum class InfoTab(val title: String) {
-    Overview("Overview"),
-    Tutorial("Tutorial"),
-    Troubleshoot("Help"),
-    FullDoc("Full Doc")
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -135,18 +68,18 @@ private enum class InfoTab(val title: String) {
 fun ChatboxScreen(
     chatboxViewModel: ChatboxViewModel = viewModel(factory = ChatboxViewModel.Factory)
 ) {
-    var page by rememberSaveable { mutableStateOf(AppPage.Home) }
+    var page by rememberSaveable { mutableStateOf(ChatboxPage.Home) }
     var showSettingsSheet by remember { mutableStateOf(false) }
 
-    // Mobile replica: left nav drawer (no bottom bar)
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
 
+    val snackbarHostState = remember { SnackbarHostState() }
+
     ModalNavigationDrawer(
         drawerState = drawerState,
-        gesturesEnabled = true,
         drawerContent = {
-            DrawerContent(
+            SlimeDrawer(
                 current = page,
                 onSelect = { chosen ->
                     page = chosen
@@ -160,6 +93,7 @@ fun ChatboxScreen(
         }
     ) {
         Scaffold(
+            snackbarHost = { SnackbarHost(snackbarHostState) },
             topBar = {
                 CenterAlignedTopAppBar(
                     title = { Text("Chatbox") },
@@ -182,13 +116,18 @@ fun ChatboxScreen(
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                Crossfade(targetState = page, label = "page_crossfade") { p ->
+                Crossfade(targetState = page, label = "page_xfade") { p ->
                     when (p) {
-                        AppPage.Home -> HomePage(chatboxViewModel, onOpenSettings = { showSettingsSheet = true })
-                        AppPage.Automations -> AutomationsPage(chatboxViewModel)
-                        AppPage.Music -> NowPlayingPage(chatboxViewModel)
-                        AppPage.Debug -> DebugPage(chatboxViewModel)
-                        AppPage.Info -> InfoPage()
+                        ChatboxPage.Home -> HomePage(
+                            vm = chatboxViewModel,
+                            snackbar = snackbarHostState,
+                            onOpenSettings = { showSettingsSheet = true }
+                        )
+
+                        ChatboxPage.Automations -> AutomationsPage(chatboxViewModel)
+                        ChatboxPage.Music -> NowPlayingPage(chatboxViewModel)
+                        ChatboxPage.Debug -> DebugPage(chatboxViewModel)
+                        ChatboxPage.Info -> InfoPage()
                     }
                 }
             }
@@ -204,133 +143,134 @@ fun ChatboxScreen(
 }
 
 /* =========================
-   LEFT NAV DRAWER (Cleaner + closer to Slime-style)
+   NAV DRAWER (Slime-ish)
    ========================= */
 
 @Composable
-private fun DrawerContent(
-    current: AppPage,
-    onSelect: (AppPage) -> Unit,
+private fun SlimeDrawer(
+    current: ChatboxPage,
+    onSelect: (ChatboxPage) -> Unit,
     onOpenSettings: () -> Unit
 ) {
+    val cs = MaterialTheme.colorScheme
+
     Surface(
         modifier = Modifier
             .fillMaxHeight()
-            .widthIn(min = 280.dp, max = 360.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        tonalElevation = 0.dp
+            .widthIn(min = 300.dp, max = 380.dp),
+        color = cs.surface,
+        tonalElevation = 2.dp
     ) {
         Column(
             modifier = Modifier
                 .fillMaxHeight()
-                .padding(16.dp),
+                .padding(horizontal = 16.dp)
+                .padding(top = 18.dp, bottom = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // Header (brand-ish)
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(
-                    text = "Navigation",
-                    style = MaterialTheme.typography.headlineSmall
-                )
-                Text(
-                    text = "VRC-A / Chatbox",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+            Text(
+                text = "Navigation",
+                style = MaterialTheme.typography.headlineSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
 
-            Divider(modifier = Modifier.padding(top = 6.dp))
+            DrawerHeader("MAIN")
 
-            DrawerSectionHeader("Main")
-            DrawerItem(
-                title = AppPage.Home.title,
-                icon = Icons.Filled.Home,
-                selected = current == AppPage.Home
-            ) { onSelect(AppPage.Home) }
+            DrawerNavItem(
+                title = ChatboxPage.Home.title,
+                icon = ChatboxPage.Home.icon,
+                selected = current == ChatboxPage.Home
+            ) { onSelect(ChatboxPage.Home) }
 
-            DrawerItem(
-                title = AppPage.Automations.title,
-                icon = Icons.Filled.Sync,
-                selected = current == AppPage.Automations
-            ) { onSelect(AppPage.Automations) }
+            DrawerNavItem(
+                title = ChatboxPage.Automations.title,
+                icon = ChatboxPage.Automations.icon,
+                selected = current == ChatboxPage.Automations
+            ) { onSelect(ChatboxPage.Automations) }
 
-            DrawerItem(
-                title = AppPage.Music.title,
-                icon = Icons.Filled.MusicNote,
-                selected = current == AppPage.Music
-            ) { onSelect(AppPage.Music) }
+            DrawerNavItem(
+                title = ChatboxPage.Music.title,
+                icon = ChatboxPage.Music.icon,
+                selected = current == ChatboxPage.Music
+            ) { onSelect(ChatboxPage.Music) }
 
-            DrawerSectionHeader("Tools")
-            DrawerItem(
-                title = AppPage.Debug.title,
-                icon = Icons.Filled.BugReport,
-                selected = current == AppPage.Debug
-            ) { onSelect(AppPage.Debug) }
+            Spacer(Modifier.height(4.dp))
+            DrawerHeader("TOOLS")
 
-            DrawerSectionHeader("Help")
-            DrawerItem(
-                title = "Info / Tutorial",
-                icon = Icons.Filled.Info,
-                selected = current == AppPage.Info
-            ) { onSelect(AppPage.Info) }
+            DrawerNavItem(
+                title = ChatboxPage.Debug.title,
+                icon = ChatboxPage.Debug.icon,
+                selected = current == ChatboxPage.Debug
+            ) { onSelect(ChatboxPage.Debug) }
 
-            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.height(4.dp))
+            DrawerHeader("SETUP")
 
-            Divider()
-
-            // Setup action pinned at bottom
-            DrawerSectionHeader("Setup")
-            DrawerItem(
+            DrawerNavItem(
                 title = "Settings & Permissions",
                 icon = Icons.Filled.Settings,
                 selected = false
             ) { onOpenSettings() }
+
+            DrawerNavItem(
+                title = "Info",
+                icon = Icons.Filled.Info,
+                selected = current == ChatboxPage.Info
+            ) { onSelect(ChatboxPage.Info) }
+
+            Spacer(Modifier.weight(1f))
+
+            // Footer placed properly with nav bar inset padding so it doesn't float awkwardly
+            Text(
+                text = "VRC-A / Chatbox",
+                style = MaterialTheme.typography.bodySmall,
+                color = cs.onSurfaceVariant,
+                modifier = Modifier.padding(bottom = 6.dp)
+            )
+
+            Spacer(Modifier.windowInsetsBottomHeight(WindowInsets.navigationBars))
         }
     }
 }
 
 @Composable
-private fun DrawerSectionHeader(text: String) {
+private fun DrawerHeader(text: String) {
     Text(
-        text = text.uppercase(),
-        style = MaterialTheme.typography.labelSmall,
+        text = text,
+        style = MaterialTheme.typography.labelMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(top = 8.dp, bottom = 2.dp)
     )
 }
 
 @Composable
-private fun DrawerItem(
+private fun DrawerNavItem(
     title: String,
     icon: ImageVector,
     selected: Boolean,
     onClick: () -> Unit
 ) {
-    val elev by animateDpAsState(
-        targetValue = if (selected) 2.dp else 0.dp,
-        animationSpec = spring(),
-        label = "drawer_item_elev"
-    )
+    val cs = MaterialTheme.colorScheme
 
-    Surface(
-        tonalElevation = elev,
+    NavigationDrawerItem(
+        label = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        selected = selected,
+        onClick = onClick,
+        icon = { Icon(icon, contentDescription = null) },
         shape = MaterialTheme.shapes.large,
-        color = if (selected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surface
-    ) {
-        NavigationDrawerItem(
-            label = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-            selected = selected,
-            onClick = onClick,
-            icon = { Icon(icon, contentDescription = null) },
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 2.dp),
-            colors = NavigationDrawerItemDefaults.colors(
-                selectedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
-                unselectedContainerColor = MaterialTheme.colorScheme.surface
-            )
-        )
-    }
+        colors = NavigationDrawerItemDefaults.colors(
+            selectedContainerColor = cs.primary.copy(alpha = 0.18f),
+            selectedTextColor = cs.onSurface,
+            selectedIconColor = cs.onSurface,
+            unselectedContainerColor = cs.surface,
+            unselectedTextColor = cs.onSurfaceVariant,
+            unselectedIconColor = cs.onSurfaceVariant
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp)
+    )
 }
 
 /* =========================
@@ -356,24 +296,42 @@ private fun SectionCard(
     actions: (@Composable RowScope.() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    ElevatedCard {
+    ElevatedCard(
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
         Column(
             Modifier.padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // Fix: prevent title/subtitle from “clipping into buttons” by giving them full width above actions.
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(text = title, style = MaterialTheme.typography.titleLarge)
-                if (!subtitle.isNullOrBlank()) {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // ✅ Fix clipping: title column gets strict weight, actions row never overlaps
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 10.dp)
+                ) {
                     Text(
-                        text = subtitle,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        text = title,
+                        style = MaterialTheme.typography.titleLarge,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
                     )
+                    if (!subtitle.isNullOrBlank()) {
+                        Text(
+                            text = subtitle,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
+
                 if (actions != null) {
                     Row(
-                        Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         content = actions
@@ -385,6 +343,22 @@ private fun SectionCard(
     }
 }
 
+@Composable
+private fun ToggleRow(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label)
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
 /* =========================
    HOME (Preview + Wizard)
    ========================= */
@@ -393,10 +367,12 @@ private fun SectionCard(
 @Composable
 private fun HomePage(
     vm: ChatboxViewModel,
+    snackbar: SnackbarHostState,
     onOpenSettings: () -> Unit
 ) {
     val uiState by vm.messengerUiState.collectAsState()
     val ctx = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
 
     var ipInput by rememberSaveable(stateSaver = TextFieldValue.Saver) {
         mutableStateOf(TextFieldValue(uiState.ipAddress))
@@ -406,49 +382,36 @@ private fun HomePage(
     }
 
     var wizardExpanded by rememberSaveable { mutableStateOf(true) }
+    var userTestSent by rememberSaveable { mutableStateOf(false) }
 
-    // We refresh these on resume so the wizard never “lies” after user returns from settings.
-    val lifecycleOwner = LocalLifecycleOwner.current
-
+    // permission states need refresh when user comes back from system screens
     val overlayGranted = remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
+
     val pm = remember(ctx) { ctx.getSystemService(Context.POWER_SERVICE) as PowerManager }
     val batteryOk = remember { mutableStateOf(pm.isIgnoringBatteryOptimizations(ctx.packageName)) }
 
-    LaunchedEffect(Unit) {
-        overlayGranted.value = Settings.canDrawOverlays(ctx)
-        batteryOk.value = pm.isIgnoringBatteryOptimizations(ctx.packageName)
-    }
-
-    LaunchedEffect(lifecycleOwner) {
-        val obs = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
+    DisposableEffect(lifecycleOwner) {
+        val obs = LifecycleEventObserver { _, e ->
+            if (e == Lifecycle.Event.ON_RESUME) {
                 overlayGranted.value = Settings.canDrawOverlays(ctx)
                 batteryOk.value = pm.isIgnoringBatteryOptimizations(ctx.packageName)
             }
         }
         lifecycleOwner.lifecycle.addObserver(obs)
-        try {
-            awaitDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
-        } catch (_: Throwable) {
-            // no-op (compose versions differ)
-        }
+        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
     }
 
     val notifOk = vm.listenerConnected
     val ipOk = uiState.ipAddress.isNotBlank() && uiState.ipAddress != "127.0.0.1"
-
-    // Test-send should only tick when we *actually* sent something.
-    var lastSentSeen by rememberSaveable { mutableStateOf(vm.lastSentToVrchatAtMs) }
-    val testSentOk = vm.lastSentToVrchatAtMs > 0 && vm.lastSentToVrchatAtMs != lastSentSeen
 
     PageContainer {
         SectionCard(
             title = "VRChat Preview",
             subtitle = "Exactly what will appear in your chatbox.",
             actions = {
-                // Fix: “Setup” matches theme, no weird outline.
-                FilledTonalButton(
-                    onClick = { onOpenSettings() },
+                // ✅ Setup button now matches theme
+                OutlinedButton(
+                    onClick = onOpenSettings,
                     contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp)
                 ) {
                     Icon(Icons.Filled.Settings, contentDescription = null)
@@ -456,13 +419,15 @@ private fun HomePage(
                     Text("Setup")
                 }
 
+                // ✅ KILL: themed (not random pink)
                 Button(
                     onClick = { vm.killStopAndClear() },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp)
-                ) {
-                    Text("KILL", color = MaterialTheme.colorScheme.onError)
-                }
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    ),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp)
+                ) { Text("KILL") }
             }
         ) {
             val previewTextRaw = vm.debugLastCombinedOsc.ifBlank { "(nothing active)" }
@@ -476,16 +441,16 @@ private fun HomePage(
                 Surface(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
-                        .widthIn(max = 420.dp)
+                        .widthIn(max = 520.dp)
                         .fillMaxWidth(0.94f),
                     tonalElevation = 2.dp,
-                    shape = MaterialTheme.shapes.extraLarge,
-                    color = MaterialTheme.colorScheme.surface
+                    color = MaterialTheme.colorScheme.surface,
+                    shape = MaterialTheme.shapes.extraLarge
                 ) {
                     Box(
                         Modifier
                             .heightIn(min = 96.dp)
-                            .padding(12.dp)
+                            .padding(14.dp)
                             .fillMaxWidth(),
                         contentAlignment = Alignment.Center
                     ) {
@@ -494,7 +459,7 @@ private fun HomePage(
                                 text = previewText,
                                 modifier = Modifier.fillMaxWidth(),
                                 fontFamily = FontFamily.Monospace,
-                                style = MaterialTheme.typography.bodyMedium,
+                                style = MaterialTheme.typography.bodyLarge,
                                 textAlign = TextAlign.Center,
                                 softWrap = true,
                                 maxLines = 9,
@@ -504,10 +469,11 @@ private fun HomePage(
                     }
                 }
 
+                // subtle “avatar silhouette”
                 Canvas(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
-                        .padding(bottom = 8.dp)
+                        .padding(bottom = 6.dp)
                         .height(200.dp)
                         .width(170.dp)
                 ) {
@@ -515,7 +481,7 @@ private fun HomePage(
                     val h = size.height
 
                     drawCircle(
-                        color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.08f),
+                        color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.07f),
                         radius = w * 0.18f,
                         center = Offset(w * 0.5f, h * 0.20f)
                     )
@@ -530,9 +496,12 @@ private fun HomePage(
                 }
             }
 
-            ElevatedCard {
+            ElevatedCard(
+                colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("Quick Toggles", style = MaterialTheme.typography.titleMedium)
+
                     ToggleRow("AFK", vm.afkEnabled) { vm.setAfkEnabledFlag(it) }
                     ToggleRow("Cycle", vm.cycleEnabled) { vm.setCycleEnabledFlag(it) }
                     ToggleRow("Now Playing", vm.spotifyEnabled) { vm.setSpotifyEnabledFlag(it) }
@@ -542,7 +511,7 @@ private fun HomePage(
 
         SectionCard(
             title = "Setup Wizard",
-            subtitle = "Make these green for stable OSC + Now Playing.",
+            subtitle = "Do these once for stable OSC + Now Playing.",
             actions = {
                 IconButton(onClick = { wizardExpanded = !wizardExpanded }) {
                     Icon(
@@ -554,19 +523,24 @@ private fun HomePage(
         ) {
             AnimatedVisibility(
                 visible = wizardExpanded,
-                enter = fadeIn(),
-                exit = fadeOut()
+                enter = fadeIn() + slideInHorizontally(initialOffsetX = { it / 8 }),
+                exit = fadeOut() + slideOutHorizontally(targetOffsetX = { it / 8 })
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    // Step 0: VRChat OSC (we can’t deep-link reliably; we guide + open VRChat)
                     WizardStep(
                         number = 0,
                         title = "Enable OSC in VRChat",
-                        subtitle = "VRChat → Settings → OSC → Enable",
+                        subtitle = "VRChat → Settings → OSC → Enable OSC.",
                         done = false,
-                        icon = Icons.Filled.Wifi,
-                        primary = "Open VRChat"
-                    ) { openVrchat(ctx) }
+                        icon = Icons.Filled.Bolt,
+                        primary = "How"
+                    ) {
+                        snackbar.currentSnackbarData?.dismiss()
+                        snackbar.showSnackbar(
+                            "VRChat → Settings → OSC → Enable OSC",
+                            withDismissAction = true
+                        )
+                    }
 
                     WizardStep(
                         number = 1,
@@ -575,7 +549,7 @@ private fun HomePage(
                         done = notifOk,
                         icon = Icons.Filled.MusicNote,
                         primary = "Open"
-                    ) { safeStartActivity(ctx, vm.notificationAccessIntent()) }
+                    ) { ctx.startActivity(vm.notificationAccessIntent()) }
 
                     WizardStep(
                         number = 2,
@@ -584,7 +558,9 @@ private fun HomePage(
                         done = overlayGranted.value,
                         icon = Icons.Filled.Bolt,
                         primary = "Open"
-                    ) { safeStartActivity(ctx, vm.overlayPermissionIntent()) }
+                    ) {
+                        ctx.startActivity(vm.overlayPermissionIntent())
+                    }
 
                     WizardStep(
                         number = 3,
@@ -593,7 +569,9 @@ private fun HomePage(
                         done = batteryOk.value,
                         icon = Icons.Filled.Power,
                         primary = "Request"
-                    ) { safeStartActivity(ctx, vm.batteryOptimizationIntent()) }
+                    ) {
+                        ctx.startActivity(vm.batteryOptimizationIntent())
+                    }
 
                     WizardStep(
                         number = 4,
@@ -602,35 +580,38 @@ private fun HomePage(
                         done = ipOk,
                         icon = Icons.Filled.Wifi,
                         primary = "Apply"
-                    ) { vm.ipAddressApply(ipInput.text.trim()) }
+                    ) {
+                        vm.ipAddressApply(ipInput.text.trim())
+                        if (ipInput.text.trim().isBlank()) {
+                            snackbar.showSnackbar("Enter an IP first.", withDismissAction = true)
+                        }
+                    }
 
                     WizardStep(
                         number = 5,
                         title = "Test Send",
-                        subtitle = "Only turns green after a real send happens.",
-                        done = testSentOk,
+                        subtitle = "Only ticks if something actually sends.",
+                        done = userTestSent,
                         icon = Icons.Filled.CheckCircle,
                         primary = "Send"
                     ) {
-                        // Only send if we have something meaningful to send.
-                        val before = vm.lastSentToVrchatAtMs
-                        when {
-                            vm.spotifyEnabled -> vm.sendNowPlayingOnce()
-                            vm.afkEnabled -> vm.sendAfkNow()
-                            vm.messageText.value.text.isNotBlank() -> vm.sendMessage()
-                            else -> {
-                                // do nothing: user didn’t actually send anything
-                                return@WizardStep
-                            }
+                        val didSend = when {
+                            vm.spotifyEnabled -> { vm.sendNowPlayingOnce(); true }
+                            vm.afkEnabled -> { vm.sendAfkNow(); true }
+                            vm.messageText.value.text.isNotBlank() -> { vm.sendMessage(); true }
+                            else -> false
                         }
-                        lastSentSeen = before
-                    }
 
-                    AssistChip(
-                        onClick = { onOpenSettings() },
-                        label = { Text("Open Settings & Permissions") },
-                        leadingIcon = { Icon(Icons.Filled.Settings, contentDescription = null) }
-                    )
+                        if (didSend) {
+                            userTestSent = true
+                            snackbar.showSnackbar("Sent test to VRChat.", withDismissAction = true)
+                        } else {
+                            snackbar.showSnackbar(
+                                "Nothing to send. Enable Now Playing/AFK or type a Manual message.",
+                                withDismissAction = true
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -687,18 +668,6 @@ private fun HomePage(
 }
 
 @Composable
-private fun ToggleRow(
-    label: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
-) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label)
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
-    }
-}
-
-@Composable
 private fun WizardStep(
     number: Int,
     title: String,
@@ -708,10 +677,11 @@ private fun WizardStep(
     primary: String,
     onPrimary: () -> Unit
 ) {
+    val cs = MaterialTheme.colorScheme
     ElevatedCard(
-        colors = if (done) CardDefaults.elevatedCardColors(
-            containerColor = MaterialTheme.colorScheme.secondaryContainer
-        ) else CardDefaults.elevatedCardColors()
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = if (done) cs.primary.copy(alpha = 0.16f) else cs.surface
+        )
     ) {
         Row(
             Modifier
@@ -719,13 +689,22 @@ private fun WizardStep(
                 .padding(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(icon, contentDescription = null)
+            Surface(
+                modifier = Modifier.size(36.dp),
+                shape = MaterialTheme.shapes.medium,
+                color = cs.surfaceVariant
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(icon, contentDescription = null, tint = cs.onSurfaceVariant)
+                }
+            }
+
             Spacer(Modifier.width(10.dp))
 
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        text = "$number. $title",
+                        text = if (number >= 0) "$number. $title" else title,
                         style = MaterialTheme.typography.titleSmall,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -735,14 +714,14 @@ private fun WizardStep(
                         Icon(
                             Icons.Filled.CheckCircle,
                             contentDescription = "Done",
-                            tint = MaterialTheme.colorScheme.primary
+                            tint = cs.primary
                         )
                     }
                 }
                 Text(
                     text = subtitle,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = cs.onSurfaceVariant
                 )
             }
 
@@ -756,13 +735,13 @@ private fun WizardStep(
 }
 
 /* =========================
-   AUTOMATIONS (AFK + Cycle)
+   AUTOMATIONS
    ========================= */
 
 @Composable
 private fun AutomationsPage(vm: ChatboxViewModel) {
     val scope = rememberCoroutineScope()
-    var tab by rememberSaveable { mutableStateOf(AutomationsTab.AFK) }
+    var tab by rememberSaveable { mutableStateOf(ChatboxAutomationsTab.AFK) }
 
     val cycleLineFields = remember { mutableStateMapOf<Int, TextFieldValue>() }
     fun syncCycleLineFieldsFromVm() {
@@ -793,10 +772,12 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
     }
 
     PageContainer {
-        ElevatedCard {
+        ElevatedCard(
+            colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        ) {
             Column(Modifier.padding(10.dp)) {
                 TabRow(selectedTabIndex = tab.ordinal) {
-                    AutomationsTab.entries.forEachIndexed { idx, t ->
+                    ChatboxAutomationsTab.entries.forEachIndexed { idx, t ->
                         Tab(
                             selected = (tab.ordinal == idx),
                             onClick = { tab = t },
@@ -808,7 +789,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
         }
 
         when (tab) {
-            AutomationsTab.AFK -> {
+            ChatboxAutomationsTab.AFK -> {
                 SectionCard(
                     title = "AFK",
                     subtitle = "AFK always appears above Cycle + Music."
@@ -823,7 +804,9 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
                         label = { Text("AFK text") }
                     )
 
-                    ElevatedCard {
+                    ElevatedCard(
+                        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)
+                    ) {
                         Column(
                             Modifier
                                 .fillMaxWidth()
@@ -860,7 +843,9 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
                             ) {
                                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                     (1..3).forEach { slot ->
-                                        ElevatedCard {
+                                        ElevatedCard(
+                                            colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                                        ) {
                                             Column(
                                                 Modifier.padding(10.dp),
                                                 verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -908,7 +893,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
                 }
             }
 
-            AutomationsTab.Cycle -> {
+            ChatboxAutomationsTab.Cycle -> {
                 SectionCard(
                     title = "Cycle",
                     subtitle = "Up to 10 lines. Stop clears instantly."
@@ -967,7 +952,9 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
 
-                    ElevatedCard {
+                    ElevatedCard(
+                        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)
+                    ) {
                         Column(
                             Modifier
                                 .fillMaxWidth()
@@ -1004,7 +991,9 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
                             ) {
                                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                     (1..5).forEach { slot ->
-                                        ElevatedCard {
+                                        ElevatedCard(
+                                            colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                                        ) {
                                             Column(
                                                 Modifier.padding(10.dp),
                                                 verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -1050,26 +1039,8 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
 }
 
 /* =========================
-   MUSIC (Now Playing)
+   MUSIC
    ========================= */
-
-@Composable
-private fun MusicPresetPreviewText(previewTextProvider: (Float) -> String) {
-    // simple “ticker” without heavy animations
-    var t by remember { mutableStateOf(0f) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            kotlinx.coroutines.delay(250L)
-            t += 0.06f
-            if (t > 1f) t = 0f
-        }
-    }
-    Text(
-        text = previewTextProvider(t),
-        style = MaterialTheme.typography.bodyMedium,
-        fontFamily = FontFamily.Monospace
-    )
-}
 
 @Composable
 private fun NowPlayingPage(vm: ChatboxViewModel) {
@@ -1084,7 +1055,7 @@ private fun NowPlayingPage(vm: ChatboxViewModel) {
             ToggleRow("Demo mode (testing)", vm.spotifyDemoEnabled) { vm.setSpotifyDemoFlag(it) }
 
             OutlinedButton(
-                onClick = { safeStartActivity(ctx, vm.notificationAccessIntent()) },
+                onClick = { ctx.startActivity(vm.notificationAccessIntent()) },
                 modifier = Modifier.fillMaxWidth()
             ) { Text("Open Notification Access settings") }
 
@@ -1102,9 +1073,11 @@ private fun NowPlayingPage(vm: ChatboxViewModel) {
                     val name = vm.getMusicPresetName(p)
 
                     ElevatedCard(
-                        colors = if (selected) CardDefaults.elevatedCardColors(
-                            containerColor = MaterialTheme.colorScheme.secondaryContainer
-                        ) else CardDefaults.elevatedCardColors()
+                        colors = CardDefaults.elevatedCardColors(
+                            containerColor = if (selected)
+                                MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                            else MaterialTheme.colorScheme.surfaceVariant
+                        )
                     ) {
                         Row(
                             Modifier
@@ -1116,7 +1089,12 @@ private fun NowPlayingPage(vm: ChatboxViewModel) {
                         ) {
                             Column(Modifier.weight(1f)) {
                                 Text(text = name, style = MaterialTheme.typography.titleSmall)
-                                MusicPresetPreviewText { tt -> vm.renderMusicPresetPreview(p, tt) }
+                                Text(
+                                    text = vm.renderMusicPresetPreview(p, 0.42f),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
                             }
                             if (selected) Text("Selected", style = MaterialTheme.typography.labelMedium)
                         }
@@ -1202,106 +1180,55 @@ private fun DebugPage(vm: ChatboxViewModel) {
 }
 
 /* =========================
-   INFO (Moved out of settings sheet)
+   INFO PAGE (moved out of sheet)
    ========================= */
 
 @Composable
 private fun InfoPage() {
-    var tab by rememberSaveable { mutableStateOf(InfoTab.Overview) }
-
-    val overview = remember {
-        """
-Chatbox (VRChat Assistant)
-Made by: Ashoska Mitsu Sisko
-
-Home shows a live VR-style preview so you always know what will appear in VRChat.
-Use KILL to instantly stop everything and clear the chatbox.
-        """.trimIndent()
-    }
-
-    val tutorial = remember {
-        """
-TUTORIAL
-
-1) VRChat → Settings → OSC → Enable OSC
-2) Phone + headset on same Wi-Fi
-3) Find headset IP (Wi-Fi → network → Advanced)
-4) Home → Connection → Apply
-5) Manual Send to test
-
-Now Playing:
-Settings → Notification Access → enable Chatbox
-Restart Chatbox, play music, then Music → Start.
-        """.trimIndent()
-    }
-
-    val help = remember {
-        """
-TROUBLESHOOT
-
-Nothing appears in VRChat:
-- Check IP
-- OSC enabled
-- Same Wi-Fi
-
-Now Playing blank:
-- Enable Notification Access
-- Restart app
-- Start playing music (notification must exist)
-
-Stops sending when screen is off:
-- Disable Battery Optimization
-- Keep notifications allowed
-        """.trimIndent()
-    }
-
-    val fullDoc = remember {
-        """
-Chatbox
-
-Home is the control center.
-If anything gets stuck sending: press KILL (stops + clears VRChat).
-        """.trimIndent()
-    }
-
-    val text = when (tab) {
-        InfoTab.Overview -> overview
-        InfoTab.Tutorial -> tutorial
-        InfoTab.Troubleshoot -> help
-        InfoTab.FullDoc -> fullDoc
-    }
-
     PageContainer {
         SectionCard(
-            title = "Info / Tutorial",
-            subtitle = "Everything you need, in one place."
+            title = "Info",
+            subtitle = "Quick reference + links."
         ) {
-            ElevatedCard {
-                Column(Modifier.padding(10.dp)) {
-                    TabRow(selectedTabIndex = tab.ordinal) {
-                        InfoTab.entries.forEachIndexed { idx, t ->
-                            Tab(
-                                selected = tab.ordinal == idx,
-                                onClick = { tab = t },
-                                text = { Text(t.title, maxLines = 1, overflow = TextOverflow.Ellipsis) }
-                            )
-                        }
-                    }
+            Text(
+                text = "Chatbox (VRChat Assistant)\nMade by: Ashoska Mitsu Sisko",
+                style = MaterialTheme.typography.bodyLarge
+            )
+
+            Spacer(Modifier.height(6.dp))
+
+            ElevatedCard(
+                colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Tutorial", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "1) VRChat → Settings → OSC → Enable OSC\n" +
+                            "2) Phone + headset on same Wi-Fi\n" +
+                            "3) Find headset IP (Wi-Fi → network → Advanced)\n" +
+                            "4) Home → Connection → Apply\n" +
+                            "5) Manual Send to test\n\n" +
+                            "Now Playing:\n" +
+                            "Settings → Notification Access → enable Chatbox\n" +
+                            "Restart Chatbox, play music, then Music → Start.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
 
-            ElevatedCard {
-                Column(
-                    Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    SelectionContainer {
-                        Text(
-                            text = text,
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontFamily = FontFamily.Monospace
-                        )
-                    }
+            ElevatedCard(
+                colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Troubleshoot", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "- Nothing appears: check IP + OSC enabled + same Wi-Fi\n" +
+                            "- Now Playing blank: enable access, restart app, play music\n" +
+                            "- Stops screen-off: disable battery optimization",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }
@@ -1309,7 +1236,7 @@ If anything gets stuck sending: press KILL (stops + clears VRChat).
 }
 
 /* =========================
-   SETTINGS SHEET (Permissions only; cleaner)
+   SETTINGS SHEET (clean, not messy)
    ========================= */
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1333,39 +1260,42 @@ private fun SettingsSheet(
                 Text("Settings & Setup", style = MaterialTheme.typography.titleLarge)
             }
 
-            ElevatedCard {
+            ElevatedCard(
+                colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            ) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    SettingsGroupHeader("Permissions")
+                    SettingsGroupHeader("PERMISSIONS")
 
                     SettingsRow(
                         icon = Icons.Filled.MusicNote,
                         title = "Notification Access",
                         subtitle = "Required for Now Playing detection.",
                         primary = "Open"
-                    ) { safeStartActivity(ctx, vm.notificationAccessIntent()) }
+                    ) { ctx.startActivity(vm.notificationAccessIntent()) }
 
                     SettingsRow(
                         icon = Icons.Filled.Bolt,
                         title = "Overlay Permission",
                         subtitle = "Only needed if you use overlay.",
                         primary = "Open"
-                    ) { safeStartActivity(ctx, vm.overlayPermissionIntent()) }
+                    ) { ctx.startActivity(vm.overlayPermissionIntent()) }
 
                     SettingsRow(
                         icon = Icons.Filled.Power,
                         title = "Battery Optimization",
                         subtitle = "Stops Android pausing when screen is off.",
                         primary = "Request"
-                    ) { safeStartActivity(ctx, vm.batteryOptimizationIntent()) }
+                    ) { ctx.startActivity(vm.batteryOptimizationIntent()) }
                 }
             }
 
-            Spacer(Modifier.height(6.dp))
             OutlinedButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) {
-                Icon(Icons.Filled.CheckCircle, contentDescription = null)
+                Icon(Icons.Filled.Info, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
-                Text("Done")
+                Text("Close")
             }
+
+            Spacer(Modifier.windowInsetsBottomHeight(WindowInsets.navigationBars))
         }
     }
 }
@@ -1373,8 +1303,8 @@ private fun SettingsSheet(
 @Composable
 private fun SettingsGroupHeader(text: String) {
     Text(
-        text = text.uppercase(),
-        style = MaterialTheme.typography.labelSmall,
+        text = text,
+        style = MaterialTheme.typography.labelMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant
     )
 }
@@ -1395,12 +1325,12 @@ private fun SettingsRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Surface(
-            modifier = Modifier.size(38.dp),
+            modifier = Modifier.size(40.dp),
             shape = MaterialTheme.shapes.medium,
-            color = MaterialTheme.colorScheme.surfaceVariant
+            color = MaterialTheme.colorScheme.surface
         ) {
             Box(contentAlignment = Alignment.Center) {
-                Icon(icon, contentDescription = null)
+                Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
 
@@ -1415,48 +1345,6 @@ private fun SettingsRow(
             Text(primary)
             Spacer(Modifier.width(4.dp))
             Icon(Icons.Filled.ChevronRight, contentDescription = null)
-        }
-    }
-}
-
-/* =========================
-   HELPERS
-   ========================= */
-
-private fun safeStartActivity(ctx: Context, intent: Intent) {
-    try {
-        // Some settings intents need NEW_TASK when launched from non-Activity contexts.
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        ctx.startActivity(intent)
-    } catch (_: Throwable) {
-        // no-op (don’t crash UI)
-    }
-}
-
-private fun openVrchat(ctx: Context) {
-    // Prefer launching VRChat; fallback to store page
-    val pm = ctx.packageManager
-    val pkg = "com.vrchat.mobile"
-    try {
-        val i = pm.getLaunchIntentForPackage(pkg)
-        if (i != null) {
-            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            ctx.startActivity(i)
-            return
-        }
-    } catch (_: Throwable) {
-    }
-
-    try {
-        val market = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$pkg"))
-        market.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        ctx.startActivity(market)
-    } catch (_: Throwable) {
-        try {
-            val web = Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=$pkg"))
-            web.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            ctx.startActivity(web)
-        } catch (_: Throwable) {
         }
     }
 }
