@@ -1,4 +1,3 @@
-// app/src/main/kotlin/com/scrapw/chatbox/ui/theme/Theme.kt
 package com.scrapw.chatbox.ui.theme
 
 import android.app.Activity
@@ -28,9 +27,6 @@ fun ThemeMode.isDark(systemIsDark: Boolean): Boolean = when (this) {
     ThemeMode.Dark -> true
 }
 
-/**
- * Slime-like: big rounded panels/cards.
- */
 private val AppShapes = Shapes(
     extraSmall = RoundedCornerShape(10.dp),
     small = RoundedCornerShape(14.dp),
@@ -39,19 +35,15 @@ private val AppShapes = Shapes(
     extraLarge = RoundedCornerShape(28.dp)
 )
 
-/**
- * SlimeVR-ish Dark Scheme (matches screenshots vibe: deep navy + purple accent).
- * NOTE: This intentionally avoids "dynamic colors" unless you enable them.
- */
 private val SlimeDark = darkColorScheme(
     primary = SlimePurple,
-    onPrimary = Color(0xFF140B2E),
+    onPrimary = Color(0xFF120B2A),
 
-    secondary = SlimeCyan,
-    onSecondary = Color(0xFF001521),
+    secondary = SlimePurple2,
+    onSecondary = Color(0xFF130B2C),
 
-    tertiary = SlimePurpleSoft,
-    onTertiary = Color(0xFF120A27),
+    tertiary = SlimePurple2,
+    onTertiary = Color(0xFF130B2C),
 
     background = SlimeBg,
     onBackground = SlimeText,
@@ -60,27 +52,23 @@ private val SlimeDark = darkColorScheme(
     onSurface = SlimeText,
 
     surfaceVariant = SlimeSurface2,
-    onSurfaceVariant = SlimeTextMuted,
+    onSurfaceVariant = SlimeMuted,
 
     outline = SlimeOutline,
-    outlineVariant = SlimeOutline.copy(alpha = 0.65f),
+    outlineVariant = SlimeOutline.copy(alpha = 0.7f),
 
     error = SlimeError,
-    onError = Color(0xFF2A0B0B)
+    onError = Color(0xFF2B0C0C)
 )
 
-/**
- * Optional Light Scheme: still “Slime” accent, but readable.
- * (You can ignore this if you stay dark-only.)
- */
 private val SlimeLight = lightColorScheme(
-    primary = Color(0xFF5E3DFF),
+    primary = Color(0xFF5A3BFF),
     onPrimary = Color.White,
 
-    secondary = Color(0xFF0B6AA0),
+    secondary = Color(0xFF6A52FF),
     onSecondary = Color.White,
 
-    tertiary = Color(0xFF7A5CFF),
+    tertiary = Color(0xFF6A52FF),
     onTertiary = Color.White,
 
     background = Color(0xFFF5F8FF),
@@ -99,14 +87,10 @@ private val SlimeLight = lightColorScheme(
     onError = Color.White
 )
 
-/**
- * Main app theme.
- * UI-only: colors + shapes + system bar styling.
- */
 @Composable
 fun ChatboxTheme(
     themeMode: ThemeMode = ThemeMode.System,
-    dynamicColor: Boolean = false, // ✅ default OFF so it looks like Slime (not device theme)
+    dynamicColor: Boolean = false, // IMPORTANT: OFF by default to match Slime theme
     content: @Composable () -> Unit
 ) {
     val systemDark = isSystemInDarkTheme()
@@ -125,10 +109,8 @@ fun ChatboxTheme(
     if (!view.isInEditMode) {
         SideEffect {
             val window = (view.context as Activity).window
-            // Slime-style: bars match surface (not pure black)
             window.statusBarColor = colorScheme.surface.toArgb()
             window.navigationBarColor = colorScheme.surface.toArgb()
-
             WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !darkTheme
             WindowCompat.getInsetsController(window, view).isAppearanceLightNavigationBars = !darkTheme
         }
@@ -142,9 +124,6 @@ fun ChatboxTheme(
     )
 }
 
-/**
- * Overlay theme stays visually consistent with app theme (UI-only).
- */
 @Composable
 fun OverlayTheme(
     themeMode: ThemeMode = ThemeMode.System,
@@ -166,7 +145,7 @@ fun OverlayTheme(
     MaterialTheme(
         colorScheme = colorScheme,
         typography = Typography,
-        shapes = AppShapes,
+        shapes = MaterialTheme.shapes,
         content = content
     )
 }
