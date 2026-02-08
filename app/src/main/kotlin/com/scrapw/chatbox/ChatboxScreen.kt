@@ -106,6 +106,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.scrapw.chatbox.ui.ChatboxViewModel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private enum class AppPage(val title: String) {
@@ -469,7 +470,7 @@ private fun HomePage(
     // Persist Setup Tutorial collapsed/expanded across reopen
     var tutorialExpanded by remember { mutableStateOf(UiPrefs.readTutorialExpanded(ctx)) }
 
-    // ✅ FIX: booleans (no `.value` anywhere)
+    // booleans
     var overlayGranted by remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
     LaunchedEffect(Unit) { overlayGranted = Settings.canDrawOverlays(ctx) }
 
@@ -1085,6 +1086,16 @@ private fun NowPlayingPage(
 ) {
     val ctx = LocalContext.current
 
+    // ✅ FIX: animate the preset preview bars on this page (only while this composable is active)
+    var previewT by remember { mutableStateOf(0f) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            previewT += 0.02f
+            if (previewT > 1f) previewT -= 1f
+            delay(60L)
+        }
+    }
+
     PageContainer {
         SectionCard(
             title = "Now Playing",
@@ -1137,7 +1148,7 @@ private fun NowPlayingPage(
                             Column(Modifier.weight(1f)) {
                                 Text(text = name, style = MaterialTheme.typography.titleSmall)
                                 Text(
-                                    text = vm.renderMusicPresetPreview(p, 0.5f),
+                                    text = vm.renderMusicPresetPreview(p, previewT),
                                     style = MaterialTheme.typography.bodyMedium,
                                     fontFamily = FontFamily.Monospace
                                 )
