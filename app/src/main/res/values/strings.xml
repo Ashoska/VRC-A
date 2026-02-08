@@ -1,91 +1,94 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Chatbox</string>
+    <!-- App label (shows in launcher + App info + Android Settings) -->
+    <string name="app_name">VRC-A</string>
 
-    <!-- Generic -->
+    <!-- General -->
     <string name="settings">Settings</string>
-    <string name="layout">Layout</string>
-    <string name="message">Message</string>
-    <string name="send">Send</string>
-    <string name="about">About</string>
-    <string name="information">Information</string>
+    <string name="settings_button">Settings</string>
+    <string name="information">Info</string>
     <string name="faq">FAQ</string>
+    <string name="about">About</string>
     <string name="license">License</string>
-    <string name="project">Project</string>
     <string name="source_code">Source code</string>
     <string name="dependencies">Dependencies</string>
-
-    <!-- IP / Connection -->
-    <string name="ip_address">IP address</string>
-    <string name="osc_host">OSC Host</string>
-    <string name="port">Port</string>
-    <string name="apply_ip_address">Apply IP address</string>
-    <string name="edit_ip_address">Edit IP address</string>
-    <string name="enter_your_ip_here">Enter your IP here</string>
-    <string name="invalid_ip_address">Invalid IP address</string>
-    <string name="send_to_localhost">Send to localhost</string>
-    <string name="send_to_localhost_desc">Send OSC to 127.0.0.1</string>
-
-    <!-- Settings toggles -->
-    <string name="display_ip_edit_bar">Display IP edit bar</string>
-    <string name="display_message_options">Display message options</string>
-    <string name="always_show_keyboard">Always show keyboard</string>
-    <string name="always_show_keyboard_desc">Automatically open the keyboard when entering message</string>
-
-    <string name="real_time_sending">Real-time sending</string>
-    <string name="real_time_sending_desc">Send changes as you type (may spam OSC)</string>
-
-    <string name="send_message_directly">Send message directly</string>
-    <string name="send_message_directly_desc">Send without confirmation step</string>
-
-    <string name="trigger_notification_sound">Trigger notification sound</string>
-    <string name="trigger_notification_sound_desc">Play a sound when sending</string>
-
-    <string name="show_message_typing_indicator">Show typing indicator</string>
-    <string name="show_message_typing_indicator_desc">Show “typing…” style indicator</string>
-
-    <string name="button_haptic">Button haptics</string>
-    <string name="button_haptic_desc">Vibrate on button press</string>
-
-    <!-- Options text blocks (used by MessageOption.kt) -->
-    <string name="msg_real_time_short">Real-time</string>
-    <string name="msg_real_time_long">Send while typing</string>
-
-    <string name="msg_trigger_notification_sfx_short">SFX</string>
-    <string name="msg_trigger_notification_sfx_long">Play a sound</string>
-
-    <string name="msg_typing_indicator_short">Typing</string>
-    <string name="msg_typing_indicator_long">Show typing indicator</string>
-
-    <string name="msg_send_immediately_short">Instant</string>
-    <string name="msg_send_immediately_long">Send instantly</string>
-
-    <!-- Conversation -->
-    <string name="empty_conversation">No messages yet.</string>
-    <string name="stashed">Stashed</string>
-    <string name="message_card_copy">Copy</string>
-    <string name="message_card_restore">Restore</string>
-
-    <!-- Overlay -->
-    <string name="open_chatbox">Open Chatbox</string>
-    <string name="overlay_lock_messenger">Lock overlay</string>
-    <string name="overlay_unlock_messenger">Unlock overlay</string>
-    <string name="write_a_message">Write a message</string>
-    <string name="keep_conversation_overlay_open">Keep overlay open</string>
-    <string name="keep_conversation_overlay_open_desc">Prevent overlay from closing automatically</string>
-    <string name="enable_chatbox_floating_button">Enable floating button</string>
-    <string name="floating_button">Floating button</string>
-    <string name="overlay_permission_request">Overlay permission required</string>
-
-    <!-- Other -->
+    <string name="project">Project</string>
+    <string name="send_a_feedback">Send feedback</string>
     <string name="download_latest_version">Download latest version</string>
     <string name="release_page">Release page</string>
     <string name="update_available">Update available</string>
 
-    <string name="fullscreen">Fullscreen</string>
-    <string name="fullscreen_desc">Use fullscreen layout</string>
-
+    <!-- Accessibility / UI -->
     <string name="accessibility">Accessibility</string>
+    <string name="layout">Layout</string>
+    <string name="fullscreen">Fullscreen</string>
+    <string name="fullscreen_desc">Use fullscreen mode.</string>
     <string name="back_button">Back</string>
+    <string name="button_haptic">Button haptics</string>
+    <string name="button_haptic_desc">Vibrate when pressing buttons.</string>
 
-    <string name="it_can_help_to_send_chatbox_in_vrchat_mobile_desc">Make sure OSC is enabled in VRChat and devices are on the same Wi-Fi.</string>
+    <!-- Chatbox / IP -->
+    <string name="ip_address">IP address</string>
+    <string name="osc_host">OSC host</string>
+    <string name="port">Port</string>
+    <string name="enter_your_ip_here">Enter your IP here</string>
+    <string name="edit_ip_address">Edit IP address</string>
+    <string name="apply_ip_address">Apply IP address</string>
+    <string name="invalid_ip_address">Invalid IP address</string>
+    <string name="send_to_localhost">Send to localhost</string>
+    <string name="send_to_localhost_desc">Send OSC to 127.0.0.1 (for debugging).</string>
+
+    <!-- Overlay -->
+    <string name="floating_button">Floating button</string>
+    <string name="enable_chatbox_floating_button">Enable floating button</string>
+    <string name="keep_conversation_overlay_open">Keep overlay open</string>
+    <string name="keep_conversation_overlay_open_desc">Don’t auto-close the overlay when switching apps.</string>
+    <string name="overlay_permission_request">Overlay permission required</string>
+    <string name="open_chatbox">Open VRC-A</string>
+    <string name="overlay_lock_messenger">Lock overlay</string>
+    <string name="overlay_unlock_messenger">Unlock overlay</string>
+
+    <!-- Messenger / Conversation -->
+    <string name="message">Message</string>
+    <string name="write_a_message">Write a message…</string>
+    <string name="send">Send</string>
+    <string name="stashed">Stashed</string>
+    <string name="empty_conversation">No messages yet.</string>
+    <string name="message_card_copy">Copy</string>
+    <string name="message_card_restore">Restore</string>
+
+    <!-- Message options -->
+    <string name="display_ip_edit_bar">Show IP edit bar</string>
+    <string name="display_message_options">Show message options</string>
+
+    <string name="real_time_sending">Real-time sending</string>
+    <string name="real_time_sending_desc">Send updates continuously while typing.</string>
+
+    <string name="trigger_notification_sound">Notification sound</string>
+    <string name="trigger_notification_sound_desc">Play a sound when sending.</string>
+
+    <string name="show_message_typing_indicator">Typing indicator</string>
+    <string name="show_message_typing_indicator_desc">Show “typing…” while composing.</string>
+
+    <string name="send_message_directly">Send immediately</string>
+    <string name="send_message_directly_desc">Send without waiting for confirmation.</string>
+
+    <string name="always_show_keyboard">Always show keyboard</string>
+    <string name="always_show_keyboard_desc">Open keyboard automatically on the message field.</string>
+
+    <!-- Option descriptions (short/long pairs used in UI) -->
+    <string name="msg_real_time_short">Real-time</string>
+    <string name="msg_real_time_long">Sends live while you type.</string>
+
+    <string name="msg_trigger_notification_sfx_short">SFX</string>
+    <string name="msg_trigger_notification_sfx_long">Plays a sound when sending.</string>
+
+    <string name="msg_typing_indicator_short">Typing</string>
+    <string name="msg_typing_indicator_long">Shows typing indicator.</string>
+
+    <string name="msg_send_immediately_short">Immediate</string>
+    <string name="msg_send_immediately_long">Sends instantly.</string>
+
+    <!-- Misc text that appeared in older strings -->
+    <string name="it_can_help_to_send_chatbox_in_vrchat_mobile_desc">Helps sending chatbox to VRChat on mobile.</string>
 </resources>
