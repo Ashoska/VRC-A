@@ -12,6 +12,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -38,9 +39,13 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Menu
@@ -57,7 +62,6 @@ import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.Divider
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -111,12 +115,14 @@ private enum class AppPage(val title: String) {
     Debug("Debug")
 }
 
-private enum class AutomationsTab(val title: String) {
+// ✅ Renamed to avoid clashing with LegacyPagesAndSettingsPage.kt
+private enum class ChatboxAutomationsTab(val title: String) {
     AFK("AFK"),
     Cycle("Cycle")
 }
 
-private enum class InfoTab(val title: String) {
+// ✅ Renamed to avoid future collisions
+private enum class ChatboxInfoTab(val title: String) {
     Overview("Overview"),
     Help("Help")
 }
@@ -170,7 +176,6 @@ fun ChatboxScreen(
 
     // Persisted UI state applied to VM once on start
     LaunchedEffect(Unit) {
-        // These calls only change VM flags; persistence lives in prefs.
         chatboxViewModel.setSpotifyEnabledFlag(UiPrefs.readSpotifyEnabled(ctx))
         chatboxViewModel.setSpotifyDemoFlag(UiPrefs.readSpotifyDemo(ctx))
         chatboxViewModel.updateSpotifyPreset(UiPrefs.readSpotifyPreset(ctx))
@@ -307,7 +312,7 @@ private fun DrawerContent(
                 onClick = { onSelect(AppPage.Debug) }
             )
 
-            HorizontalDivider()
+            Divider()
 
             DrawerSectionHeader("Setup")
             DrawerItem(
@@ -326,7 +331,7 @@ private fun DrawerContent(
             Spacer(Modifier.weight(1f))
 
             Text(
-                text = "VRC-A / Chatbox",
+                text = "VRC-A",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -351,7 +356,6 @@ private fun DrawerItem(
     selected: Boolean,
     onClick: () -> Unit
 ) {
-    // Proper “boxed” items (no floating text)
     NavigationDrawerItem(
         label = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         selected = selected,
@@ -399,15 +403,24 @@ private fun SectionCard(
                 Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Keep text away from the actions area so it never clips into buttons
                 Column(
                     Modifier
                         .weight(1f)
                         .padding(end = 10.dp)
                 ) {
-                    Text(text = title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
                     if (!subtitle.isNullOrBlank()) {
-                        Text(text = subtitle, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            text = subtitle,
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                 }
                 if (actions != null) {
@@ -427,7 +440,7 @@ private fun SectionCard(
    HOME (Preview + Tutorial panel)
    ========================= */
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun HomePage(
     vm: ChatboxViewModel,
@@ -450,7 +463,6 @@ private fun HomePage(
 
     var tutorialExpanded by rememberSaveable { mutableStateOf(true) }
 
-    // Status checks (lightweight)
     val overlayGranted = remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
     LaunchedEffect(Unit) { overlayGranted.value = Settings.canDrawOverlays(ctx) }
 
@@ -547,7 +559,6 @@ private fun HomePage(
             ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("Quick Toggles", style = MaterialTheme.typography.titleSmall)
-
                     ToggleRow("AFK", vm.afkEnabled) { vm.setAfkEnabledFlag(it) }
                     ToggleRow("Cycle", vm.cycleEnabled) { vm.setCycleEnabledFlag(it) }
                     ToggleRow("Now Playing", vm.spotifyEnabled) { vm.setSpotifyEnabledFlag(it) }
@@ -555,15 +566,13 @@ private fun HomePage(
             }
         }
 
-        // Tutorial panel (replaces checklist wizard)
         SectionCard(
             title = "Setup Tutorial",
             subtitle = "Tap each step to open settings or jump to the right place.",
             actions = {
                 IconButton(onClick = { tutorialExpanded = !tutorialExpanded }) {
                     Icon(
-                        imageVector = if (tutorialExpanded) androidx.compose.material.icons.filled.ExpandLess
-                        else androidx.compose.material.icons.filled.ExpandMore,
+                        imageVector = if (tutorialExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
                         contentDescription = null
                     )
                 }
@@ -575,7 +584,6 @@ private fun HomePage(
                 exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 3 })
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-
                     TutorialStep(
                         number = 0,
                         title = "Enable OSC in VRChat",
@@ -624,9 +632,7 @@ private fun HomePage(
                         subtitle = if (ipOk) "Looks set." else "Quest/PC IP on the same Wi-Fi.",
                         icon = Icons.Filled.Wifi,
                         primary = "Go"
-                    ) {
-                        scope.launch { connectionBring.bringIntoView() }
-                    }
+                    ) { scope.launch { connectionBring.bringIntoView() } }
 
                     TutorialStep(
                         number = 5,
@@ -634,9 +640,7 @@ private fun HomePage(
                         subtitle = "Type a message and hit Send.",
                         icon = Icons.Filled.ChevronRight,
                         primary = "Go"
-                    ) {
-                        scope.launch { manualSendBring.bringIntoView() }
-                    }
+                    ) { scope.launch { manualSendBring.bringIntoView() } }
                 }
             }
         }
@@ -662,7 +666,9 @@ private fun HomePage(
                             val ip = ipInput.text.trim()
                             runCatching { vm.ipAddressApply(ip) }
                                 .onFailure {
-                                    scope.launch { snackbarHostState.showSnackbar("IP apply failed. Check format (e.g. 192.168.1.23)") }
+                                    scope.launch {
+                                        snackbarHostState.showSnackbar("IP apply failed. Check format (e.g. 192.168.1.23)")
+                                    }
                                 }
                         },
                         modifier = Modifier.weight(1f)
@@ -772,7 +778,7 @@ private fun TutorialStep(
 @Composable
 private fun AutomationsPage(vm: ChatboxViewModel) {
     val scope = rememberCoroutineScope()
-    var tab by rememberSaveable { mutableStateOf(AutomationsTab.AFK) }
+    var tab by rememberSaveable { mutableStateOf(ChatboxAutomationsTab.AFK) }
 
     val cycleLineFields = remember { mutableStateMapOf<Int, TextFieldValue>() }
     fun syncCycleLineFieldsFromVm() {
@@ -806,7 +812,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
         ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
             Column(Modifier.padding(10.dp)) {
                 TabRow(selectedTabIndex = tab.ordinal) {
-                    AutomationsTab.entries.forEachIndexed { idx, t ->
+                    ChatboxAutomationsTab.entries.forEachIndexed { idx, t ->
                         Tab(
                             selected = (tab.ordinal == idx),
                             onClick = { tab = t },
@@ -818,7 +824,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
         }
 
         when (tab) {
-            AutomationsTab.AFK -> {
+            ChatboxAutomationsTab.AFK -> {
                 SectionCard(
                     title = "AFK",
                     subtitle = "AFK always appears above Cycle + Music."
@@ -858,9 +864,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
                                     }
                                 }
                                 Icon(
-                                    imageVector = if (vm.afkPresetsCollapsed)
-                                        androidx.compose.material.icons.filled.ExpandMore
-                                    else androidx.compose.material.icons.filled.ExpandLess,
+                                    imageVector = if (vm.afkPresetsCollapsed) Icons.Filled.ExpandMore else Icons.Filled.ExpandLess,
                                     contentDescription = null
                                 )
                             }
@@ -920,7 +924,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
                 }
             }
 
-            AutomationsTab.Cycle -> {
+            ChatboxAutomationsTab.Cycle -> {
                 SectionCard(
                     title = "Cycle",
                     subtitle = "Up to 10 lines. Stop clears instantly."
@@ -949,7 +953,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
                                 )
                                 Spacer(Modifier.width(8.dp))
                                 IconButton(onClick = { vm.removeCycleLine(idx) }) {
-                                    Icon(androidx.compose.material.icons.filled.Delete, contentDescription = "Remove line")
+                                    Icon(Icons.Filled.Delete, contentDescription = "Remove line")
                                 }
                             }
                         }
@@ -960,7 +964,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
                                 enabled = vm.cycleLines.size < 10,
                                 modifier = Modifier.weight(1f)
                             ) {
-                                Icon(androidx.compose.material.icons.filled.Add, contentDescription = null)
+                                Icon(Icons.Filled.Add, contentDescription = null)
                                 Spacer(Modifier.width(6.dp))
                                 Text("Add line (${vm.cycleLines.size}/10)")
                             }
@@ -1004,9 +1008,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
                                     }
                                 }
                                 Icon(
-                                    imageVector = if (vm.cyclePresetsCollapsed)
-                                        androidx.compose.material.icons.filled.ExpandMore
-                                    else androidx.compose.material.icons.filled.ExpandLess,
+                                    imageVector = if (vm.cyclePresetsCollapsed) Icons.Filled.ExpandMore else Icons.Filled.ExpandLess,
                                     contentDescription = null
                                 )
                             }
@@ -1127,7 +1129,6 @@ private fun NowPlayingPage(
                         ) {
                             Column(Modifier.weight(1f)) {
                                 Text(text = name, style = MaterialTheme.typography.titleSmall)
-                                // Keep VM-driven preview (VM updates at 2s cadence already)
                                 Text(
                                     text = vm.renderMusicPresetPreview(p, 0.5f),
                                     style = MaterialTheme.typography.bodyMedium,
@@ -1218,7 +1219,7 @@ private fun DebugPage(vm: ChatboxViewModel) {
 }
 
 /* =========================
-   SETTINGS SHEET (clean, no messy info tabs)
+   SETTINGS SHEET (clean)
    ========================= */
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1329,13 +1330,13 @@ private fun SettingsRow(
 }
 
 /* =========================
-   INFO SHEET (moved to drawer; cleaner; no tutorial/full doc)
+   INFO SHEET (moved to drawer; cleaner)
    ========================= */
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun InfoSheet(onDismiss: () -> Unit) {
-    var tab by rememberSaveable { mutableStateOf(InfoTab.Overview) }
+    var tab by rememberSaveable { mutableStateOf(ChatboxInfoTab.Overview) }
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
@@ -1353,7 +1354,7 @@ private fun InfoSheet(onDismiss: () -> Unit) {
             ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     TabRow(selectedTabIndex = tab.ordinal) {
-                        InfoTab.entries.forEachIndexed { idx, t ->
+                        ChatboxInfoTab.entries.forEachIndexed { idx, t ->
                             Tab(
                                 selected = (tab.ordinal == idx),
                                 onClick = { tab = t },
@@ -1393,8 +1394,8 @@ Stops sending with screen off:
                     }
 
                     val text = when (tab) {
-                        InfoTab.Overview -> overview
-                        InfoTab.Help -> help
+                        ChatboxInfoTab.Overview -> overview
+                        ChatboxInfoTab.Help -> help
                     }
 
                     SelectionContainer {
