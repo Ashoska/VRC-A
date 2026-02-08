@@ -460,21 +460,22 @@ private fun HomePage(
     val connectionBring = remember { BringIntoViewRequester() }
     val manualSendBring = remember { BringIntoViewRequester() }
 
-    // ✅ FIX: use String state (avoids TextFieldValue delegate/saver issues in your build)
+    // IP field: String state (avoids TextFieldValue delegate/saver issues)
     var ipInputText by rememberSaveable { mutableStateOf(uiState.ipAddress) }
     LaunchedEffect(uiState.ipAddress) {
         if (ipInputText.isBlank()) ipInputText = uiState.ipAddress
     }
 
-    // ✅ Persist Setup Tutorial collapsed/expanded across reopen.
+    // Persist Setup Tutorial collapsed/expanded across reopen
     var tutorialExpanded by remember { mutableStateOf(UiPrefs.readTutorialExpanded(ctx)) }
 
-    val overlayGranted = remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
-    LaunchedEffect(Unit) { overlayGranted.value = Settings.canDrawOverlays(ctx) }
+    // ✅ FIX: booleans (no `.value` anywhere)
+    var overlayGranted by remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
+    LaunchedEffect(Unit) { overlayGranted = Settings.canDrawOverlays(ctx) }
 
     val pm = remember(ctx) { ctx.getSystemService(Context.POWER_SERVICE) as PowerManager }
-    val batteryOk = remember { mutableStateOf(pm.isIgnoringBatteryOptimizations(ctx.packageName)) }
-    LaunchedEffect(Unit) { batteryOk.value = pm.isIgnoringBatteryOptimizations(ctx.packageName) }
+    var batteryOk by remember { mutableStateOf(pm.isIgnoringBatteryOptimizations(ctx.packageName)) }
+    LaunchedEffect(Unit) { batteryOk = pm.isIgnoringBatteryOptimizations(ctx.packageName) }
 
     val notifOk = vm.listenerConnected
     val ipOk = uiState.ipAddress.isNotBlank() && uiState.ipAddress != "127.0.0.1"
@@ -612,23 +613,23 @@ private fun HomePage(
                     TutorialStep(
                         number = 2,
                         title = "Allow Overlay permission",
-                        subtitle = if (overlayGranted.value) "Enabled." else "Only needed if you use overlay.",
+                        subtitle = if (overlayGranted) "Enabled." else "Only needed if you use overlay.",
                         icon = Icons.Filled.Bolt,
                         primary = "Open"
                     ) {
                         ctx.startActivity(vm.overlayPermissionIntent())
-                        overlayGranted.value = Settings.canDrawOverlays(ctx)
+                        overlayGranted = Settings.canDrawOverlays(ctx)
                     }
 
                     TutorialStep(
                         number = 3,
                         title = "Disable Battery Optimization",
-                        subtitle = if (batteryOk.value) "Disabled (good)." else "Stops Android pausing the app when screen is off.",
+                        subtitle = if (batteryOk) "Disabled (good)." else "Stops Android pausing the app when screen is off.",
                         icon = Icons.Filled.Power,
                         primary = "Request"
                     ) {
                         ctx.startActivity(vm.batteryOptimizationIntent())
-                        batteryOk.value = pm.isIgnoringBatteryOptimizations(ctx.packageName)
+                        batteryOk = pm.isIgnoringBatteryOptimizations(ctx.packageName)
                     }
 
                     TutorialStep(
