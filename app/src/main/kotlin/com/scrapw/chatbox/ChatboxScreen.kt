@@ -106,7 +106,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.scrapw.chatbox.ui.ChatboxViewModel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private enum class AppPage(val title: String) {
@@ -371,7 +370,8 @@ private fun DrawerItem(
         modifier = Modifier.fillMaxWidth(),
         colors = NavigationDrawerItemDefaults.colors(
             selectedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
-            unselectedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+            // ONLY CHANGE: make unselected buttons visible vs drawer background
+            unselectedContainerColor = MaterialTheme.colorScheme.surface,
             selectedIconColor = MaterialTheme.colorScheme.onSecondaryContainer,
             unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -450,7 +450,7 @@ private fun SectionCard(
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun HomePage(
-    vm: ChatboxViewModel,
+    vm: com.scrapw.chatbox.ui.ChatboxViewModel,
     snackbarHostState: SnackbarHostState,
     onOpenSettings: () -> Unit
 ) {
@@ -470,7 +470,6 @@ private fun HomePage(
     // Persist Setup Tutorial collapsed/expanded across reopen
     var tutorialExpanded by remember { mutableStateOf(UiPrefs.readTutorialExpanded(ctx)) }
 
-    // booleans
     var overlayGranted by remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
     LaunchedEffect(Unit) { overlayGranted = Settings.canDrawOverlays(ctx) }
 
@@ -783,7 +782,7 @@ private fun TutorialStep(
    ========================= */
 
 @Composable
-private fun AutomationsPage(vm: ChatboxViewModel) {
+private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
     val scope = rememberCoroutineScope()
     var tab by rememberSaveable { mutableStateOf(ChatboxAutomationsTab.AFK) }
 
@@ -1079,22 +1078,12 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
 
 @Composable
 private fun NowPlayingPage(
-    vm: ChatboxViewModel,
+    vm: com.scrapw.chatbox.ui.ChatboxViewModel,
     onPersistSpotifyEnabled: (Boolean) -> Unit,
     onPersistSpotifyDemo: (Boolean) -> Unit,
     onPersistSpotifyPreset: (Int) -> Unit
 ) {
     val ctx = LocalContext.current
-
-    // ✅ FIX: animate the preset preview bars on this page (only while this composable is active)
-    var previewT by remember { mutableStateOf(0f) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            previewT += 0.02f
-            if (previewT > 1f) previewT -= 1f
-            delay(60L)
-        }
-    }
 
     PageContainer {
         SectionCard(
@@ -1148,7 +1137,7 @@ private fun NowPlayingPage(
                             Column(Modifier.weight(1f)) {
                                 Text(text = name, style = MaterialTheme.typography.titleSmall)
                                 Text(
-                                    text = vm.renderMusicPresetPreview(p, previewT),
+                                    text = vm.renderMusicPresetPreview(p, 0.5f),
                                     style = MaterialTheme.typography.bodyMedium,
                                     fontFamily = FontFamily.Monospace
                                 )
@@ -1197,7 +1186,7 @@ private fun NowPlayingPage(
    ========================= */
 
 @Composable
-private fun DebugPage(vm: ChatboxViewModel) {
+private fun DebugPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
     PageContainer {
         SectionCard(
             title = "Listener",
@@ -1243,7 +1232,7 @@ private fun DebugPage(vm: ChatboxViewModel) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsSheet(
-    vm: ChatboxViewModel,
+    vm: com.scrapw.chatbox.ui.ChatboxViewModel,
     onDismiss: () -> Unit
 ) {
     val ctx = LocalContext.current
