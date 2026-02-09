@@ -248,7 +248,7 @@ fun ChatboxScreen(
 
                         AppPage.Debug -> DebugPage(chatboxViewModel)
                     }
-                }
+                )
             }
 
             if (showSettingsSheet) {
@@ -370,8 +370,7 @@ private fun DrawerItem(
         modifier = Modifier.fillMaxWidth(),
         colors = NavigationDrawerItemDefaults.colors(
             selectedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
-            // ONLY CHANGE: make unselected buttons visible vs drawer background
-            unselectedContainerColor = MaterialTheme.colorScheme.surface,
+            unselectedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
             selectedIconColor = MaterialTheme.colorScheme.onSecondaryContainer,
             unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -450,7 +449,7 @@ private fun SectionCard(
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun HomePage(
-    vm: com.scrapw.chatbox.ui.ChatboxViewModel,
+    vm: ChatboxViewModel,
     snackbarHostState: SnackbarHostState,
     onOpenSettings: () -> Unit
 ) {
@@ -470,6 +469,7 @@ private fun HomePage(
     // Persist Setup Tutorial collapsed/expanded across reopen
     var tutorialExpanded by remember { mutableStateOf(UiPrefs.readTutorialExpanded(ctx)) }
 
+    // ✅ FIX: booleans (no `.value` anywhere)
     var overlayGranted by remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
     LaunchedEffect(Unit) { overlayGranted = Settings.canDrawOverlays(ctx) }
 
@@ -782,7 +782,7 @@ private fun TutorialStep(
    ========================= */
 
 @Composable
-private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
+private fun AutomationsPage(vm: ChatboxViewModel) {
     val scope = rememberCoroutineScope()
     var tab by rememberSaveable { mutableStateOf(ChatboxAutomationsTab.AFK) }
 
@@ -1078,12 +1078,26 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
 
 @Composable
 private fun NowPlayingPage(
-    vm: com.scrapw.chatbox.ui.ChatboxViewModel,
+    vm: ChatboxViewModel,
     onPersistSpotifyEnabled: (Boolean) -> Unit,
     onPersistSpotifyDemo: (Boolean) -> Unit,
     onPersistSpotifyPreset: (Int) -> Unit
 ) {
     val ctx = LocalContext.current
+
+    val previewProgress by androidx.compose.animation.core.rememberInfiniteTransition(label = "preview")
+        .animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = androidx.compose.animation.core.infiniteRepeatable(
+                animation = androidx.compose.animation.core.tween(
+                    2000,
+                    easing = androidx.compose.animation.core.LinearEasing
+                ),
+                repeatMode = androidx.compose.animation.core.RepeatMode.Restart
+            ),
+            label = "previewProgress"
+        )
 
     PageContainer {
         SectionCard(
@@ -1137,7 +1151,7 @@ private fun NowPlayingPage(
                             Column(Modifier.weight(1f)) {
                                 Text(text = name, style = MaterialTheme.typography.titleSmall)
                                 Text(
-                                    text = vm.renderMusicPresetPreview(p, 0.5f),
+                                    text = vm.renderMusicPresetPreview(p, previewProgress),
                                     style = MaterialTheme.typography.bodyMedium,
                                     fontFamily = FontFamily.Monospace
                                 )
@@ -1186,7 +1200,7 @@ private fun NowPlayingPage(
    ========================= */
 
 @Composable
-private fun DebugPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
+private fun DebugPage(vm: ChatboxViewModel) {
     PageContainer {
         SectionCard(
             title = "Listener",
@@ -1232,7 +1246,7 @@ private fun DebugPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsSheet(
-    vm: com.scrapw.chatbox.ui.ChatboxViewModel,
+    vm: ChatboxViewModel,
     onDismiss: () -> Unit
 ) {
     val ctx = LocalContext.current
