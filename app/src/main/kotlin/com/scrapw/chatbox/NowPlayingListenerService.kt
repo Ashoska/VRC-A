@@ -126,6 +126,56 @@ class NowPlayingListenerService : NotificationListenerService() {
         controllersByPackage.clear()
     }
 
+    /**
+     * Filters out Spotify DJ / ad / junk "tracks" so the app won't detect them as Now Playing.
+     * IMPORTANT behavior: if a snapshot is rejected, we simply do NOT update NowPlayingState,
+     * so the last valid real track stays active instead of flipping to DJ/ad garbage.
+     */
+    private fun shouldAcceptNowPlaying(pkg: String, titleRaw: String?, artistRaw: String?, durationMs: Long): Boolean {
+        val title = (titleRaw ?: "").trim()
+        val artist = (artistRaw ?: "").trim()
+
+        if (title.isBlank() && artist.isBlank()) return false
+
+        val t = title.lowercase()
+        val a = artist.lowercase()
+
+        val isSpotify = pkg == "com.spotify.music"
+
+        // Generic ad-ish strings
+        val looksLikeAd =
+            t.contains("advertisement") || a.contains("advertisement") ||
+            t == "ad" || a == "ad" ||
+            t.contains("sponsored") || a.contains("sponsored")
+
+        if (looksLikeAd) return false
+
+        if (isSpotify) {
+            // Spotify DJ / voice / recommendation junk
+            val looksLikeDj =
+                t == "dj" || a == "dj" ||
+                t.contains("spotify dj") || a.contains("spotify dj") ||
+                t.contains("dj") || a.contains("dj")
+
+            if (looksLikeDj) return false
+
+            // Other Spotify non-track states that can show up after sleep/wake
+            val spotifyJunk =
+                t.contains("smart shuffle") ||
+                t.contains("recommended") ||
+                t.contains("suggested") ||
+                t.contains("made for you") ||
+                t.contains("radio") && artist.isBlank()
+
+            if (spotifyJunk) return false
+
+            // Ads/junk often have missing/zero duration; require duration for Spotify.
+            if (durationMs <= 0L) return false
+        }
+
+        return true
+    }
+
     private fun pushSnapshot(
         pkg: String,
         metadata: MediaMetadata?,
@@ -134,6 +184,11 @@ class NowPlayingListenerService : NotificationListenerService() {
         val title = metadata?.getString(MediaMetadata.METADATA_KEY_TITLE).orEmpty()
         val artist = metadata?.getString(MediaMetadata.METADATA_KEY_ARTIST).orEmpty()
         val duration = metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
+
+        // Reject DJ/ads/junk BEFORE updating global state.
+        if (!shouldAcceptNowPlaying(pkg, title, artist, duration)) {
+            return
+        }
 
         val rawPos = pb?.position ?: 0L
         val lastUpdate = pb?.lastPositionUpdateTime ?: 0L
