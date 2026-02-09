@@ -106,6 +106,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.scrapw.chatbox.ui.ChatboxViewModel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private enum class AppPage(val title: String) {
@@ -248,7 +249,7 @@ fun ChatboxScreen(
 
                         AppPage.Debug -> DebugPage(chatboxViewModel)
                     }
-                )
+                }
             }
 
             if (showSettingsSheet) {
@@ -370,7 +371,7 @@ private fun DrawerItem(
         modifier = Modifier.fillMaxWidth(),
         colors = NavigationDrawerItemDefaults.colors(
             selectedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
-            unselectedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+            unselectedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
             selectedIconColor = MaterialTheme.colorScheme.onSecondaryContainer,
             unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -469,7 +470,7 @@ private fun HomePage(
     // Persist Setup Tutorial collapsed/expanded across reopen
     var tutorialExpanded by remember { mutableStateOf(UiPrefs.readTutorialExpanded(ctx)) }
 
-    // ✅ FIX: booleans (no `.value` anywhere)
+    // booleans
     var overlayGranted by remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
     LaunchedEffect(Unit) { overlayGranted = Settings.canDrawOverlays(ctx) }
 
@@ -1085,19 +1086,15 @@ private fun NowPlayingPage(
 ) {
     val ctx = LocalContext.current
 
-    val previewProgress by androidx.compose.animation.core.rememberInfiniteTransition(label = "preview")
-        .animateFloat(
-            initialValue = 0f,
-            targetValue = 1f,
-            animationSpec = androidx.compose.animation.core.infiniteRepeatable(
-                animation = androidx.compose.animation.core.tween(
-                    2000,
-                    easing = androidx.compose.animation.core.LinearEasing
-                ),
-                repeatMode = androidx.compose.animation.core.RepeatMode.Restart
-            ),
-            label = "previewProgress"
-        )
+    // ✅ FIX: animate the preset preview bars on this page (only while this composable is active)
+    var previewT by remember { mutableStateOf(0f) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            previewT += 0.02f
+            if (previewT > 1f) previewT -= 1f
+            delay(60L)
+        }
+    }
 
     PageContainer {
         SectionCard(
@@ -1151,7 +1148,7 @@ private fun NowPlayingPage(
                             Column(Modifier.weight(1f)) {
                                 Text(text = name, style = MaterialTheme.typography.titleSmall)
                                 Text(
-                                    text = vm.renderMusicPresetPreview(p, previewProgress),
+                                    text = vm.renderMusicPresetPreview(p, previewT),
                                     style = MaterialTheme.typography.bodyMedium,
                                     fontFamily = FontFamily.Monospace
                                 )
