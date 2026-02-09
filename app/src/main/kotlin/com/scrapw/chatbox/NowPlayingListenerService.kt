@@ -126,54 +126,37 @@ class NowPlayingListenerService : NotificationListenerService() {
         controllersByPackage.clear()
     }
 
-    /**
-     * Filters out Spotify DJ / ad / junk "tracks" so the app won't detect them as Now Playing.
-     * IMPORTANT behavior: if a snapshot is rejected, we simply do NOT update NowPlayingState,
-     * so the last valid real track stays active instead of flipping to DJ/ad garbage.
-     */
-    private fun shouldAcceptNowPlaying(pkg: String, titleRaw: String?, artistRaw: String?, durationMs: Long): Boolean {
-        val title = (titleRaw ?: "").trim()
-        val artist = (artistRaw ?: "").trim()
+    // ---- Filtering (Spotify DJ / Ads) ----
 
-        if (title.isBlank() && artist.isBlank()) return false
+    private enum class SpotifySpecial {
+        None, Ad, Dj
+    }
 
-        val t = title.lowercase()
-        val a = artist.lowercase()
+    private fun spotifySpecialType(titleRaw: String, artistRaw: String): SpotifySpecial {
+        val t = titleRaw.trim()
+        val a = artistRaw.trim()
+        val tl = t.lowercase()
+        val al = a.lowercase()
 
-        val isSpotify = pkg == "com.spotify.music"
+        // Ads
+        val isAd =
+            tl == "advertisement" ||
+                tl == "ad" ||
+                tl.contains("advertisement") ||
+                (al == "spotify" && (tl.contains("advertisement") || tl == "ad"))
 
-        // Generic ad-ish strings
-        val looksLikeAd =
-            t.contains("advertisement") || a.contains("advertisement") ||
-            t == "ad" || a == "ad" ||
-            t.contains("sponsored") || a.contains("sponsored")
+        if (isAd) return SpotifySpecial.Ad
 
-        if (looksLikeAd) return false
+        // DJ (varies by region/version)
+        val isDj =
+            tl.contains("spotify dj") ||
+                tl == "dj" ||
+                tl.startsWith("dj ") ||
+                (tl.contains("dj") && al.contains("spotify"))
 
-        if (isSpotify) {
-            // Spotify DJ / voice / recommendation junk
-            val looksLikeDj =
-                t == "dj" || a == "dj" ||
-                t.contains("spotify dj") || a.contains("spotify dj") ||
-                t.contains("dj") || a.contains("dj")
+        if (isDj) return SpotifySpecial.Dj
 
-            if (looksLikeDj) return false
-
-            // Other Spotify non-track states that can show up after sleep/wake
-            val spotifyJunk =
-                t.contains("smart shuffle") ||
-                t.contains("recommended") ||
-                t.contains("suggested") ||
-                t.contains("made for you") ||
-                t.contains("radio") && artist.isBlank()
-
-            if (spotifyJunk) return false
-
-            // Ads/junk often have missing/zero duration; require duration for Spotify.
-            if (durationMs <= 0L) return false
-        }
-
-        return true
+        return SpotifySpecial.None
     }
 
     private fun pushSnapshot(
@@ -181,35 +164,74 @@ class NowPlayingListenerService : NotificationListenerService() {
         metadata: MediaMetadata?,
         pb: PlaybackState?
     ) {
-        val title = metadata?.getString(MediaMetadata.METADATA_KEY_TITLE).orEmpty()
-        val artist = metadata?.getString(MediaMetadata.METADATA_KEY_ARTIST).orEmpty()
-        val duration = metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
-
-        // Reject DJ/ads/junk BEFORE updating global state.
-        if (!shouldAcceptNowPlaying(pkg, title, artist, duration)) {
-            return
-        }
+        val titleRaw = metadata?.getString(MediaMetadata.METADATA_KEY_TITLE).orEmpty()
+        val artistRaw = metadata?.getString(MediaMetadata.METADATA_KEY_ARTIST).orEmpty()
+        val durationRaw = metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
 
         val rawPos = pb?.position ?: 0L
         val lastUpdate = pb?.lastPositionUpdateTime ?: 0L
         val speed = pb?.playbackSpeed ?: 1f
-
         val isPlaying = pb?.state == PlaybackState.STATE_PLAYING
 
         // lastPositionUpdateTime is based on elapsedRealtime.
         val snapshotUpdateTime =
             if (lastUpdate > 0L) lastUpdate else SystemClock.elapsedRealtime()
 
-        val detected = title.isNotBlank() || artist.isNotBlank()
+        // Only apply these heuristics to Spotify (other apps vary a lot)
+        if (pkg == "com.spotify.music") {
+            when (spotifySpecialType(titleRaw, artistRaw)) {
+                SpotifySpecial.Ad -> {
+                    NowPlayingState.update(
+                        NowPlayingSnapshot(
+                            listenerConnected = true,
+                            activePackage = pkg,
+                            detected = true,
+                            title = "AD",
+                            artist = "",
+                            durationMs = 0L,
+                            positionMs = 0L,
+                            positionUpdateTimeMs = SystemClock.elapsedRealtime(),
+                            playbackSpeed = 0f,
+                            isPlaying = false
+                        )
+                    )
+                    return
+                }
+
+                SpotifySpecial.Dj -> {
+                    NowPlayingState.update(
+                        NowPlayingSnapshot(
+                            listenerConnected = true,
+                            activePackage = pkg,
+                            detected = true,
+                            title = "DJ",
+                            artist = "",
+                            durationMs = 0L,
+                            positionMs = 0L,
+                            positionUpdateTimeMs = SystemClock.elapsedRealtime(),
+                            playbackSpeed = 0f,
+                            isPlaying = false
+                        )
+                    )
+                    return
+                }
+
+                SpotifySpecial.None -> {
+                    // fall through to normal handling
+                }
+            }
+        }
+
+        val detected = titleRaw.isNotBlank() || artistRaw.isNotBlank()
 
         NowPlayingState.update(
             NowPlayingSnapshot(
                 listenerConnected = true,
                 activePackage = pkg,
                 detected = detected,
-                title = title,
-                artist = artist,
-                durationMs = duration,
+                title = titleRaw,
+                artist = artistRaw,
+                durationMs = durationRaw,
                 positionMs = rawPos,
                 positionUpdateTimeMs = snapshotUpdateTime,
                 playbackSpeed = speed,
