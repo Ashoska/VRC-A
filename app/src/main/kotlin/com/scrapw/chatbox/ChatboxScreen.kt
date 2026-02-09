@@ -371,10 +371,13 @@ private fun DrawerItem(
         modifier = Modifier.fillMaxWidth(),
         colors = NavigationDrawerItemDefaults.colors(
             selectedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
-            // ONLY CHANGE: make unselected buttons not blend into drawer background
-            unselectedContainerColor = MaterialTheme.colorScheme.surface,
+            // ✅ ONLY CHANGE: make unselected buttons clearly visible (noticeable)
+            unselectedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
             selectedIconColor = MaterialTheme.colorScheme.onSecondaryContainer,
-            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant
+            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            // ✅ also make text clearer without changing layout/logic
+            unselectedTextColor = MaterialTheme.colorScheme.onSurface,
+            selectedTextColor = MaterialTheme.colorScheme.onSecondaryContainer
         )
     )
 }
