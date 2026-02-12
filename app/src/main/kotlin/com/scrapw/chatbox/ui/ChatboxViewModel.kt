@@ -263,6 +263,9 @@ class ChatboxViewModel(
     private var cycleIndex = 0
     val cycleLines = mutableStateListOf<String>()
 
+    // ✅ NEW: preview-only cycling timer (does NOT send, does NOT start the cycle job)
+    private var lastCyclePreviewAdvanceMs: Long = 0L
+
     // =========================
     // Now Playing
     // =========================
@@ -429,6 +432,7 @@ class ChatboxViewModel(
         uiTickJob = viewModelScope.launch {
             while (true) {
                 tickNowPlayingMovement()
+                tickCyclePreviewOnly() // ✅ NEW: preview cycles even without Start
                 nowPlayingIsPlaying = computeDisplayedPlaying()
                 rebuildCombinedPreviewOnly()
                 delay(UI_TICK_MS)
@@ -471,6 +475,26 @@ class ChatboxViewModel(
                 nowPlayingIsPlaying = computeDisplayedPlaying()
                 rebuildCombinedPreviewOnly()
             }
+        }
+    }
+
+    // ✅ NEW: Cycle preview advances every 10s when enabled AND not actually running the cycle sender
+    private fun tickCyclePreviewOnly() {
+        if (!cycleEnabled) return
+        if (cycleJob != null) return // if user hit Start, the sender controls the index
+        val msgs = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(10)
+        if (msgs.isEmpty()) return
+
+        val now = System.currentTimeMillis()
+        if (lastCyclePreviewAdvanceMs == 0L) {
+            lastCyclePreviewAdvanceMs = now
+            return
+        }
+
+        val intervalMs = CYCLE_INTERVAL_SECONDS_LOCKED.toLong() * 1000L
+        if (now - lastCyclePreviewAdvanceMs >= intervalMs) {
+            cycleIndex = (cycleIndex + 1) % msgs.size
+            lastCyclePreviewAdvanceMs = now
         }
     }
 
@@ -579,6 +603,7 @@ class ChatboxViewModel(
         viewModelScope.launch { userPreferencesRepository.saveCycleEnabled(enabled) }
         rebuildCombinedPreviewOnly()
         if (!enabled) stopCycle(clearFromChatbox = true)
+        if (enabled) lastCyclePreviewAdvanceMs = 0L // ✅ reset preview timer when enabling
     }
 
     fun setSpotifyEnabledFlag(enabled: Boolean) {
@@ -793,6 +818,7 @@ class ChatboxViewModel(
         cycleJob?.cancel()
         cycleJob = null
         if (clearFromChatbox) rebuildAndMaybeSendCombined(forceSend = true, forceClearIfAllOff = true)
+        lastCyclePreviewAdvanceMs = 0L // ✅ so preview restarts clean after stopping
     }
 
     // =========================
