@@ -19,14 +19,20 @@ def ghRunAttempt = 1
 try { ghRunNumber = ghRunNumberStr.isInteger() ? ghRunNumberStr.toInteger() : 0 } catch (ignored) { ghRunNumber = 0 }
 try { ghRunAttempt = ghRunAttemptStr.isInteger() ? ghRunAttemptStr.toInteger() : 1 } catch (ignored) { ghRunAttempt = 1 }
 
-// Base version you asked for
+// ✅ Base major (you can change this manually if you ever want)
 def baseMajor = 1
-def baseMinor = 0
 
-// If running on GitHub Actions, bump automatically.
-// If building locally, keep your current values.
-def computedVersionCode = (ghRunNumber > 0) ? ghRunNumber : 4
-def computedVersionName = (ghRunNumber > 0) ? "v${baseMajor}.${baseMinor}.${ghRunNumber}" : "v1.0.3"
+// ✅ Version mapping:
+// run 279  -> v1.2.79
+// run 1000 -> v2.0.0
+// run 1279 -> v2.2.79
+def run = (ghRunNumber > 0) ? ghRunNumber : 3
+def major = baseMajor + (run / 1000).toInteger()
+def minor = ((run % 1000) / 100).toInteger()
+def patch = (run % 100).toInteger()
+
+def computedVersionCode = run
+def computedVersionName = "v${major}.${minor}.${patch}"
 
 android {
     namespace 'com.scrapw.chatbox'
@@ -37,7 +43,7 @@ android {
         minSdk 26
         targetSdk 34
 
-        // ✅ Now increases automatically per workflow run
+        // ✅ CI: auto bumps; local: uses fallback run above
         versionCode computedVersionCode
         versionName computedVersionName
 
