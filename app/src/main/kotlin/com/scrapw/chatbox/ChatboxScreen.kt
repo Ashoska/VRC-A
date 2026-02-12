@@ -54,7 +54,6 @@ import androidx.compose.material.icons.filled.Power
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Wifi
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CardDefaults
@@ -487,11 +486,15 @@ private fun HomePage(
             title = "VRChat Preview",
             subtitle = "Exactly what will appear in your chatbox.",
             actions = {
-                AssistChip(
-                    onClick = { onOpenSettings() },
-                    label = { Text("Setup") },
-                    leadingIcon = { Icon(Icons.Filled.Settings, contentDescription = null) }
-                )
+                Button(
+                    onClick = {
+                        vm.startAfkSender()
+                        vm.startCycle()
+                        vm.startNowPlayingSender()
+                    }
+                ) {
+                    Text("Start")
+                }
                 Button(
                     onClick = { vm.killStopAndClear() },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
