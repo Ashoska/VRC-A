@@ -2,14 +2,32 @@
 package com.scrapw.chatbox.data
 
 import android.content.Context
-import androidx.datastore.preferences.core.*
-import androidx.datastore.preferences.preferencesDataStore
-import kotlinx.coroutines.flow.*
+import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
+import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.edit
+import com.scrapw.chatbox.dataStore
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import java.time.Instant
 
-private val Context.dataStore by preferencesDataStore(name = "vrca_prefs")
-
+/**
+ * IMPORTANT FIX:
+ * Do NOT create another preferencesDataStore() here.
+ * This repo must use the ONE global Context.dataStore defined in com.scrapw.chatbox (your dataStore extension),
+ * otherwise Android will crash with:
+ * "multiple DataStores active for the same file ... vrca_prefs.preferences_pb"
+ */
 class UserPreferencesRepository(private val context: Context) {
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     // =========================
     // Keys
@@ -215,7 +233,7 @@ class UserPreferencesRepository(private val context: Context) {
                 acceptedVer >= currentVersion
             }
             .stateIn(
-                scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default),
+                scope = scope,
                 started = SharingStarted.Eagerly,
                 initialValue = false
             )
