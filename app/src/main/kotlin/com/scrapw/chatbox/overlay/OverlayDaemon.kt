@@ -13,54 +13,66 @@ import androidx.activity.result.ActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.res.stringResource
 import com.scrapw.chatbox.R
 import com.scrapw.chatbox.data.SettingsStates
 
+/**
+ * ✅ Safe overlay daemon:
+ * - No starting/stopping services directly inside the composable body (prevents crashy recomposition loops)
+ * - Requests overlay permission only when overlay toggle is ON
+ * - Automatically disables overlay toggle if permission is missing/denied
+ */
 @Composable
 fun OverlayDaemon(context: Context) {
-    val state = SettingsStates.overlayState()
-    val firstTime = remember { mutableStateOf(true) }
+    // Use app context for starting/stopping services (safer than Activity context)
+    val appCtx = context.applicationContext
 
-    if (firstTime.value && !Settings.canDrawOverlays(context)) {
-        Log.d("Service", "No permission at start up, cancel.")
-        state.value = false
-    } else {
-        if (state.value) {
-            StartOverlay(context)
-        } else {
-            StopOverlay(context)
-        }
-    }
+    val overlayEnabledState = SettingsStates.overlayState()
 
-    LaunchedEffect(Unit) {
-        firstTime.value = false
-    }
-}
-
-@Composable
-private fun StartOverlay(context: Context) {
-    Log.d("Service", "startOverlay")
-    val state = SettingsStates.overlayState()
-
-    val startForResult =
-        rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { _ ->
-            if (Settings.canDrawOverlays(context)) {
-                Log.d("Overlay Permission", "Permission granted")
-                startOverlayService(context)
+    // Permission launcher (only used if user enabled overlay)
+    val permissionLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { _: ActivityResult ->
+            val granted = Settings.canDrawOverlays(context)
+            if (granted) {
+                Log.d("OverlayDaemon", "Overlay permission granted")
+                // Start happens via LaunchedEffect below
             } else {
-                Log.d("Overlay Permission", "Permission denied")
-                state.value = false
+                Log.d("OverlayDaemon", "Overlay permission denied -> disabling overlay toggle")
+                overlayEnabledState.value = false
             }
         }
 
-    if (Settings.canDrawOverlays(context)) {
-        startOverlayService(context)
-    } else {
-        Log.d("Service", "Can't draw Overlays!")
-        CheckOverlayPermission(context, startForResult)
+    // If permission is missing at any time, force toggle off (prevents boot crash + inconsistent state)
+    LaunchedEffect(Unit) {
+        if (!Settings.canDrawOverlays(context) && overlayEnabledState.value) {
+            overlayEnabledState.value = false
+        }
+    }
+
+    // If user turns overlay ON but permission is missing, request it once.
+    LaunchedEffect(overlayEnabledState.value) {
+        val wantsOverlay = overlayEnabledState.value
+        val hasPermission = Settings.canDrawOverlays(context)
+
+        if (wantsOverlay && !hasPermission) {
+            requestOverlayPermission(context, permissionLauncher)
+        }
+    }
+
+    // Start/Stop overlay service ONLY as a side-effect, not during composition.
+    LaunchedEffect(overlayEnabledState.value) {
+        val wantsOverlay = overlayEnabledState.value
+        val hasPermission = Settings.canDrawOverlays(context)
+
+        if (wantsOverlay && hasPermission) {
+            Log.d("OverlayDaemon", "Starting overlay service")
+            startOverlayService(appCtx)
+        } else {
+            Log.d("OverlayDaemon", "Stopping overlay service")
+            stopOverlayService(appCtx)
+        }
     }
 }
 
@@ -73,32 +85,25 @@ private fun startOverlayService(context: Context) {
     }
 }
 
-@Composable
-private fun StopOverlay(context: Context) {
-    Log.d("Service", "stopOverlay")
+private fun stopOverlayService(context: Context) {
     context.stopService(Intent(context, OverlayService::class.java))
 }
 
 @Composable
-private fun CheckOverlayPermission(
+private fun requestOverlayPermission(
     context: Context,
-    result: ManagedActivityResultLauncher<Intent, ActivityResult>
+    launcher: ManagedActivityResultLauncher<Intent, ActivityResult>
 ) {
-    if (!Settings.canDrawOverlays(context)) {
+    val toastText = stringResource(R.string.overlay_permission_request)
+
+    // Only launch once per composition trigger (the LaunchedEffect in OverlayDaemon controls repeats)
+    LaunchedEffect(Unit) {
+        Toast.makeText(context, toastText, Toast.LENGTH_LONG).show()
+
         val intent = Intent(
             Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
             Uri.parse("package:${context.packageName}")
         )
-
-        val toast = Toast.makeText(
-            context,
-            stringResource(R.string.overlay_permission_request),
-            Toast.LENGTH_LONG
-        )
-
-        LaunchedEffect(Unit) {
-            toast.show()
-            result.launch(intent)
-        }
+        launcher.launch(intent)
     }
 }
