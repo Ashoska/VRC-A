@@ -35,7 +35,6 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           set -e
-
           if [ -z "$KEYSTORE_B64" ]; then
             echo "No signing secrets found. Release will be unsigned."
             exit 0
@@ -52,22 +51,40 @@ jobs:
 
           echo "Signing files created."
 
-      # ✅ Build ONLY the PUBLIC variant (no admin)
+      # ✅ Build ONLY the variants we care about (separately)
       - name: Build Public Debug APK
         run: ./gradlew :app:assemblePublicAppDebug
 
       - name: Build Public Release APK
         run: ./gradlew :app:assemblePublicAppRelease
 
-      # ✅ Upload ONLY public apks as two separate artifacts (like your screenshot)
+      - name: Build Admin Debug APK
+        run: ./gradlew :app:assembleAdminAppDebug
+
+      - name: Build Admin Release APK
+        run: ./gradlew :app:assembleAdminAppRelease
+
+      # ✅ Upload each APK as its own artifact so you can't install the wrong one
       - name: Upload Public Debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
+          name: public-debug
           path: app/build/outputs/apk/publicApp/debug/*.apk
 
       - name: Upload Public Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-release
+          name: public-release
           path: app/build/outputs/apk/publicApp/release/*.apk
+
+      - name: Upload Admin Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: admin-debug
+          path: app/build/outputs/apk/adminApp/debug/*.apk
+
+      - name: Upload Admin Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: admin-release
+          path: app/build/outputs/apk/adminApp/release/*.apk
