@@ -3,7 +3,7 @@ plugins {
     id 'org.jetbrains.kotlin.android'
     id 'com.mikepenz.aboutlibraries.plugin'
 
-    // Firebase (safe to leave even if you haven't wired deps yet)
+    // Firebase / Google Services
     id 'com.google.gms.google-services'
 }
 
@@ -16,22 +16,14 @@ if (keystorePropertiesFile.exists()) {
 
 // =========================
 // ✅ Auto versioning (GitHub Actions)
-// Goal:
-// - run 279  -> v1.2.79
-// - run 300  -> v1.2.100  (NO rollover to 1.3.0)
 // =========================
 def ghRunNumberStr = System.getenv("GITHUB_RUN_NUMBER") ?: ""
 def ghRunNumber = 0
 try { ghRunNumber = ghRunNumberStr.isInteger() ? ghRunNumberStr.toInteger() : 0 } catch (ignored) { ghRunNumber = 0 }
 
-// Set your “series”
 def baseMajor = 1
 def baseMinor = 2
-
-// This makes run 200 become v1.2.0, run 279 become v1.2.79, run 300 become v1.2.100
 def baseRunOffset = 200
-
-// Local fallback so local builds show the version you expect
 def localFallbackRun = 279
 
 def run = (ghRunNumber > 0) ? ghRunNumber : localFallbackRun
@@ -45,9 +37,8 @@ android {
     compileSdk 34
 
     defaultConfig {
-        // ✅ Base app id (public build)
+        // default = PUBLIC id; admin flavor overrides
         applicationId "com.scrapw.chatbox"
-
         minSdk 26
         targetSdk 34
 
@@ -58,20 +49,19 @@ android {
         vectorDrawables { useSupportLibrary true }
     }
 
-    // ✅ THIS is what creates assembleAdminAppDebug / assemblePublicAppDebug
-    flavorDimensions "app"
+    // ✅ REQUIRED: flavors so Gradle creates adminApp/publicApp tasks
+    flavorDimensions += "app"
     productFlavors {
         publicApp {
             dimension "app"
-            // uses defaultConfig applicationId
+            // Uses default applicationId com.scrapw.chatbox
+            buildConfigField "boolean", "IS_ADMIN_BUILD", "false"
             resValue "string", "app_name", "VRC-A"
         }
-
         adminApp {
             dimension "app"
-            // ✅ results in: com.scrapw.chatbox.admin
-            applicationIdSuffix ".admin"
-            versionNameSuffix "-admin"
+            applicationId "com.scrapw.chatbox.admin"
+            buildConfigField "boolean", "IS_ADMIN_BUILD", "true"
             resValue "string", "app_name", "VRC-A Admin"
         }
     }
@@ -93,9 +83,7 @@ android {
     }
 
     buildTypes {
-        debug {
-            // keep default
-        }
+        debug { }
 
         release {
             minifyEnabled true
@@ -150,7 +138,10 @@ dependencies {
     implementation 'androidx.compose.material3:material3'
 
     implementation "androidx.compose.material:material-icons-extended:1.6.1"
+
+    // ✅ DataStore (fixes SettingsStates.kt errors)
     implementation "androidx.datastore:datastore-preferences:1.0.0"
+
     implementation "androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0"
     implementation 'androidx.navigation:navigation-runtime-ktx:2.7.7'
     implementation 'androidx.navigation:navigation-compose:2.7.7'
@@ -166,7 +157,10 @@ dependencies {
     implementation "com.mikepenz:aboutlibraries-core:${latestAboutLibsRelease}"
     implementation "com.mikepenz:aboutlibraries-compose-m3:${latestAboutLibsRelease}"
 
-    // (Firebase deps come later — don’t add until we’re ready)
+    // ✅ Firebase (fixes unresolved reference firebase/FirebaseAuth/Firestore/Timestamp)
+    implementation platform("com.google.firebase:firebase-bom:33.1.2")
+    implementation "com.google.firebase:firebase-auth-ktx"
+    implementation "com.google.firebase:firebase-firestore-ktx"
 
     testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test.ext:junit:1.1.5'
