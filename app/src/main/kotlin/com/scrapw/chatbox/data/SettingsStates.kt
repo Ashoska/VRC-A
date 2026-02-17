@@ -1,11 +1,14 @@
 package com.scrapw.chatbox.data
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.stringPreferencesKey
 import com.alorma.compose.settings.storage.datastore.GenericPreferenceDataStoreSettingValueState
 import com.alorma.compose.settings.storage.datastore.rememberPreferenceDataStoreBooleanSettingState
 import com.alorma.compose.settings.storage.datastore.rememberPreferenceDataStoreIntSettingState
-import com.alorma.compose.settings.storage.datastore.rememberPreferenceDataStoreStringSettingState
 import com.scrapw.chatbox.dataStore
 
 object SettingsStates {
@@ -133,6 +136,28 @@ object SettingsStates {
             key = "button_haptic",
             defaultValue = true,
             dataStore = LocalContext.current.dataStore
+        )
+    }
+}
+
+/**
+ * ✅ COMPAT HELPER:
+ * Your Alorma datastore version doesn't ship rememberPreferenceDataStoreStringSettingState,
+ * so we implement it ourselves using the generic state type.
+ */
+@Composable
+private fun rememberPreferenceDataStoreStringSettingState(
+    key: String,
+    defaultValue: String,
+    dataStore: DataStore<Preferences>
+): GenericPreferenceDataStoreSettingValueState<String> {
+    val prefKey = remember(key) { stringPreferencesKey(key) }
+    return remember(key, defaultValue, dataStore) {
+        // This constructor exists in the Alorma datastore state type
+        GenericPreferenceDataStoreSettingValueState(
+            key = prefKey,
+            defaultValue = defaultValue,
+            dataStore = dataStore
         )
     }
 }
