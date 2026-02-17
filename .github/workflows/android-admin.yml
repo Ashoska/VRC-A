@@ -1,0 +1,87 @@
+name: Android CI (ADMIN)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build_admin:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Gradle cache
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      # ✅ Admin-only google-services.json from secret (never committed)
+      - name: Create google-services.json (ADMIN)
+        shell: bash
+        env:
+          GOOGLE_SERVICES_JSON_ADMIN_B64: ${{ secrets.GOOGLE_SERVICES_JSON_ADMIN_B64 }}
+        run: |
+          set -e
+          if [ -z "$GOOGLE_SERVICES_JSON_ADMIN_B64" ]; then
+            echo "Missing secret: GOOGLE_SERVICES_JSON_ADMIN_B64"
+            exit 1
+          fi
+          mkdir -p app
+          echo "$GOOGLE_SERVICES_JSON_ADMIN_B64" | base64 -d > app/google-services.json
+          echo "google-services.json created for admin build."
+
+      # Create signing files ONLY if secrets exist (same behavior as your main workflow)
+      - name: Create signing files (if secrets set)
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -e
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "No signing secrets found. Release will be unsigned."
+            exit 0
+          fi
+
+          echo "$KEYSTORE_B64" | base64 -d > release.keystore
+
+          cat > keystore.properties <<EOF
+          storeFile=release.keystore
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
+
+          echo "Signing files created."
+
+      # ✅ Build ADMIN if flavors exist; otherwise build normal (so this workflow won't break yet)
+      - name: Build Admin APK (fallback-safe)
+        shell: bash
+        run: |
+          set -e
+          if ./gradlew :app:tasks --all | grep -q "assembleAdminDebug"; then
+            echo "Admin flavor detected — building admin debug + release"
+            ./gradlew :app:assembleAdminDebug
+            ./gradlew :app:assembleAdminRelease
+          else
+            echo "Admin flavor NOT detected yet — building standard debug + release (temporary fallback)"
+            ./gradlew :app:assembleDebug
+            ./gradlew :app:assembleRelease
+          fi
+
+      - name: Upload Admin APK(s)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-admin
+          path: |
+            app/build/outputs/apk/**/**/*.apk
