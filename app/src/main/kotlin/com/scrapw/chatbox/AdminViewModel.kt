@@ -1,9 +1,6 @@
-// app/src/main/kotlin/com/scrapw/chatbox/ui/admin/AdminViewModel.kt
-package com.scrapw.chatbox.ui.admin
+package com.scrapw.chatbox
 
-import android.util.Log
 import androidx.lifecycle.ViewModel
-import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
@@ -11,190 +8,130 @@ import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
-import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.tasks.await
 
-enum class AdminAction { Warn, Ban, Note }
+data class AdminUser(
+    val uid: String,
+    val email: String
+)
 
-data class AdminUiState(
-    val isSignedIn: Boolean = false,
-    val signedInAs: String = "(not signed in)",
-    val error: String = "",
-    val lastWriteStatus: String = "",
-    val cleanupStatus: String = ""
+data class Punishment(
+    val id: String,
+    val targetUserId: String,
+    val type: String, // "warn" or "ban"
+    val reason: String,
+    val createdAt: Timestamp,
+    val active: Boolean
 )
 
 class AdminViewModel : ViewModel() {
 
-    companion object {
-        val Factory: ViewModelProvider.Factory = object : ViewModelProvider.Factory {
-            override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                @Suppress("UNCHECKED_CAST")
-                return AdminViewModel() as T
-            }
-        }
-    }
+    private val auth: FirebaseAuth = FirebaseAuth.getInstance()
+    private val db: FirebaseFirestore = FirebaseFirestore.getInstance()
 
-    private val auth = FirebaseAuth.getInstance()
-    private val db = FirebaseFirestore.getInstance()
+    private val _error = MutableStateFlow<String?>(null)
+    val error: StateFlow<String?> = _error
 
-    private val _ui = MutableStateFlow(AdminUiState())
-    val ui: StateFlow<AdminUiState> = _ui
+    private val _adminUser = MutableStateFlow<AdminUser?>(null)
+    val adminUser: StateFlow<AdminUser?> = _adminUser
 
-    init {
-        val user = auth.currentUser
-        _ui.value = _ui.value.copy(
-            isSignedIn = user != null,
-            signedInAs = user?.email ?: "(not signed in)"
-        )
-    }
+    private val _loading = MutableStateFlow(false)
+    val loading: StateFlow<Boolean> = _loading
+
+    private val _punishments = MutableStateFlow<List<Punishment>>(emptyList())
+    val punishments: StateFlow<List<Punishment>> = _punishments
 
     fun signIn(email: String, password: String) {
-        _ui.value = _ui.value.copy(error = "", lastWriteStatus = "", cleanupStatus = "")
-        auth.signInWithEmailAndPassword(email, password)
-            .addOnSuccessListener {
-                val u = auth.currentUser
-                _ui.value = _ui.value.copy(
-                    isSignedIn = true,
-                    signedInAs = u?.email ?: "(signed in)",
-                    error = ""
-                )
+        _error.value = null
+        viewModelScope.launch {
+            _loading.value = true
+            try {
+                val result = auth.signInWithEmailAndPassword(email.trim(), password).await()
+                val user = result.user
+                if (user == null) {
+                    _adminUser.value = null
+                    _error.value = "Login failed."
+                } else {
+                    _adminUser.value = AdminUser(uid = user.uid, email = user.email ?: email.trim())
+                    loadLatestPunishments()
+                }
+            } catch (e: Exception) {
+                _error.value = e.message ?: "Login error"
+            } finally {
+                _loading.value = false
             }
-            .addOnFailureListener { e ->
-                _ui.value = _ui.value.copy(error = e.message ?: "Sign-in failed")
-            }
+        }
     }
 
     fun signOut() {
         auth.signOut()
-        _ui.value = _ui.value.copy(
-            isSignedIn = false,
-            signedInAs = "(not signed in)",
-            error = "",
-            lastWriteStatus = "",
-            cleanupStatus = ""
-        )
+        _adminUser.value = null
+        _punishments.value = emptyList()
+    }
+
+    fun loadLatestPunishments(limit: Long = 50) {
+        _error.value = null
+        viewModelScope.launch {
+            _loading.value = true
+            try {
+                val snap = db.collection("punishments")
+                    .orderBy("createdAt", com.google.firebase.firestore.Query.Direction.DESCENDING)
+                    .limit(limit)
+                    .get()
+                    .await()
+
+                val list = snap.documents.mapNotNull { d ->
+                    val targetUserId = d.getString("targetUserId") ?: return@mapNotNull null
+                    val type = d.getString("type") ?: return@mapNotNull null
+                    val reason = d.getString("reason") ?: ""
+                    val createdAt = d.getTimestamp("createdAt") ?: Timestamp.now()
+                    val active = d.getBoolean("active") ?: true
+
+                    Punishment(
+                        id = d.id,
+                        targetUserId = targetUserId,
+                        type = type,
+                        reason = reason,
+                        createdAt = createdAt,
+                        active = active
+                    )
+                }
+
+                _punishments.value = list
+            } catch (e: Exception) {
+                _error.value = e.message ?: "Failed to load punishments"
+            } finally {
+                _loading.value = false
+            }
+        }
     }
 
     /**
-     * Firestore layout:
-     * - punishments/{punishmentId}
-     *   fields: targetUser, action, reason, createdAt, status(active/cleared), clearedAt?
-     * - evidence/{evidenceId}
-     *   fields: targetUser, punishmentId, message, createdAt, expiresAt? (Timestamp or null)
+     * Your rule:
+     * - keep offending messages only
+     * - warn/ban evidence can be permanent until cleared
      *
-     * Retention rule:
-     * - If action is Warn/Ban: evidence.expiresAt = null (kept until case cleared)
-     * - If action is Note: evidence.expiresAt = now + 90 days
-     * - When you later implement "clear punishment": set evidence.expiresAt = now + 90 days
+     * For now we store punishment records; evidence linking comes next step.
      */
-    fun createPunishment(
-        targetUser: String,
-        action: AdminAction,
-        reason: String,
-        evidenceLines: List<String>
-    ) {
-        if (auth.currentUser == null) {
-            _ui.value = _ui.value.copy(error = "You must sign in first.")
-            return
+    fun createPunishment(targetUserId: String, type: String, reason: String) {
+        _error.value = null
+        viewModelScope.launch {
+            _loading.value = true
+            try {
+                val doc = hashMapOf(
+                    "targetUserId" to targetUserId.trim(),
+                    "type" to type.trim(),
+                    "reason" to reason.trim(),
+                    "createdAt" to Timestamp.now(),
+                    "active" to true
+                )
+                db.collection("punishments").add(doc).await()
+                loadLatestPunishments()
+            } catch (e: Exception) {
+                _error.value = e.message ?: "Failed to create punishment"
+            } finally {
+                _loading.value = false
+            }
         }
-
-        _ui.value = _ui.value.copy(error = "", lastWriteStatus = "", cleanupStatus = "")
-
-        val createdAt = Timestamp.now()
-
-        val punishRef = db.collection("punishments").document()
-        val punishmentId = punishRef.id
-
-        val punishmentDoc = hashMapOf(
-            "punishmentId" to punishmentId,
-            "targetUser" to targetUser,
-            "action" to action.name,
-            "reason" to reason,
-            "status" to "active",
-            "createdAt" to createdAt,
-            "createdBy" to (auth.currentUser?.uid ?: "")
-        )
-
-        punishRef.set(punishmentDoc)
-            .addOnSuccessListener {
-                if (evidenceLines.isEmpty()) {
-                    _ui.value = _ui.value.copy(lastWriteStatus = "Punishment created (no evidence attached).")
-                    return@addOnSuccessListener
-                }
-
-                val batch = db.batch()
-
-                val expiresAt: Timestamp? = when (action) {
-                    AdminAction.Warn, AdminAction.Ban -> null
-                    AdminAction.Note -> Timestamp(
-                        java.util.Date(System.currentTimeMillis() + TimeUnit.DAYS.toMillis(90))
-                    )
-                }
-
-                evidenceLines.forEach { msg ->
-                    val evRef = db.collection("evidence").document()
-                    val evDoc = hashMapOf(
-                        "evidenceId" to evRef.id,
-                        "targetUser" to targetUser,
-                        "punishmentId" to punishmentId,
-                        "message" to msg,
-                        "createdAt" to createdAt,
-                        "expiresAt" to expiresAt, // null means "keep until cleared"
-                        "createdBy" to (auth.currentUser?.uid ?: "")
-                    )
-                    batch.set(evRef, evDoc)
-                }
-
-                batch.commit()
-                    .addOnSuccessListener {
-                        _ui.value = _ui.value.copy(lastWriteStatus = "Punishment + ${evidenceLines.size} evidence line(s) saved.")
-                    }
-                    .addOnFailureListener { e ->
-                        _ui.value = _ui.value.copy(error = e.message ?: "Failed to write evidence")
-                    }
-            }
-            .addOnFailureListener { e ->
-                _ui.value = _ui.value.copy(error = e.message ?: "Failed to create punishment")
-            }
-    }
-
-    /**
-     * Deletes evidence where expiresAt < now.
-     * (Evidence with expiresAt == null is kept.)
-     */
-    fun runEvidenceCleanup() {
-        if (auth.currentUser == null) {
-            _ui.value = _ui.value.copy(error = "You must sign in first.")
-            return
-        }
-
-        _ui.value = _ui.value.copy(error = "", cleanupStatus = "Running cleanup...")
-
-        val now = Timestamp.now()
-
-        db.collection("evidence")
-            .whereLessThan("expiresAt", now)
-            .get()
-            .addOnSuccessListener { snap ->
-                if (snap.isEmpty) {
-                    _ui.value = _ui.value.copy(cleanupStatus = "No expired evidence found.")
-                    return@addOnSuccessListener
-                }
-
-                val batch = db.batch()
-                snap.documents.forEach { d -> batch.delete(d.reference) }
-
-                batch.commit()
-                    .addOnSuccessListener {
-                        _ui.value = _ui.value.copy(cleanupStatus = "Deleted ${snap.size()} expired evidence docs.")
-                    }
-                    .addOnFailureListener { e ->
-                        _ui.value = _ui.value.copy(error = e.message ?: "Cleanup failed")
-                    }
-            }
-            .addOnFailureListener { e ->
-                Log.e("AdminCleanup", "query failed", e)
-                _ui.value = _ui.value.copy(error = e.message ?: "Cleanup query failed")
-            }
     }
 }
