@@ -5,19 +5,17 @@ import android.content.Context
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -29,26 +27,32 @@ import com.scrapw.chatbox.ui.ChatboxViewModel
 @Composable
 fun ChatboxApp() {
     val ctx = LocalContext.current
-    val prefs = remember { ctx.getSharedPreferences(ChatboxApplication.CRASH_PREFS_FILE, Context.MODE_PRIVATE) }
-    val crashText = remember {
-        // read once at composition start; if user presses "Clear", we simply proceed
-        prefs.getString(ChatboxApplication.CRASH_KEY_TEXT, null)
+
+    val crashPrefs = remember {
+        ctx.getSharedPreferences(ChatboxApplication.CRASH_PREFS_FILE, Context.MODE_PRIVATE)
     }
 
-    if (!crashText.isNullOrBlank()) {
+    val lastCrashText = remember {
+        crashPrefs.getString(ChatboxApplication.CRASH_KEY_TEXT, "") ?: ""
+    }
+
+    val showAppState = remember { mutableStateOf(lastCrashText.isBlank()) }
+
+    if (!showAppState.value) {
         CrashScreen(
-            crashText = crashText,
-            onClearAndContinue = {
-                prefs.edit().remove(ChatboxApplication.CRASH_KEY_TEXT).apply()
-                // After clearing, the next recomposition will run the normal UI.
-                // Easiest way: just rely on process restart, but we can also recompose by no-op:
-                // (User will press "Continue" and it will render normal UI immediately)
+            crashText = lastCrashText,
+            onClear = {
+                crashPrefs.edit().remove(ChatboxApplication.CRASH_KEY_TEXT).commit()
+            },
+            onContinue = {
+                // Clear then try booting
+                crashPrefs.edit().remove(ChatboxApplication.CRASH_KEY_TEXT).commit()
+                showAppState.value = true
             }
         )
         return
     }
 
-    // Normal app
     val vm: ChatboxViewModel = viewModel(factory = ChatboxViewModel.Factory)
     ChatboxScreen(chatboxViewModel = vm)
 }
@@ -56,55 +60,53 @@ fun ChatboxApp() {
 @Composable
 private fun CrashScreen(
     crashText: String,
-    onClearAndContinue: () -> Unit
+    onClear: () -> Unit,
+    onContinue: () -> Unit
 ) {
-    val scroll = rememberScrollState()
-
     Surface {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .verticalScroll(scroll)
+                .verticalScroll(rememberScrollState())
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text(
-                text = "VRC-A crashed last time",
-                style = MaterialTheme.typography.headlineSmall
-            )
+            Text("VRC-A crashed on last launch", style = MaterialTheme.typography.headlineSmall)
 
             Text(
-                text = "Send this log to debug the crash. You can clear it and continue.",
-                style = MaterialTheme.typography.bodyMedium,
+                "Build: ${BuildConfig.APPLICATION_ID}\n" +
+                    "Version: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})\n" +
+                    "Admin: ${BuildConfig.IS_ADMIN_BUILD}",
+                style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                modifier = Modifier.heightIn(min = 140.dp)
-            ) {
-                SelectionContainer {
+            ElevatedCard {
+                Column(
+                    Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     Text(
-                        text = crashText,
-                        modifier = Modifier.padding(12.dp),
+                        crashText.ifBlank { "(no crash text saved)" },
                         fontFamily = FontFamily.Monospace,
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
             }
 
-            Button(
-                onClick = onClearAndContinue,
-                modifier = Modifier.fillMaxSize().let { Modifier } // keep stable; no full-width requirement
-            ) {
-                Text("Clear crash log & continue")
+            Button(onClick = onContinue, modifier = Modifier.fillMaxSize().padding(top = 4.dp)) {
+                Text("Clear crash + Try boot")
             }
 
-            OutlinedButton(
-                onClick = { /* leave log on screen */ }
-            ) {
-                Text("Keep log (don’t clear)")
+            OutlinedButton(onClick = onClear) {
+                Text("Clear crash log only")
             }
+
+            Text(
+                "If this screen shows “no crash text saved”, the process is dying before the handler can write the log (native crash or very-early crash).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
