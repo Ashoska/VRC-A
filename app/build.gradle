@@ -1,9 +1,10 @@
+// app/build.gradle
 plugins {
     id 'com.android.application'
     id 'org.jetbrains.kotlin.android'
     id 'com.mikepenz.aboutlibraries.plugin'
 
-    // Firebase
+    // Firebase (safe to leave even if you haven't wired deps yet)
     id 'com.google.gms.google-services'
 }
 
@@ -18,16 +19,20 @@ if (keystorePropertiesFile.exists()) {
 // ✅ Auto versioning (GitHub Actions)
 // Goal:
 // - run 279  -> v1.2.79
-// - run 300  -> v1.2.100  (NO rollover)
+// - run 300  -> v1.2.100  (NO rollover to 1.3.0)
 // =========================
 def ghRunNumberStr = System.getenv("GITHUB_RUN_NUMBER") ?: ""
 def ghRunNumber = 0
 try { ghRunNumber = ghRunNumberStr.isInteger() ? ghRunNumberStr.toInteger() : 0 } catch (ignored) { ghRunNumber = 0 }
 
-// Version series
+// Set your “series”
 def baseMajor = 1
 def baseMinor = 2
+
+// This makes run 200 become v1.2.0, run 279 become v1.2.79, run 300 become v1.2.100
 def baseRunOffset = 200
+
+// Local fallback so local builds show the version you expect
 def localFallbackRun = 279
 
 def run = (ghRunNumber > 0) ? ghRunNumber : localFallbackRun
@@ -41,6 +46,7 @@ android {
     compileSdk 34
 
     defaultConfig {
+        // Public flavor uses this; admin flavor overrides with suffix below
         applicationId "com.scrapw.chatbox"
         minSdk 26
         targetSdk 34
@@ -52,21 +58,16 @@ android {
         vectorDrawables { useSupportLibrary true }
     }
 
-    // ✅ Flavors: public + admin (separate install)
-    flavorDimensions "app"
-
+    // ✅ Separate workflow: build flavors (public/admin) with different applicationIds
+    flavorDimensions "tier"
     productFlavors {
-        publicApp {
-            dimension "app"
-            applicationId "com.scrapw.chatbox"
-            resValue "string", "app_name", "VRC-A"
+        public {
+            dimension "tier"
             buildConfigField "boolean", "IS_ADMIN_BUILD", "false"
         }
-
-        adminApp {
-            dimension "app"
-            applicationId "com.scrapw.chatbox.admin"
-            resValue "string", "app_name", "VRC-A Admin"
+        admin {
+            dimension "tier"
+            applicationIdSuffix ".admin" // => com.scrapw.chatbox.admin
             buildConfigField "boolean", "IS_ADMIN_BUILD", "true"
         }
     }
@@ -161,7 +162,7 @@ dependencies {
     implementation "com.mikepenz:aboutlibraries-core:${latestAboutLibsRelease}"
     implementation "com.mikepenz:aboutlibraries-compose-m3:${latestAboutLibsRelease}"
 
-    // Firebase deps come next step
+    // (Firebase deps come later — don’t add until we’re ready)
 
     testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test.ext:junit:1.1.5'
