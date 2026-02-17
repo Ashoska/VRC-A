@@ -1,51 +1,61 @@
-// app/src/main/kotlin/com/scrapw/chatbox/ui/admin/AdminScreen.kt
-package com.scrapw.chatbox.ui.admin
+package com.scrapw.chatbox
 
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Divider
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
 
 @Composable
-fun AdminScreen(
-    vm: AdminViewModel = viewModel(factory = AdminViewModel.Factory)
-) {
-    val state by vm.ui.collectAsState()
+fun AdminScreen(vm: AdminViewModel) {
+    val loading by vm.loading.collectAsState()
+    val err by vm.error.collectAsState()
+    val adminUser by vm.adminUser.collectAsState()
+    val punishments by vm.punishments.collectAsState()
 
     var email by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
+    var pass by remember { mutableStateOf("") }
 
     var targetUserId by remember { mutableStateOf("") }
-    var action by remember { mutableStateOf(AdminAction.Warn) }
     var reason by remember { mutableStateOf("") }
-
-    // evidence: only offending messages
-    var evidenceText by remember { mutableStateOf("") }
-
-    val scroll = rememberScrollState()
+    var type by remember { mutableStateOf("warn") } // "warn" or "ban"
 
     Column(
-        Modifier
-            .fillMaxSize()
-            .verticalScroll(scroll)
-            .padding(14.dp),
+        modifier = Modifier.padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        ElevatedCard {
-            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Admin Auth", style = MaterialTheme.typography.titleMedium)
+        Text("Admin Panel")
 
-                Text(
-                    "Signed in: ${state.signedInAs}",
-                    style = MaterialTheme.typography.bodySmall
-                )
+        if (loading) {
+            CircularProgressIndicator()
+        }
 
-                if (!state.isSignedIn) {
+        if (err != null) {
+            Text("Error: $err")
+        }
+
+        if (adminUser == null) {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Sign in (Firebase Auth)")
+
                     OutlinedTextField(
                         value = email,
                         onValueChange = { email = it },
@@ -54,62 +64,54 @@ fun AdminScreen(
                         singleLine = true
                     )
                     OutlinedTextField(
-                        value = password,
-                        onValueChange = { password = it },
+                        value = pass,
+                        onValueChange = { pass = it },
                         modifier = Modifier.fillMaxWidth(),
                         label = { Text("Password") },
                         singleLine = true
                     )
 
                     Button(
-                        onClick = { vm.signIn(email.trim(), password) },
+                        onClick = { vm.signIn(email, pass) },
                         modifier = Modifier.fillMaxWidth()
-                    ) { Text("Sign in") }
-                } else {
-                    OutlinedButton(
-                        onClick = { vm.signOut() },
-                        modifier = Modifier.fillMaxWidth()
-                    ) { Text("Sign out") }
+                    ) {
+                        Text("Login")
+                    }
                 }
+            }
+            return
+        }
 
-                if (state.error.isNotBlank()) {
-                    Text(state.error, color = MaterialTheme.colorScheme.error)
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Logged in: ${adminUser!!.email}")
+
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(onClick = { vm.loadLatestPunishments() }, modifier = Modifier.weight(1f)) {
+                        Text("Refresh")
+                    }
+                    TextButton(onClick = { vm.signOut() }, modifier = Modifier.weight(1f)) {
+                        Text("Sign out")
+                    }
                 }
             }
         }
 
-        ElevatedCard {
-            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Create Punishment", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    "Only store offending messages. Warn/Ban evidence remains until cleared, then expires after 90 days.",
-                    style = MaterialTheme.typography.bodySmall
-                )
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Create punishment")
 
                 OutlinedTextField(
                     value = targetUserId,
                     onValueChange = { targetUserId = it },
                     modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Target user ID (VRChat user id / name)") },
+                    label = { Text("Target user id") },
                     singleLine = true
                 )
 
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    FilterChip(
-                        selected = action == AdminAction.Warn,
-                        onClick = { action = AdminAction.Warn },
-                        label = { Text("Warn") }
-                    )
-                    FilterChip(
-                        selected = action == AdminAction.Ban,
-                        onClick = { action = AdminAction.Ban },
-                        label = { Text("Ban") }
-                    )
-                    FilterChip(
-                        selected = action == AdminAction.Note,
-                        onClick = { action = AdminAction.Note },
-                        label = { Text("Note") }
-                    )
+                    Button(onClick = { type = "warn" }, modifier = Modifier.weight(1f)) { Text("Warn") }
+                    Button(onClick = { type = "ban" }, modifier = Modifier.weight(1f)) { Text("Ban") }
                 }
 
                 OutlinedTextField(
@@ -119,51 +121,29 @@ fun AdminScreen(
                     label = { Text("Reason") }
                 )
 
-                OutlinedTextField(
-                    value = evidenceText,
-                    onValueChange = { evidenceText = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    minLines = 4,
-                    label = { Text("Offending message(s) evidence (one per line)") }
-                )
-
                 Button(
-                    onClick = {
-                        vm.createPunishment(
-                            targetUser = targetUserId.trim(),
-                            action = action,
-                            reason = reason.trim(),
-                            evidenceLines = evidenceText.lines().map { it.trim() }.filter { it.isNotBlank() }
-                        )
-                        evidenceText = ""
-                        reason = ""
-                    },
-                    enabled = state.isSignedIn && targetUserId.trim().isNotBlank() && (action == AdminAction.Note || evidenceText.trim().isNotBlank()),
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("Create") }
-
-                if (state.lastWriteStatus.isNotBlank()) {
-                    Text(state.lastWriteStatus, style = MaterialTheme.typography.bodySmall)
+                    onClick = { vm.createPunishment(targetUserId, type, reason) },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = targetUserId.isNotBlank()
+                ) {
+                    Text("Submit")
                 }
             }
         }
 
-        ElevatedCard {
-            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Evidence Cleanup", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    "Deletes evidence that has expired (90 days after case cleared).",
-                    style = MaterialTheme.typography.bodySmall
-                )
+        Divider()
 
-                OutlinedButton(
-                    onClick = { vm.runEvidenceCleanup() },
-                    enabled = state.isSignedIn,
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("Run cleanup now") }
+        Text("Latest punishments (${punishments.size})")
 
-                if (state.cleanupStatus.isNotBlank()) {
-                    Text(state.cleanupStatus, fontFamily = FontFamily.Monospace)
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            items(punishments) { p ->
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Type: ${p.type}  •  Active: ${p.active}")
+                        Text("Target: ${p.targetUserId}")
+                        Text("Reason: ${p.reason}")
+                        Text("Created: ${p.createdAt.toDate()}")
+                    }
                 }
             }
         }
