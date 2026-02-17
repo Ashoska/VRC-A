@@ -3,7 +3,7 @@ plugins {
     id 'org.jetbrains.kotlin.android'
     id 'com.mikepenz.aboutlibraries.plugin'
 
-    // Firebase
+    // Firebase (safe to leave even if you haven't wired deps yet)
     id 'com.google.gms.google-services'
 }
 
@@ -45,7 +45,9 @@ android {
     compileSdk 34
 
     defaultConfig {
+        // ✅ Base app id (public build)
         applicationId "com.scrapw.chatbox"
+
         minSdk 26
         targetSdk 34
 
@@ -54,6 +56,24 @@ android {
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary true }
+    }
+
+    // ✅ THIS is what creates assembleAdminAppDebug / assemblePublicAppDebug
+    flavorDimensions "app"
+    productFlavors {
+        publicApp {
+            dimension "app"
+            // uses defaultConfig applicationId
+            resValue "string", "app_name", "VRC-A"
+        }
+
+        adminApp {
+            dimension "app"
+            // ✅ results in: com.scrapw.chatbox.admin
+            applicationIdSuffix ".admin"
+            versionNameSuffix "-admin"
+            resValue "string", "app_name", "VRC-A Admin"
+        }
     }
 
     signingConfigs {
@@ -146,10 +166,7 @@ dependencies {
     implementation "com.mikepenz:aboutlibraries-core:${latestAboutLibsRelease}"
     implementation "com.mikepenz:aboutlibraries-compose-m3:${latestAboutLibsRelease}"
 
-    // ✅ Firebase (Admin UI + ToS audit hooks if you want later)
-    implementation platform('com.google.firebase:firebase-bom:33.5.1')
-    implementation 'com.google.firebase:firebase-auth-ktx'
-    implementation 'com.google.firebase:firebase-firestore-ktx'
+    // (Firebase deps come later — don’t add until we’re ready)
 
     testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test.ext:junit:1.1.5'
