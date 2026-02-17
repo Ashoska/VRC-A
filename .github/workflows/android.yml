@@ -52,20 +52,30 @@ jobs:
 
           echo "Signing files created."
 
-      - name: Build Debug APK
-        run: ./gradlew :app:assembleDebug
+      # Build exact variants (flavors)
+      - name: Build Public Debug + Release
+        run: |
+          ./gradlew :app:assemblePublicAppDebug :app:assemblePublicAppRelease
 
-      - name: Build Release APK
-        run: ./gradlew :app:assembleRelease
+      - name: Build Admin Debug
+        run: |
+          ./gradlew :app:assembleAdminAppDebug
 
-      - name: Upload Debug APK
+      # Only attempt Admin Release if signing exists (optional but nice)
+      - name: Build Admin Release (if signing exists)
+        shell: bash
+        run: |
+          if [ -f "keystore.properties" ]; then
+            ./gradlew :app:assembleAdminAppRelease
+          else
+            echo "Skipping Admin Release (no signing secrets)."
+          fi
+
+      # Upload ALL APKs regardless of flavor folder structure
+      - name: Upload APKs
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
-          path: app/build/outputs/apk/debug/*.apk
-
-      - name: Upload Release APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release
-          path: app/build/outputs/apk/release/*.apk
+          name: apks
+          path: |
+            app/build/outputs/apk/**/*.apk
+            app/build/outputs/mapping/**/*
