@@ -3,64 +3,74 @@ package com.scrapw.chatbox
 
 import android.app.Application
 import android.content.Context
+import android.os.Build
+import android.os.Process
 import com.scrapw.chatbox.data.UserPreferencesRepository
 import java.io.PrintWriter
 import java.io.StringWriter
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlin.system.exitProcess
 
 class ChatboxApplication : Application() {
+
+    companion object {
+        // Used by ChatboxApp.kt to show last crash
+        const val CRASH_PREFS_FILE = "vrca_crash"
+        const val CRASH_KEY_TEXT = "last_crash_text"
+    }
 
     // Used by ChatboxViewModel.Factory
     lateinit var userPreferencesRepository: UserPreferencesRepository
         private set
 
     override fun onCreate() {
+        // Install crash handler as early as possible
+        installCrashHandler()
+
         super.onCreate()
 
         // Your repo expects Context
         userPreferencesRepository = UserPreferencesRepository(applicationContext)
-
-        installCrashCapture()
     }
 
-    private fun installCrashCapture() {
-        val prefs = getSharedPreferences(CRASH_PREFS_FILE, Context.MODE_PRIVATE)
+    private fun installCrashHandler() {
+        val prev = Thread.getDefaultUncaughtExceptionHandler()
 
-        val previous = Thread.getDefaultUncaughtExceptionHandler()
-        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
             try {
                 val sw = StringWriter()
                 val pw = PrintWriter(sw)
-                pw.println("=== VRC-A Crash Report ===")
-                pw.println("timeMs=${System.currentTimeMillis()}")
-                pw.println("thread=${thread.name}")
-                pw.println("appId=${BuildConfig.APPLICATION_ID}")
-                pw.println("versionName=${BuildConfig.VERSION_NAME}")
-                pw.println("versionCode=${BuildConfig.VERSION_CODE}")
-                pw.println("isAdmin=${BuildConfig.IS_ADMIN_BUILD}")
+
+                val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
+
+                pw.println("=== VRC-A LAST CRASH ===")
+                pw.println("Time: $stamp")
+                pw.println("Thread: ${t.name}")
+                pw.println("Process: ${Process.myPid()}")
+                pw.println("SDK: ${Build.VERSION.SDK_INT}")
+                pw.println("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
+                pw.println("AppId: ${applicationContext.packageName}")
+                pw.println("VersionName: ${BuildConfig.VERSION_NAME}")
+                pw.println("VersionCode: ${BuildConfig.VERSION_CODE}")
                 pw.println()
-                throwable.printStackTrace(pw)
+                e.printStackTrace(pw)
                 pw.flush()
 
-                prefs.edit()
-                    .putString(CRASH_KEY_TEXT, sw.toString())
-                    .apply()
+                val text = sw.toString().take(80_000) // keep prefs sane
+                val prefs = applicationContext.getSharedPreferences(CRASH_PREFS_FILE, Context.MODE_PRIVATE)
+                prefs.edit().putString(CRASH_KEY_TEXT, text).apply()
             } catch (_: Throwable) {
-                // If crash logging fails, do nothing.
+                // If even this fails, fall through to previous handler
             }
 
-            // Let Android / previous handler handle the actual crash dialog/kill
-            if (previous != null) {
-                previous.uncaughtException(thread, throwable)
-            } else {
-                // Fallback hard kill
+            // Let Android still treat it as a crash
+            prev?.uncaughtException(t, e) ?: run {
+                // Last resort
+                Process.killProcess(Process.myPid())
                 exitProcess(10)
             }
         }
-    }
-
-    companion object {
-        const val CRASH_PREFS_FILE = "vrca_crash"
-        const val CRASH_KEY_TEXT = "last_crash_text"
     }
 }
