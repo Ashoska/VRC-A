@@ -56,7 +56,9 @@ android {
         vectorDrawables { useSupportLibrary true }
     }
 
-    // ✅ Two installable apps on the same phone
+    // =========================
+    // ✅ Public + Admin as separate installable apps
+    // =========================
     flavorDimensions += "tier"
     productFlavors {
         publicApp {
