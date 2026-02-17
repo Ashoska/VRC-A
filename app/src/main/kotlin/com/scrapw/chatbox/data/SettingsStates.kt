@@ -5,6 +5,7 @@ import androidx.compose.ui.platform.LocalContext
 import com.alorma.compose.settings.storage.datastore.GenericPreferenceDataStoreSettingValueState
 import com.alorma.compose.settings.storage.datastore.rememberPreferenceDataStoreBooleanSettingState
 import com.alorma.compose.settings.storage.datastore.rememberPreferenceDataStoreIntSettingState
+import com.alorma.compose.settings.storage.datastore.rememberPreferenceDataStoreStringSettingState
 import com.scrapw.chatbox.dataStore
 
 object SettingsStates {
