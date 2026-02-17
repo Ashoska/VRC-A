@@ -3,7 +3,7 @@ plugins {
     id 'org.jetbrains.kotlin.android'
     id 'com.mikepenz.aboutlibraries.plugin'
 
-    // Firebase
+    // Firebase / Google Services
     id 'com.google.gms.google-services'
 }
 
@@ -16,19 +16,22 @@ if (keystorePropertiesFile.exists()) {
 
 // =========================
 // ✅ Auto versioning (GitHub Actions)
+// Goal:
+// - run 279  -> v1.2.79
+// - run 300  -> v1.2.100  (NO rollover to 1.3.0)
 // =========================
 def ghRunNumberStr = System.getenv("GITHUB_RUN_NUMBER") ?: ""
 def ghRunNumber = 0
-try {
-    ghRunNumber = ghRunNumberStr.isInteger() ? ghRunNumberStr.toInteger() : 0
-} catch (ignored) {
-    ghRunNumber = 0
-}
+try { ghRunNumber = ghRunNumberStr.isInteger() ? ghRunNumberStr.toInteger() : 0 } catch (ignored) { ghRunNumber = 0 }
 
-// Version series
+// Set your “series”
 def baseMajor = 1
 def baseMinor = 2
+
+// This makes run 200 become v1.2.0, run 279 become v1.2.79, run 300 become v1.2.100
 def baseRunOffset = 200
+
+// Local fallback so local builds show the version you expect
 def localFallbackRun = 279
 
 def run = (ghRunNumber > 0) ? ghRunNumber : localFallbackRun
@@ -41,22 +44,10 @@ android {
     namespace 'com.scrapw.chatbox'
     compileSdk 34
 
-    // ✅ ADMIN / PUBLIC SPLIT
-    flavorDimensions "mode"
-
-    productFlavors {
-        public {
-            dimension "mode"
-            applicationId "com.scrapw.chatbox"
-        }
-        admin {
-            dimension "mode"
-            applicationId "com.scrapw.chatbox.admin"
-            versionNameSuffix "-admin"
-        }
-    }
-
     defaultConfig {
+        // IMPORTANT: base id stays public, admin flavor adds suffix
+        applicationId "com.scrapw.chatbox"
+
         minSdk 26
         targetSdk 34
 
@@ -67,11 +58,39 @@ android {
         vectorDrawables { useSupportLibrary true }
     }
 
+    // ✅ NEW: flavors so you can have public + admin on the same phone
+    flavorDimensions += "tier"
+    productFlavors {
+        publicApp {
+            dimension "tier"
+
+            // Visible in code: BuildConfig.IS_ADMIN_BUILD = false
+            buildConfigField "boolean", "IS_ADMIN_BUILD", "false"
+
+            // Optional: per-flavor app label override
+            resValue "string", "app_name", "VRC-A"
+        }
+
+        adminApp {
+            dimension "tier"
+
+            // ✅ installs alongside public app
+            applicationIdSuffix ".admin"
+
+            // Visible in code: BuildConfig.IS_ADMIN_BUILD = true
+            buildConfigField "boolean", "IS_ADMIN_BUILD", "true"
+
+            // Optional: make it obvious which app is which
+            versionNameSuffix "-admin"
+            resValue "string", "app_name", "VRC-A Admin"
+        }
+    }
+
     signingConfigs {
         if (keystorePropertiesFile.exists()) {
             release {
                 def storeFilePath = keystoreProperties['storeFile']?.toString()?.trim()
-                if (!storeFilePath) {
+                if (storeFilePath == null || storeFilePath.isEmpty()) {
                     throw new GradleException("keystore.properties exists but storeFile is missing")
                 }
 
@@ -85,7 +104,7 @@ android {
 
     buildTypes {
         debug {
-            // default debug
+            // keep default
         }
 
         release {
@@ -156,6 +175,8 @@ dependencies {
 
     implementation "com.mikepenz:aboutlibraries-core:${latestAboutLibsRelease}"
     implementation "com.mikepenz:aboutlibraries-compose-m3:${latestAboutLibsRelease}"
+
+    // (Firebase deps come later — don’t add until we’re ready)
 
     testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test.ext:junit:1.1.5'
