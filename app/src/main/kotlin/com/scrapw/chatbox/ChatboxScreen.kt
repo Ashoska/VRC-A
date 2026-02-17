@@ -53,6 +53,7 @@ import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Power
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -104,6 +105,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.scrapw.chatbox.BuildConfig
 import com.scrapw.chatbox.ui.ChatboxViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -112,7 +114,8 @@ private enum class AppPage(val title: String) {
     Home("Home"),
     Automations("Automations"),
     Music("Music"),
-    Debug("Debug")
+    Debug("Debug"),
+    Admin("Admin")
 }
 
 private enum class ChatboxAutomationsTab(val title: String) {
@@ -162,6 +165,24 @@ private object UiPrefs {
     }
 }
 
+/** Simple persisted ToS acceptance gate (UI-only, no Firebase, no VM changes). */
+private object TosPrefs {
+    private const val FILE = "vrca_tos"
+    private const val KEY_ACCEPTED_VERSION = "accepted_version"
+
+    // Bump this integer whenever you change ToS text materially.
+    private const val CURRENT_TOS_VERSION = 1
+
+    fun isAccepted(ctx: Context): Boolean =
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getInt(KEY_ACCEPTED_VERSION, 0) >= CURRENT_TOS_VERSION
+
+    fun accept(ctx: Context) {
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit().putInt(KEY_ACCEPTED_VERSION, CURRENT_TOS_VERSION).apply()
+    }
+
+    fun currentVersion(): Int = CURRENT_TOS_VERSION
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatboxScreen(
@@ -169,6 +190,19 @@ fun ChatboxScreen(
 ) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
+
+    // ✅ ToS Gate (must accept before using app)
+    var tosAccepted by rememberSaveable { mutableStateOf(TosPrefs.isAccepted(ctx)) }
+    if (!tosAccepted) {
+        TosGateScreen(
+            tosVersion = TosPrefs.currentVersion(),
+            onAccept = {
+                TosPrefs.accept(ctx)
+                tosAccepted = true
+            }
+        )
+        return
+    }
 
     var page by rememberSaveable { mutableStateOf(AppPage.Home) }
     var showSettingsSheet by remember { mutableStateOf(false) }
@@ -247,6 +281,20 @@ fun ChatboxScreen(
                         )
 
                         AppPage.Debug -> DebugPage(chatboxViewModel)
+
+                        AppPage.Admin -> {
+                            // ✅ Only reachable on admin builds (drawer hides otherwise)
+                            if (BuildConfig.IS_ADMIN_BUILD) {
+                                AdminScreen()
+                            } else {
+                                // Fallback safety: if somehow selected, bounce to Home
+                                HomePage(
+                                    vm = chatboxViewModel,
+                                    snackbarHostState = snackbarHostState,
+                                    onOpenSettings = { showSettingsSheet = true }
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -317,6 +365,16 @@ private fun DrawerContent(
                 selected = current == AppPage.Debug,
                 onClick = { onSelect(AppPage.Debug) }
             )
+
+            if (BuildConfig.IS_ADMIN_BUILD) {
+                DrawerSectionHeader("Admin")
+                DrawerItem(
+                    title = AppPage.Admin.title,
+                    icon = Icons.Filled.VerifiedUser,
+                    selected = current == AppPage.Admin,
+                    onClick = { onSelect(AppPage.Admin) }
+                )
+            }
 
             Divider()
 
@@ -439,6 +497,91 @@ private fun SectionCard(
                 }
             }
             content()
+        }
+    }
+}
+
+/* =========================
+   TOS GATE
+   ========================= */
+
+@Composable
+private fun TosGateScreen(
+    tosVersion: Int,
+    onAccept: () -> Unit
+) {
+    val scroll = rememberScrollState()
+
+    Scaffold(
+        topBar = {
+            CenterAlignedTopAppBar(
+                title = { Text("Terms of Service") },
+                actions = {
+                    Text(
+                        text = "v$tosVersion",
+                        style = MaterialTheme.typography.labelLarge,
+                        modifier = Modifier.padding(end = 12.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            )
+        }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            ElevatedCard {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 220.dp)
+                        .verticalScroll(scroll)
+                        .padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        "VRC-A Terms of Service (Summary)",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+
+                    Text(
+                        """
+1) You are responsible for how you use this app.
+2) Don’t use it to harass, threaten, dox, evade bans, or break platform rules.
+3) The app may send text to VRChat via OSC; you confirm you understand that.
+4) Admin tooling (if present) is for moderation + safety. Misuse may result in access removal.
+5) No guarantee of uptime, availability, or delivery of messages.
+6) By tapping Accept, you agree to these terms.
+                        """.trimIndent(),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+
+                    Text(
+                        "Tip: you can scroll this box. If you update ToS later, the app will ask again.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            Button(
+                onClick = onAccept,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Accept and Continue")
+            }
+
+            Text(
+                text = "You must accept to use the app.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
         }
     }
 }
