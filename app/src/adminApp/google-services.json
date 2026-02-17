@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "620019851677",
+    "project_id": "vrc-a-b592e",
+    "storage_bucket": "vrc-a-b592e.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:620019851677:android:b632c0860cd84cd9b04f74",
+        "android_client_info": {
+          "package_name": "com.scrapw.chatbox"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDSC77aBxkNDtCPWBhFKpDilyFT0-aNfdQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:620019851677:android:99c1d71edb2bf89fb04f74",
+        "android_client_info": {
+          "package_name": "com.scrapw.chatbox.admin"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDSC77aBxkNDtCPWBhFKpDilyFT0-aNfdQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
