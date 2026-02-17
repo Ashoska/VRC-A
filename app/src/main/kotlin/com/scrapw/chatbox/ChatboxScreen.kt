@@ -3,6 +3,8 @@ package com.scrapw.chatbox
 
 import android.content.Context
 import android.content.Context.MODE_PRIVATE
+import android.content.Intent
+import android.net.Uri
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
@@ -57,6 +59,7 @@ import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.Divider
@@ -83,9 +86,11 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -104,6 +109,11 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.google.firebase.Timestamp
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.ListenerRegistration
+import com.google.firebase.firestore.Query
 import com.scrapw.chatbox.ui.ChatboxViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -163,28 +173,54 @@ private object UiPrefs {
     }
 }
 
-/** ToS gate (local-only). Increment TOS_VERSION when ToS changes. */
+/**
+ * ✅ ToS acceptance storage.
+ * We store an "accepted_version" integer locally.
+ * Now that ToS is remote-configurable, "version" is dynamic.
+ */
 private object TosPrefs {
     private const val FILE = "vrca_tos"
     private const val KEY_ACCEPTED_VERSION = "accepted_version"
     private const val KEY_ACCEPTED_AT_MS = "accepted_at_ms"
 
-    private const val TOS_VERSION = 1
+    fun acceptedVersion(ctx: Context): Int =
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getInt(KEY_ACCEPTED_VERSION, 0)
 
-    fun isAccepted(ctx: Context): Boolean {
-        val v = ctx.getSharedPreferences(FILE, MODE_PRIVATE).getInt(KEY_ACCEPTED_VERSION, 0)
-        return v >= TOS_VERSION
-    }
-
-    fun accept(ctx: Context) {
+    fun accept(ctx: Context, version: Int) {
         ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit()
-            .putInt(KEY_ACCEPTED_VERSION, TOS_VERSION)
+            .putInt(KEY_ACCEPTED_VERSION, version.coerceAtLeast(1))
             .putLong(KEY_ACCEPTED_AT_MS, System.currentTimeMillis())
             .apply()
     }
-
-    fun currentVersion(): Int = TOS_VERSION
 }
+
+/* =========================
+   Remote UI models
+   ========================= */
+
+private data class RemoteTosUi(
+    val tosVersion: Int = 1,
+    val tosText: String = "",
+    val tosUrl: String = "",
+    val updatedAt: Timestamp? = null
+)
+
+private data class AnnouncementUi(
+    val id: String,
+    val title: String,
+    val body: String,
+    val active: Boolean,
+    val priority: Int,
+    val createdAt: Timestamp?
+)
+
+private data class ModerationUi(
+    val warned: Boolean = false,
+    val warnReason: String = "",
+    val banned: Boolean = false,
+    val banReason: String = "",
+    val updatedAt: Timestamp? = null
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -194,26 +230,154 @@ fun ChatboxScreen(
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    // ✅ ToS gate first (blocks app until accepted)
-    var tosAccepted by rememberSaveable { mutableStateOf(TosPrefs.isAccepted(ctx)) }
+    // --- Firebase (public + admin) ---
+    val auth = remember { FirebaseAuth.getInstance() }
+    val db = remember { FirebaseFirestore.getInstance() }
+
+    // Ensure public users have a UID (anonymous auth).
+    var authedUid by remember { mutableStateOf(auth.currentUser?.uid) }
+    var firebaseError by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(Unit) {
+        if (auth.currentUser == null) {
+            runCatching {
+                auth.signInAnonymously()
+                    .addOnSuccessListener { res -> authedUid = res.user?.uid }
+                    .addOnFailureListener { e -> firebaseError = e.message ?: "Auth failed" }
+            }.onFailure { e ->
+                firebaseError = e.message ?: "Auth failed"
+            }
+        }
+    }
+
+    // --- Remote config state ---
+    var remoteTos by remember { mutableStateOf(RemoteTosUi()) }
+    var announcements by remember { mutableStateOf<List<AnnouncementUi>>(emptyList()) }
+    var moderation by remember { mutableStateOf(ModerationUi()) }
+
+    // Listen: config/app (ToS)
+    DisposableEffect(Unit) {
+        var reg: ListenerRegistration? = null
+        reg = db.collection("config").document("app")
+            .addSnapshotListener { snap, err ->
+                if (err != null) {
+                    firebaseError = err.message ?: "Firestore error"
+                    return@addSnapshotListener
+                }
+                if (snap != null && snap.exists()) {
+                    val v = (snap.getLong("tosVersion") ?: 1L).toInt().coerceAtLeast(1)
+                    remoteTos = RemoteTosUi(
+                        tosVersion = v,
+                        tosText = snap.getString("tosText") ?: "",
+                        tosUrl = snap.getString("tosUrl") ?: "",
+                        updatedAt = snap.getTimestamp("updatedAt")
+                    )
+                }
+            }
+        onDispose { reg?.remove() }
+    }
+
+    // Listen: announcements (active only)
+    DisposableEffect(Unit) {
+        var reg: ListenerRegistration? = null
+        reg = db.collection("announcements")
+            .whereEqualTo("active", true)
+            .orderBy("priority", Query.Direction.DESCENDING)
+            .orderBy("createdAt", Query.Direction.DESCENDING)
+            .limit(30)
+            .addSnapshotListener { snap, err ->
+                if (err != null) {
+                    firebaseError = err.message ?: "Failed to load announcements"
+                    return@addSnapshotListener
+                }
+                if (snap != null) {
+                    val list = snap.documents.map { d ->
+                        AnnouncementUi(
+                            id = d.id,
+                            title = d.getString("title") ?: "",
+                            body = d.getString("body") ?: "",
+                            active = d.getBoolean("active") ?: true,
+                            priority = (d.getLong("priority") ?: 0L).toInt(),
+                            createdAt = d.getTimestamp("createdAt")
+                        )
+                    }
+                    announcements = list
+                }
+            }
+        onDispose { reg?.remove() }
+    }
+
+    // Listen: moderation status for THIS user (public). Admins can also see their own record, harmless.
+    DisposableEffect(authedUid) {
+        var reg: ListenerRegistration? = null
+        val uid = authedUid
+        if (!uid.isNullOrBlank()) {
+            reg = db.collection("users").document(uid)
+                .addSnapshotListener { snap, err ->
+                    if (err != null) {
+                        firebaseError = err.message ?: "Failed to load moderation"
+                        return@addSnapshotListener
+                    }
+                    if (snap != null && snap.exists()) {
+                        moderation = ModerationUi(
+                            warned = snap.getBoolean("warned") ?: false,
+                            warnReason = snap.getString("warnReason") ?: "",
+                            banned = snap.getBoolean("banned") ?: false,
+                            banReason = snap.getString("banReason") ?: "",
+                            updatedAt = snap.getTimestamp("updatedAt")
+                        )
+                    } else {
+                        moderation = ModerationUi()
+                    }
+                }
+        }
+        onDispose { reg?.remove() }
+    }
+
+    // --- ToS gate (remote) ---
+    val requiredTosVersion = remoteTos.tosVersion.coerceAtLeast(1)
+    var tosAccepted by rememberSaveable { mutableStateOf(TosPrefs.acceptedVersion(ctx) >= requiredTosVersion) }
+
+    // If remote ToS version changes upward while app is open, re-gate.
+    LaunchedEffect(requiredTosVersion) {
+        tosAccepted = TosPrefs.acceptedVersion(ctx) >= requiredTosVersion
+    }
+
     if (!tosAccepted) {
         TosGate(
-            tosVersion = TosPrefs.currentVersion(),
+            tosVersion = requiredTosVersion,
+            tosText = remoteTos.tosText,
+            tosUrl = remoteTos.tosUrl,
+            onOpenUrl = { url ->
+                runCatching {
+                    ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                }
+            },
             onAccept = {
-                TosPrefs.accept(ctx)
+                TosPrefs.accept(ctx, requiredTosVersion)
                 tosAccepted = true
             }
         )
         return
     }
 
+    // --- Ban gate (public + admin) ---
+    // If banned: block app usage (still let them open Settings/Info).
+    // Also stop any active senders once, so VRChat is cleared.
+    var banStopRan by remember { mutableStateOf(false) }
+    LaunchedEffect(moderation.banned) {
+        if (moderation.banned && !banStopRan) {
+            banStopRan = true
+            runCatching { chatboxViewModel.killStopAndClear() }
+        }
+        if (!moderation.banned) banStopRan = false
+    }
+
     var page by rememberSaveable { mutableStateOf(AppPage.Home) }
 
-    // ✅ SAFETY: if this is a PUBLIC build, never allow landing on Admin page (prevents crashes if state ever restores weirdly)
+    // ✅ SAFETY: if PUBLIC build, never allow landing on Admin
     LaunchedEffect(Unit) {
-        if (!BuildConfig.IS_ADMIN_BUILD && page == AppPage.Admin) {
-            page = AppPage.Home
-        }
+        if (!BuildConfig.IS_ADMIN_BUILD && page == AppPage.Admin) page = AppPage.Home
     }
 
     var showSettingsSheet by remember { mutableStateOf(false) }
@@ -229,6 +393,11 @@ fun ChatboxScreen(
         chatboxViewModel.updateSpotifyPreset(UiPrefs.readSpotifyPreset(ctx))
     }
 
+    // If banned, always keep them on Home (so they see ban screen)
+    LaunchedEffect(moderation.banned) {
+        if (moderation.banned) page = AppPage.Home
+    }
+
     ModalNavigationDrawer(
         drawerState = drawerState,
         gesturesEnabled = true,
@@ -236,8 +405,12 @@ fun ChatboxScreen(
             DrawerContent(
                 current = page,
                 onSelect = { chosen ->
-                    // ✅ block admin navigation on public build
-                    page = if (!BuildConfig.IS_ADMIN_BUILD && chosen == AppPage.Admin) AppPage.Home else chosen
+                    val safeChosen =
+                        if (moderation.banned) AppPage.Home
+                        else if (!BuildConfig.IS_ADMIN_BUILD && chosen == AppPage.Admin) AppPage.Home
+                        else chosen
+
+                    page = safeChosen
                     scope.launch { drawerState.close() }
                 },
                 onOpenSettings = {
@@ -275,13 +448,32 @@ fun ChatboxScreen(
                     .fillMaxSize()
                     .padding(padding)
             ) {
+                // Global banners (warn + announcements + firebase errors)
+                GlobalStatusBanner(
+                    moderation = moderation,
+                    announcements = announcements,
+                    firebaseError = firebaseError
+                )
+
                 Crossfade(targetState = page, label = "page_crossfade") { p ->
                     when (p) {
-                        AppPage.Home -> HomePage(
-                            vm = chatboxViewModel,
-                            snackbarHostState = snackbarHostState,
-                            onOpenSettings = { showSettingsSheet = true }
-                        )
+                        AppPage.Home -> {
+                            if (moderation.banned) {
+                                BannedScreen(
+                                    banReason = moderation.banReason,
+                                    onOpenInfo = { showInfoSheet = true },
+                                    onOpenSettings = { showSettingsSheet = true }
+                                )
+                            } else {
+                                HomePage(
+                                    vm = chatboxViewModel,
+                                    snackbarHostState = snackbarHostState,
+                                    onOpenSettings = { showSettingsSheet = true },
+                                    announcements = announcements,
+                                    moderation = moderation
+                                )
+                            }
+                        }
 
                         AppPage.Automations -> AutomationsPage(chatboxViewModel)
 
@@ -295,30 +487,135 @@ fun ChatboxScreen(
                         AppPage.Debug -> DebugPage(chatboxViewModel)
 
                         AppPage.Admin -> {
-                            // ✅ Extra safety
-                            if (BuildConfig.IS_ADMIN_BUILD) {
+                            if (BuildConfig.IS_ADMIN_BUILD && !moderation.banned) {
                                 AdminScreen()
                             } else {
                                 HomePage(
                                     vm = chatboxViewModel,
                                     snackbarHostState = snackbarHostState,
-                                    onOpenSettings = { showSettingsSheet = true }
+                                    onOpenSettings = { showSettingsSheet = true },
+                                    announcements = announcements,
+                                    moderation = moderation
                                 )
                             }
                         }
                     }
                 }
+
+                if (showSettingsSheet) {
+                    SettingsSheet(
+                        vm = chatboxViewModel,
+                        onDismiss = { showSettingsSheet = false }
+                    )
+                }
+
+                if (showInfoSheet) {
+                    InfoSheet(onDismiss = { showInfoSheet = false })
+                }
+            }
+        }
+    }
+}
+
+/* =========================
+   Global banners
+   ========================= */
+
+@Composable
+private fun GlobalStatusBanner(
+    moderation: ModerationUi,
+    announcements: List<AnnouncementUi>,
+    firebaseError: String?
+) {
+    val topAnn = announcements.maxByOrNull { it.priority }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        if (!firebaseError.isNullOrBlank()) {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Firebase issue", style = MaterialTheme.typography.labelLarge)
+                    Text(firebaseError, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+                }
+            }
+        }
+
+        if (moderation.warned && !moderation.banned) {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("⚠️ Warning", style = MaterialTheme.typography.labelLarge)
+                    Text(
+                        moderation.warnReason.ifBlank { "You have been warned by moderators." },
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+        }
+
+        if (topAnn != null) {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
+                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        topAnn.title.ifBlank { "Announcement" },
+                        style = MaterialTheme.typography.labelLarge
+                    )
+                    Text(
+                        topAnn.body.ifBlank { "" },
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+    }
+}
+
+/* =========================
+   Ban screen
+   ========================= */
+
+@Composable
+private fun BannedScreen(
+    banReason: String,
+    onOpenInfo: () -> Unit,
+    onOpenSettings: () -> Unit
+) {
+    Surface {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text("Access restricted", style = MaterialTheme.typography.headlineSmall)
+
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("You are banned from using this app.", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        banReason.ifBlank { "No reason provided." },
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
             }
 
-            if (showSettingsSheet) {
-                SettingsSheet(
-                    vm = chatboxViewModel,
-                    onDismiss = { showSettingsSheet = false }
-                )
+            ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("What you can do", style = MaterialTheme.typography.titleSmall)
+                    Text("• You can still open Settings and Info.")
+                    Text("• If this is a mistake, contact the app moderators.")
+                }
             }
 
-            if (showInfoSheet) {
-                InfoSheet(onDismiss = { showInfoSheet = false })
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedButton(onClick = onOpenSettings, modifier = Modifier.weight(1f)) { Text("Settings") }
+                OutlinedButton(onClick = onOpenInfo, modifier = Modifier.weight(1f)) { Text("Info") }
             }
         }
     }
@@ -331,9 +628,24 @@ fun ChatboxScreen(
 @Composable
 private fun TosGate(
     tosVersion: Int,
+    tosText: String,
+    tosUrl: String,
+    onOpenUrl: (String) -> Unit,
     onAccept: () -> Unit
 ) {
     var checked by rememberSaveable { mutableStateOf(false) }
+
+    val fallbackText = remember {
+        """
+By using this app, you agree to:
+• Use it responsibly and legally
+• Not use it to harass, spam, or impersonate others
+• Understand VRChat chatbox limits apply and messages may be trimmed
+• Accept that settings/history are stored locally on your device
+
+If you do not agree, close the app.
+        """.trimIndent()
+    }
 
     Surface {
         Column(
@@ -344,22 +656,27 @@ private fun TosGate(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Text("Terms of Service", style = MaterialTheme.typography.headlineSmall)
-            Text("Version $tosVersion", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                "Version $tosVersion",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
 
             ElevatedCard {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
-                        text = """
-By using this app, you agree to:
-• Use it responsibly and legally
-• Not use it to harass, spam, or impersonate others
-• Understand VRChat chatbox limits apply and messages may be trimmed
-• Accept that settings/history are stored locally on your device
-
-If you do not agree, close the app.
-                        """.trimIndent(),
+                        text = (tosText.ifBlank { fallbackText }),
                         style = MaterialTheme.typography.bodyMedium
                     )
+
+                    if (tosUrl.isNotBlank()) {
+                        OutlinedButton(
+                            onClick = { onOpenUrl(tosUrl.trim()) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Open full ToS link")
+                        }
+                    }
                 }
             }
 
@@ -436,7 +753,6 @@ private fun DrawerContent(
                 onClick = { onSelect(AppPage.Debug) }
             )
 
-            // ✅ Admin-only entry
             if (BuildConfig.IS_ADMIN_BUILD) {
                 DrawerItem(
                     title = AppPage.Admin.title,
@@ -579,7 +895,9 @@ private fun SectionCard(
 private fun HomePage(
     vm: ChatboxViewModel,
     snackbarHostState: SnackbarHostState,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
+    announcements: List<AnnouncementUi>,
+    moderation: ModerationUi
 ) {
     val uiState by vm.messengerUiState.collectAsState()
     val ctx = LocalContext.current
@@ -605,7 +923,55 @@ private fun HomePage(
     val notifOk = vm.listenerConnected
     val ipOk = uiState.ipAddress.isNotBlank() && uiState.ipAddress != "127.0.0.1"
 
+    val topAnnouncements = remember(announcements) {
+        announcements
+            .sortedWith(compareByDescending<AnnouncementUi> { it.priority }.thenByDescending { it.createdAt })
+            .take(3)
+    }
+
     PageContainer {
+        // Announcements block (public)
+        if (topAnnouncements.isNotEmpty()) {
+            SectionCard(
+                title = "Announcements",
+                subtitle = "Latest updates from the app team."
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    topAnnouncements.forEach { a ->
+                        ElevatedCard(
+                            colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
+                        ) {
+                            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text(a.title.ifBlank { "Announcement" }, style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    a.body.ifBlank { "" },
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Warning block (public)
+        if (moderation.warned && !moderation.banned) {
+            SectionCard(
+                title = "Account warning",
+                subtitle = "This warning is shown to you only."
+            ) {
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("⚠️ You have been warned.", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            moderation.warnReason.ifBlank { "No reason provided." },
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                }
+            }
+        }
+
         SectionCard(
             title = "VRChat Preview",
             subtitle = "Exactly what will appear in your chatbox.",
