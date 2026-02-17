@@ -53,10 +53,10 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             ChatboxTheme {
-                // ✅ UI redesign lives in ChatboxScreen.kt; keep app wiring stable.
+                // ✅ App routing (ToS gate + Admin-only UI) lives in ChatboxApp.kt
                 ChatboxApp()
             }
-            // ✅ Overlay stays as-is (no feature change).
+            // ✅ Overlay stays as-is
             OverlayDaemon(this)
         }
     }
