@@ -16,8 +16,8 @@ jobs:
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: '17'
+          distribution: temurin
+          java-version: "17"
 
       - name: Gradle cache
         uses: gradle/actions/setup-gradle@v3
@@ -52,30 +52,22 @@ jobs:
 
           echo "Signing files created."
 
-      # Build exact variants (flavors)
-      - name: Build Public Debug + Release
-        run: |
-          ./gradlew :app:assemblePublicAppDebug :app:assemblePublicAppRelease
+      # ✅ Build ONLY the PUBLIC variant (no admin)
+      - name: Build Public Debug APK
+        run: ./gradlew :app:assemblePublicAppDebug
 
-      - name: Build Admin Debug
-        run: |
-          ./gradlew :app:assembleAdminAppDebug
+      - name: Build Public Release APK
+        run: ./gradlew :app:assemblePublicAppRelease
 
-      # Only attempt Admin Release if signing exists (optional but nice)
-      - name: Build Admin Release (if signing exists)
-        shell: bash
-        run: |
-          if [ -f "keystore.properties" ]; then
-            ./gradlew :app:assembleAdminAppRelease
-          else
-            echo "Skipping Admin Release (no signing secrets)."
-          fi
-
-      # Upload ALL APKs regardless of flavor folder structure
-      - name: Upload APKs
+      # ✅ Upload ONLY public apks as two separate artifacts (like your screenshot)
+      - name: Upload Public Debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: apks
-          path: |
-            app/build/outputs/apk/**/*.apk
-            app/build/outputs/mapping/**/*
+          name: app-debug
+          path: app/build/outputs/apk/publicApp/debug/*.apk
+
+      - name: Upload Public Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release
+          path: app/build/outputs/apk/publicApp/release/*.apk
