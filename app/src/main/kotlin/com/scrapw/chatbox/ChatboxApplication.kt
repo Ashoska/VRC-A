@@ -1,22 +1,20 @@
 package com.scrapw.chatbox
 
 import android.app.Application
-import com.google.firebase.FirebaseApp
 import com.scrapw.chatbox.data.UserPreferencesRepository
-import com.scrapw.chatbox.data.dataStore
 
 class ChatboxApplication : Application() {
 
-    // keep your existing repository pattern
+    // Used by ChatboxViewModel.Factory
     lateinit var userPreferencesRepository: UserPreferencesRepository
         private set
 
     override fun onCreate() {
         super.onCreate()
 
-        // ✅ Firebase init (works for both flavors as long as each flavor has its google-services.json)
-        runCatching { FirebaseApp.initializeApp(this) }
-
-        userPreferencesRepository = UserPreferencesRepository(dataStore)
+        // ✅ IMPORTANT:
+        // UserPreferencesRepository in your project expects a Context (not a DataStore object).
+        // Passing applicationContext fixes: "Type mismatch: DataStore<Preferences> but Context expected".
+        userPreferencesRepository = UserPreferencesRepository(applicationContext)
     }
 }
