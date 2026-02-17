@@ -104,7 +104,6 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.scrapw.chatbox.ui.ChatboxViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -190,7 +189,7 @@ private object TosPrefs {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatboxScreen(
-    chatboxViewModel: ChatboxViewModel = viewModel(factory = ChatboxViewModel.Factory)
+    chatboxViewModel: ChatboxViewModel
 ) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -209,6 +208,14 @@ fun ChatboxScreen(
     }
 
     var page by rememberSaveable { mutableStateOf(AppPage.Home) }
+
+    // ✅ SAFETY: if this is a PUBLIC build, never allow landing on Admin page (prevents crashes if state ever restores weirdly)
+    LaunchedEffect(Unit) {
+        if (!BuildConfig.IS_ADMIN_BUILD && page == AppPage.Admin) {
+            page = AppPage.Home
+        }
+    }
+
     var showSettingsSheet by remember { mutableStateOf(false) }
     var showInfoSheet by remember { mutableStateOf(false) }
 
@@ -229,7 +236,8 @@ fun ChatboxScreen(
             DrawerContent(
                 current = page,
                 onSelect = { chosen ->
-                    page = chosen
+                    // ✅ block admin navigation on public build
+                    page = if (!BuildConfig.IS_ADMIN_BUILD && chosen == AppPage.Admin) AppPage.Home else chosen
                     scope.launch { drawerState.close() }
                 },
                 onOpenSettings = {
@@ -286,7 +294,18 @@ fun ChatboxScreen(
 
                         AppPage.Debug -> DebugPage(chatboxViewModel)
 
-                        AppPage.Admin -> AdminScreen()
+                        AppPage.Admin -> {
+                            // ✅ Extra safety
+                            if (BuildConfig.IS_ADMIN_BUILD) {
+                                AdminScreen()
+                            } else {
+                                HomePage(
+                                    vm = chatboxViewModel,
+                                    snackbarHostState = snackbarHostState,
+                                    onOpenSettings = { showSettingsSheet = true }
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -479,7 +498,6 @@ private fun DrawerItem(
         modifier = Modifier.fillMaxWidth(),
         colors = NavigationDrawerItemDefaults.colors(
             selectedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
-            // ONLY CHANGE: make unselected buttons more noticeable without using unsupported tokens
             unselectedContainerColor = MaterialTheme.colorScheme.secondary.copy(alpha = 0.14f),
             selectedIconColor = MaterialTheme.colorScheme.onSecondaryContainer,
             unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant
@@ -570,16 +588,13 @@ private fun HomePage(
     val connectionBring = remember { BringIntoViewRequester() }
     val manualSendBring = remember { BringIntoViewRequester() }
 
-    // IP field: String state (avoids TextFieldValue delegate/saver issues)
     var ipInputText by rememberSaveable { mutableStateOf(uiState.ipAddress) }
     LaunchedEffect(uiState.ipAddress) {
         if (ipInputText.isBlank()) ipInputText = uiState.ipAddress
     }
 
-    // Persist Setup Tutorial collapsed/expanded across reopen
     var tutorialExpanded by remember { mutableStateOf(UiPrefs.readTutorialExpanded(ctx)) }
 
-    // booleans
     var overlayGranted by remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
     LaunchedEffect(Unit) { overlayGranted = Settings.canDrawOverlays(ctx) }
 
@@ -601,9 +616,8 @@ private fun HomePage(
                         vm.startCycle()
                         vm.startNowPlayingSender()
                     }
-                ) {
-                    Text("Start")
-                }
+                ) { Text("Start") }
+
                 Button(
                     onClick = { vm.killStopAndClear() },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
@@ -1199,7 +1213,6 @@ private fun NowPlayingPage(
 ) {
     val ctx = LocalContext.current
 
-    // ✅ FIX: animate the preset preview bars on this page (only while this composable is active)
     var previewT by remember { mutableStateOf(0f) }
     LaunchedEffect(Unit) {
         while (true) {
@@ -1458,7 +1471,7 @@ private fun SettingsRow(
 }
 
 /* =========================
-   INFO SHEET (name restored)
+   INFO SHEET
    ========================= */
 
 @OptIn(ExperimentalMaterial3Api::class)
