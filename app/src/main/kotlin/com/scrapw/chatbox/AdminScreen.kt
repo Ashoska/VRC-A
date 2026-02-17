@@ -1,8 +1,8 @@
 // app/src/main/kotlin/com/scrapw/chatbox/AdminScreen.kt
 package com.scrapw.chatbox
 
+import android.content.Context
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -24,79 +24,78 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.google.firebase.Timestamp
-import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
 
 /**
- * Admin-only screen.
- * Uses FirebaseAuth + Firestore directly so it doesn't depend on AdminViewModel wiring.
+ * ✅ Device-gated Admin-only screen (NO LOGIN).
  *
- * Firestore layout (suggested):
- * - admins/{uid} : { enabled: true, note: "..." }
- * - announcements/{id} : { title, body, active, priority, createdAt, createdByUid }
+ * Admin enable:
+ * - Firestore: devices/{deviceHash} : { adminEnabled: true, note: "..." }
+ *
+ * Other collections:
+ * - announcements/{id} : { title, body, active, priority, createdAt, createdByDevice, createdByAppId }
  * - users/{uid} : { displayName, warned, warnReason, banned, banReason, updatedAt }
  * - config/app : { tosVersion: number, tosText: string, tosUrl: string, updatedAt }
  */
 @Composable
 fun AdminScreen() {
-    val auth = remember { FirebaseAuth.getInstance() }
+    val ctx = LocalContext.current
     val db = remember { FirebaseFirestore.getInstance() }
 
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     fun setErr(msg: String?) { error = msg?.takeIf { it.isNotBlank() } }
 
-    val user = auth.currentUser
-
-    // ---------- Auth UI ----------
-    if (user == null) {
-        AdminLoginCard(
-            loading = loading,
-            error = error,
-            onClearError = { setErr(null) },
-            onLogin = { email, pass ->
-                loading = true
-                setErr(null)
-                auth.signInWithEmailAndPassword(email.trim(), pass)
-                    .addOnSuccessListener { loading = false }
-                    .addOnFailureListener { e ->
-                        loading = false
-                        setErr(e.message ?: "Login failed")
-                    }
+    // Hard block: should never be reachable on public build, but keep it safe anyway.
+    if (!BuildConfig.IS_ADMIN_BUILD) {
+        Surface {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text("Admin", style = MaterialTheme.typography.titleLarge)
+                ErrorCard("This page is only available in the Admin build.")
             }
-        )
+        }
         return
     }
 
-    // ---------- Admin gate ----------
-    var isAdmin by remember { mutableStateOf(false) }
-    var adminChecked by remember { mutableStateOf(false) }
+    val deviceHash = remember { readDeviceHash(ctx) }
 
-    LaunchedEffect(user.uid) {
+    // ---------- Admin gate (device-based) ----------
+    var adminChecked by remember { mutableStateOf(false) }
+    var isAdmin by remember { mutableStateOf(false) }
+
+    fun refreshAdminGate() {
         adminChecked = false
         isAdmin = false
-        db.collection("admins").document(user.uid).get()
+        setErr(null)
+
+        if (deviceHash.isBlank()) {
+            setErr("DeviceHash is blank. (The app couldn't read vrca_remote prefs.)")
+            adminChecked = true
+            return
+        }
+
+        db.collection("devices").document(deviceHash).get()
             .addOnSuccessListener { snap ->
-                val enabled = snap.getBoolean("enabled") ?: false
-                isAdmin = enabled
+                isAdmin = snap.getBoolean("adminEnabled") ?: false
                 adminChecked = true
             }
             .addOnFailureListener { e ->
@@ -104,6 +103,8 @@ fun AdminScreen() {
                 adminChecked = true
             }
     }
+
+    LaunchedEffect(deviceHash) { refreshAdminGate() }
 
     if (!adminChecked) {
         Surface {
@@ -116,6 +117,7 @@ fun AdminScreen() {
                     CircularProgressIndicator()
                     Text("Checking permissions…")
                 }
+                DeviceHashCard(deviceHash)
                 if (error != null) ErrorCard(error!!)
             }
         }
@@ -129,20 +131,26 @@ fun AdminScreen() {
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text("Admin", style = MaterialTheme.typography.titleLarge)
+
                 Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
                     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text("Access denied", style = MaterialTheme.typography.titleSmall)
                         Text(
-                            "Your account is signed in, but it is not enabled as an admin in Firestore.\n\n" +
-                                "Add a document: admins/${user.uid} with { enabled: true }",
+                            "Enable this device in Firestore:\n\n" +
+                                "devices/$deviceHash\n" +
+                                "{ adminEnabled: true }",
                             fontFamily = FontFamily.Monospace
                         )
                     }
                 }
+
+                DeviceHashCard(deviceHash)
+
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedButton(onClick = { auth.signOut() }) { Text("Sign out") }
+                    OutlinedButton(onClick = { refreshAdminGate() }) { Text("Re-check") }
                     if (error != null) OutlinedButton(onClick = { setErr(null) }) { Text("Clear error") }
                 }
+
                 if (error != null) ErrorCard(error!!)
             }
         }
@@ -163,12 +171,12 @@ fun AdminScreen() {
                 Column {
                     Text("Admin", style = MaterialTheme.typography.titleLarge)
                     Text(
-                        "Signed in: ${user.email ?: user.uid}",
+                        "Device: $deviceHash",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                OutlinedButton(onClick = { auth.signOut() }) { Text("Sign out") }
+                OutlinedButton(onClick = { refreshAdminGate() }) { Text("Re-check") }
             }
 
             if (error != null) {
@@ -185,7 +193,7 @@ fun AdminScreen() {
             // Announcements
             AdminAnnouncementsSection(
                 db = db,
-                currentUid = user.uid,
+                createdByDevice = deviceHash,
                 setLoading = { loading = it },
                 setError = ::setErr
             )
@@ -220,65 +228,38 @@ fun AdminScreen() {
     }
 }
 
+private fun readDeviceHash(ctx: Context): String {
+    // You said it's already cached in ChatboxApp.kt under vrca_remote.
+    // We try a few common keys so we don't break if your key name differs.
+    val prefs = ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
+
+    val candidates = listOf(
+        "device_hash",
+        "deviceHash",
+        "device_id",
+        "deviceId",
+        "uid",
+        "user_id",
+        "userId"
+    )
+
+    for (k in candidates) {
+        val v = prefs.getString(k, null)?.trim().orEmpty()
+        if (v.isNotBlank()) return v
+    }
+
+    return ""
+}
+
 @Composable
-private fun AdminLoginCard(
-    loading: Boolean,
-    error: String?,
-    onClearError: () -> Unit,
-    onLogin: (email: String, password: String) -> Unit
-) {
-    var email by remember { mutableStateOf("") }
-    var pass by remember { mutableStateOf("") }
-
-    Surface {
-        Column(
-            modifier = Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text("Admin Login", style = MaterialTheme.typography.titleLarge)
-
-            if (error != null) {
-                ErrorCard(error)
-                OutlinedButton(onClick = onClearError) { Text("Clear error") }
-            }
-
-            ElevatedCard {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedTextField(
-                        value = email,
-                        onValueChange = { email = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        label = { Text("Email") }
-                    )
-                    OutlinedTextField(
-                        value = pass,
-                        onValueChange = { pass = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        label = { Text("Password") },
-                        visualTransformation = PasswordVisualTransformation()
-                    )
-
-                    Button(
-                        onClick = { onLogin(email, pass) },
-                        enabled = !loading && email.isNotBlank() && pass.isNotBlank(),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(if (loading) "Signing in…" else "Sign in")
-                    }
-                }
-            }
-
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("Note", style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        "After login, you must be enabled in Firestore:\nadmins/{uid} -> { enabled: true }",
-                        fontFamily = FontFamily.Monospace
-                    )
-                }
-            }
+private fun DeviceHashCard(deviceHash: String) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("DeviceHash", style = MaterialTheme.typography.titleSmall)
+            Text(
+                deviceHash.ifBlank { "(blank — not found in vrca_remote prefs)" },
+                fontFamily = FontFamily.Monospace
+            )
         }
     }
 }
@@ -301,6 +282,7 @@ private fun AdminRulesCard() {
             Text("• Public build must show: announcements + warning/ban banners.")
             Text("• Admin build writes moderation + announcements + ToS config.")
             Text("• Warn/Ban should include a reason string for the public UI.")
+            Text("• Admin access is device-based: devices/{deviceHash}.adminEnabled")
         }
     }
 }
@@ -321,7 +303,7 @@ private data class AnnouncementRow(
 @Composable
 private fun AdminAnnouncementsSection(
     db: FirebaseFirestore,
-    currentUid: String,
+    createdByDevice: String,
     setLoading: (Boolean) -> Unit,
     setError: (String?) -> Unit
 ) {
@@ -399,15 +381,11 @@ private fun AdminAnnouncementsSection(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("Priority")
                         Spacer(Modifier.width(8.dp))
-                        OutlinedButton(
-                            onClick = { newPriority = (newPriority - 1).coerceIn(-5, 5) }
-                        ) { Text("−") }
+                        OutlinedButton(onClick = { newPriority = (newPriority - 1).coerceIn(-5, 5) }) { Text("−") }
                         Spacer(Modifier.width(8.dp))
                         Text(newPriority.toString(), fontFamily = FontFamily.Monospace)
                         Spacer(Modifier.width(8.dp))
-                        OutlinedButton(
-                            onClick = { newPriority = (newPriority + 1).coerceIn(-5, 5) }
-                        ) { Text("+") }
+                        OutlinedButton(onClick = { newPriority = (newPriority + 1).coerceIn(-5, 5) }) { Text("+") }
                     }
                 }
 
@@ -422,7 +400,8 @@ private fun AdminAnnouncementsSection(
                                 "active" to newActive,
                                 "priority" to newPriority,
                                 "createdAt" to FieldValue.serverTimestamp(),
-                                "createdByUid" to currentUid
+                                "createdByDevice" to createdByDevice,
+                                "createdByAppId" to BuildConfig.APPLICATION_ID
                             )
                             db.collection("announcements").add(data)
                                 .addOnSuccessListener {
@@ -442,9 +421,7 @@ private fun AdminAnnouncementsSection(
                         modifier = Modifier.weight(1f)
                     ) { Text("Publish") }
 
-                    OutlinedButton(onClick = { refresh() }, modifier = Modifier.weight(1f)) {
-                        Text("Refresh list")
-                    }
+                    OutlinedButton(onClick = { refresh() }, modifier = Modifier.weight(1f)) { Text("Refresh list") }
                 }
             }
         }
@@ -458,10 +435,7 @@ private fun AdminAnnouncementsSection(
                         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                                 Text(a.title.ifBlank { "(no title)" }, style = MaterialTheme.typography.titleSmall)
-                                Text(
-                                    if (a.active) "ACTIVE" else "OFF",
-                                    style = MaterialTheme.typography.labelLarge
-                                )
+                                Text(if (a.active) "ACTIVE" else "OFF", style = MaterialTheme.typography.labelLarge)
                             }
                             Text(
                                 "priority=${a.priority}  createdAt=${a.createdAt ?: "?"}",
@@ -584,10 +558,7 @@ private fun AdminModerationSection(
                         modifier = Modifier.weight(1f)
                     ) { Text("Load") }
 
-                    OutlinedButton(
-                        onClick = { clearLoaded() },
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Clear") }
+                    OutlinedButton(onClick = { clearLoaded() }, modifier = Modifier.weight(1f)) { Text("Clear") }
                 }
             }
         }
@@ -599,7 +570,7 @@ private fun AdminModerationSection(
 
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("User: ${loadedUid}", style = MaterialTheme.typography.titleSmall)
+                Text("User: $loadedUid", style = MaterialTheme.typography.titleSmall)
                 Text("displayName=$displayName", fontFamily = FontFamily.Monospace)
                 Text("warned=$warned  banned=$banned", fontFamily = FontFamily.Monospace)
                 Text("updatedAt=${updatedAt ?: "?"}", fontFamily = FontFamily.Monospace)
@@ -620,8 +591,7 @@ private fun AdminModerationSection(
                     Button(
                         onClick = {
                             val uid = loadedUid ?: return@Button
-                            setLoading(true)
-                            setError(null)
+                            setLoading(true); setError(null)
                             db.collection("users").document(uid)
                                 .set(
                                     mapOf(
@@ -632,9 +602,7 @@ private fun AdminModerationSection(
                                     com.google.firebase.firestore.SetOptions.merge()
                                 )
                                 .addOnSuccessListener { setLoading(false); load(uid) }
-                                .addOnFailureListener { e ->
-                                    setLoading(false); setError(e.message ?: "Failed to warn")
-                                }
+                                .addOnFailureListener { e -> setLoading(false); setError(e.message ?: "Failed to warn") }
                         },
                         modifier = Modifier.weight(1f)
                     ) { Text("Apply warn") }
@@ -642,8 +610,7 @@ private fun AdminModerationSection(
                     OutlinedButton(
                         onClick = {
                             val uid = loadedUid ?: return@OutlinedButton
-                            setLoading(true)
-                            setError(null)
+                            setLoading(true); setError(null)
                             db.collection("users").document(uid)
                                 .set(
                                     mapOf(
@@ -654,9 +621,7 @@ private fun AdminModerationSection(
                                     com.google.firebase.firestore.SetOptions.merge()
                                 )
                                 .addOnSuccessListener { setLoading(false); load(uid) }
-                                .addOnFailureListener { e ->
-                                    setLoading(false); setError(e.message ?: "Failed to clear warn")
-                                }
+                                .addOnFailureListener { e -> setLoading(false); setError(e.message ?: "Failed to clear warn") }
                         },
                         modifier = Modifier.weight(1f)
                     ) { Text("Clear warn") }
@@ -678,8 +643,7 @@ private fun AdminModerationSection(
                     Button(
                         onClick = {
                             val uid = loadedUid ?: return@Button
-                            setLoading(true)
-                            setError(null)
+                            setLoading(true); setError(null)
                             db.collection("users").document(uid)
                                 .set(
                                     mapOf(
@@ -690,9 +654,7 @@ private fun AdminModerationSection(
                                     com.google.firebase.firestore.SetOptions.merge()
                                 )
                                 .addOnSuccessListener { setLoading(false); load(uid) }
-                                .addOnFailureListener { e ->
-                                    setLoading(false); setError(e.message ?: "Failed to ban")
-                                }
+                                .addOnFailureListener { e -> setLoading(false); setError(e.message ?: "Failed to ban") }
                         },
                         modifier = Modifier.weight(1f)
                     ) { Text("Ban user") }
@@ -700,8 +662,7 @@ private fun AdminModerationSection(
                     OutlinedButton(
                         onClick = {
                             val uid = loadedUid ?: return@OutlinedButton
-                            setLoading(true)
-                            setError(null)
+                            setLoading(true); setError(null)
                             db.collection("users").document(uid)
                                 .set(
                                     mapOf(
@@ -712,9 +673,7 @@ private fun AdminModerationSection(
                                     com.google.firebase.firestore.SetOptions.merge()
                                 )
                                 .addOnSuccessListener { setLoading(false); load(uid) }
-                                .addOnFailureListener { e ->
-                                    setLoading(false); setError(e.message ?: "Failed to unban")
-                                }
+                                .addOnFailureListener { e -> setLoading(false); setError(e.message ?: "Failed to unban") }
                         },
                         modifier = Modifier.weight(1f)
                     ) { Text("Unban") }
@@ -813,15 +772,14 @@ private fun AdminTosConfigSection(
                                 .set(data, com.google.firebase.firestore.SetOptions.merge())
                                 .addOnSuccessListener { setLoading(false); load() }
                                 .addOnFailureListener { e ->
-                                    setLoading(false); setError(e.message ?: "Failed to save config")
+                                    setLoading(false)
+                                    setError(e.message ?: "Failed to save config")
                                 }
                         },
                         modifier = Modifier.weight(1f)
                     ) { Text("Save") }
 
-                    OutlinedButton(onClick = { load() }, modifier = Modifier.weight(1f)) {
-                        Text("Reload")
-                    }
+                    OutlinedButton(onClick = { load() }, modifier = Modifier.weight(1f)) { Text("Reload") }
                 }
 
                 Text(
