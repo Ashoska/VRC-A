@@ -51,13 +51,17 @@ class MainActivity : ComponentActivity() {
             ChatboxKeepAliveService.start(applicationContext)
         }
 
+        // ✅ IMPORTANT:
+        // OverlayDaemon MUST NOT be created inside setContent (it can be re-run on recomposition).
+        // Keep Compose purely UI and start overlay daemon once from the Activity lifecycle.
         setContent {
             ChatboxTheme {
                 // ✅ App routing (ToS gate + Admin-only UI) lives in ChatboxApp.kt
                 ChatboxApp()
             }
-            // ✅ Overlay stays as-is
-            OverlayDaemon(this)
         }
+
+        // ✅ Overlay stays as-is, but runs once (not on recomposition)
+        OverlayDaemon(this)
     }
 }
