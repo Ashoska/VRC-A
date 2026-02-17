@@ -3,149 +3,88 @@ package com.scrapw.chatbox
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewmodel.compose.viewModel
 
 @Composable
-fun AdminScreen(vm: AdminViewModel) {
+fun AdminScreen(
+    vm: AdminViewModel = viewModel(factory = AdminViewModel.Factory)
+) {
     val loading by vm.loading.collectAsState()
-    val err by vm.error.collectAsState()
-    val adminUser by vm.adminUser.collectAsState()
-    val punishments by vm.punishments.collectAsState()
-
-    var email by remember { mutableStateOf("") }
-    var pass by remember { mutableStateOf("") }
-
-    var targetUserId by remember { mutableStateOf("") }
-    var reason by remember { mutableStateOf("") }
-    var type by remember { mutableStateOf("warn") } // "warn" or "ban"
+    val error by vm.error.collectAsState()
+    val users by vm.users.collectAsState()
 
     Column(
         modifier = Modifier.padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text("Admin Panel")
+        Text("Admin", style = MaterialTheme.typography.titleLarge)
+
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Button(onClick = { vm.refresh() }) { Text("Refresh") }
+            OutlinedButton(onClick = { vm.clearError() }) { Text("Clear error") }
+        }
 
         if (loading) {
-            CircularProgressIndicator()
-        }
-
-        if (err != null) {
-            Text("Error: $err")
-        }
-
-        if (adminUser == null) {
-            Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("Sign in (Firebase Auth)")
-
-                    OutlinedTextField(
-                        value = email,
-                        onValueChange = { email = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("Email") },
-                        singleLine = true
-                    )
-                    OutlinedTextField(
-                        value = pass,
-                        onValueChange = { pass = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("Password") },
-                        singleLine = true
-                    )
-
-                    Button(
-                        onClick = { vm.signIn(email, pass) },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Login")
-                    }
-                }
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                CircularProgressIndicator()
             }
-            return
         }
 
-        Card(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Logged in: ${adminUser!!.email}")
-
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(onClick = { vm.loadLatestPunishments() }, modifier = Modifier.weight(1f)) {
-                        Text("Refresh")
-                    }
-                    TextButton(onClick = { vm.signOut() }, modifier = Modifier.weight(1f)) {
-                        Text("Sign out")
-                    }
+        if (error != null) {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Error", style = MaterialTheme.typography.titleSmall)
+                    Text(error ?: "", fontFamily = FontFamily.Monospace)
                 }
             }
         }
 
-        Card(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Create punishment")
-
-                OutlinedTextField(
-                    value = targetUserId,
-                    onValueChange = { targetUserId = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Target user id") },
-                    singleLine = true
-                )
-
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(onClick = { type = "warn" }, modifier = Modifier.weight(1f)) { Text("Warn") }
-                    Button(onClick = { type = "ban" }, modifier = Modifier.weight(1f)) { Text("Ban") }
-                }
-
-                OutlinedTextField(
-                    value = reason,
-                    onValueChange = { reason = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Reason") }
-                )
-
-                Button(
-                    onClick = { vm.createPunishment(targetUserId, type, reason) },
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = targetUserId.isNotBlank()
-                ) {
-                    Text("Submit")
-                }
+        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Rules (current plan)", style = MaterialTheme.typography.titleSmall)
+                Text("• Only keep offending messages (linked to punishments).")
+                Text("• 30→90 rule: warned/banned stays until warn cleared or unbanned.")
             }
         }
 
         Divider()
 
-        Text("Latest punishments (${punishments.size})")
+        Text("Users", style = MaterialTheme.typography.titleMedium)
 
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            items(punishments) { p ->
-                Card(Modifier.fillMaxWidth()) {
+            items(users) { u ->
+                Card {
                     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("Type: ${p.type}  •  Active: ${p.active}")
-                        Text("Target: ${p.targetUserId}")
-                        Text("Reason: ${p.reason}")
-                        Text("Created: ${p.createdAt.toDate()}")
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text(u.displayName, style = MaterialTheme.typography.titleSmall)
+                            Text(u.status, style = MaterialTheme.typography.labelLarge)
+                        }
+                        Text("ID: ${u.userId}", fontFamily = FontFamily.Monospace)
+                        if (u.notes.isNotBlank()) Text(u.notes)
                     }
                 }
             }
+
+            item { Spacer(Modifier.padding(bottom = 40.dp)) }
         }
     }
 }
