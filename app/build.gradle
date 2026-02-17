@@ -3,7 +3,7 @@ plugins {
     id 'org.jetbrains.kotlin.android'
     id 'com.mikepenz.aboutlibraries.plugin'
 
-    // Firebase (safe to leave even if you haven't wired deps yet)
+    // Firebase / Google Services
     id 'com.google.gms.google-services'
 }
 
@@ -54,6 +54,9 @@ android {
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary true }
+
+        // default: NOT admin
+        buildConfigField "boolean", "ADMIN_BUILD", "false"
     }
 
     signingConfigs {
@@ -75,12 +78,27 @@ android {
     buildTypes {
         debug {
             // keep default
+            buildConfigField "boolean", "ADMIN_BUILD", "false"
+        }
+
+        // ✅ ADMIN APK build type (separate workflow will build this later)
+        // - different package name so it can be installed alongside the normal app
+        // - debuggable so you can test easily
+        admin {
+            initWith debug
+            matchingFallbacks = ['debug']
+            applicationIdSuffix ".admin"
+            versionNameSuffix "-admin"
+            debuggable true
+            buildConfigField "boolean", "ADMIN_BUILD", "true"
         }
 
         release {
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+
+            buildConfigField "boolean", "ADMIN_BUILD", "false"
 
             if (keystorePropertiesFile.exists()) {
                 signingConfig signingConfigs.release
@@ -146,7 +164,17 @@ dependencies {
     implementation "com.mikepenz:aboutlibraries-core:${latestAboutLibsRelease}"
     implementation "com.mikepenz:aboutlibraries-compose-m3:${latestAboutLibsRelease}"
 
-    // (Firebase deps come later — don’t add until we’re ready)
+    // =========================
+    // ✅ Firebase (for admin console + moderation storage)
+    // BoM v34.0.0 removes the -ktx artifacts, use main modules. 0
+    // =========================
+    implementation platform('com.google.firebase:firebase-bom:34.0.0')
+
+    // Auth (so the admin APK can sign in as YOU)
+    implementation 'com.google.firebase:firebase-auth'
+
+    // Firestore (store users, punishments, offending messages, announcements, etc.)
+    implementation 'com.google.firebase:firebase-firestore'
 
     testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test.ext:junit:1.1.5'
