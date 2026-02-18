@@ -7,6 +7,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.PowerManager
 import android.provider.Settings
+import android.provider.Settings.Secure
 import android.util.Log
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
@@ -119,6 +120,7 @@ import com.google.firebase.firestore.SetOptions
 import com.scrapw.chatbox.ui.ChatboxViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.security.MessageDigest
 
 private enum class AppPage(val title: String) {
     Home("Home"),
@@ -178,7 +180,7 @@ private object UiPrefs {
 /**
  * ✅ ToS acceptance storage.
  * We store an "accepted_version" integer locally.
- * Now that ToS is remote-configurable, "version" is dynamic.
+ * "version" is fetched remotely.
  */
 private object TosPrefs {
     private const val FILE = "vrca_tos"
@@ -193,30 +195,6 @@ private object TosPrefs {
             .putInt(KEY_ACCEPTED_VERSION, version.coerceAtLeast(1))
             .putLong(KEY_ACCEPTED_AT_MS, System.currentTimeMillis())
             .apply()
-    }
-}
-
-/**
- * ✅ Local profile storage (alias + optional displayName).
- * Alias is the important one. displayName defaults to alias.
- */
-private object ProfilePrefs {
-    private const val FILE = "vrca_profile"
-    private const val KEY_ALIAS = "alias"
-    private const val KEY_DISPLAY_NAME = "display_name"
-
-    fun readAlias(ctx: Context): String =
-        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getString(KEY_ALIAS, "")?.trim().orEmpty()
-
-    fun writeAlias(ctx: Context, alias: String) {
-        ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit().putString(KEY_ALIAS, alias.trim()).apply()
-    }
-
-    fun readDisplayName(ctx: Context): String =
-        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getString(KEY_DISPLAY_NAME, "")?.trim().orEmpty()
-
-    fun writeDisplayName(ctx: Context, name: String) {
-        ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit().putString(KEY_DISPLAY_NAME, name.trim()).apply()
     }
 }
 
@@ -245,8 +223,53 @@ private data class ModerationUi(
     val warnReason: String = "",
     val banned: Boolean = false,
     val banReason: String = "",
+    val deviceBanned: Boolean = false,
+    val deviceBanReason: String = "",
     val updatedAt: Timestamp? = null
 )
+
+/* =========================
+   Device hash (survives reinstall)
+   ========================= */
+
+private object DeviceId {
+    private const val PREFS = "vrca_remote"
+    private const val KEY_DEVICE_ID_HASH = "device_id_hash"
+
+    fun read(ctx: Context): String {
+        val prefs = ctx.getSharedPreferences(PREFS, MODE_PRIVATE)
+        return prefs.getString(KEY_DEVICE_ID_HASH, "")?.trim().orEmpty()
+    }
+
+    fun ensure(ctx: Context): String {
+        val existing = read(ctx)
+        if (existing.isNotBlank()) return existing
+
+        // ANDROID_ID survives reinstall (same signing key + same Android user), changes on factory reset.
+        val androidId = runCatching { Secure.getString(ctx.contentResolver, Secure.ANDROID_ID) }
+            .getOrNull()
+            ?.trim()
+            .orEmpty()
+
+        val seed = "v1:${androidId.ifBlank { "unknown" }}"
+        val hash = sha256Hex(seed)
+
+        ctx.getSharedPreferences(PREFS, MODE_PRIVATE)
+            .edit()
+            .putString(KEY_DEVICE_ID_HASH, hash)
+            .apply()
+
+        return hash
+    }
+
+    private fun sha256Hex(input: String): String {
+        val md = MessageDigest.getInstance("SHA-256")
+        val bytes = md.digest(input.toByteArray(Charsets.UTF_8))
+        val sb = StringBuilder(bytes.size * 2)
+        for (b in bytes) sb.append(String.format("%02x", b))
+        return sb.toString()
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -260,10 +283,13 @@ fun ChatboxScreen(
     val auth = remember { FirebaseAuth.getInstance() }
     val db = remember { FirebaseFirestore.getInstance() }
 
-    // Ensure users have a UID (anonymous auth).
+    // ✅ Ensure device hash exists for this install/user (survives reinstall)
+    val deviceHash = remember { DeviceId.ensure(ctx) }
+
+    // Ensure public users have a UID (anonymous auth).
     var authedUid by remember { mutableStateOf(auth.currentUser?.uid) }
 
-    // ✅ Capture last Firebase issue for Debug ONLY
+    // ✅ Capture last Firebase issue for Debug ONLY (never shown as a global orange banner)
     var lastFirebaseIssue by remember { mutableStateOf<String?>(null) }
 
     fun reportFirebase(tag: String, msg: String, t: Throwable? = null) {
@@ -271,10 +297,6 @@ fun ChatboxScreen(
         lastFirebaseIssue = full.take(4000)
         if (t != null) Log.w("VRC-A/Firebase", full, t) else Log.w("VRC-A/Firebase", full)
     }
-
-    // --- Local profile (alias) ---
-    var localAlias by rememberSaveable { mutableStateOf(ProfilePrefs.readAlias(ctx)) }
-    var localDisplayName by rememberSaveable { mutableStateOf(ProfilePrefs.readDisplayName(ctx).ifBlank { localAlias }) }
 
     LaunchedEffect(Unit) {
         if (auth.currentUser == null) {
@@ -285,20 +307,36 @@ fun ChatboxScreen(
             }.onFailure { e ->
                 reportFirebase("auth", "Anonymous auth failed", e)
             }
-        } else {
-            authedUid = auth.currentUser?.uid
+        }
+    }
+
+    // ✅ Write/refresh user presence + deviceHash (for user list + ban linkage)
+    LaunchedEffect(authedUid, deviceHash) {
+        val uid = authedUid?.trim().orEmpty()
+        if (uid.isBlank() || deviceHash.isBlank()) return@LaunchedEffect
+
+        runCatching {
+            db.collection("users").document(uid)
+                .set(
+                    mapOf(
+                        "deviceHash" to deviceHash,
+                        "appId" to BuildConfig.APPLICATION_ID,
+                        "lastSeenAt" to FieldValue.serverTimestamp(),
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                )
+        }.onFailure { e ->
+            reportFirebase("users/$uid", "Failed writing user presence/deviceHash", e)
         }
     }
 
     // ✅ Admin-build-only heartbeat for devices/{deviceHash}
     // Public build does NOT write devices/ at all.
     if (BuildConfig.IS_ADMIN_BUILD) {
-        val deviceHash = remember { readDeviceHashFromPrefs(ctx) }
-
         LaunchedEffect(deviceHash) {
             if (deviceHash.isBlank()) return@LaunchedEffect
 
-            // Write once immediately
             runCatching {
                 db.collection("devices").document(deviceHash)
                     .set(
@@ -314,7 +352,6 @@ fun ChatboxScreen(
                 reportFirebase("devices", "Failed writing admin heartbeat", e)
             }
 
-            // Then keep it fresh (every 2 minutes)
             while (true) {
                 delay(120_000L)
                 runCatching {
@@ -336,6 +373,10 @@ fun ChatboxScreen(
     // --- Remote config state ---
     var remoteTos by remember { mutableStateOf(RemoteTosUi()) }
     var announcements by remember { mutableStateOf<List<AnnouncementUi>>(emptyList()) }
+
+    // Moderation:
+    // - user-based: users/{uid}.warned/banned + reasons
+    // - device-based: bannedDevices/{deviceHash}.banned + reason
     var moderation by remember { mutableStateOf(ModerationUi()) }
 
     // Listen: config/app (ToS)
@@ -390,42 +431,53 @@ fun ChatboxScreen(
         onDispose { reg?.remove() }
     }
 
-    // Listen: moderation status for THIS user (public).
+    // Listen: moderation status for THIS UID (users/{uid})
     DisposableEffect(authedUid) {
         var reg: ListenerRegistration? = null
-        val uid = authedUid
-        if (!uid.isNullOrBlank()) {
+        val uid = authedUid?.trim().orEmpty()
+        if (uid.isNotBlank()) {
             reg = db.collection("users").document(uid)
                 .addSnapshotListener { snap, err ->
                     if (err != null) {
                         reportFirebase("users/$uid", "Failed to load moderation", err)
                         return@addSnapshotListener
                     }
-                    if (snap != null && snap.exists()) {
-                        moderation = ModerationUi(
-                            warned = snap.getBoolean("warned") ?: false,
-                            warnReason = snap.getString("warnReason") ?: "",
-                            banned = snap.getBoolean("banned") ?: false,
-                            banReason = snap.getString("banReason") ?: "",
-                            updatedAt = snap.getTimestamp("updatedAt")
-                        )
 
-                        // ✅ Also pull alias/displayName if present (nice for multi-device)
-                        val remoteAlias = (snap.getString("alias") ?: "").trim()
-                        val remoteName = (snap.getString("displayName") ?: "").trim()
+                    val warned = snap?.getBoolean("warned") ?: false
+                    val warnReason = snap?.getString("warnReason") ?: ""
+                    val banned = snap?.getBoolean("banned") ?: false
+                    val banReason = snap?.getString("banReason") ?: ""
+                    val updatedAt = snap?.getTimestamp("updatedAt")
 
-                        if (remoteAlias.isNotBlank() && remoteAlias != localAlias) {
-                            localAlias = remoteAlias
-                            ProfilePrefs.writeAlias(ctx, remoteAlias)
-                        }
-                        val resolvedName = remoteName.ifBlank { remoteAlias }
-                        if (resolvedName.isNotBlank() && resolvedName != localDisplayName) {
-                            localDisplayName = resolvedName
-                            ProfilePrefs.writeDisplayName(ctx, resolvedName)
-                        }
-                    } else {
-                        moderation = ModerationUi()
+                    moderation = moderation.copy(
+                        warned = warned,
+                        warnReason = warnReason,
+                        banned = banned,
+                        banReason = banReason,
+                        updatedAt = updatedAt
+                    )
+                }
+        }
+        onDispose { reg?.remove() }
+    }
+
+    // ✅ Listen: device ban (bannedDevices/{deviceHash})
+    DisposableEffect(deviceHash) {
+        var reg: ListenerRegistration? = null
+        val dh = deviceHash.trim()
+        if (dh.isNotBlank()) {
+            reg = db.collection("bannedDevices").document(dh)
+                .addSnapshotListener { snap, err ->
+                    if (err != null) {
+                        reportFirebase("bannedDevices/$dh", "Failed to load device ban", err)
+                        return@addSnapshotListener
                     }
+                    val banned = snap?.getBoolean("banned") ?: false
+                    val reason = snap?.getString("reason") ?: ""
+                    moderation = moderation.copy(
+                        deviceBanned = banned,
+                        deviceBanReason = reason
+                    )
                 }
         }
         onDispose { reg?.remove() }
@@ -433,44 +485,23 @@ fun ChatboxScreen(
 
     // --- ToS gate (remote) ---
     val requiredTosVersion = remoteTos.tosVersion.coerceAtLeast(1)
-    var tosAccepted by rememberSaveable { mutableStateOf(TosPrefs.acceptedVersion(ctx) >= requiredTosVersion) }
+    var tosAccepted by rememberSaveable {
+        mutableStateOf(TosPrefs.acceptedVersion(ctx) >= requiredTosVersion)
+    }
 
-    // If remote ToS version changes upward while app is open, re-gate.
     LaunchedEffect(requiredTosVersion) {
         tosAccepted = TosPrefs.acceptedVersion(ctx) >= requiredTosVersion
     }
 
-    // ✅ Require alias before allowing ToS acceptance
-    val aliasOk = localAlias.trim().length >= 2
-
-    if (!tosAccepted || !aliasOk) {
+    if (!tosAccepted) {
         TosGate(
             tosVersion = requiredTosVersion,
             tosText = remoteTos.tosText,
             tosUrl = remoteTos.tosUrl,
-            aliasValue = localAlias,
-            onAliasChange = { new ->
-                localAlias = new
-                // also keep displayName in sync by default
-                if (localDisplayName.isBlank() || localDisplayName == ProfilePrefs.readDisplayName(ctx).ifBlank { localAlias }) {
-                    localDisplayName = new
-                }
-            },
             onOpenUrl = { url ->
-                runCatching {
-                    ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-                }
+                runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
             },
             onAccept = {
-                val finalAlias = localAlias.trim()
-                if (finalAlias.length < 2) return@TosGate
-
-                ProfilePrefs.writeAlias(ctx, finalAlias)
-                if (localDisplayName.isBlank()) {
-                    localDisplayName = finalAlias
-                }
-                ProfilePrefs.writeDisplayName(ctx, localDisplayName.trim().ifBlank { finalAlias })
-
                 TosPrefs.accept(ctx, requiredTosVersion)
                 tosAccepted = true
             }
@@ -478,55 +509,16 @@ fun ChatboxScreen(
         return
     }
 
-    // ✅ Self-profile heartbeat: keep users/{uid} updated (alias + lastSeenAt)
-    // This is "best effort" and will silently fail if rules deny (captured in Debug).
-    val deviceHashForUser = remember { readDeviceHashFromPrefs(ctx) }
-    LaunchedEffect(authedUid, localAlias) {
-        val uid = authedUid ?: return@LaunchedEffect
-        if (uid.isBlank()) return@LaunchedEffect
+    // --- Ban gate (C: UID banned OR device banned) ---
+    val isBannedEffective = moderation.banned || moderation.deviceBanned
 
-        // Write immediately, then every 2 minutes
-        suspend fun writeProfileOnce() {
-            val alias = localAlias.trim()
-            if (alias.isBlank()) return
-
-            val displayName = localDisplayName.trim().ifBlank { alias }
-            val data = hashMapOf<String, Any>(
-                "alias" to alias,
-                "displayName" to displayName,
-                "lastSeenAt" to FieldValue.serverTimestamp(),
-                "updatedAt" to FieldValue.serverTimestamp(),
-                "appId" to BuildConfig.APPLICATION_ID,
-                "versionName" to BuildConfig.VERSION_NAME,
-                "versionCode" to BuildConfig.VERSION_CODE,
-                "adminBuild" to BuildConfig.IS_ADMIN_BUILD
-            )
-            if (deviceHashForUser.isNotBlank()) {
-                data["deviceHash"] = deviceHashForUser
-            }
-
-            runCatching {
-                db.collection("users").document(uid).set(data, SetOptions.merge())
-            }.onFailure { e ->
-                reportFirebase("users/$uid", "Self-profile write blocked/failed", e)
-            }
-        }
-
-        writeProfileOnce()
-        while (true) {
-            delay(120_000L)
-            writeProfileOnce()
-        }
-    }
-
-    // --- Ban gate (public + admin) ---
     var banStopRan by remember { mutableStateOf(false) }
-    LaunchedEffect(moderation.banned) {
-        if (moderation.banned && !banStopRan) {
+    LaunchedEffect(isBannedEffective) {
+        if (isBannedEffective && !banStopRan) {
             banStopRan = true
             runCatching { chatboxViewModel.killStopAndClear() }
         }
-        if (!moderation.banned) banStopRan = false
+        if (!isBannedEffective) banStopRan = false
     }
 
     var page by rememberSaveable { mutableStateOf(AppPage.Home) }
@@ -550,8 +542,8 @@ fun ChatboxScreen(
     }
 
     // If banned, always keep them on Home (so they see ban screen)
-    LaunchedEffect(moderation.banned) {
-        if (moderation.banned) page = AppPage.Home
+    LaunchedEffect(isBannedEffective) {
+        if (isBannedEffective) page = AppPage.Home
     }
 
     ModalNavigationDrawer(
@@ -562,7 +554,7 @@ fun ChatboxScreen(
                 current = page,
                 onSelect = { chosen ->
                     val safeChosen =
-                        if (moderation.banned) AppPage.Home
+                        if (isBannedEffective) AppPage.Home
                         else if (!BuildConfig.IS_ADMIN_BUILD && chosen == AppPage.Admin) AppPage.Home
                         else chosen
 
@@ -613,9 +605,12 @@ fun ChatboxScreen(
                 Crossfade(targetState = page, label = "page_crossfade") { p ->
                     when (p) {
                         AppPage.Home -> {
-                            if (moderation.banned) {
+                            if (isBannedEffective) {
                                 BannedScreen(
+                                    uid = authedUid.orEmpty(),
+                                    deviceHash = deviceHash,
                                     banReason = moderation.banReason,
+                                    deviceBanReason = moderation.deviceBanReason,
                                     onOpenInfo = { showInfoSheet = true },
                                     onOpenSettings = { showSettingsSheet = true }
                                 )
@@ -625,15 +620,7 @@ fun ChatboxScreen(
                                     snackbarHostState = snackbarHostState,
                                     onOpenSettings = { showSettingsSheet = true },
                                     announcements = announcements,
-                                    moderation = moderation,
-                                    alias = localAlias,
-                                    onAliasSaved = { newAlias ->
-                                        localAlias = newAlias.trim()
-                                        ProfilePrefs.writeAlias(ctx, localAlias)
-                                        // keep displayName aligned unless user overrides later
-                                        localDisplayName = localAlias
-                                        ProfilePrefs.writeDisplayName(ctx, localDisplayName)
-                                    }
+                                    moderation = moderation
                                 )
                             }
                         }
@@ -653,7 +640,7 @@ fun ChatboxScreen(
                         )
 
                         AppPage.Admin -> {
-                            if (BuildConfig.IS_ADMIN_BUILD && !moderation.banned) {
+                            if (BuildConfig.IS_ADMIN_BUILD && !isBannedEffective) {
                                 AdminScreen()
                             } else {
                                 HomePage(
@@ -661,14 +648,7 @@ fun ChatboxScreen(
                                     snackbarHostState = snackbarHostState,
                                     onOpenSettings = { showSettingsSheet = true },
                                     announcements = announcements,
-                                    moderation = moderation,
-                                    alias = localAlias,
-                                    onAliasSaved = { newAlias ->
-                                        localAlias = newAlias.trim()
-                                        ProfilePrefs.writeAlias(ctx, localAlias)
-                                        localDisplayName = localAlias
-                                        ProfilePrefs.writeDisplayName(ctx, localDisplayName)
-                                    }
+                                    moderation = moderation
                                 )
                             }
                         }
@@ -707,7 +687,7 @@ private fun GlobalStatusBanner(
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        if (moderation.warned && !moderation.banned) {
+        if (moderation.warned && !(moderation.banned || moderation.deviceBanned)) {
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
                 Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("⚠️ Warning", style = MaterialTheme.typography.labelLarge)
@@ -744,7 +724,10 @@ private fun GlobalStatusBanner(
 
 @Composable
 private fun BannedScreen(
+    uid: String,
+    deviceHash: String,
     banReason: String,
+    deviceBanReason: String,
     onOpenInfo: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
@@ -761,9 +744,25 @@ private fun BannedScreen(
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("You are banned from using this app.", style = MaterialTheme.typography.titleSmall)
+
+                    val reasons = buildList {
+                        if (banReason.isNotBlank()) add("UID ban: $banReason")
+                        if (deviceBanReason.isNotBlank()) add("Device ban: $deviceBanReason")
+                    }.ifEmpty { listOf("No reason provided.") }
+
+                    reasons.forEach { r ->
+                        Text(r, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            }
+
+            ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("IDs (for support/admin)", style = MaterialTheme.typography.titleSmall)
+                    Text("uid=${uid.ifBlank { "?" }}", fontFamily = FontFamily.Monospace)
                     Text(
-                        banReason.ifBlank { "No reason provided." },
-                        style = MaterialTheme.typography.bodyMedium
+                        "deviceHash=${deviceHash.take(16).ifBlank { "?" }}…",
+                        fontFamily = FontFamily.Monospace
                     )
                 }
             }
@@ -785,7 +784,7 @@ private fun BannedScreen(
 }
 
 /* =========================
-   ToS Gate UI (WITH ALIAS)
+   ToS Gate UI
    ========================= */
 
 @Composable
@@ -793,22 +792,22 @@ private fun TosGate(
     tosVersion: Int,
     tosText: String,
     tosUrl: String,
-    aliasValue: String,
-    onAliasChange: (String) -> Unit,
     onOpenUrl: (String) -> Unit,
     onAccept: () -> Unit
 ) {
     var checked by rememberSaveable { mutableStateOf(false) }
-    val aliasTrim = aliasValue.trim()
-    val aliasOk = aliasTrim.length >= 2 && aliasTrim.length <= 24
 
+    // ✅ Always show something even if Firestore text is empty.
     val fallbackText = remember {
         """
+TERMS OF SERVICE (SUMMARY)
+
 By using this app, you agree to:
 • Use it responsibly and legally
 • Not use it to harass, spam, or impersonate others
 • Understand VRChat chatbox limits apply and messages may be trimmed
 • Accept that settings/history are stored locally on your device
+• You may be moderated (warned/banned) for abuse
 
 If you do not agree, close the app.
         """.trimIndent()
@@ -832,7 +831,7 @@ If you do not agree, close the app.
             ElevatedCard {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
-                        text = (tosText.ifBlank { fallbackText }),
+                        text = tosText.ifBlank { fallbackText },
                         style = MaterialTheme.typography.bodyMedium
                     )
 
@@ -847,34 +846,6 @@ If you do not agree, close the app.
                 }
             }
 
-            ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("Pick your Alias", style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        "This is what admins will see in the user directory. You can change it later in Home.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    OutlinedTextField(
-                        value = aliasValue,
-                        onValueChange = { onAliasChange(it) },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        label = { Text("Alias") },
-                        placeholder = { Text("e.g. Ash") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
-                    )
-
-                    Text(
-                        if (aliasOk) "OK"
-                        else "Alias must be 2–24 characters.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (aliasOk) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error
-                    )
-                }
-            }
-
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -886,7 +857,7 @@ If you do not agree, close the app.
 
             Button(
                 onClick = onAccept,
-                enabled = checked && aliasOk,
+                enabled = checked,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text("Accept & Continue")
@@ -1092,9 +1063,7 @@ private fun HomePage(
     snackbarHostState: SnackbarHostState,
     onOpenSettings: () -> Unit,
     announcements: List<AnnouncementUi>,
-    moderation: ModerationUi,
-    alias: String,
-    onAliasSaved: (String) -> Unit
+    moderation: ModerationUi
 ) {
     val uiState by vm.messengerUiState.collectAsState()
     val ctx = LocalContext.current
@@ -1126,52 +1095,7 @@ private fun HomePage(
             .take(3)
     }
 
-    // Alias editor
-    var aliasDraft by rememberSaveable { mutableStateOf(alias) }
-    LaunchedEffect(alias) { if (aliasDraft.isBlank()) aliasDraft = alias }
-
     PageContainer {
-        // ✅ Profile card (alias edit later)
-        SectionCard(
-            title = "Profile",
-            subtitle = "Your Alias is shown to admins (user directory)."
-        ) {
-            OutlinedTextField(
-                value = aliasDraft,
-                onValueChange = { aliasDraft = it },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                label = { Text("Alias") },
-                placeholder = { Text("e.g. Ash") }
-            )
-
-            val a = aliasDraft.trim()
-            val ok = a.length in 2..24
-
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(
-                    onClick = {
-                        if (!ok) return@Button
-                        onAliasSaved(a)
-                        scope.launch { snackbarHostState.showSnackbar("Alias saved") }
-                    },
-                    enabled = ok,
-                    modifier = Modifier.weight(1f)
-                ) { Text("Save Alias") }
-
-                OutlinedButton(
-                    onClick = { aliasDraft = alias },
-                    modifier = Modifier.weight(1f)
-                ) { Text("Reset") }
-            }
-
-            Text(
-                text = "Current: ${alias.trim().ifBlank { "(not set)" }}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-
         if (topAnnouncements.isNotEmpty()) {
             SectionCard(
                 title = "Announcements",
@@ -1195,7 +1119,7 @@ private fun HomePage(
             }
         }
 
-        if (moderation.warned && !moderation.banned) {
+        if (moderation.warned && !(moderation.banned || moderation.deviceBanned)) {
             SectionCard(
                 title = "Account warning",
                 subtitle = "This warning is shown to you only."
@@ -2123,7 +2047,6 @@ private fun InfoSheet(onDismiss: () -> Unit) {
                     val overview = remember {
                         """
 VRC-A (VRChat Assistant)
-by Ashoska Mitsu Sisko
 
 • Sends OSC chatbox text to your Quest/PC target
 • Includes: AFK, Cycle, Now Playing, Manual Send
@@ -2198,13 +2121,4 @@ private fun vrChatSafePreview(input: String): String {
     return input.lines().joinToString("\n") { line ->
         line.split(" ").joinToString(" ") { breakLongToken(it) }
     }
-}
-
-/**
- * Reads the device hash that ChatboxApp caches into SharedPreferences "vrca_remote".
- * Key must match ChatboxApp.kt (RemoteKeys.DEVICE_ID_HASH).
- */
-private fun readDeviceHashFromPrefs(ctx: Context): String {
-    val prefs = ctx.getSharedPreferences("vrca_remote", MODE_PRIVATE)
-    return prefs.getString("device_id_hash", "")?.trim().orEmpty()
 }
