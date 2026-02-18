@@ -90,7 +90,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -111,9 +110,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.Query
+import com.google.firebase.firestore.SetOptions
 import com.scrapw.chatbox.ui.ChatboxViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -246,6 +247,45 @@ fun ChatboxScreen(
                     .addOnFailureListener { e -> firebaseError = e.message ?: "Auth failed" }
             }.onFailure { e ->
                 firebaseError = e.message ?: "Auth failed"
+            }
+        }
+    }
+
+    // ✅ Admin-build-only heartbeat for devices/{deviceHash}
+    // Public build does NOT write devices/ at all.
+    if (BuildConfig.IS_ADMIN_BUILD) {
+        val deviceHash = remember { readDeviceHashFromPrefs(ctx) }
+
+        LaunchedEffect(deviceHash) {
+            if (deviceHash.isBlank()) return@LaunchedEffect
+
+            // Write once immediately
+            runCatching {
+                db.collection("devices").document(deviceHash)
+                    .set(
+                        mapOf(
+                            "lastSeenAt" to FieldValue.serverTimestamp(),
+                            "appId" to BuildConfig.APPLICATION_ID,
+                            "adminBuild" to true,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        ),
+                        SetOptions.merge()
+                    )
+            }
+
+            // Then keep it fresh (every 2 minutes)
+            while (true) {
+                delay(120_000L)
+                runCatching {
+                    db.collection("devices").document(deviceHash)
+                        .set(
+                            mapOf(
+                                "lastSeenAt" to FieldValue.serverTimestamp(),
+                                "updatedAt" to FieldValue.serverTimestamp()
+                            ),
+                            SetOptions.merge()
+                        )
+                }
             }
         }
     }
@@ -1948,4 +1988,13 @@ private fun vrChatSafePreview(input: String): String {
     return input.lines().joinToString("\n") { line ->
         line.split(" ").joinToString(" ") { breakLongToken(it) }
     }
+}
+
+/**
+ * Reads the device hash that ChatboxApp caches into SharedPreferences "vrca_remote".
+ * Key must match ChatboxApp.kt (RemoteKeys.DEVICE_ID_HASH).
+ */
+private fun readDeviceHashFromPrefs(ctx: Context): String {
+    val prefs = ctx.getSharedPreferences("vrca_remote", MODE_PRIVATE)
+    return prefs.getString("device_id_hash", "")?.trim().orEmpty()
 }
