@@ -7,6 +7,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.PowerManager
 import android.provider.Settings
+import android.util.Log
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.fadeIn
@@ -238,19 +239,23 @@ fun ChatboxScreen(
     // Ensure public users have a UID (anonymous auth).
     var authedUid by remember { mutableStateOf(auth.currentUser?.uid) }
 
-    // NOTE:
-    // We intentionally DO NOT surface Firebase errors in the UI
-    // (removes the orange "Firebase issue" box behind your UI).
-    var firebaseError by remember { mutableStateOf<String?>(null) }
+    // ✅ Capture last Firebase issue for Debug ONLY (never shown as a global orange banner)
+    var lastFirebaseIssue by remember { mutableStateOf<String?>(null) }
+
+    fun reportFirebase(tag: String, msg: String, t: Throwable? = null) {
+        val full = "[$tag] $msg" + (t?.let { " :: ${it.message ?: it::class.java.simpleName}" } ?: "")
+        lastFirebaseIssue = full.take(4000)
+        if (t != null) Log.w("VRC-A/Firebase", full, t) else Log.w("VRC-A/Firebase", full)
+    }
 
     LaunchedEffect(Unit) {
         if (auth.currentUser == null) {
             runCatching {
                 auth.signInAnonymously()
                     .addOnSuccessListener { res -> authedUid = res.user?.uid }
-                    .addOnFailureListener { e -> firebaseError = e.message ?: "Auth failed" }
+                    .addOnFailureListener { e -> reportFirebase("auth", "Anonymous auth failed", e) }
             }.onFailure { e ->
-                firebaseError = e.message ?: "Auth failed"
+                reportFirebase("auth", "Anonymous auth failed", e)
             }
         }
     }
@@ -275,6 +280,8 @@ fun ChatboxScreen(
                         ),
                         SetOptions.merge()
                     )
+            }.onFailure { e ->
+                reportFirebase("devices", "Failed writing admin heartbeat", e)
             }
 
             // Then keep it fresh (every 2 minutes)
@@ -289,6 +296,8 @@ fun ChatboxScreen(
                             ),
                             SetOptions.merge()
                         )
+                }.onFailure { e ->
+                    reportFirebase("devices", "Failed updating admin heartbeat", e)
                 }
             }
         }
@@ -305,7 +314,7 @@ fun ChatboxScreen(
         reg = db.collection("config").document("app")
             .addSnapshotListener { snap, err ->
                 if (err != null) {
-                    firebaseError = err.message ?: "Firestore error"
+                    reportFirebase("config/app", "Snapshot listener error", err)
                     return@addSnapshotListener
                 }
                 if (snap != null && snap.exists()) {
@@ -331,7 +340,7 @@ fun ChatboxScreen(
             .limit(30)
             .addSnapshotListener { snap, err ->
                 if (err != null) {
-                    firebaseError = err.message ?: "Failed to load announcements"
+                    reportFirebase("announcements", "Failed to load announcements", err)
                     return@addSnapshotListener
                 }
                 if (snap != null) {
@@ -359,7 +368,7 @@ fun ChatboxScreen(
             reg = db.collection("users").document(uid)
                 .addSnapshotListener { snap, err ->
                     if (err != null) {
-                        firebaseError = err.message ?: "Failed to load moderation"
+                        reportFirebase("users/$uid", "Failed to load moderation", err)
                         return@addSnapshotListener
                     }
                     if (snap != null && snap.exists()) {
@@ -406,8 +415,6 @@ fun ChatboxScreen(
     }
 
     // --- Ban gate (public + admin) ---
-    // If banned: block app usage (still let them open Settings/Info).
-    // Also stop any active senders once, so VRChat is cleared.
     var banStopRan by remember { mutableStateOf(false) }
     LaunchedEffect(moderation.banned) {
         if (moderation.banned && !banStopRan) {
@@ -492,12 +499,10 @@ fun ChatboxScreen(
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                // Global banners (warn + announcements)
-                // NOTE: firebaseError is intentionally ignored so it never renders an orange box.
+                // Global banners (warn + announcements) ONLY
                 GlobalStatusBanner(
                     moderation = moderation,
-                    announcements = announcements,
-                    firebaseError = firebaseError
+                    announcements = announcements
                 )
 
                 Crossfade(targetState = page, label = "page_crossfade") { p ->
@@ -529,7 +534,10 @@ fun ChatboxScreen(
                             onPersistSpotifyPreset = { UiPrefs.writeSpotifyPreset(ctx, it) }
                         )
 
-                        AppPage.Debug -> DebugPage(chatboxViewModel)
+                        AppPage.Debug -> DebugPage(
+                            vm = chatboxViewModel,
+                            lastFirebaseIssue = lastFirebaseIssue
+                        )
 
                         AppPage.Admin -> {
                             if (BuildConfig.IS_ADMIN_BUILD && !moderation.banned) {
@@ -569,8 +577,7 @@ fun ChatboxScreen(
 @Composable
 private fun GlobalStatusBanner(
     moderation: ModerationUi,
-    announcements: List<AnnouncementUi>,
-    firebaseError: String?
+    announcements: List<AnnouncementUi>
 ) {
     val topAnn = announcements.maxByOrNull { it.priority }
 
@@ -580,11 +587,6 @@ private fun GlobalStatusBanner(
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        // Intentionally do NOT show firebaseError to avoid orange error cards in-app.
-        // (We keep the param to avoid changing call sites / structure.)
-        @Suppress("UNUSED_VARIABLE")
-        val _ignored = firebaseError
-
         if (moderation.warned && !moderation.banned) {
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
                 Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -971,7 +973,6 @@ private fun HomePage(
     }
 
     PageContainer {
-        // Announcements block (public)
         if (topAnnouncements.isNotEmpty()) {
             SectionCard(
                 title = "Announcements",
@@ -995,7 +996,6 @@ private fun HomePage(
             }
         }
 
-        // Warning block (public)
         if (moderation.warned && !moderation.banned) {
             SectionCard(
                 title = "Account warning",
@@ -1730,8 +1730,18 @@ private fun NowPlayingPage(
    ========================= */
 
 @Composable
-private fun DebugPage(vm: ChatboxViewModel) {
+private fun DebugPage(vm: ChatboxViewModel, lastFirebaseIssue: String?) {
     PageContainer {
+        SectionCard(
+            title = "Firebase (last issue)",
+            subtitle = "Only shown here. Not shown as a global banner."
+        ) {
+            Text(
+                text = lastFirebaseIssue ?: "(none captured)",
+                fontFamily = FontFamily.Monospace
+            )
+        }
+
         SectionCard(
             title = "Listener",
             subtitle = "Confirms Notification Access + media detection."
