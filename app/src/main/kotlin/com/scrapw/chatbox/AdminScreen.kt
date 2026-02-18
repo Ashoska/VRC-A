@@ -38,6 +38,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
@@ -54,7 +55,7 @@ import kotlinx.coroutines.tasks.await
  *
  * Collections:
  * - announcements/{id} : { title, body, active, priority, createdAt, createdByDevice, createdByAppId }
- * - users/{uid} : { displayName, warned, warnReason, banned, banReason, updatedAt }
+ * - users/{uid} : { displayName, warned, warnReason, banned, banReason, lastSeenAt, updatedAt }
  * - config/app : { tosVersion, tosText, tosUrl, ownerUid, updatedAt }
  * - devices/{deviceHash} : { adminEnabled, note, lastSeenAt, ... }
  *
@@ -219,6 +220,9 @@ fun AdminScreen() {
 
     LaunchedEffect(myUid) { refreshOwnerGate() }
 
+    // ✅ hoist moderation lookup so Users Directory can fill it
+    var moderationLookupUid by remember { mutableStateOf("") }
+
     // ---------- Main admin UI ----------
     Surface {
         Column(
@@ -279,6 +283,16 @@ fun AdminScreen() {
 
             Divider()
 
+            // ✅ NEW: Users directory (admin-only)
+            AdminUsersDirectorySection(
+                db = db,
+                setLoading = { loading = it },
+                setError = ::setErr,
+                onSelectUid = { uid -> moderationLookupUid = uid }
+            )
+
+            Divider()
+
             // Announcements
             AdminAnnouncementsSection(
                 db = db,
@@ -296,7 +310,9 @@ fun AdminScreen() {
                 byDeviceHash = deviceHash,
                 byAppId = BuildConfig.APPLICATION_ID,
                 setLoading = { loading = it },
-                setError = ::setErr
+                setError = ::setErr,
+                lookupUid = moderationLookupUid,
+                onLookupUidChange = { moderationLookupUid = it }
             )
 
             Divider()
@@ -388,6 +404,235 @@ private fun AdminRulesCard() {
             Text("• Admin access: devices/{deviceHash}.adminEnabled == true.")
             Text("• Owner access: config/app.ownerUid == your UID (enables in-app admin manager).")
             Text("• Moderation history: moderationEvents/ collection (append-only).")
+            Text("• Users directory: admin-only list of users/ (paged).")
+        }
+    }
+}
+
+/* =========================================================
+   ✅ NEW: Admin-only Users Directory (paged + lazy)
+   ========================================================= */
+
+private data class UserRow(
+    val uid: String,
+    val displayName: String,
+    val warned: Boolean,
+    val banned: Boolean,
+    val lastSeenAt: Timestamp?
+)
+
+@Composable
+private fun AdminUsersDirectorySection(
+    db: FirebaseFirestore,
+    setLoading: (Boolean) -> Unit,
+    setError: (String?) -> Unit,
+    onSelectUid: (String) -> Unit
+) {
+    val users = remember { mutableStateListOf<UserRow>() }
+
+    var search by remember { mutableStateOf("") }
+    var onlyWarned by remember { mutableStateOf(false) }
+    var onlyBanned by remember { mutableStateOf(false) }
+
+    var pagingLoading by remember { mutableStateOf(false) }
+    var hasMore by remember { mutableStateOf(true) }
+    var lastDoc by remember { mutableStateOf<DocumentSnapshot?>(null) }
+
+    val pageSize = 60
+
+    fun resetAndLoadFirstPage() {
+        users.clear()
+        lastDoc = null
+        hasMore = true
+        loadNextPage()
+    }
+
+    fun loadNextPage() {
+        if (pagingLoading) return
+        if (!hasMore) return
+
+        pagingLoading = true
+        setError(null)
+
+        // Order by lastSeenAt so "active-ish" users float up.
+        // (Docs missing lastSeenAt will still appear; ordering puts them near the bottom.)
+        var q: Query = db.collection("users")
+            .orderBy("lastSeenAt", Query.Direction.DESCENDING)
+            .limit(pageSize.toLong())
+
+        val ld = lastDoc
+        if (ld != null) q = q.startAfter(ld)
+
+        q.get()
+            .addOnSuccessListener { snap ->
+                val docs = snap.documents
+                for (d in docs) {
+                    val uid = d.id
+                    val name = (d.getString("displayName") ?: "").trim()
+                    val warned = d.getBoolean("warned") ?: false
+                    val banned = d.getBoolean("banned") ?: false
+                    val lastSeen = d.getTimestamp("lastSeenAt")
+                    users.add(
+                        UserRow(
+                            uid = uid,
+                            displayName = name,
+                            warned = warned,
+                            banned = banned,
+                            lastSeenAt = lastSeen
+                        )
+                    )
+                }
+
+                lastDoc = docs.lastOrNull()
+                // If we got fewer than pageSize, we're done.
+                if (docs.size < pageSize) hasMore = false
+
+                pagingLoading = false
+            }
+            .addOnFailureListener { e ->
+                pagingLoading = false
+                setError(e.message ?: "Failed to load users list")
+            }
+    }
+
+    LaunchedEffect(Unit) { resetAndLoadFirstPage() }
+
+    val filtered = remember(search, onlyWarned, onlyBanned, users.toList()) {
+        val q = search.trim()
+        users.asSequence()
+            .filter { u ->
+                val okWarn = if (!onlyWarned) true else u.warned
+                val okBan = if (!onlyBanned) true else u.banned
+                okWarn && okBan
+            }
+            .filter { u ->
+                if (q.isBlank()) return@filter true
+                u.uid.contains(q, ignoreCase = true) || u.displayName.contains(q, ignoreCase = true)
+            }
+            .toList()
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("Users directory (admin)", style = MaterialTheme.typography.titleMedium)
+
+        ElevatedCard {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "Tap a user to fill Moderation UID. Uses paging + LazyColumn to avoid lag.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                OutlinedTextField(
+                    value = search,
+                    onValueChange = { search = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("Search (uid or displayName)") },
+                    placeholder = { Text("type to filter…") }
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Warned only")
+                        Spacer(Modifier.width(8.dp))
+                        Switch(checked = onlyWarned, onCheckedChange = { onlyWarned = it })
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Banned only")
+                        Spacer(Modifier.width(8.dp))
+                        Switch(checked = onlyBanned, onCheckedChange = { onlyBanned = it })
+                    }
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedButton(
+                        onClick = { resetAndLoadFirstPage() },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Refresh") }
+
+                    Button(
+                        onClick = { loadNextPage() },
+                        enabled = hasMore && !pagingLoading,
+                        modifier = Modifier.weight(1f)
+                    ) { Text(if (pagingLoading) "Loading…" else "Load more") }
+                }
+
+                Text(
+                    "Loaded: ${users.size}  •  Showing: ${filtered.size}  •  More: ${if (hasMore) "yes" else "no"}",
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
+
+        if (filtered.isEmpty()) {
+            Text("No users to show (try Load more or clear filters).", style = MaterialTheme.typography.bodySmall)
+        } else {
+            // LazyColumn only renders visible items -> no UI lag.
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                items(filtered, key = { it.uid }) { u ->
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                    ) {
+                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column {
+                                    Text(
+                                        u.displayName.ifBlank { "(no displayName)" },
+                                        style = MaterialTheme.typography.titleSmall
+                                    )
+                                    Text(u.uid, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                                }
+
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    if (u.warned) Text("WARN", style = MaterialTheme.typography.labelLarge)
+                                    if (u.banned) Text("BAN", style = MaterialTheme.typography.labelLarge)
+                                }
+                            }
+
+                            Text(
+                                "lastSeenAt=${u.lastSeenAt ?: "?"}",
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Button(
+                                    onClick = { onSelectUid(u.uid) },
+                                    modifier = Modifier.weight(1f)
+                                ) { Text("Moderate") }
+                            }
+                        }
+                    }
+                }
+
+                item {
+                    Spacer(Modifier.height(6.dp))
+                    if (hasMore) {
+                        OutlinedButton(
+                            onClick = { loadNextPage() },
+                            enabled = !pagingLoading,
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text(if (pagingLoading) "Loading…" else "Load more users") }
+                    } else {
+                        Text(
+                            "End of list.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                }
+            }
         }
     }
 }
@@ -791,9 +1036,10 @@ private fun AdminModerationSection(
     byDeviceHash: String,
     byAppId: String,
     setLoading: (Boolean) -> Unit,
-    setError: (String?) -> Unit
+    setError: (String?) -> Unit,
+    lookupUid: String,
+    onLookupUidChange: (String) -> Unit
 ) {
-    var lookupUid by remember { mutableStateOf("") }
     var loadedUid by remember { mutableStateOf<String?>(null) }
 
     var displayName by remember { mutableStateOf("") }
@@ -882,7 +1128,6 @@ private fun AdminModerationSection(
             "byUid" to myUid,
             "byAppId" to byAppId
         )
-        // Do not block UI on event write; still surface errors.
         db.collection("moderationEvents")
             .add(data)
             .addOnFailureListener { e ->
@@ -898,7 +1143,7 @@ private fun AdminModerationSection(
                 Text("Lookup user (by UID)", style = MaterialTheme.typography.titleSmall)
                 OutlinedTextField(
                     value = lookupUid,
-                    onValueChange = { lookupUid = it },
+                    onValueChange = { onLookupUidChange(it) },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     label = { Text("User UID") },
