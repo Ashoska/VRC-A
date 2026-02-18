@@ -20,9 +20,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -39,19 +39,6 @@ import com.scrapw.chatbox.ui.ChatboxViewModel
 import kotlinx.coroutines.tasks.await
 import java.security.MessageDigest
 
-/**
- * ChatboxApp
- *
- * Responsibilities:
- *  - crash gate
- *  - bootstrap gate
- *  - anonymous auth (no login UI)
- *  - stable device identity via ANDROID_ID hash
- *  - sync + cache:
- *      devices/{deviceHash}      moderation state (+ adminEnabled exists there too)
- *      announcements (active)
- *      config/app                ToS config
- */
 @Composable
 fun ChatboxApp() {
     val ctx = LocalContext.current
@@ -64,17 +51,15 @@ fun ChatboxApp() {
         crashPrefs.getString(ChatboxApplication.CRASH_KEY_TEXT, "").orEmpty()
     }
 
-    var showApp by remember { mutableStateOf(lastCrashText.isBlank()) }
+    var allowBoot by remember { mutableStateOf(lastCrashText.isBlank()) }
 
-    if (!showApp) {
+    if (!allowBoot) {
         CrashScreen(
             crashText = lastCrashText,
-            onClear = {
-                crashPrefs.edit().remove(ChatboxApplication.CRASH_KEY_TEXT).commit()
-            },
+            onClear = { crashPrefs.edit().remove(ChatboxApplication.CRASH_KEY_TEXT).commit() },
             onContinue = {
                 crashPrefs.edit().remove(ChatboxApplication.CRASH_KEY_TEXT).commit()
-                showApp = true
+                allowBoot = true
             }
         )
         return
@@ -83,29 +68,28 @@ fun ChatboxApp() {
     // ----- Bootstrap gate -----
     var bootOk by remember { mutableStateOf(false) }
     var bootWorking by remember { mutableStateOf(false) }
-    var bootErr by remember { mutableStateOf<String?>(null) }
+    var bootError by remember { mutableStateOf<String?>(null) }
 
     if (!bootOk) {
         BootstrapScreen(
             working = bootWorking,
-            error = bootErr,
+            error = bootError,
             onRetry = {
                 bootOk = false
                 bootWorking = false
-                bootErr = null
+                bootError = null
             }
         )
 
         LaunchedEffect(bootOk) {
             if (bootOk || bootWorking) return@LaunchedEffect
             bootWorking = true
-            bootErr = null
-
+            bootError = null
             try {
                 bootstrapFirebaseAndCache(ctx)
                 bootOk = true
             } catch (t: Throwable) {
-                bootErr = (t.message ?: t.toString()).take(4000)
+                bootError = (t.message ?: t.toString()).take(4000)
             } finally {
                 bootWorking = false
             }
@@ -118,9 +102,9 @@ fun ChatboxApp() {
     ChatboxScreen(chatboxViewModel = vm)
 }
 
-/* =========================================================
+/* =========================
    BOOTSTRAP
-   ========================================================= */
+   ========================= */
 
 private const val REMOTE_PREFS_FILE = "vrca_remote"
 
@@ -139,25 +123,18 @@ private object RemoteKeys {
     const val TOS_URL = "tos_url"
     const val TOS_UPDATED_AT = "tos_updated_at"
 
-    // Stored as compact escaped plaintext rows:
-    //  esc(title)|||esc(body)|||priority|||createdAtMs\n
     const val ANNOUNCEMENTS_BLOCK = "announcements_block"
     const val ANNOUNCEMENTS_UPDATED_AT = "announcements_updated_at"
 }
 
 private suspend fun bootstrapFirebaseAndCache(ctx: Context) {
     val auth = FirebaseAuth.getInstance()
-    if (auth.currentUser == null) {
-        auth.signInAnonymously().await()
-    }
+    if (auth.currentUser == null) auth.signInAnonymously().await()
     val uid = auth.currentUser?.uid ?: error("Anonymous auth returned null user")
 
-    val androidId = Settings.Secure
-        .getString(ctx.contentResolver, Settings.Secure.ANDROID_ID)
-        ?.trim()
-        .orEmpty()
+    val androidId = Settings.Secure.getString(ctx.contentResolver, Settings.Secure.ANDROID_ID)
+        ?.trim().orEmpty()
 
-    // ANDROID_ID can be null/blank on some devices; fall back to UID (still no login UI).
     val deviceKeySource = if (androidId.isNotBlank()) "a:$androidId" else "u:$uid"
     val deviceHash = sha256Hex(deviceKeySource)
 
@@ -170,42 +147,39 @@ private suspend fun bootstrapFirebaseAndCache(ctx: Context) {
     val db = FirebaseFirestore.getInstance()
     val deviceRef = db.collection("devices").document(deviceHash)
 
-    // Create if missing (safe merge)
-    runCatching {
-        val existing = deviceRef.get().await()
-        if (!existing.exists()) {
-            deviceRef.set(
-                mapOf(
-                    "deviceHash" to deviceHash,
-                    "ownerUid" to uid,
-                    "adminEnabled" to false,
-                    "warned" to false,
-                    "banned" to false,
-                    "warnReason" to "",
-                    "banReason" to "",
-                    "createdAt" to FieldValue.serverTimestamp()
-                ),
-                com.google.firebase.firestore.SetOptions.merge()
-            ).await()
-        }
-    }
-
-    // Heartbeat (merge-safe). Non-fatal if rules deny.
-    runCatching {
+    // Create-once baseline (merge-safe)
+    val existing = deviceRef.get().await()
+    if (!existing.exists()) {
         deviceRef.set(
             mapOf(
-                "lastSeenAt" to FieldValue.serverTimestamp(),
-                "lastSeenUid" to uid,
-                "appId" to BuildConfig.APPLICATION_ID,
-                "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
-                "versionName" to BuildConfig.VERSION_NAME,
-                "versionCode" to BuildConfig.VERSION_CODE
+                "deviceHash" to deviceHash,
+                "ownerUid" to uid,
+                "adminEnabled" to false,
+                "warned" to false,
+                "banned" to false,
+                "warnReason" to "",
+                "banReason" to "",
+                "createdAt" to FieldValue.serverTimestamp()
             ),
             com.google.firebase.firestore.SetOptions.merge()
         ).await()
     }
 
-    // Moderation read (device doc)
+    // Heartbeat merge write
+    deviceRef.set(
+        mapOf(
+            "deviceHash" to deviceHash,
+            "lastSeenAt" to FieldValue.serverTimestamp(),
+            "lastSeenUid" to uid,
+            "appId" to BuildConfig.APPLICATION_ID,
+            "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
+            "versionName" to BuildConfig.VERSION_NAME,
+            "versionCode" to BuildConfig.VERSION_CODE
+        ),
+        com.google.firebase.firestore.SetOptions.merge()
+    ).await()
+
+    // Moderation cache
     run {
         val snap = deviceRef.get().await()
         val warned = snap.getBoolean("warned") ?: false
@@ -223,7 +197,7 @@ private suspend fun bootstrapFirebaseAndCache(ctx: Context) {
             .apply()
     }
 
-    // ToS config (config/app)
+    // ToS cache
     run {
         val snap = db.collection("config").document("app").get().await()
         val tosVersion = (snap.getLong("tosVersion") ?: 1L).toInt().coerceAtLeast(1)
@@ -239,7 +213,7 @@ private suspend fun bootstrapFirebaseAndCache(ctx: Context) {
             .apply()
     }
 
-    // Announcements (active only)
+    // Announcements cache (simple + index-friendly)
     run {
         val snap = db.collection("announcements")
             .whereEqualTo("active", true)
@@ -262,7 +236,6 @@ private suspend fun bootstrapFirebaseAndCache(ctx: Context) {
             val body = (d.getString("body") ?: "").trim()
             val priority = (d.getLong("priority") ?: 0L).toInt()
             val createdAt = d.getTimestamp("createdAt")
-
             if (newest == null && createdAt != null) newest = createdAt
 
             sb.append(esc(title))
@@ -294,9 +267,9 @@ private fun sha256Hex(input: String): String {
     return sb.toString()
 }
 
-/* =========================================================
-   UI: Bootstrap + Crash
-   ========================================================= */
+/* =========================
+   BOOTSTRAP UI
+   ========================= */
 
 @Composable
 private fun BootstrapScreen(
@@ -314,30 +287,57 @@ private fun BootstrapScreen(
         ) {
             Text("Starting VRC-A…", style = MaterialTheme.typography.headlineSmall)
 
+            ElevatedCard {
+                Column(
+                    Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        "Preparing device session + loading announcements/mod status + ToS config.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        "Build: ${BuildConfig.APPLICATION_ID}\n" +
+                            "Version: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})\n" +
+                            "Admin: ${BuildConfig.IS_ADMIN_BUILD}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
             if (working) {
-                Row(
+                Column(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Center
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     CircularProgressIndicator()
+                    Text("Loading…")
                 }
             }
 
             if (error != null) {
                 ElevatedCard {
                     Column(
-                        modifier = Modifier.padding(12.dp),
+                        Modifier.padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text("Startup error", style = MaterialTheme.typography.titleSmall)
-                        Text(error, fontFamily = FontFamily.Monospace)
+                        Text(error, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
                     }
                 }
-                Button(onClick = onRetry) { Text("Retry") }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(onClick = onRetry) { Text("Retry") }
+                }
             }
         }
     }
 }
+
+/* =========================
+   CRASH SCREEN
+   ========================= */
 
 @Composable
 private fun CrashScreen(
@@ -355,19 +355,45 @@ private fun CrashScreen(
         ) {
             Text("VRC-A crashed on last launch", style = MaterialTheme.typography.headlineSmall)
 
+            Text(
+                "Build: ${BuildConfig.APPLICATION_ID}\n" +
+                    "Version: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})\n" +
+                    "Admin: ${BuildConfig.IS_ADMIN_BUILD}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
             ElevatedCard {
-                Column(Modifier.padding(12.dp)) {
-                    Text(crashText.ifBlank { "(no crash text saved)" }, fontFamily = FontFamily.Monospace)
+                Column(
+                    Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        crashText.ifBlank { "(no crash text saved)" },
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall
+                    )
                 }
             }
 
-            Button(onClick = onContinue, modifier = Modifier.fillMaxWidth()) {
-                Text("Clear crash + continue")
+            Button(
+                onClick = onContinue,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp)
+            ) {
+                Text("Clear crash + Try boot")
             }
 
             OutlinedButton(onClick = onClear, modifier = Modifier.fillMaxWidth()) {
                 Text("Clear crash log only")
             }
+
+            Text(
+                "If this screen shows “no crash text saved”, the process is dying before the handler can write the log (native crash or very-early crash).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
