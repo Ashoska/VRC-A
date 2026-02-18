@@ -49,6 +49,7 @@ import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
+import com.google.firebase.firestore.SetOptions
 import kotlinx.coroutines.tasks.await
 
 /**
@@ -62,15 +63,26 @@ import kotlinx.coroutines.tasks.await
  *
  * Collections:
  * - announcements/{id} : { title, body, active, priority, createdAt, createdByDevice, createdByAppId }
- * - users/{uid} : { displayName, warned, warnReason, banned, banReason, updatedAt, lastSeenAt }
+ * - users/{uid} : {
+ *      alias, displayName,
+ *      warned, warnReason, banned, banReason,
+ *      updatedAt, lastSeenAt,
+ *      appId, versionName, versionCode, adminBuild, deviceHash
+ *   }
  * - config/app : { tosVersion, tosText, tosUrl, ownerUid, updatedAt }
  * - devices/{deviceHash} : { adminEnabled, note, lastSeenAt, ... }
  *
- * Added:
  * - moderationEvents/{id} : { uid, action, reason, createdAt, byDeviceHash, byUid, byAppId }
  *
- * Added (admin-only UI):
+ * ✅ Admin-only UI included:
  * - User Directory: paged, filterable list of users/{uid}
+ * - Moderation actions + append-only moderation history
+ * - Announcements CRUD
+ * - ToS/config editor
+ * - Owner-only Admin Manager (toggle devices/{hash}.adminEnabled)
+ *
+ * ✅ Also includes copy/paste "RULES + INDEXES" snippets at bottom (as text).
+ *    You still apply them in Firebase, but you won't have to guess later.
  */
 @Composable
 fun AdminScreen() {
@@ -98,13 +110,12 @@ fun AdminScreen() {
 
     val deviceHash = remember { readDeviceHash(ctx) }
 
-    // ✅ UID: read cached UID first (written by ChatboxApp bootstrap)
+    // ✅ UID: read cached UID first (written by bootstrap)
     var myUid by remember { mutableStateOf(readCachedUid(ctx)) }
 
     // If cached UID is blank, try to auth and then cache it
     LaunchedEffect(Unit) {
         if (myUid.isNotBlank()) return@LaunchedEffect
-
         runCatching {
             if (auth.currentUser == null) auth.signInAnonymously().await()
             val uid = auth.currentUser?.uid.orEmpty()
@@ -191,7 +202,6 @@ fun AdminScreen() {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     OutlinedButton(onClick = { refreshAdminGate() }) { Text("Re-check") }
                     OutlinedButton(onClick = {
-                        // force refresh UID display
                         myUid = readCachedUid(ctx)
                         if (myUid.isBlank()) {
                             setErr("UID not cached yet. Open app Home once (bootstrap), then return here.")
@@ -275,9 +285,10 @@ fun AdminScreen() {
                 }
             }
 
-            AdminRulesCard()
+            // ✅ "rules + indexes" in the UI so it’s never lost
+            AdminRulesAndIndexesCard()
 
-            // ✅ Admin-only user directory (paged / lazy / filterable)
+            // ✅ Admin-only user directory
             Divider()
             AdminUserDirectorySection(
                 db = db,
@@ -396,17 +407,45 @@ private fun ErrorCard(message: String) {
     }
 }
 
+/* =========================================================
+   Rules + Indexes card (IN APP so we never lose it)
+   ========================================================= */
+
 @Composable
-private fun AdminRulesCard() {
+private fun AdminRulesAndIndexesCard() {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("Rules (current plan)", style = MaterialTheme.typography.titleSmall)
-            Text("• Public build: NO writes to devices/ collection.")
-            Text("• Admin build: reads/writes announcements + moderation + config.")
-            Text("• Admin access: devices/{deviceHash}.adminEnabled == true.")
-            Text("• Owner access: config/app.ownerUid == your UID (enables in-app admin manager).")
-            Text("• Moderation history: moderationEvents/ collection (append-only).")
-            Text("• User directory: paged + lazy list (won’t render everything at once).")
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Rules + Indexes (copy/paste)", style = MaterialTheme.typography.titleSmall)
+
+            Text(
+                "This is the FULL plan. Apply these on Firebase when you're ready.\n" +
+                    "Public build should NOT write devices/. Admin build can.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Divider()
+
+            Text("Firestore Rules (suggested)", style = MaterialTheme.typography.labelLarge)
+            CodeCard(FIRESTORE_RULES_SNIPPET)
+
+            Text("Indexes to create", style = MaterialTheme.typography.labelLarge)
+            CodeCard(FIRESTORE_INDEXES_SNIPPET)
+
+            Text(
+                "If Firestore throws an index error, it will usually give you a direct link to create it.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun CodeCard(text: String) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(text, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
         }
     }
 }
@@ -417,10 +456,16 @@ private fun AdminRulesCard() {
 
 private data class UserRow(
     val uid: String,
+    val alias: String,
     val displayName: String,
     val warned: Boolean,
     val banned: Boolean,
-    val lastSeenAt: Timestamp?
+    val lastSeenAt: Timestamp?,
+    val appId: String,
+    val versionName: String,
+    val versionCode: Long?,
+    val adminBuild: Boolean?,
+    val deviceHash: String
 )
 
 @Composable
@@ -435,16 +480,13 @@ private fun AdminUserDirectorySection(
     var filterWarned by rememberSaveable { mutableStateOf(false) }
     var filterBanned by rememberSaveable { mutableStateOf(false) }
 
-    // ✅ Remember expanded user + keep place (no navigation away)
     var expandedUid by rememberSaveable { mutableStateOf<String?>(null) }
 
-    // ✅ Remember scroll position (and restore after expand/collapse)
     val listState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
     var restoreIndex by rememberSaveable { mutableIntStateOf(0) }
     var restoreOffset by rememberSaveable { mutableIntStateOf(0) }
     var restorePending by rememberSaveable { mutableStateOf(false) }
 
-    // Paging state
     var pagingLoading by remember { mutableStateOf(false) }
     var hasMore by remember { mutableStateOf(true) }
     var lastDoc by remember { mutableStateOf<DocumentSnapshot?>(null) }
@@ -470,25 +512,37 @@ private fun AdminUserDirectorySection(
 
                 for (d in docs) {
                     val uid = d.id
-                    val name = (d.getString("displayName") ?: "").trim()
+                    val alias = (d.getString("alias") ?: "").trim()
+                    val displayName = (d.getString("displayName") ?: "").trim()
                     val warned = d.getBoolean("warned") ?: false
                     val banned = d.getBoolean("banned") ?: false
                     val lastSeen = d.getTimestamp("lastSeenAt")
 
+                    val appId = (d.getString("appId") ?: "").trim()
+                    val versionName = (d.getString("versionName") ?: "").trim()
+                    val versionCode = d.getLong("versionCode")
+                    val adminBuild = d.getBoolean("adminBuild")
+                    val deviceHash = (d.getString("deviceHash") ?: "").trim()
+
                     users.add(
                         UserRow(
                             uid = uid,
-                            displayName = name,
+                            alias = alias,
+                            displayName = displayName,
                             warned = warned,
                             banned = banned,
-                            lastSeenAt = lastSeen
+                            lastSeenAt = lastSeen,
+                            appId = appId,
+                            versionName = versionName,
+                            versionCode = versionCode,
+                            adminBuild = adminBuild,
+                            deviceHash = deviceHash
                         )
                     )
                 }
 
                 lastDoc = docs.lastOrNull()
                 if (docs.size < pageSize) hasMore = false
-
                 pagingLoading = false
             }
             .addOnFailureListener { e ->
@@ -519,13 +573,13 @@ private fun AdminUserDirectorySection(
                 .filter { row ->
                     if (q.isBlank()) true
                     else row.uid.contains(q, ignoreCase = true) ||
+                        row.alias.contains(q, ignoreCase = true) ||
                         row.displayName.contains(q, ignoreCase = true)
                 }
                 .toList()
         }
     }
 
-    // ✅ Restore scroll after expand/collapse so you keep your place (prevents “jump” feeling)
     LaunchedEffect(expandedUid) {
         if (restorePending) {
             restorePending = false
@@ -549,7 +603,7 @@ private fun AdminUserDirectorySection(
                     onValueChange = { search = it },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
-                    label = { Text("Search UID / displayName") },
+                    label = { Text("Search UID / alias / displayName") },
                     placeholder = { Text("type to filter…") }
                 )
 
@@ -599,10 +653,7 @@ private fun AdminUserDirectorySection(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 itemsIndexed(filtered, key = { _, u -> u.uid }) { index, u ->
-                    // ✅ auto prefetch near bottom (infinite scroll)
-                    if (hasMore && !pagingLoading && index >= filtered.size - 12) {
-                        loadNextPage()
-                    }
+                    if (hasMore && !pagingLoading && index >= filtered.size - 12) loadNextPage()
 
                     val isExpanded = expandedUid == u.uid
 
@@ -612,11 +663,9 @@ private fun AdminUserDirectorySection(
                             .fillMaxWidth()
                             .animateContentSize()
                             .clickable {
-                                // Capture current scroll position BEFORE changing item height.
                                 restoreIndex = listState.firstVisibleItemIndex
                                 restoreOffset = listState.firstVisibleItemScrollOffset
                                 restorePending = true
-
                                 expandedUid = if (isExpanded) null else u.uid
                             }
                     ) {
@@ -627,18 +676,19 @@ private fun AdminUserDirectorySection(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(u.uid, fontFamily = FontFamily.Monospace)
-                                Text(
-                                    if (isExpanded) "▾" else "▸",
-                                    style = MaterialTheme.typography.titleMedium
-                                )
+                                Text(if (isExpanded) "▾" else "▸", style = MaterialTheme.typography.titleMedium)
                             }
 
+                            Text(
+                                "alias=${u.alias.ifBlank { "(blank)" }}",
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall
+                            )
                             Text(
                                 "displayName=${u.displayName.ifBlank { "(blank)" }}",
                                 fontFamily = FontFamily.Monospace,
                                 style = MaterialTheme.typography.bodySmall
                             )
-
                             Text(
                                 "warned=${u.warned}  banned=${u.banned}",
                                 fontFamily = FontFamily.Monospace,
@@ -653,6 +703,30 @@ private fun AdminUserDirectorySection(
                                     fontFamily = FontFamily.Monospace,
                                     style = MaterialTheme.typography.bodySmall
                                 )
+
+                                if (u.appId.isNotBlank() || u.versionName.isNotBlank() || u.versionCode != null) {
+                                    Text(
+                                        "appId=${u.appId.ifBlank { "?" }}  v=${u.versionName.ifBlank { "?" }} (${u.versionCode ?: -1})",
+                                        fontFamily = FontFamily.Monospace,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+
+                                if (u.adminBuild != null) {
+                                    Text(
+                                        "adminBuild=${u.adminBuild}",
+                                        fontFamily = FontFamily.Monospace,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+
+                                if (u.deviceHash.isNotBlank()) {
+                                    Text(
+                                        "deviceHash=${u.deviceHash.take(16)}…",
+                                        fontFamily = FontFamily.Monospace,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
 
                                 Text(
                                     "Tip: copy UID and paste into Moderation section below to act on them.",
@@ -672,10 +746,7 @@ private fun AdminUserDirectorySection(
 
                 item {
                     Spacer(Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.Center
-                    ) {
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
                         if (pagingLoading) CircularProgressIndicator()
                     }
                     Spacer(Modifier.height(8.dp))
@@ -684,9 +755,7 @@ private fun AdminUserDirectorySection(
         }
     }
 
-    LaunchedEffect(pagingLoading) {
-        setLoading(pagingLoading)
-    }
+    LaunchedEffect(pagingLoading) { setLoading(pagingLoading) }
 }
 
 /* =========================================================
@@ -744,10 +813,7 @@ private fun OwnerAdminManagerSection(
 
         ElevatedCard {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(
-                    "Promote/demote admins without opening the Firestore website.",
-                    style = MaterialTheme.typography.bodyMedium
-                )
+                Text("Promote/demote admins without opening the Firestore website.")
 
                 OutlinedTextField(
                     value = search,
@@ -808,7 +874,7 @@ private fun OwnerAdminManagerSection(
                                                         "adminEnabled" to newValue,
                                                         "updatedAt" to FieldValue.serverTimestamp()
                                                     ),
-                                                    com.google.firebase.firestore.SetOptions.merge()
+                                                    SetOptions.merge()
                                                 )
                                                 .addOnSuccessListener { setLoading(false); refresh() }
                                                 .addOnFailureListener { e ->
@@ -841,7 +907,7 @@ private fun OwnerAdminManagerSection(
                                                     "note" to noteText.trim(),
                                                     "updatedAt" to FieldValue.serverTimestamp()
                                                 ),
-                                                com.google.firebase.firestore.SetOptions.merge()
+                                                SetOptions.merge()
                                             )
                                             .addOnSuccessListener { setLoading(false); refresh() }
                                             .addOnFailureListener { e ->
@@ -868,7 +934,7 @@ private fun OwnerAdminManagerSection(
 }
 
 /* =========================================================
-   Announcements (unchanged)
+   Announcements
    ========================================================= */
 
 private data class AnnouncementRow(
@@ -1093,6 +1159,7 @@ private fun AdminModerationSection(
     var lookupUid by remember { mutableStateOf("") }
     var loadedUid by remember { mutableStateOf<String?>(null) }
 
+    var alias by remember { mutableStateOf("") }
     var displayName by remember { mutableStateOf("") }
     var warned by remember { mutableStateOf(false) }
     var banned by remember { mutableStateOf(false) }
@@ -1104,6 +1171,7 @@ private fun AdminModerationSection(
 
     fun clearLoaded() {
         loadedUid = null
+        alias = ""
         displayName = ""
         warned = false
         banned = false
@@ -1118,6 +1186,8 @@ private fun AdminModerationSection(
         if (u.isBlank()) return
         setLoading(true)
         setError(null)
+
+        // NOTE: This requires a composite index: moderationEvents(uid ASC, createdAt DESC)
         db.collection("moderationEvents")
             .whereEqualTo("uid", u)
             .orderBy("createdAt", Query.Direction.DESCENDING)
@@ -1151,10 +1221,12 @@ private fun AdminModerationSection(
         if (u.isBlank()) return
         setLoading(true)
         setError(null)
+
         db.collection("users").document(u).get()
             .addOnSuccessListener { snap ->
                 loadedUid = u
-                displayName = snap.getString("displayName") ?: ""
+                alias = (snap.getString("alias") ?: "").trim()
+                displayName = (snap.getString("displayName") ?: "").trim()
                 warned = snap.getBoolean("warned") ?: false
                 banned = snap.getBoolean("banned") ?: false
                 warnReason = snap.getString("warnReason") ?: ""
@@ -1221,7 +1293,8 @@ private fun AdminModerationSection(
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("User: $loadedUid", style = MaterialTheme.typography.titleSmall)
-                Text("displayName=$displayName", fontFamily = FontFamily.Monospace)
+                Text("alias=${alias.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
+                Text("displayName=${displayName.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
                 Text("warned=$warned  banned=$banned", fontFamily = FontFamily.Monospace)
                 Text("updatedAt=${updatedAt ?: "?"}", fontFamily = FontFamily.Monospace)
 
@@ -1261,7 +1334,7 @@ private fun AdminModerationSection(
                                         "warnReason" to warnReason.trim(),
                                         "updatedAt" to FieldValue.serverTimestamp()
                                     ),
-                                    com.google.firebase.firestore.SetOptions.merge()
+                                    SetOptions.merge()
                                 )
                                 .addOnSuccessListener {
                                     setLoading(false)
@@ -1286,7 +1359,7 @@ private fun AdminModerationSection(
                                         "warnReason" to "",
                                         "updatedAt" to FieldValue.serverTimestamp()
                                     ),
-                                    com.google.firebase.firestore.SetOptions.merge()
+                                    SetOptions.merge()
                                 )
                                 .addOnSuccessListener {
                                     setLoading(false)
@@ -1325,7 +1398,7 @@ private fun AdminModerationSection(
                                         "banReason" to banReason.trim(),
                                         "updatedAt" to FieldValue.serverTimestamp()
                                     ),
-                                    com.google.firebase.firestore.SetOptions.merge()
+                                    SetOptions.merge()
                                 )
                                 .addOnSuccessListener {
                                     setLoading(false)
@@ -1350,7 +1423,7 @@ private fun AdminModerationSection(
                                         "banReason" to "",
                                         "updatedAt" to FieldValue.serverTimestamp()
                                     ),
-                                    com.google.firebase.firestore.SetOptions.merge()
+                                    SetOptions.merge()
                                 )
                                 .addOnSuccessListener {
                                     setLoading(false)
@@ -1407,7 +1480,7 @@ private fun AdminModerationSection(
 }
 
 /* =========================================================
-   ToS / Config (unchanged)
+   ToS / Config
    ========================================================= */
 
 @Composable
@@ -1504,7 +1577,7 @@ private fun AdminTosConfigSection(
                                 "updatedAt" to FieldValue.serverTimestamp()
                             )
                             db.collection("config").document("app")
-                                .set(data, com.google.firebase.firestore.SetOptions.merge())
+                                .set(data, SetOptions.merge())
                                 .addOnSuccessListener { setLoading(false); load() }
                                 .addOnFailureListener { e ->
                                     setLoading(false)
@@ -1526,3 +1599,90 @@ private fun AdminTosConfigSection(
         }
     }
 }
+
+/* =========================================================
+   Firestore rules + indexes snippets (kept inside codebase)
+   ========================================================= */
+
+private const val FIRESTORE_RULES_SNIPPET = """
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Device-gated admin flag: devices/{deviceHash}.adminEnabled == true
+    function isAdminDevice() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/devices/$(request.auth.uid)) == false; // (placeholder, see note below)
+    }
+
+    // NOTE:
+    // You CANNOT read "deviceHash" from request on rules, because rules cannot read SharedPreferences.
+    // So the real admin gate is typically done by:
+    // - app reads devices/{deviceHash}.adminEnabled
+    // - rules: allow writes only from "trusted" conditions (or via Cloud Functions)
+    //
+    // For this project (simple + mobile), the practical approach is:
+    // 1) Public build: disallow writes to devices/
+    // 2) Admin build: use rules that allow writes to devices/ only for authenticated users (anonymous is ok)
+    // 3) Admin UI is still device-gated on client side by reading devices/{deviceHash}.adminEnabled
+
+    // ---- Public / shared ----
+
+    match /config/{doc} {
+      allow read: if true;
+      allow write: if isSignedIn(); // Admin-only by app build + device gate (client side)
+    }
+
+    match /announcements/{id} {
+      allow read: if true;
+      allow write: if isSignedIn(); // Admin-only by app build + device gate (client side)
+    }
+
+    // users/{uid}: user can write their own profile + heartbeat
+    match /users/{uid} {
+      allow read: if isSignedIn(); // or true if you want public reading (not recommended)
+      allow write: if isSignedIn() && request.auth.uid == uid;
+    }
+
+    // moderationEvents: append-only by admins (client gated)
+    match /moderationEvents/{id} {
+      allow read: if isSignedIn(); // admins use it
+      allow create: if isSignedIn();
+      allow update, delete: if false;
+    }
+
+    // devices: recommended to deny public build writes (client should never attempt in public build)
+    match /devices/{deviceHash} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn(); // admin build only (public build should never call it)
+    }
+  }
+}
+"""
+
+private const val FIRESTORE_INDEXES_SNIPPET = """
+Create these composite indexes (Firestore console -> Indexes):
+
+1) moderationEvents
+   Query: where uid == X, orderBy createdAt desc
+   Index:
+     Collection: moderationEvents
+     Fields:
+       uid Asc
+       createdAt Desc
+
+2) announcements (optional if you later query active + priority + createdAt)
+   If you ever use: where active==true, orderBy priority desc, orderBy createdAt desc
+   Index:
+     Collection: announcements
+     Fields:
+       active Asc
+       priority Desc
+       createdAt Desc
+
+NOTE: users list (orderBy lastSeenAt desc) does NOT need a composite index.
+"""
