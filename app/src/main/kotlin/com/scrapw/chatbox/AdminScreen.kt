@@ -2,6 +2,7 @@
 package com.scrapw.chatbox
 
 import android.content.Context
+import android.util.Log
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -31,6 +32,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -65,8 +67,25 @@ fun AdminScreen() {
     val auth = remember { FirebaseAuth.getInstance() }
 
     var loading by remember { mutableStateOf(false) }
+
+    // We still capture errors, but we DON'T show the "orange error boxes" by default.
     var error by remember { mutableStateOf<String?>(null) }
-    fun setErr(msg: String?) { error = msg?.takeIf { it.isNotBlank() }?.take(4000) }
+    var lastErrorAtMs by remember { mutableStateOf<Long?>(null) }
+
+    // Diagnostics toggle (off by default so errors don't clutter the UI)
+    var showDiagnostics by rememberSaveable { mutableStateOf(false) }
+
+    fun setErr(msg: String?) {
+        val m = msg?.trim().orEmpty()
+        if (m.isBlank()) {
+            error = null
+            lastErrorAtMs = null
+            return
+        }
+        error = m.take(4000)
+        lastErrorAtMs = System.currentTimeMillis()
+        Log.w("AdminScreen", m)
+    }
 
     // Hard block: should never be reachable on public build, but keep it safe anyway.
     if (!BuildConfig.IS_ADMIN_BUILD) {
@@ -76,7 +95,12 @@ fun AdminScreen() {
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text("Admin", style = MaterialTheme.typography.titleLarge)
-                ErrorCard("This page is only available in the Admin build.")
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Unavailable", style = MaterialTheme.typography.titleSmall)
+                        Text("This page is only available in the Admin build.")
+                    }
+                }
             }
         }
         return
@@ -90,13 +114,14 @@ fun AdminScreen() {
     // If cached UID is blank, try to auth and then cache it
     LaunchedEffect(Unit) {
         if (myUid.isNotBlank()) return@LaunchedEffect
-
         runCatching {
             if (auth.currentUser == null) auth.signInAnonymously().await()
             val uid = auth.currentUser?.uid.orEmpty()
             if (uid.isNotBlank()) {
                 writeCachedUid(ctx, uid)
                 myUid = uid
+            } else {
+                setErr("Auth returned blank UID.")
             }
         }.onFailure { e ->
             setErr(e.message ?: "Auth failed while trying to get UID")
@@ -110,7 +135,6 @@ fun AdminScreen() {
     fun refreshAdminGate() {
         adminChecked = false
         isAdmin = false
-        setErr(null)
 
         if (deviceHash.isBlank()) {
             setErr("DeviceHash is blank. (App couldn't read vrca_remote/device_id_hash.)")
@@ -142,9 +166,17 @@ fun AdminScreen() {
                     CircularProgressIndicator()
                     Text("Checking permissions…")
                 }
+
                 DeviceHashCard(deviceHash)
                 UidCard(myUid)
-                if (error != null) ErrorCard(error!!)
+
+                DiagnosticsCard(
+                    showDiagnostics = showDiagnostics,
+                    onToggle = { showDiagnostics = it },
+                    error = error,
+                    lastErrorAtMs = lastErrorAtMs,
+                    onClear = { setErr(null) }
+                )
             }
         }
         return
@@ -158,7 +190,7 @@ fun AdminScreen() {
             ) {
                 Text("Admin", style = MaterialTheme.typography.titleLarge)
 
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text("Access denied", style = MaterialTheme.typography.titleSmall)
                         Text(
@@ -177,16 +209,20 @@ fun AdminScreen() {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     OutlinedButton(onClick = { refreshAdminGate() }) { Text("Re-check") }
                     OutlinedButton(onClick = {
-                        // force refresh UID display
                         myUid = readCachedUid(ctx)
                         if (myUid.isBlank()) {
-                            setErr("UID not cached yet. Open app Home once (bootstrap), then return here.")
+                            setErr("UID not cached yet. Open the app Home once (bootstrap), then return here.")
                         }
                     }) { Text("Re-read UID") }
-                    if (error != null) OutlinedButton(onClick = { setErr(null) }) { Text("Clear error") }
                 }
 
-                if (error != null) ErrorCard(error!!)
+                DiagnosticsCard(
+                    showDiagnostics = showDiagnostics,
+                    onToggle = { showDiagnostics = it },
+                    error = error,
+                    lastErrorAtMs = lastErrorAtMs,
+                    onClear = { setErr(null) }
+                )
             }
         }
         return
@@ -248,19 +284,20 @@ fun AdminScreen() {
                     }
                 }
                 OutlinedButton(onClick = {
-                    // refresh both gates + UID
                     myUid = readCachedUid(ctx).ifBlank { myUid }
                     refreshAdminGate()
                     refreshOwnerGate()
                 }) { Text("Refresh") }
             }
 
-            if (error != null) {
-                ErrorCard(error!!)
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedButton(onClick = { setErr(null) }) { Text("Clear error") }
-                }
-            }
+            // ✅ No big orange error panels by default — only show in Diagnostics.
+            DiagnosticsCard(
+                showDiagnostics = showDiagnostics,
+                onToggle = { showDiagnostics = it },
+                error = error,
+                lastErrorAtMs = lastErrorAtMs,
+                onClear = { setErr(null) }
+            )
 
             AdminRulesCard()
 
@@ -363,11 +400,54 @@ private fun UidCard(uid: String) {
 }
 
 @Composable
-private fun ErrorCard(message: String) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("Error", style = MaterialTheme.typography.titleSmall)
-            Text(message, fontFamily = FontFamily.Monospace)
+private fun DiagnosticsCard(
+    showDiagnostics: Boolean,
+    onToggle: (Boolean) -> Unit,
+    error: String?,
+    lastErrorAtMs: Long?,
+    onClear: () -> Unit
+) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Diagnostics", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        if (showDiagnostics) "Showing internal errors (for debugging)."
+                        else "Hidden (recommended).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(checked = showDiagnostics, onCheckedChange = onToggle)
+            }
+
+            if (showDiagnostics) {
+                if (error.isNullOrBlank()) {
+                    Text("No errors captured.", style = MaterialTheme.typography.bodySmall)
+                } else {
+                    Text(
+                        "Last error:",
+                        style = MaterialTheme.typography.labelLarge
+                    )
+                    Text(
+                        error,
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        "at=${lastErrorAtMs ?: "?"}",
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedButton(onClick = onClear) { Text("Clear") }
+                }
+            }
         }
     }
 }
@@ -564,12 +644,9 @@ private fun OwnerAdminManagerSection(
 }
 
 /* =========================================================
-   Announcements / Moderation / ToS Config
-   (kept as-is from your file below)
+   Announcements / Moderation / ToS Config (unchanged logic)
    ========================================================= */
 
-// --- keep your existing sections exactly the same ---
-/* Announcements */
 private data class AnnouncementRow(
     val id: String,
     val title: String,
@@ -766,7 +843,6 @@ private fun AdminAnnouncementsSection(
     }
 }
 
-/* Moderation */
 @Composable
 private fun AdminModerationSection(
     db: FirebaseFirestore,
@@ -970,7 +1046,6 @@ private fun AdminModerationSection(
     }
 }
 
-/* ToS / Config */
 @Composable
 private fun AdminTosConfigSection(
     db: FirebaseFirestore,
