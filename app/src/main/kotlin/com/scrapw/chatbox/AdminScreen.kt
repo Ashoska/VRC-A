@@ -2,7 +2,6 @@
 package com.scrapw.chatbox
 
 import android.content.Context
-import android.util.Log
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -32,7 +31,6 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -59,6 +57,9 @@ import kotlinx.coroutines.tasks.await
  * - users/{uid} : { displayName, warned, warnReason, banned, banReason, updatedAt }
  * - config/app : { tosVersion, tosText, tosUrl, ownerUid, updatedAt }
  * - devices/{deviceHash} : { adminEnabled, note, lastSeenAt, ... }
+ *
+ * Added:
+ * - moderationEvents/{id} : { uid, action, reason, createdAt, byDeviceHash, byUid, byAppId }
  */
 @Composable
 fun AdminScreen() {
@@ -67,25 +68,8 @@ fun AdminScreen() {
     val auth = remember { FirebaseAuth.getInstance() }
 
     var loading by remember { mutableStateOf(false) }
-
-    // We still capture errors, but we DON'T show the "orange error boxes" by default.
     var error by remember { mutableStateOf<String?>(null) }
-    var lastErrorAtMs by remember { mutableStateOf<Long?>(null) }
-
-    // Diagnostics toggle (off by default so errors don't clutter the UI)
-    var showDiagnostics by rememberSaveable { mutableStateOf(false) }
-
-    fun setErr(msg: String?) {
-        val m = msg?.trim().orEmpty()
-        if (m.isBlank()) {
-            error = null
-            lastErrorAtMs = null
-            return
-        }
-        error = m.take(4000)
-        lastErrorAtMs = System.currentTimeMillis()
-        Log.w("AdminScreen", m)
-    }
+    fun setErr(msg: String?) { error = msg?.takeIf { it.isNotBlank() }?.take(4000) }
 
     // Hard block: should never be reachable on public build, but keep it safe anyway.
     if (!BuildConfig.IS_ADMIN_BUILD) {
@@ -95,12 +79,7 @@ fun AdminScreen() {
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text("Admin", style = MaterialTheme.typography.titleLarge)
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("Unavailable", style = MaterialTheme.typography.titleSmall)
-                        Text("This page is only available in the Admin build.")
-                    }
-                }
+                ErrorCard("This page is only available in the Admin build.")
             }
         }
         return
@@ -114,14 +93,13 @@ fun AdminScreen() {
     // If cached UID is blank, try to auth and then cache it
     LaunchedEffect(Unit) {
         if (myUid.isNotBlank()) return@LaunchedEffect
+
         runCatching {
             if (auth.currentUser == null) auth.signInAnonymously().await()
             val uid = auth.currentUser?.uid.orEmpty()
             if (uid.isNotBlank()) {
                 writeCachedUid(ctx, uid)
                 myUid = uid
-            } else {
-                setErr("Auth returned blank UID.")
             }
         }.onFailure { e ->
             setErr(e.message ?: "Auth failed while trying to get UID")
@@ -135,6 +113,7 @@ fun AdminScreen() {
     fun refreshAdminGate() {
         adminChecked = false
         isAdmin = false
+        setErr(null)
 
         if (deviceHash.isBlank()) {
             setErr("DeviceHash is blank. (App couldn't read vrca_remote/device_id_hash.)")
@@ -166,17 +145,9 @@ fun AdminScreen() {
                     CircularProgressIndicator()
                     Text("Checking permissions…")
                 }
-
                 DeviceHashCard(deviceHash)
                 UidCard(myUid)
-
-                DiagnosticsCard(
-                    showDiagnostics = showDiagnostics,
-                    onToggle = { showDiagnostics = it },
-                    error = error,
-                    lastErrorAtMs = lastErrorAtMs,
-                    onClear = { setErr(null) }
-                )
+                if (error != null) ErrorCard(error!!)
             }
         }
         return
@@ -190,7 +161,7 @@ fun AdminScreen() {
             ) {
                 Text("Admin", style = MaterialTheme.typography.titleLarge)
 
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
                     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text("Access denied", style = MaterialTheme.typography.titleSmall)
                         Text(
@@ -209,20 +180,16 @@ fun AdminScreen() {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     OutlinedButton(onClick = { refreshAdminGate() }) { Text("Re-check") }
                     OutlinedButton(onClick = {
+                        // force refresh UID display
                         myUid = readCachedUid(ctx)
                         if (myUid.isBlank()) {
-                            setErr("UID not cached yet. Open the app Home once (bootstrap), then return here.")
+                            setErr("UID not cached yet. Open app Home once (bootstrap), then return here.")
                         }
                     }) { Text("Re-read UID") }
+                    if (error != null) OutlinedButton(onClick = { setErr(null) }) { Text("Clear error") }
                 }
 
-                DiagnosticsCard(
-                    showDiagnostics = showDiagnostics,
-                    onToggle = { showDiagnostics = it },
-                    error = error,
-                    lastErrorAtMs = lastErrorAtMs,
-                    onClear = { setErr(null) }
-                )
+                if (error != null) ErrorCard(error!!)
             }
         }
         return
@@ -284,20 +251,19 @@ fun AdminScreen() {
                     }
                 }
                 OutlinedButton(onClick = {
+                    // refresh both gates + UID
                     myUid = readCachedUid(ctx).ifBlank { myUid }
                     refreshAdminGate()
                     refreshOwnerGate()
                 }) { Text("Refresh") }
             }
 
-            // ✅ No big orange error panels by default — only show in Diagnostics.
-            DiagnosticsCard(
-                showDiagnostics = showDiagnostics,
-                onToggle = { showDiagnostics = it },
-                error = error,
-                lastErrorAtMs = lastErrorAtMs,
-                onClear = { setErr(null) }
-            )
+            if (error != null) {
+                ErrorCard(error!!)
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedButton(onClick = { setErr(null) }) { Text("Clear error") }
+                }
+            }
 
             AdminRulesCard()
 
@@ -323,9 +289,12 @@ fun AdminScreen() {
 
             Divider()
 
-            // Moderation
+            // Moderation + History
             AdminModerationSection(
                 db = db,
+                myUid = myUid,
+                byDeviceHash = deviceHash,
+                byAppId = BuildConfig.APPLICATION_ID,
                 setLoading = { loading = it },
                 setError = ::setErr
             )
@@ -400,54 +369,11 @@ private fun UidCard(uid: String) {
 }
 
 @Composable
-private fun DiagnosticsCard(
-    showDiagnostics: Boolean,
-    onToggle: (Boolean) -> Unit,
-    error: String?,
-    lastErrorAtMs: Long?,
-    onClear: () -> Unit
-) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("Diagnostics", style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        if (showDiagnostics) "Showing internal errors (for debugging)."
-                        else "Hidden (recommended).",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Switch(checked = showDiagnostics, onCheckedChange = onToggle)
-            }
-
-            if (showDiagnostics) {
-                if (error.isNullOrBlank()) {
-                    Text("No errors captured.", style = MaterialTheme.typography.bodySmall)
-                } else {
-                    Text(
-                        "Last error:",
-                        style = MaterialTheme.typography.labelLarge
-                    )
-                    Text(
-                        error,
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    Text(
-                        "at=${lastErrorAtMs ?: "?"}",
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    OutlinedButton(onClick = onClear) { Text("Clear") }
-                }
-            }
+private fun ErrorCard(message: String) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Error", style = MaterialTheme.typography.titleSmall)
+            Text(message, fontFamily = FontFamily.Monospace)
         }
     }
 }
@@ -461,6 +387,7 @@ private fun AdminRulesCard() {
             Text("• Admin build: reads/writes announcements + moderation + config.")
             Text("• Admin access: devices/{deviceHash}.adminEnabled == true.")
             Text("• Owner access: config/app.ownerUid == your UID (enables in-app admin manager).")
+            Text("• Moderation history: moderationEvents/ collection (append-only).")
         }
     }
 }
@@ -644,7 +571,7 @@ private fun OwnerAdminManagerSection(
 }
 
 /* =========================================================
-   Announcements / Moderation / ToS Config (unchanged logic)
+   Announcements (unchanged)
    ========================================================= */
 
 private data class AnnouncementRow(
@@ -843,9 +770,26 @@ private fun AdminAnnouncementsSection(
     }
 }
 
+/* =========================================================
+   Moderation + History
+   ========================================================= */
+
+private data class ModerationEventRow(
+    val id: String,
+    val action: String,
+    val reason: String,
+    val createdAt: Timestamp?,
+    val byDeviceHash: String,
+    val byUid: String,
+    val byAppId: String
+)
+
 @Composable
 private fun AdminModerationSection(
     db: FirebaseFirestore,
+    myUid: String,
+    byDeviceHash: String,
+    byAppId: String,
     setLoading: (Boolean) -> Unit,
     setError: (String?) -> Unit
 ) {
@@ -859,6 +803,8 @@ private fun AdminModerationSection(
     var banReason by remember { mutableStateOf("") }
     var updatedAt by remember { mutableStateOf<Timestamp?>(null) }
 
+    val history = remember { mutableStateListOf<ModerationEventRow>() }
+
     fun clearLoaded() {
         loadedUid = null
         displayName = ""
@@ -867,6 +813,40 @@ private fun AdminModerationSection(
         warnReason = ""
         banReason = ""
         updatedAt = null
+        history.clear()
+    }
+
+    fun refreshHistory(uid: String) {
+        val u = uid.trim()
+        if (u.isBlank()) return
+        setLoading(true)
+        setError(null)
+        db.collection("moderationEvents")
+            .whereEqualTo("uid", u)
+            .orderBy("createdAt", Query.Direction.DESCENDING)
+            .limit(40)
+            .get()
+            .addOnSuccessListener { snap ->
+                history.clear()
+                for (d in snap.documents) {
+                    history.add(
+                        ModerationEventRow(
+                            id = d.id,
+                            action = d.getString("action") ?: "",
+                            reason = d.getString("reason") ?: "",
+                            createdAt = d.getTimestamp("createdAt"),
+                            byDeviceHash = d.getString("byDeviceHash") ?: "",
+                            byUid = d.getString("byUid") ?: "",
+                            byAppId = d.getString("byAppId") ?: ""
+                        )
+                    )
+                }
+                setLoading(false)
+            }
+            .addOnFailureListener { e ->
+                setLoading(false)
+                setError(e.message ?: "Failed to load moderation history")
+            }
     }
 
     fun load(uid: String) {
@@ -884,10 +864,29 @@ private fun AdminModerationSection(
                 banReason = snap.getString("banReason") ?: ""
                 updatedAt = snap.getTimestamp("updatedAt")
                 setLoading(false)
+                refreshHistory(u)
             }
             .addOnFailureListener { e ->
                 setLoading(false)
                 setError(e.message ?: "Failed to load user")
+            }
+    }
+
+    fun writeEvent(uid: String, action: String, reason: String) {
+        val data = hashMapOf(
+            "uid" to uid.trim(),
+            "action" to action,
+            "reason" to reason.trim(),
+            "createdAt" to FieldValue.serverTimestamp(),
+            "byDeviceHash" to byDeviceHash,
+            "byUid" to myUid,
+            "byAppId" to byAppId
+        )
+        // Do not block UI on event write; still surface errors.
+        db.collection("moderationEvents")
+            .add(data)
+            .addOnFailureListener { e ->
+                setError("Event write failed: ${e.message ?: "unknown"}")
             }
     }
 
@@ -929,6 +928,18 @@ private fun AdminModerationSection(
                 Text("displayName=$displayName", fontFamily = FontFamily.Monospace)
                 Text("warned=$warned  banned=$banned", fontFamily = FontFamily.Monospace)
                 Text("updatedAt=${updatedAt ?: "?"}", fontFamily = FontFamily.Monospace)
+
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedButton(
+                        onClick = { refreshHistory(loadedUid!!) },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Refresh history") }
+
+                    OutlinedButton(
+                        onClick = { load(loadedUid!!) },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Reload user") }
+                }
             }
         }
 
@@ -956,7 +967,11 @@ private fun AdminModerationSection(
                                     ),
                                     com.google.firebase.firestore.SetOptions.merge()
                                 )
-                                .addOnSuccessListener { setLoading(false); load(uid) }
+                                .addOnSuccessListener {
+                                    setLoading(false)
+                                    writeEvent(uid, "warn", warnReason)
+                                    load(uid)
+                                }
                                 .addOnFailureListener { e ->
                                     setLoading(false); setError(e.message ?: "Failed to warn")
                                 }
@@ -977,7 +992,11 @@ private fun AdminModerationSection(
                                     ),
                                     com.google.firebase.firestore.SetOptions.merge()
                                 )
-                                .addOnSuccessListener { setLoading(false); load(uid) }
+                                .addOnSuccessListener {
+                                    setLoading(false)
+                                    writeEvent(uid, "clear_warn", "")
+                                    load(uid)
+                                }
                                 .addOnFailureListener { e ->
                                     setLoading(false); setError(e.message ?: "Failed to clear warn")
                                 }
@@ -1012,7 +1031,11 @@ private fun AdminModerationSection(
                                     ),
                                     com.google.firebase.firestore.SetOptions.merge()
                                 )
-                                .addOnSuccessListener { setLoading(false); load(uid) }
+                                .addOnSuccessListener {
+                                    setLoading(false)
+                                    writeEvent(uid, "ban", banReason)
+                                    load(uid)
+                                }
                                 .addOnFailureListener { e ->
                                     setLoading(false); setError(e.message ?: "Failed to ban")
                                 }
@@ -1033,7 +1056,11 @@ private fun AdminModerationSection(
                                     ),
                                     com.google.firebase.firestore.SetOptions.merge()
                                 )
-                                .addOnSuccessListener { setLoading(false); load(uid) }
+                                .addOnSuccessListener {
+                                    setLoading(false)
+                                    writeEvent(uid, "unban", "")
+                                    load(uid)
+                                }
                                 .addOnFailureListener { e ->
                                     setLoading(false); setError(e.message ?: "Failed to unban")
                                 }
@@ -1043,8 +1070,50 @@ private fun AdminModerationSection(
                 }
             }
         }
+
+        // History list
+        ElevatedCard {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("History", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "Latest moderation actions for this UID.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                if (history.isEmpty()) {
+                    Text("No history found.", style = MaterialTheme.typography.bodySmall)
+                } else {
+                    LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        items(history, key = { it.id }) { e ->
+                            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text(
+                                        "${e.action.ifBlank { "(no action)" }}  @  ${e.createdAt ?: "?"}",
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                    if (e.reason.isNotBlank()) {
+                                        Text("reason=${e.reason}", fontFamily = FontFamily.Monospace)
+                                    }
+                                    Text(
+                                        "byUid=${e.byUid.ifBlank { "?" }}  byDevice=${e.byDeviceHash.take(12).ifBlank { "?" }}…",
+                                        fontFamily = FontFamily.Monospace,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                            }
+                        }
+                        item { Spacer(Modifier.height(10.dp)) }
+                    }
+                }
+            }
+        }
     }
 }
+
+/* =========================================================
+   ToS / Config (unchanged)
+   ========================================================= */
 
 @Composable
 private fun AdminTosConfigSection(
