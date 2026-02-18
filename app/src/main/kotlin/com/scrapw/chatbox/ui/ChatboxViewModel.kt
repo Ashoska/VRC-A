@@ -1,4 +1,3 @@
-// app/src/main/kotlin/com/scrapw/chatbox/ui/ChatboxViewModel.kt
 package com.scrapw.chatbox.ui
 
 import android.content.Intent
@@ -19,6 +18,11 @@ import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.AP
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FieldValue
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.SetOptions
+import com.scrapw.chatbox.BuildConfig
 import com.scrapw.chatbox.ChatboxApplication
 import com.scrapw.chatbox.NowPlayingState
 import com.scrapw.chatbox.data.UserPreferencesRepository
@@ -34,12 +38,14 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.tasks.await
 import java.time.Instant
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
 class ChatboxViewModel(
+    private val app: ChatboxApplication,
     private val userPreferencesRepository: UserPreferencesRepository
 ) : ViewModel() {
 
@@ -71,13 +77,20 @@ class ChatboxViewModel(
         // ✅ Tick that updates pause detection even when notifications stop
         private const val UI_TICK_MS = 500L
 
+        // ✅ Firestore self snapshot throttling
+        private const val SELF_SYNC_MIN_INTERVAL_MS = 12_000L
+        private const val SELF_SYNC_FORCE_INTERVAL_MS = 90_000L
+
         @MainThread
         fun isInstanceInitialized(): Boolean = ::instance.isInitialized
 
         val Factory: ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 val application = (this[APPLICATION_KEY] as ChatboxApplication)
-                instance = ChatboxViewModel(application.userPreferencesRepository)
+                instance = ChatboxViewModel(
+                    app = application,
+                    userPreferencesRepository = application.userPreferencesRepository
+                )
                 Log.d("ChatboxViewModel", "Init")
                 instance
             }
@@ -92,8 +105,147 @@ class ChatboxViewModel(
 
     override fun onCleared() {
         uiTickJob?.cancel()
+        selfSyncJob?.cancel()
         stopAll(clearFromChatbox = false)
         super.onCleared()
+    }
+
+    // =========================
+    // Firebase (safe, throttled)
+    // =========================
+    private val auth: FirebaseAuth by lazy { FirebaseAuth.getInstance() }
+    private val db: FirebaseFirestore by lazy { FirebaseFirestore.getInstance() }
+
+    private var selfSyncJob: Job? = null
+    private var lastSelfSyncAtMs: Long = 0L
+    private var lastSelfSyncFingerprint: String = ""
+
+    // You can optionally surface this in Debug later; for now we keep it quiet.
+    private var lastSelfSyncError: String = ""
+
+    private suspend fun ensureAnonAuth(): String? {
+        return runCatching {
+            if (auth.currentUser == null) auth.signInAnonymously().await()
+            auth.currentUser?.uid
+        }.getOrNull()
+    }
+
+    /**
+     * Builds a stable-ish fingerprint string so we only write when the state changes.
+     * (No hashing lib needed; Firestore writes are already throttled.)
+     */
+    private fun computeSelfFingerprint(): String {
+        val cycleClean = cycleLines.map { it.trim() }.take(10)
+        val afkP = (1..3).joinToString("|") { getAfkPresetPreview(it) }
+        val cycP = (1..5).joinToString("|") { getCyclePresetPreview(it) }
+
+        val npTitle = lastNowPlayingTitle.trim()
+        val npArtist = lastNowPlayingArtist.trim()
+
+        return listOf(
+            "afkE=$afkEnabled",
+            "afkM=${afkMessage.trim()}",
+            "cycE=$cycleEnabled",
+            "cycI=$cycleIntervalSeconds",
+            "cycL=${cycleClean.joinToString("\\n")}",
+            "spE=$spotifyEnabled",
+            "spD=$spotifyDemoEnabled",
+            "spP=$spotifyPreset",
+            "npDet=$nowPlayingDetected",
+            "npPlay=$nowPlayingIsPlaying",
+            "npT=$npTitle",
+            "npA=$npArtist",
+            "prev=${combinedPreviewText.trim()}",
+            "afkP=$afkP",
+            "cycP=$cycP"
+        ).joinToString("||")
+    }
+
+    private fun buildSelfSnapshot(uid: String): Map<String, Any> {
+        val cycleClean = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(10)
+
+        // Note: Keep keys predictable; we’ll mirror them in Firestore rules.
+        val data = linkedMapOf<String, Any>(
+            // identity-ish / debug
+            "uid" to uid,
+            "appId" to BuildConfig.APPLICATION_ID,
+            "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
+            "versionName" to BuildConfig.VERSION_NAME,
+            "versionCode" to BuildConfig.VERSION_CODE,
+
+            // activity markers
+            "lastSeenAt" to FieldValue.serverTimestamp(),
+            "updatedAt" to FieldValue.serverTimestamp(),
+
+            // live feature state
+            "afkEnabled" to afkEnabled,
+            "afkMessage" to afkMessage.trim(),
+
+            "cycleEnabled" to cycleEnabled,
+            "cycleIntervalSeconds" to CYCLE_INTERVAL_SECONDS_LOCKED,
+            "cycleLines" to cycleClean, // list for admin UI
+            "cycleLinesText" to cycleClean.joinToString("\n"), // convenient display/search
+
+            "spotifyEnabled" to spotifyEnabled,
+            "spotifyDemoEnabled" to spotifyDemoEnabled,
+            "spotifyPreset" to spotifyPreset,
+
+            "nowPlayingDetected" to nowPlayingDetected,
+            "nowPlayingIsPlaying" to nowPlayingIsPlaying,
+            "nowPlayingTitle" to lastNowPlayingTitle.takeIf { it != "(blank)" }?.trim().orEmpty(),
+            "nowPlayingArtist" to lastNowPlayingArtist.takeIf { it != "(blank)" }?.trim().orEmpty(),
+            "activePackage" to activePackage,
+
+            // UI preview / output
+            "combinedPreviewText" to combinedPreviewText.trim(),
+            "cycleTrimWarning" to cycleTrimWarning.trim()
+        )
+
+        // presets (so Admin can view older setups)
+        data["afkPreset1"] = getAfkPresetPreview(1)
+        data["afkPreset2"] = getAfkPresetPreview(2)
+        data["afkPreset3"] = getAfkPresetPreview(3)
+
+        data["cyclePreset1"] = cyclePresetMessages.getOrNull(0)?.trim().orEmpty()
+        data["cyclePreset2"] = cyclePresetMessages.getOrNull(1)?.trim().orEmpty()
+        data["cyclePreset3"] = cyclePresetMessages.getOrNull(2)?.trim().orEmpty()
+        data["cyclePreset4"] = cyclePresetMessages.getOrNull(3)?.trim().orEmpty()
+        data["cyclePreset5"] = cyclePresetMessages.getOrNull(4)?.trim().orEmpty()
+
+        return data
+    }
+
+    private fun startSelfSyncLoopIfNeeded() {
+        if (selfSyncJob != null) return
+        selfSyncJob = viewModelScope.launch {
+            while (true) {
+                runCatching {
+                    val uid = ensureAnonAuth() ?: return@runCatching
+                    val now = System.currentTimeMillis()
+
+                    val fp = computeSelfFingerprint()
+                    val changed = fp != lastSelfSyncFingerprint
+                    val dueByForce = (now - lastSelfSyncAtMs) >= SELF_SYNC_FORCE_INTERVAL_MS
+                    val dueByChange = changed && (now - lastSelfSyncAtMs) >= SELF_SYNC_MIN_INTERVAL_MS
+
+                    if (!dueByForce && !dueByChange) return@runCatching
+
+                    val snap = buildSelfSnapshot(uid)
+                    db.collection("users").document(uid)
+                        .set(snap, SetOptions.merge())
+                        .await()
+
+                    lastSelfSyncAtMs = now
+                    lastSelfSyncFingerprint = fp
+                    lastSelfSyncError = ""
+                }.onFailure { e ->
+                    // Don’t crash the app; just record.
+                    lastSelfSyncError = (e.message ?: e.toString()).take(4000)
+                }
+
+                delay(2_000L)
+            }
+        }
     }
 
     // =========================
@@ -176,11 +328,13 @@ class ChatboxViewModel(
     fun ipAddressApply(address: String) {
         remoteChatboxOSC.ipAddress = address
         viewModelScope.launch { userPreferencesRepository.saveIpAddress(address) }
+        startSelfSyncLoopIfNeeded()
     }
 
     fun portApply(port: Int) {
         remoteChatboxOSC.port = port
         viewModelScope.launch { userPreferencesRepository.savePort(port) }
+        startSelfSyncLoopIfNeeded()
     }
 
     fun onRealtimeMsgChanged(value: Boolean) {
@@ -371,10 +525,14 @@ class ChatboxViewModel(
     )
 
     init {
+        // Start remote snapshot loop (safe even if rules deny).
+        startSelfSyncLoopIfNeeded()
+
         viewModelScope.launch {
             userPreferencesRepository.afkMessage.collect {
                 afkMessage = it
                 rebuildCombinedPreviewOnly()
+                startSelfSyncLoopIfNeeded()
             }
         }
 
@@ -382,12 +540,14 @@ class ChatboxViewModel(
             userPreferencesRepository.cycleEnabled.collect {
                 cycleEnabled = it
                 rebuildCombinedPreviewOnly()
+                startSelfSyncLoopIfNeeded()
             }
         }
 
         viewModelScope.launch {
             userPreferencesRepository.cycleMessages.collect { text ->
                 setCycleLinesFromTextPreserve(text)
+                startSelfSyncLoopIfNeeded()
             }
         }
 
@@ -395,28 +555,30 @@ class ChatboxViewModel(
             userPreferencesRepository.cycleInterval.collect {
                 cycleIntervalSeconds = CYCLE_INTERVAL_SECONDS_LOCKED
                 rebuildCombinedPreviewOnly()
+                startSelfSyncLoopIfNeeded()
             }
         }
 
-        viewModelScope.launch { userPreferencesRepository.afkPreset1.collect { afkPresetTexts[0] = it } }
-        viewModelScope.launch { userPreferencesRepository.afkPreset2.collect { afkPresetTexts[1] = it } }
-        viewModelScope.launch { userPreferencesRepository.afkPreset3.collect { afkPresetTexts[2] = it } }
+        viewModelScope.launch { userPreferencesRepository.afkPreset1.collect { afkPresetTexts[0] = it; startSelfSyncLoopIfNeeded() } }
+        viewModelScope.launch { userPreferencesRepository.afkPreset2.collect { afkPresetTexts[1] = it; startSelfSyncLoopIfNeeded() } }
+        viewModelScope.launch { userPreferencesRepository.afkPreset3.collect { afkPresetTexts[2] = it; startSelfSyncLoopIfNeeded() } }
 
-        viewModelScope.launch { userPreferencesRepository.cyclePreset1Messages.collect { cyclePresetMessages[0] = it } }
+        viewModelScope.launch { userPreferencesRepository.cyclePreset1Messages.collect { cyclePresetMessages[0] = it; startSelfSyncLoopIfNeeded() } }
         viewModelScope.launch { userPreferencesRepository.cyclePreset1Interval.collect { cyclePresetIntervals[0] = CYCLE_INTERVAL_SECONDS_LOCKED } }
-        viewModelScope.launch { userPreferencesRepository.cyclePreset2Messages.collect { cyclePresetMessages[1] = it } }
+        viewModelScope.launch { userPreferencesRepository.cyclePreset2Messages.collect { cyclePresetMessages[1] = it; startSelfSyncLoopIfNeeded() } }
         viewModelScope.launch { userPreferencesRepository.cyclePreset2Interval.collect { cyclePresetIntervals[1] = CYCLE_INTERVAL_SECONDS_LOCKED } }
-        viewModelScope.launch { userPreferencesRepository.cyclePreset3Messages.collect { cyclePresetMessages[2] = it } }
+        viewModelScope.launch { userPreferencesRepository.cyclePreset3Messages.collect { cyclePresetMessages[2] = it; startSelfSyncLoopIfNeeded() } }
         viewModelScope.launch { userPreferencesRepository.cyclePreset3Interval.collect { cyclePresetIntervals[2] = CYCLE_INTERVAL_SECONDS_LOCKED } }
-        viewModelScope.launch { userPreferencesRepository.cyclePreset4Messages.collect { cyclePresetMessages[3] = it } }
+        viewModelScope.launch { userPreferencesRepository.cyclePreset4Messages.collect { cyclePresetMessages[3] = it; startSelfSyncLoopIfNeeded() } }
         viewModelScope.launch { userPreferencesRepository.cyclePreset4Interval.collect { cyclePresetIntervals[3] = CYCLE_INTERVAL_SECONDS_LOCKED } }
-        viewModelScope.launch { userPreferencesRepository.cyclePreset5Messages.collect { cyclePresetMessages[4] = it } }
+        viewModelScope.launch { userPreferencesRepository.cyclePreset5Messages.collect { cyclePresetMessages[4] = it; startSelfSyncLoopIfNeeded() } }
         viewModelScope.launch { userPreferencesRepository.cyclePreset5Interval.collect { cyclePresetIntervals[4] = CYCLE_INTERVAL_SECONDS_LOCKED } }
 
         viewModelScope.launch {
             userPreferencesRepository.spotifyPreset.collect { saved ->
                 spotifyPreset = saved.coerceIn(1, 5)
                 rebuildCombinedPreviewOnly()
+                startSelfSyncLoopIfNeeded()
             }
         }
 
@@ -435,6 +597,8 @@ class ChatboxViewModel(
                 tickCyclePreviewOnly() // ✅ NEW: preview cycles even without Start
                 nowPlayingIsPlaying = computeDisplayedPlaying()
                 rebuildCombinedPreviewOnly()
+                // snapshot loop already runs, but this makes "Now Playing" changes visible sooner
+                startSelfSyncLoopIfNeeded()
                 delay(UI_TICK_MS)
             }
         }
@@ -474,6 +638,7 @@ class ChatboxViewModel(
 
                 nowPlayingIsPlaying = computeDisplayedPlaying()
                 rebuildCombinedPreviewOnly()
+                startSelfSyncLoopIfNeeded()
             }
         }
     }
@@ -587,6 +752,7 @@ class ChatboxViewModel(
         stopAll(clearFromChatbox = false)
         clearChatbox(local)
         rebuildCombinedPreviewOnly(forceClearIfAllOff = true)
+        startSelfSyncLoopIfNeeded()
     }
 
     // =========================
@@ -596,6 +762,7 @@ class ChatboxViewModel(
         afkEnabled = enabled
         rebuildCombinedPreviewOnly()
         if (!enabled) stopAfkSender(clearFromChatbox = true)
+        startSelfSyncLoopIfNeeded()
     }
 
     fun setCycleEnabledFlag(enabled: Boolean) {
@@ -604,17 +771,20 @@ class ChatboxViewModel(
         rebuildCombinedPreviewOnly()
         if (!enabled) stopCycle(clearFromChatbox = true)
         if (enabled) lastCyclePreviewAdvanceMs = 0L // ✅ reset preview timer when enabling
+        startSelfSyncLoopIfNeeded()
     }
 
     fun setSpotifyEnabledFlag(enabled: Boolean) {
         spotifyEnabled = enabled
         rebuildCombinedPreviewOnly()
         if (!enabled) stopNowPlayingSender(clearFromChatbox = true)
+        startSelfSyncLoopIfNeeded()
     }
 
     fun setSpotifyDemoFlag(enabled: Boolean) {
         spotifyDemoEnabled = enabled
         rebuildCombinedPreviewOnly()
+        startSelfSyncLoopIfNeeded()
     }
 
     fun updateSpotifyPreset(preset: Int) {
@@ -622,6 +792,7 @@ class ChatboxViewModel(
         spotifyPreset = v
         viewModelScope.launch { userPreferencesRepository.saveSpotifyPreset(v) }
         rebuildCombinedPreviewOnly()
+        startSelfSyncLoopIfNeeded()
     }
 
     // =========================
@@ -631,6 +802,7 @@ class ChatboxViewModel(
         afkMessage = text
         viewModelScope.launch { userPreferencesRepository.saveAfkMessage(text) }
         rebuildCombinedPreviewOnly()
+        startSelfSyncLoopIfNeeded()
     }
 
     // =========================
@@ -647,6 +819,7 @@ class ChatboxViewModel(
     private fun persistCycleLinesPreserve() {
         val joined = cycleLines.take(10).joinToString("\n")
         viewModelScope.launch { userPreferencesRepository.saveCycleMessages(joined) }
+        startSelfSyncLoopIfNeeded()
     }
 
     fun addCycleLine() {
@@ -716,6 +889,7 @@ class ChatboxViewModel(
             2 -> userPreferencesRepository.saveAfkPreset2(text)
             else -> userPreferencesRepository.saveAfkPreset3(text)
         }
+        startSelfSyncLoopIfNeeded()
     }
 
     suspend fun loadAfkPreset(slot: Int) {
@@ -725,6 +899,7 @@ class ChatboxViewModel(
             else -> userPreferencesRepository.afkPreset3.first()
         }
         updateAfkText(txt)
+        startSelfSyncLoopIfNeeded()
     }
 
     suspend fun saveCyclePreset(slot: Int, lines: List<String>) {
@@ -744,6 +919,7 @@ class ChatboxViewModel(
             4 -> userPreferencesRepository.saveCyclePreset4(messages, interval)
             else -> userPreferencesRepository.saveCyclePreset5(messages, interval)
         }
+        startSelfSyncLoopIfNeeded()
     }
 
     suspend fun loadCyclePreset(slot: Int) {
@@ -761,6 +937,7 @@ class ChatboxViewModel(
 
         setCycleLinesFromTextPreserve(messages)
         persistCycleLinesPreserve()
+        startSelfSyncLoopIfNeeded()
     }
 
     // =========================
@@ -775,16 +952,19 @@ class ChatboxViewModel(
                 delay(afkForcedIntervalSeconds.toLong() * 1000L)
             }
         }
+        startSelfSyncLoopIfNeeded()
     }
 
     fun stopAfkSender(clearFromChatbox: Boolean) {
         afkJob?.cancel()
         afkJob = null
         if (clearFromChatbox) rebuildAndMaybeSendCombined(forceSend = true, forceClearIfAllOff = true)
+        startSelfSyncLoopIfNeeded()
     }
 
     fun sendAfkNow(local: Boolean = false) {
         rebuildAndMaybeSendCombined(forceSend = true, local = local)
+        startSelfSyncLoopIfNeeded()
     }
 
     // =========================
@@ -812,6 +992,7 @@ class ChatboxViewModel(
                 delay(CYCLE_INTERVAL_SECONDS_LOCKED.toLong() * 1000L)
             }
         }
+        startSelfSyncLoopIfNeeded()
     }
 
     fun stopCycle(clearFromChatbox: Boolean) {
@@ -819,6 +1000,7 @@ class ChatboxViewModel(
         cycleJob = null
         if (clearFromChatbox) rebuildAndMaybeSendCombined(forceSend = true, forceClearIfAllOff = true)
         lastCyclePreviewAdvanceMs = 0L // ✅ so preview restarts clean after stopping
+        startSelfSyncLoopIfNeeded()
     }
 
     // =========================
@@ -838,16 +1020,19 @@ class ChatboxViewModel(
                 delay(10L)
             }
         }
+        startSelfSyncLoopIfNeeded()
     }
 
     fun stopNowPlayingSender(clearFromChatbox: Boolean) {
         nowPlayingJob?.cancel()
         nowPlayingJob = null
         if (clearFromChatbox) rebuildAndMaybeSendCombined(forceSend = true, forceClearIfAllOff = true)
+        startSelfSyncLoopIfNeeded()
     }
 
     fun sendNowPlayingOnce(local: Boolean = false) {
         rebuildAndMaybeSendCombined(forceSend = true, local = local)
+        startSelfSyncLoopIfNeeded()
     }
 
     fun stopAll(clearFromChatbox: Boolean) {
@@ -855,6 +1040,7 @@ class ChatboxViewModel(
         stopNowPlayingSender(clearFromChatbox = false)
         stopAfkSender(clearFromChatbox = false)
         if (clearFromChatbox) clearChatbox()
+        startSelfSyncLoopIfNeeded()
     }
 
     // =========================
