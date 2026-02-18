@@ -41,6 +41,7 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
+import com.google.firebase.firestore.SetOptions
 
 /**
  * ✅ Device-gated Admin-only screen (NO LOGIN UI).
@@ -55,7 +56,7 @@ import com.google.firebase.firestore.Query
  * - announcements/{id} : { title, body, active, priority, createdAt, createdByDevice, createdByAppId }
  * - users/{uid} : { displayName, warned, warnReason, banned, banReason, updatedAt }
  * - config/app : { tosVersion, tosText, tosUrl, ownerUid, updatedAt }
- * - devices/{deviceHash} : { adminEnabled, note, lastSeenAt, ... }
+ * - devices/{deviceHash} : { adminEnabled, note, lastSeenAt, updatedAt, ... }
  */
 @Composable
 fun AdminScreen() {
@@ -65,7 +66,9 @@ fun AdminScreen() {
 
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    fun setErr(msg: String?) { error = msg?.takeIf { it.isNotBlank() }?.take(4000) }
+    fun setErr(msg: String?) {
+        error = msg?.takeIf { it.isNotBlank() }?.take(4000)
+    }
 
     // Hard block: should never be reachable on public build, but keep it safe anyway.
     if (!BuildConfig.IS_ADMIN_BUILD) {
@@ -119,7 +122,10 @@ fun AdminScreen() {
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text("Admin", style = MaterialTheme.typography.titleLarge)
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
                     CircularProgressIndicator()
                     Text("Checking permissions…")
                 }
@@ -167,12 +173,6 @@ fun AdminScreen() {
     // ---------- Owner gate (config/app.ownerUid) ----------
     var ownerChecked by remember { mutableStateOf(false) }
     var ownerUid by remember { mutableStateOf("") }
-    val isOwner = = remember(myUid, ownerUid) { myUid.isNotBlank() && ownerUid.isNotBlank() && myUid == ownerUid }
-
-    // Kotlin doesn't allow "val isOwner = ..." with "=" inside remember above, so do it properly:
-    // (We keep it simple)
-    // We'll compute below.
-
     var computedIsOwner by remember { mutableStateOf(false) }
 
     fun refreshOwnerGate() {
@@ -187,7 +187,7 @@ fun AdminScreen() {
                 ownerChecked = true
             }
             .addOnFailureListener { e ->
-                // not fatal; owner-only features will just hide
+                // Not fatal; owner-only features will just hide.
                 setErr(e.message ?: "Failed to load config/app (ownerUid)")
                 ownerChecked = true
             }
@@ -460,7 +460,7 @@ private fun OwnerAdminManagerSection(
                                                         "adminEnabled" to newValue,
                                                         "updatedAt" to FieldValue.serverTimestamp()
                                                     ),
-                                                    com.google.firebase.firestore.SetOptions.merge()
+                                                    SetOptions.merge()
                                                 )
                                                 .addOnSuccessListener { setLoading(false); refresh() }
                                                 .addOnFailureListener { e ->
@@ -493,7 +493,7 @@ private fun OwnerAdminManagerSection(
                                                     "note" to noteText.trim(),
                                                     "updatedAt" to FieldValue.serverTimestamp()
                                                 ),
-                                                com.google.firebase.firestore.SetOptions.merge()
+                                                SetOptions.merge()
                                             )
                                             .addOnSuccessListener { setLoading(false); refresh() }
                                             .addOnFailureListener { e ->
@@ -520,7 +520,7 @@ private fun OwnerAdminManagerSection(
 }
 
 /* =========================================================
-   Announcements (unchanged from your version)
+   Announcements
    ========================================================= */
 
 private data class AnnouncementRow(
@@ -720,7 +720,7 @@ private fun AdminAnnouncementsSection(
 }
 
 /* =========================================================
-   Moderation (unchanged from your version)
+   Moderation
    ========================================================= */
 
 @Composable
@@ -834,7 +834,7 @@ private fun AdminModerationSection(
                                         "warnReason" to warnReason.trim(),
                                         "updatedAt" to FieldValue.serverTimestamp()
                                     ),
-                                    com.google.firebase.firestore.SetOptions.merge()
+                                    SetOptions.merge()
                                 )
                                 .addOnSuccessListener { setLoading(false); load(uid) }
                                 .addOnFailureListener { e ->
@@ -855,7 +855,7 @@ private fun AdminModerationSection(
                                         "warnReason" to "",
                                         "updatedAt" to FieldValue.serverTimestamp()
                                     ),
-                                    com.google.firebase.firestore.SetOptions.merge()
+                                    SetOptions.merge()
                                 )
                                 .addOnSuccessListener { setLoading(false); load(uid) }
                                 .addOnFailureListener { e ->
@@ -890,7 +890,7 @@ private fun AdminModerationSection(
                                         "banReason" to banReason.trim(),
                                         "updatedAt" to FieldValue.serverTimestamp()
                                     ),
-                                    com.google.firebase.firestore.SetOptions.merge()
+                                    SetOptions.merge()
                                 )
                                 .addOnSuccessListener { setLoading(false); load(uid) }
                                 .addOnFailureListener { e ->
@@ -911,7 +911,7 @@ private fun AdminModerationSection(
                                         "banReason" to "",
                                         "updatedAt" to FieldValue.serverTimestamp()
                                     ),
-                                    com.google.firebase.firestore.SetOptions.merge()
+                                    SetOptions.merge()
                                 )
                                 .addOnSuccessListener { setLoading(false); load(uid) }
                                 .addOnFailureListener { e ->
@@ -927,7 +927,7 @@ private fun AdminModerationSection(
 }
 
 /* =========================================================
-   ToS Config (unchanged from your version)
+   ToS / App Config
    ========================================================= */
 
 @Composable
@@ -1024,7 +1024,7 @@ private fun AdminTosConfigSection(
                                 "updatedAt" to FieldValue.serverTimestamp()
                             )
                             db.collection("config").document("app")
-                                .set(data, com.google.firebase.firestore.SetOptions.merge())
+                                .set(data, SetOptions.merge())
                                 .addOnSuccessListener { setLoading(false); load() }
                                 .addOnFailureListener { e ->
                                     setLoading(false)
