@@ -41,7 +41,7 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
-import com.google.firebase.firestore.SetOptions
+import kotlinx.coroutines.tasks.await
 
 /**
  * ✅ Device-gated Admin-only screen (NO LOGIN UI).
@@ -56,7 +56,7 @@ import com.google.firebase.firestore.SetOptions
  * - announcements/{id} : { title, body, active, priority, createdAt, createdByDevice, createdByAppId }
  * - users/{uid} : { displayName, warned, warnReason, banned, banReason, updatedAt }
  * - config/app : { tosVersion, tosText, tosUrl, ownerUid, updatedAt }
- * - devices/{deviceHash} : { adminEnabled, note, lastSeenAt, updatedAt, ... }
+ * - devices/{deviceHash} : { adminEnabled, note, lastSeenAt, ... }
  */
 @Composable
 fun AdminScreen() {
@@ -66,9 +66,7 @@ fun AdminScreen() {
 
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    fun setErr(msg: String?) {
-        error = msg?.takeIf { it.isNotBlank() }?.take(4000)
-    }
+    fun setErr(msg: String?) { error = msg?.takeIf { it.isNotBlank() }?.take(4000) }
 
     // Hard block: should never be reachable on public build, but keep it safe anyway.
     if (!BuildConfig.IS_ADMIN_BUILD) {
@@ -85,7 +83,25 @@ fun AdminScreen() {
     }
 
     val deviceHash = remember { readDeviceHash(ctx) }
-    val myUid = auth.currentUser?.uid.orEmpty()
+
+    // ✅ UID: read cached UID first (written by ChatboxApp bootstrap)
+    var myUid by remember { mutableStateOf(readCachedUid(ctx)) }
+
+    // If cached UID is blank, try to auth and then cache it
+    LaunchedEffect(Unit) {
+        if (myUid.isNotBlank()) return@LaunchedEffect
+
+        runCatching {
+            if (auth.currentUser == null) auth.signInAnonymously().await()
+            val uid = auth.currentUser?.uid.orEmpty()
+            if (uid.isNotBlank()) {
+                writeCachedUid(ctx, uid)
+                myUid = uid
+            }
+        }.onFailure { e ->
+            setErr(e.message ?: "Auth failed while trying to get UID")
+        }
+    }
 
     // ---------- Admin gate (device-based) ----------
     var adminChecked by remember { mutableStateOf(false) }
@@ -122,14 +138,12 @@ fun AdminScreen() {
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text("Admin", style = MaterialTheme.typography.titleLarge)
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     CircularProgressIndicator()
                     Text("Checking permissions…")
                 }
                 DeviceHashCard(deviceHash)
+                UidCard(myUid)
                 if (error != null) ErrorCard(error!!)
             }
         }
@@ -158,9 +172,17 @@ fun AdminScreen() {
                 }
 
                 DeviceHashCard(deviceHash)
+                UidCard(myUid)
 
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     OutlinedButton(onClick = { refreshAdminGate() }) { Text("Re-check") }
+                    OutlinedButton(onClick = {
+                        // force refresh UID display
+                        myUid = readCachedUid(ctx)
+                        if (myUid.isBlank()) {
+                            setErr("UID not cached yet. Open app Home once (bootstrap), then return here.")
+                        }
+                    }) { Text("Re-read UID") }
                     if (error != null) OutlinedButton(onClick = { setErr(null) }) { Text("Clear error") }
                 }
 
@@ -187,7 +209,6 @@ fun AdminScreen() {
                 ownerChecked = true
             }
             .addOnFailureListener { e ->
-                // Not fatal; owner-only features will just hide.
                 setErr(e.message ?: "Failed to load config/app (ownerUid)")
                 ownerChecked = true
             }
@@ -214,7 +235,7 @@ fun AdminScreen() {
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Text(
-                        "UID: ${myUid.ifBlank { "(not signed in?)" }}",
+                        "UID: ${myUid.ifBlank { "(not available yet)" }}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -227,6 +248,8 @@ fun AdminScreen() {
                     }
                 }
                 OutlinedButton(onClick = {
+                    // refresh both gates + UID
+                    myUid = readCachedUid(ctx).ifBlank { myUid }
                     refreshAdminGate()
                     refreshOwnerGate()
                 }) { Text("Refresh") }
@@ -297,8 +320,19 @@ fun AdminScreen() {
 
 private fun readDeviceHash(ctx: Context): String {
     val prefs = ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
-    // ChatboxApp.kt writes this exact key.
     return prefs.getString("device_id_hash", "")?.trim().orEmpty()
+}
+
+private fun readCachedUid(ctx: Context): String {
+    val prefs = ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
+    return prefs.getString("auth_uid", "")?.trim().orEmpty()
+}
+
+private fun writeCachedUid(ctx: Context, uid: String) {
+    ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
+        .edit()
+        .putString("auth_uid", uid.trim())
+        .apply()
 }
 
 /* =========================================================
@@ -314,6 +348,16 @@ private fun DeviceHashCard(deviceHash: String) {
                 deviceHash.ifBlank { "(blank — not found in vrca_remote/device_id_hash)" },
                 fontFamily = FontFamily.Monospace
             )
+        }
+    }
+}
+
+@Composable
+private fun UidCard(uid: String) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("UID", style = MaterialTheme.typography.titleSmall)
+            Text(uid.ifBlank { "(not available yet)" }, fontFamily = FontFamily.Monospace)
         }
     }
 }
@@ -460,7 +504,7 @@ private fun OwnerAdminManagerSection(
                                                         "adminEnabled" to newValue,
                                                         "updatedAt" to FieldValue.serverTimestamp()
                                                     ),
-                                                    SetOptions.merge()
+                                                    com.google.firebase.firestore.SetOptions.merge()
                                                 )
                                                 .addOnSuccessListener { setLoading(false); refresh() }
                                                 .addOnFailureListener { e ->
@@ -493,7 +537,7 @@ private fun OwnerAdminManagerSection(
                                                     "note" to noteText.trim(),
                                                     "updatedAt" to FieldValue.serverTimestamp()
                                                 ),
-                                                SetOptions.merge()
+                                                com.google.firebase.firestore.SetOptions.merge()
                                             )
                                             .addOnSuccessListener { setLoading(false); refresh() }
                                             .addOnFailureListener { e ->
@@ -520,9 +564,12 @@ private fun OwnerAdminManagerSection(
 }
 
 /* =========================================================
-   Announcements
+   Announcements / Moderation / ToS Config
+   (kept as-is from your file below)
    ========================================================= */
 
+// --- keep your existing sections exactly the same ---
+/* Announcements */
 private data class AnnouncementRow(
     val id: String,
     val title: String,
@@ -719,10 +766,7 @@ private fun AdminAnnouncementsSection(
     }
 }
 
-/* =========================================================
-   Moderation
-   ========================================================= */
-
+/* Moderation */
 @Composable
 private fun AdminModerationSection(
     db: FirebaseFirestore,
@@ -834,7 +878,7 @@ private fun AdminModerationSection(
                                         "warnReason" to warnReason.trim(),
                                         "updatedAt" to FieldValue.serverTimestamp()
                                     ),
-                                    SetOptions.merge()
+                                    com.google.firebase.firestore.SetOptions.merge()
                                 )
                                 .addOnSuccessListener { setLoading(false); load(uid) }
                                 .addOnFailureListener { e ->
@@ -855,7 +899,7 @@ private fun AdminModerationSection(
                                         "warnReason" to "",
                                         "updatedAt" to FieldValue.serverTimestamp()
                                     ),
-                                    SetOptions.merge()
+                                    com.google.firebase.firestore.SetOptions.merge()
                                 )
                                 .addOnSuccessListener { setLoading(false); load(uid) }
                                 .addOnFailureListener { e ->
@@ -890,7 +934,7 @@ private fun AdminModerationSection(
                                         "banReason" to banReason.trim(),
                                         "updatedAt" to FieldValue.serverTimestamp()
                                     ),
-                                    SetOptions.merge()
+                                    com.google.firebase.firestore.SetOptions.merge()
                                 )
                                 .addOnSuccessListener { setLoading(false); load(uid) }
                                 .addOnFailureListener { e ->
@@ -911,7 +955,7 @@ private fun AdminModerationSection(
                                         "banReason" to "",
                                         "updatedAt" to FieldValue.serverTimestamp()
                                     ),
-                                    SetOptions.merge()
+                                    com.google.firebase.firestore.SetOptions.merge()
                                 )
                                 .addOnSuccessListener { setLoading(false); load(uid) }
                                 .addOnFailureListener { e ->
@@ -926,10 +970,7 @@ private fun AdminModerationSection(
     }
 }
 
-/* =========================================================
-   ToS / App Config
-   ========================================================= */
-
+/* ToS / Config */
 @Composable
 private fun AdminTosConfigSection(
     db: FirebaseFirestore,
@@ -1024,7 +1065,7 @@ private fun AdminTosConfigSection(
                                 "updatedAt" to FieldValue.serverTimestamp()
                             )
                             db.collection("config").document("app")
-                                .set(data, SetOptions.merge())
+                                .set(data, com.google.firebase.firestore.SetOptions.merge())
                                 .addOnSuccessListener { setLoading(false); load() }
                                 .addOnFailureListener { e ->
                                     setLoading(false)
