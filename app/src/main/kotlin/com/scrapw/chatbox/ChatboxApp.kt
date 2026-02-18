@@ -2,6 +2,8 @@
 package com.scrapw.chatbox
 
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import android.provider.Settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -11,8 +13,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -48,7 +50,7 @@ import java.security.MessageDigest
  *  - crash gate
  *  - bootstrap gate
  *  - anonymous auth (no login UI)
- *  - stable device identity via ANDROID_ID hash (fallback: uid)
+ *  - stable device identity cached in SharedPreferences ("vrca_remote"/"device_id_hash")
  *  - SAFE public writes ONLY to users/{uid} (self doc) for:
  *      deviceHash, lastSeenAt, appId, adminBuild, versionName, versionCode
  *
@@ -142,15 +144,18 @@ fun ChatboxApp() {
 private const val REMOTE_PREFS_FILE = "vrca_remote"
 
 private object RemoteKeys {
-    // AdminScreen reads this from prefs (keep this key name stable!)
+    // AdminScreen reads these from prefs (keep these key names stable!)
     const val DEVICE_ID_HASH = "device_id_hash"
     const val AUTH_UID = "auth_uid"
+
+    // Optional: used if ANDROID_ID is unavailable (less resistant to data wipe)
+    const val DEVICE_FALLBACK_RANDOM = "device_id_hash_fallback_random"
 }
 
 /**
  * Boot steps:
  *  1) anonymous auth
- *  2) compute deviceHash
+ *  2) ensure deviceHash is present + stable
  *  3) cache uid + deviceHash locally
  *  4) SAFE self-write to users/{uid}: deviceHash + lastSeen (rules restrict!)
  *
@@ -163,16 +168,9 @@ private suspend fun bootstrapFirebaseAndCache(ctx: Context) {
     }
     val uid = auth.currentUser?.uid ?: error("Anonymous auth returned null user")
 
-    val androidId = Settings.Secure
-        .getString(ctx.contentResolver, Settings.Secure.ANDROID_ID)
-        ?.trim()
-        .orEmpty()
+    val deviceHash = ensureDeviceHash(ctx)
 
-    // ANDROID_ID can be blank; fallback to uid so app still works.
-    val deviceKeySource = if (androidId.isNotBlank()) "a:$androidId" else "u:$uid"
-    val deviceHash = sha256Hex(deviceKeySource)
-
-    // Cache for AdminScreen + for debugging
+    // Cache for AdminScreen + other screens
     ctx.getSharedPreferences(REMOTE_PREFS_FILE, Context.MODE_PRIVATE)
         .edit()
         .putString(RemoteKeys.AUTH_UID, uid)
@@ -198,14 +196,87 @@ private suspend fun bootstrapFirebaseAndCache(ctx: Context) {
     }
 }
 
-private fun sha256Hex(input: String): String {
+/* =========================================================
+   Device hash (stable across reinstall)
+   ========================================================= */
+
+/**
+ * Ensures prefs contain a stable device hash.
+ * Primary source: ANDROID_ID mixed with signing cert digest.
+ *
+ * Goal: reinstall / clear-app-data should not change deviceHash (ANDROID_ID path).
+ * Note: factory reset can change ANDROID_ID; nothing purely local can survive that.
+ */
+private fun ensureDeviceHash(ctx: Context): String {
+    val prefs = ctx.getSharedPreferences(REMOTE_PREFS_FILE, Context.MODE_PRIVATE)
+    val existing = prefs.getString(RemoteKeys.DEVICE_ID_HASH, "")?.trim().orEmpty()
+    if (existing.isNotBlank()) return existing
+
+    val androidId = runCatching {
+        Settings.Secure.getString(ctx.contentResolver, Settings.Secure.ANDROID_ID)?.trim().orEmpty()
+    }.getOrDefault("")
+
+    val signingDigest = runCatching { signingCertSha256Hex(ctx) }.getOrDefault("")
+
+    val stableSeed = buildString {
+        append("v1:")
+        append(androidId.ifBlank { "no_android_id" })
+        append(":")
+        append(signingDigest.ifBlank { "no_signing" })
+    }
+
+    val computedStable = if (androidId.isNotBlank()) sha256Hex(stableSeed) else ""
+
+    // If we can compute a stable value, use it. Otherwise store a fallback random once.
+    val finalHash = if (computedStable.isNotBlank()) {
+        computedStable
+    } else {
+        val fallbackExisting = prefs.getString(RemoteKeys.DEVICE_FALLBACK_RANDOM, "")?.trim().orEmpty()
+        if (fallbackExisting.isNotBlank()) fallbackExisting
+        else {
+            val r = sha256Hex("fallback:${System.nanoTime()}:${Math.random()}")
+            prefs.edit().putString(RemoteKeys.DEVICE_FALLBACK_RANDOM, r).apply()
+            r
+        }
+    }
+
+    prefs.edit().putString(RemoteKeys.DEVICE_ID_HASH, finalHash).apply()
+    return finalHash
+}
+
+/**
+ * Returns SHA-256 of the app signing certificate (hex).
+ * Helps make the device hash app-signing-specific.
+ */
+private fun signingCertSha256Hex(ctx: Context): String {
+    val pm = ctx.packageManager
+    val pkg = ctx.packageName
+
+    val certBytes: ByteArray = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        val info = pm.getPackageInfo(pkg, PackageManager.GET_SIGNING_CERTIFICATES)
+        val sigs = info.signingInfo.apkContentsSigners
+        (sigs.firstOrNull()?.toByteArray() ?: byteArrayOf())
+    } else {
+        @Suppress("DEPRECATION")
+        val info = pm.getPackageInfo(pkg, PackageManager.GET_SIGNATURES)
+        @Suppress("DEPRECATION")
+        (info.signatures?.firstOrNull()?.toByteArray() ?: byteArrayOf())
+    }
+
+    if (certBytes.isEmpty()) return ""
+    return sha256HexBytes(certBytes)
+}
+
+private fun sha256Hex(input: String): String = sha256HexBytes(input.toByteArray(Charsets.UTF_8))
+
+private fun sha256HexBytes(bytes: ByteArray): String {
     val md = MessageDigest.getInstance("SHA-256")
-    val bytes = md.digest(input.toByteArray(Charsets.UTF_8))
-    val sb = StringBuilder(bytes.size * 2)
-    for (b in bytes) {
-        val v = b.toInt() and 0xFF
-        sb.append("0123456789abcdef"[v ushr 4])
-        sb.append("0123456789abcdef"[v and 0x0F])
+    val digest = md.digest(bytes)
+    val sb = StringBuilder(digest.size * 2)
+    for (b in digest) {
+        val v = b.toInt() and 0xff
+        if (v < 16) sb.append('0')
+        sb.append(v.toString(16))
     }
     return sb.toString()
 }
