@@ -237,6 +237,10 @@ fun ChatboxScreen(
 
     // Ensure public users have a UID (anonymous auth).
     var authedUid by remember { mutableStateOf(auth.currentUser?.uid) }
+
+    // NOTE:
+    // We intentionally DO NOT surface Firebase errors in the UI
+    // (removes the orange "Firebase issue" box behind your UI).
     var firebaseError by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
@@ -488,7 +492,8 @@ fun ChatboxScreen(
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                // Global banners (warn + announcements + firebase errors)
+                // Global banners (warn + announcements)
+                // NOTE: firebaseError is intentionally ignored so it never renders an orange box.
                 GlobalStatusBanner(
                     moderation = moderation,
                     announcements = announcements,
@@ -575,14 +580,10 @@ private fun GlobalStatusBanner(
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        if (!firebaseError.isNullOrBlank()) {
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
-                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Firebase issue", style = MaterialTheme.typography.labelLarge)
-                    Text(firebaseError, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
-                }
-            }
-        }
+        // Intentionally do NOT show firebaseError to avoid orange error cards in-app.
+        // (We keep the param to avoid changing call sites / structure.)
+        @Suppress("UNUSED_VARIABLE")
+        val _ignored = firebaseError
 
         if (moderation.warned && !moderation.banned) {
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
