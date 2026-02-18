@@ -2,6 +2,7 @@
 package com.scrapw.chatbox
 
 import android.content.Context
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -437,8 +438,11 @@ private fun AdminUserDirectorySection(
     // ✅ Remember expanded user + keep place (no navigation away)
     var expandedUid by rememberSaveable { mutableStateOf<String?>(null) }
 
-    // ✅ Remember scroll position (so expanding/collapsing doesn’t “jump”)
+    // ✅ Remember scroll position (and restore after expand/collapse)
     val listState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
+    var restoreIndex by rememberSaveable { mutableIntStateOf(0) }
+    var restoreOffset by rememberSaveable { mutableIntStateOf(0) }
+    var restorePending by rememberSaveable { mutableStateOf(false) }
 
     // Paging state
     var pagingLoading by remember { mutableStateOf(false) }
@@ -521,6 +525,14 @@ private fun AdminUserDirectorySection(
         }
     }
 
+    // ✅ Restore scroll after expand/collapse so you keep your place (prevents “jump” feeling)
+    LaunchedEffect(expandedUid) {
+        if (restorePending) {
+            restorePending = false
+            runCatching { listState.scrollToItem(restoreIndex, restoreOffset) }
+        }
+    }
+
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("User Directory (admin)", style = MaterialTheme.typography.titleMedium)
 
@@ -598,7 +610,13 @@ private fun AdminUserDirectorySection(
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                         modifier = Modifier
                             .fillMaxWidth()
+                            .animateContentSize()
                             .clickable {
+                                // Capture current scroll position BEFORE changing item height.
+                                restoreIndex = listState.firstVisibleItemIndex
+                                restoreOffset = listState.firstVisibleItemScrollOffset
+                                restorePending = true
+
                                 expandedUid = if (isExpanded) null else u.uid
                             }
                     ) {
