@@ -16,21 +16,47 @@ if (keystorePropertiesFile.exists()) {
 
 // =========================
 // ✅ Auto versioning (GitHub Actions)
+// Goal:
+//  - versionCode: always increasing (use GITHUB_RUN_NUMBER when available)
+//  - versionName: vMAJOR.MINOR.PATCH where:
+//      * PATCH is 0..99
+//      * every +100 builds => MINOR increments by 1, PATCH rolls over
+//      * no manual edits needed at 100 / 1000 / etc
 // =========================
 def ghRunNumberStr = System.getenv("GITHUB_RUN_NUMBER") ?: ""
 def ghRunNumber = 0
-try { ghRunNumber = ghRunNumberStr.isInteger() ? ghRunNumberStr.toInteger() : 0 } catch (ignored) { ghRunNumber = 0 }
+try {
+    ghRunNumber = (ghRunNumberStr?.trim()?.isInteger()) ? ghRunNumberStr.toInteger() : 0
+} catch (ignored) {
+    ghRunNumber = 0
+}
 
+// Base semantic version
 def baseMajor = 1
 def baseMinor = 2
+
+// Choose where "patch/minor counting" starts from.
+// Example: if baseRunOffset=200, then:
+//   run=200 => rel=0  => v1.2.0
+//   run=299 => rel=99 => v1.2.99
+//   run=300 => rel=100=> v1.3.0  ✅ (auto minor bump)
+//   run=1300=> rel=1100=> v1.13.0 ✅ (auto continues past 1000)
 def baseRunOffset = 200
+
+// Local fallback for Android Studio builds when env var isn't set
 def localFallbackRun = 279
 
 def run = (ghRunNumber > 0) ? ghRunNumber : localFallbackRun
-def patch = Math.max(0, run - baseRunOffset)
+
+// Relative build count since baseRunOffset (never negative)
+def rel = Math.max(0, run - baseRunOffset)
+
+// Roll patch every 100, bump minor accordingly
+def minorBump = (int)(rel / 100)
+def patch = (int)(rel % 100)
 
 def computedVersionCode = run
-def computedVersionName = "v${baseMajor}.${baseMinor}.${patch}"
+def computedVersionName = "v${baseMajor}.${baseMinor + minorBump}.${patch}"
 
 android {
     namespace 'com.scrapw.chatbox'
