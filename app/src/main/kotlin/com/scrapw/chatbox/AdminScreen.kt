@@ -17,12 +17,17 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CopyAll
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -41,6 +46,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.google.firebase.Timestamp
@@ -53,40 +60,27 @@ import com.google.firebase.firestore.SetOptions
 import kotlinx.coroutines.tasks.await
 
 /**
- * ✅ Device-gated Admin-only screen (NO LOGIN UI).
+ * ✅ Admin-only screen (device gated, no login UI)
  *
  * Admin enable:
- * - Firestore: devices/{deviceHash} : { adminEnabled: true, ... }
+ * - devices/{deviceHash} : { adminEnabled: true }
  *
- * Owner enable (for in-app admin management):
- * - Firestore: config/app : { ownerUid: "<uid>" }
+ * Owner enable:
+ * - config/app : { ownerUid: "<uid>" }
  *
- * Collections:
- * - announcements/{id} : { title, body, active, priority, createdAt, createdByDevice, createdByAppId }
- * - users/{uid} : {
- *      alias, displayName,
- *      warned, warnReason, banned, banReason,
- *      updatedAt, lastSeenAt,
- *      appId, versionName, versionCode, adminBuild, deviceHash
- *   }
- * - config/app : { tosVersion, tosText, tosUrl, ownerUid, updatedAt }
- * - devices/{deviceHash} : { adminEnabled, note, lastSeenAt, ... }
- *
- * - moderationEvents/{id} : { uid, action, reason, createdAt, byDeviceHash, byUid, byAppId }
- *
- * ✅ Admin-only UI included:
- * - User Directory: paged, filterable list of users/{uid}
- * - Moderation actions + append-only moderation history
- * - Announcements CRUD
- * - ToS/config editor
- * - Owner-only Admin Manager (toggle devices/{hash}.adminEnabled)
- *
- * ✅ Also includes copy/paste "RULES + INDEXES" snippets at bottom (as text).
- *    You still apply them in Firebase, but you won't have to guess later.
+ * Collections used:
+ * - announcements/{id}
+ * - users/{uid} : includes deviceHash, lastSeenAt, warned/banned + reasons
+ * - bannedDevices/{deviceHash} : { banned: true/false, reason, updatedAt }
+ * - moderationEvents/{id} : append-only
+ * - config/app : ToS + ownerUid
+ * - devices/{deviceHash} : adminEnabled gate (admin build only)
  */
 @Composable
 fun AdminScreen() {
     val ctx = androidx.compose.ui.platform.LocalContext.current
+    val clipboard = LocalClipboardManager.current
+
     val db = remember { FirebaseFirestore.getInstance() }
     val auth = remember { FirebaseAuth.getInstance() }
 
@@ -94,7 +88,7 @@ fun AdminScreen() {
     var error by remember { mutableStateOf<String?>(null) }
     fun setErr(msg: String?) { error = msg?.takeIf { it.isNotBlank() }?.take(4000) }
 
-    // Hard block: should never be reachable on public build, but keep it safe anyway.
+    // Hard block: should never be reachable on public build.
     if (!BuildConfig.IS_ADMIN_BUILD) {
         Surface {
             Column(
@@ -110,10 +104,10 @@ fun AdminScreen() {
 
     val deviceHash = remember { readDeviceHash(ctx) }
 
-    // ✅ UID: read cached UID first (written by bootstrap)
+    // ✅ UID: read cached first (written by ChatboxScreen)
     var myUid by remember { mutableStateOf(readCachedUid(ctx)) }
 
-    // If cached UID is blank, try to auth and then cache it
+    // If cached UID is blank, auth and cache it
     LaunchedEffect(Unit) {
         if (myUid.isNotBlank()) return@LaunchedEffect
         runCatching {
@@ -163,12 +157,15 @@ fun AdminScreen() {
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text("Admin", style = MaterialTheme.typography.titleLarge)
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
                     CircularProgressIndicator()
                     Text("Checking permissions…")
                 }
-                DeviceHashCard(deviceHash)
-                UidCard(myUid)
+                DeviceHashCard(deviceHash, onCopy = { clipboard.setText(AnnotatedString(deviceHash)) })
+                UidCard(myUid, onCopy = { clipboard.setText(AnnotatedString(myUid)) })
                 if (error != null) ErrorCard(error!!)
             }
         }
@@ -196,8 +193,8 @@ fun AdminScreen() {
                     }
                 }
 
-                DeviceHashCard(deviceHash)
-                UidCard(myUid)
+                DeviceHashCard(deviceHash, onCopy = { clipboard.setText(AnnotatedString(deviceHash)) })
+                UidCard(myUid, onCopy = { clipboard.setText(AnnotatedString(myUid)) })
 
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     OutlinedButton(onClick = { refreshAdminGate() }) { Text("Re-check") }
@@ -251,7 +248,7 @@ fun AdminScreen() {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
+                Column(Modifier.weight(1f)) {
                     Text("Admin", style = MaterialTheme.typography.titleLarge)
                     Text(
                         "Device: $deviceHash",
@@ -271,11 +268,14 @@ fun AdminScreen() {
                         )
                     }
                 }
-                OutlinedButton(onClick = {
+
+                IconButton(onClick = {
                     myUid = readCachedUid(ctx).ifBlank { myUid }
                     refreshAdminGate()
                     refreshOwnerGate()
-                }) { Text("Refresh") }
+                }) {
+                    Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
+                }
             }
 
             if (error != null) {
@@ -285,13 +285,25 @@ fun AdminScreen() {
                 }
             }
 
-            // ✅ "rules + indexes" in the UI so it’s never lost
-            AdminRulesAndIndexesCard()
+            AdminRulesCard()
+
+            Divider()
 
             // ✅ Admin-only user directory
-            Divider()
             AdminUserDirectorySection(
                 db = db,
+                setLoading = { loading = it },
+                setError = ::setErr
+            )
+
+            Divider()
+
+            // ✅ Moderation (UID + Device ban)
+            AdminModerationSection(
+                db = db,
+                myUid = myUid,
+                byDeviceHash = deviceHash,
+                byAppId = BuildConfig.APPLICATION_ID,
                 setLoading = { loading = it },
                 setError = ::setErr
             )
@@ -312,18 +324,6 @@ fun AdminScreen() {
             AdminAnnouncementsSection(
                 db = db,
                 createdByDevice = deviceHash,
-                setLoading = { loading = it },
-                setError = ::setErr
-            )
-
-            Divider()
-
-            // Moderation + History
-            AdminModerationSection(
-                db = db,
-                myUid = myUid,
-                byDeviceHash = deviceHash,
-                byAppId = BuildConfig.APPLICATION_ID,
                 setLoading = { loading = it },
                 setError = ::setErr
             )
@@ -375,10 +375,19 @@ private fun writeCachedUid(ctx: Context, uid: String) {
    ========================================================= */
 
 @Composable
-private fun DeviceHashCard(deviceHash: String) {
+private fun DeviceHashCard(deviceHash: String, onCopy: () -> Unit) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("DeviceHash", style = MaterialTheme.typography.titleSmall)
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("DeviceHash", style = MaterialTheme.typography.titleSmall)
+                IconButton(onClick = onCopy) {
+                    Icon(Icons.Filled.CopyAll, contentDescription = "Copy")
+                }
+            }
             Text(
                 deviceHash.ifBlank { "(blank — not found in vrca_remote/device_id_hash)" },
                 fontFamily = FontFamily.Monospace
@@ -388,10 +397,19 @@ private fun DeviceHashCard(deviceHash: String) {
 }
 
 @Composable
-private fun UidCard(uid: String) {
+private fun UidCard(uid: String, onCopy: () -> Unit) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("UID", style = MaterialTheme.typography.titleSmall)
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("UID", style = MaterialTheme.typography.titleSmall)
+                IconButton(onClick = onCopy) {
+                    Icon(Icons.Filled.CopyAll, contentDescription = "Copy")
+                }
+            }
             Text(uid.ifBlank { "(not available yet)" }, fontFamily = FontFamily.Monospace)
         }
     }
@@ -407,45 +425,18 @@ private fun ErrorCard(message: String) {
     }
 }
 
-/* =========================================================
-   Rules + Indexes card (IN APP so we never lose it)
-   ========================================================= */
-
 @Composable
-private fun AdminRulesAndIndexesCard() {
+private fun AdminRulesCard() {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("Rules + Indexes (copy/paste)", style = MaterialTheme.typography.titleSmall)
-
-            Text(
-                "This is the FULL plan. Apply these on Firebase when you're ready.\n" +
-                    "Public build should NOT write devices/. Admin build can.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            Divider()
-
-            Text("Firestore Rules (suggested)", style = MaterialTheme.typography.labelLarge)
-            CodeCard(FIRESTORE_RULES_SNIPPET)
-
-            Text("Indexes to create", style = MaterialTheme.typography.labelLarge)
-            CodeCard(FIRESTORE_INDEXES_SNIPPET)
-
-            Text(
-                "If Firestore throws an index error, it will usually give you a direct link to create it.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
-}
-
-@Composable
-private fun CodeCard(text: String) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(text, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Rules (current plan)", style = MaterialTheme.typography.titleSmall)
+            Text("• Public build: writes users/{uid} presence + deviceHash; reads ToS + announcements + moderation.")
+            Text("• Admin build: can read/write announcements + moderation + config + bannedDevices.")
+            Text("• Admin access: devices/{deviceHash}.adminEnabled == true.")
+            Text("• Owner access: config/app.ownerUid == your UID (enables in-app admin manager).")
+            Text("• Moderation history: moderationEvents/ collection (append-only).")
+            Text("• Device bans: bannedDevices/{deviceHash} (blocks reinstalls).")
+            Text("• User directory: paged + lazy list.")
         }
     }
 }
@@ -456,16 +447,11 @@ private fun CodeCard(text: String) {
 
 private data class UserRow(
     val uid: String,
-    val alias: String,
     val displayName: String,
+    val deviceHash: String,
     val warned: Boolean,
     val banned: Boolean,
-    val lastSeenAt: Timestamp?,
-    val appId: String,
-    val versionName: String,
-    val versionCode: Long?,
-    val adminBuild: Boolean?,
-    val deviceHash: String
+    val lastSeenAt: Timestamp?
 )
 
 @Composable
@@ -483,9 +469,6 @@ private fun AdminUserDirectorySection(
     var expandedUid by rememberSaveable { mutableStateOf<String?>(null) }
 
     val listState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
-    var restoreIndex by rememberSaveable { mutableIntStateOf(0) }
-    var restoreOffset by rememberSaveable { mutableIntStateOf(0) }
-    var restorePending by rememberSaveable { mutableStateOf(false) }
 
     var pagingLoading by remember { mutableStateOf(false) }
     var hasMore by remember { mutableStateOf(true) }
@@ -512,37 +495,27 @@ private fun AdminUserDirectorySection(
 
                 for (d in docs) {
                     val uid = d.id
-                    val alias = (d.getString("alias") ?: "").trim()
-                    val displayName = (d.getString("displayName") ?: "").trim()
+                    val name = (d.getString("displayName") ?: "").trim()
+                    val deviceHash = (d.getString("deviceHash") ?: "").trim()
                     val warned = d.getBoolean("warned") ?: false
                     val banned = d.getBoolean("banned") ?: false
                     val lastSeen = d.getTimestamp("lastSeenAt")
 
-                    val appId = (d.getString("appId") ?: "").trim()
-                    val versionName = (d.getString("versionName") ?: "").trim()
-                    val versionCode = d.getLong("versionCode")
-                    val adminBuild = d.getBoolean("adminBuild")
-                    val deviceHash = (d.getString("deviceHash") ?: "").trim()
-
                     users.add(
                         UserRow(
                             uid = uid,
-                            alias = alias,
-                            displayName = displayName,
+                            displayName = name,
+                            deviceHash = deviceHash,
                             warned = warned,
                             banned = banned,
-                            lastSeenAt = lastSeen,
-                            appId = appId,
-                            versionName = versionName,
-                            versionCode = versionCode,
-                            adminBuild = adminBuild,
-                            deviceHash = deviceHash
+                            lastSeenAt = lastSeen
                         )
                     )
                 }
 
                 lastDoc = docs.lastOrNull()
                 if (docs.size < pageSize) hasMore = false
+
                 pagingLoading = false
             }
             .addOnFailureListener { e ->
@@ -573,17 +546,10 @@ private fun AdminUserDirectorySection(
                 .filter { row ->
                     if (q.isBlank()) true
                     else row.uid.contains(q, ignoreCase = true) ||
-                        row.alias.contains(q, ignoreCase = true) ||
-                        row.displayName.contains(q, ignoreCase = true)
+                        row.displayName.contains(q, ignoreCase = true) ||
+                        row.deviceHash.contains(q, ignoreCase = true)
                 }
                 .toList()
-        }
-    }
-
-    LaunchedEffect(expandedUid) {
-        if (restorePending) {
-            restorePending = false
-            runCatching { listState.scrollToItem(restoreIndex, restoreOffset) }
         }
     }
 
@@ -593,7 +559,7 @@ private fun AdminUserDirectorySection(
         ElevatedCard {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    "Scroll to auto-load more. Tap a user to expand (keeps your place).",
+                    "Scroll to auto-load more. Tap a user to expand.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -603,7 +569,7 @@ private fun AdminUserDirectorySection(
                     onValueChange = { search = it },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
-                    label = { Text("Search UID / alias / displayName") },
+                    label = { Text("Search UID / displayName / deviceHash") },
                     placeholder = { Text("type to filter…") }
                 )
 
@@ -662,12 +628,7 @@ private fun AdminUserDirectorySection(
                         modifier = Modifier
                             .fillMaxWidth()
                             .animateContentSize()
-                            .clickable {
-                                restoreIndex = listState.firstVisibleItemIndex
-                                restoreOffset = listState.firstVisibleItemScrollOffset
-                                restorePending = true
-                                expandedUid = if (isExpanded) null else u.uid
-                            }
+                            .clickable { expandedUid = if (isExpanded) null else u.uid }
                     ) {
                         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Row(
@@ -680,15 +641,17 @@ private fun AdminUserDirectorySection(
                             }
 
                             Text(
-                                "alias=${u.alias.ifBlank { "(blank)" }}",
-                                fontFamily = FontFamily.Monospace,
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                            Text(
                                 "displayName=${u.displayName.ifBlank { "(blank)" }}",
                                 fontFamily = FontFamily.Monospace,
                                 style = MaterialTheme.typography.bodySmall
                             )
+
+                            Text(
+                                "deviceHash=${u.deviceHash.take(16).ifBlank { "(blank)" }}…",
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+
                             Text(
                                 "warned=${u.warned}  banned=${u.banned}",
                                 fontFamily = FontFamily.Monospace,
@@ -704,41 +667,11 @@ private fun AdminUserDirectorySection(
                                     style = MaterialTheme.typography.bodySmall
                                 )
 
-                                if (u.appId.isNotBlank() || u.versionName.isNotBlank() || u.versionCode != null) {
-                                    Text(
-                                        "appId=${u.appId.ifBlank { "?" }}  v=${u.versionName.ifBlank { "?" }} (${u.versionCode ?: -1})",
-                                        fontFamily = FontFamily.Monospace,
-                                        style = MaterialTheme.typography.bodySmall
-                                    )
-                                }
-
-                                if (u.adminBuild != null) {
-                                    Text(
-                                        "adminBuild=${u.adminBuild}",
-                                        fontFamily = FontFamily.Monospace,
-                                        style = MaterialTheme.typography.bodySmall
-                                    )
-                                }
-
-                                if (u.deviceHash.isNotBlank()) {
-                                    Text(
-                                        "deviceHash=${u.deviceHash.take(16)}…",
-                                        fontFamily = FontFamily.Monospace,
-                                        style = MaterialTheme.typography.bodySmall
-                                    )
-                                }
-
                                 Text(
-                                    "Tip: copy UID and paste into Moderation section below to act on them.",
+                                    "Tip: copy UID (and deviceHash) and paste into Moderation below.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
-
-                                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                    OutlinedButton(onClick = { expandedUid = null }, modifier = Modifier.weight(1f)) {
-                                        Text("Collapse")
-                                    }
-                                }
                             }
                         }
                     }
@@ -746,9 +679,10 @@ private fun AdminUserDirectorySection(
 
                 item {
                     Spacer(Modifier.height(8.dp))
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                        if (pagingLoading) CircularProgressIndicator()
-                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.Center
+                    ) { if (pagingLoading) CircularProgressIndicator() }
                     Spacer(Modifier.height(8.dp))
                 }
             }
@@ -759,7 +693,555 @@ private fun AdminUserDirectorySection(
 }
 
 /* =========================================================
-   OWNER: Admin manager
+   Moderation + History (UID + Device Ban = C)
+   ========================================================= */
+
+private data class ModerationEventRow(
+    val id: String,
+    val action: String,
+    val reason: String,
+    val createdAt: Timestamp?,
+    val byDeviceHash: String,
+    val byUid: String,
+    val byAppId: String,
+    val targetUid: String,
+    val targetDeviceHash: String
+)
+
+@Composable
+private fun AdminModerationSection(
+    db: FirebaseFirestore,
+    myUid: String,
+    byDeviceHash: String,
+    byAppId: String,
+    setLoading: (Boolean) -> Unit,
+    setError: (String?) -> Unit
+) {
+    val clipboard = LocalClipboardManager.current
+
+    var lookupUid by remember { mutableStateOf("") }
+    var loadedUid by remember { mutableStateOf<String?>(null) }
+
+    // user doc fields
+    var displayName by remember { mutableStateOf("") }
+    var userDeviceHash by remember { mutableStateOf("") }
+    var warned by remember { mutableStateOf(false) }
+    var banned by remember { mutableStateOf(false) }
+    var warnReason by remember { mutableStateOf("") }
+    var banReason by remember { mutableStateOf("") }
+    var updatedAt by remember { mutableStateOf<Timestamp?>(null) }
+    var lastSeenAt by remember { mutableStateOf<Timestamp?>(null) }
+
+    // device ban doc
+    var deviceBanned by remember { mutableStateOf(false) }
+    var deviceBanReason by remember { mutableStateOf("") }
+    var deviceBanUpdatedAt by remember { mutableStateOf<Timestamp?>(null) }
+
+    // UI toggles for applying bans
+    var applyUidBan by rememberSaveable { mutableStateOf(true) }
+    var applyDeviceBan by rememberSaveable { mutableStateOf(true) }
+
+    val history = remember { mutableStateListOf<ModerationEventRow>() }
+
+    fun clearLoaded() {
+        loadedUid = null
+        displayName = ""
+        userDeviceHash = ""
+        warned = false
+        banned = false
+        warnReason = ""
+        banReason = ""
+        updatedAt = null
+        lastSeenAt = null
+        deviceBanned = false
+        deviceBanReason = ""
+        deviceBanUpdatedAt = null
+        history.clear()
+    }
+
+    fun refreshHistory(uid: String) {
+        val u = uid.trim()
+        if (u.isBlank()) return
+        setLoading(true)
+        setError(null)
+
+        db.collection("moderationEvents")
+            .whereEqualTo("uid", u)
+            .orderBy("createdAt", Query.Direction.DESCENDING)
+            .limit(60)
+            .get()
+            .addOnSuccessListener { snap ->
+                history.clear()
+                for (d in snap.documents) {
+                    history.add(
+                        ModerationEventRow(
+                            id = d.id,
+                            action = d.getString("action") ?: "",
+                            reason = d.getString("reason") ?: "",
+                            createdAt = d.getTimestamp("createdAt"),
+                            byDeviceHash = d.getString("byDeviceHash") ?: "",
+                            byUid = d.getString("byUid") ?: "",
+                            byAppId = d.getString("byAppId") ?: "",
+                            targetUid = d.getString("targetUid") ?: (d.getString("uid") ?: ""),
+                            targetDeviceHash = d.getString("targetDeviceHash") ?: ""
+                        )
+                    )
+                }
+                setLoading(false)
+            }
+            .addOnFailureListener { e ->
+                setLoading(false)
+                setError(e.message ?: "Failed to load moderation history")
+            }
+    }
+
+    fun load(uid: String) {
+        val u = uid.trim()
+        if (u.isBlank()) return
+        setLoading(true)
+        setError(null)
+
+        // load user doc
+        db.collection("users").document(u).get()
+            .addOnSuccessListener { snap ->
+                loadedUid = u
+                displayName = snap.getString("displayName") ?: ""
+                userDeviceHash = (snap.getString("deviceHash") ?: "").trim()
+
+                warned = snap.getBoolean("warned") ?: false
+                banned = snap.getBoolean("banned") ?: false
+                warnReason = snap.getString("warnReason") ?: ""
+                banReason = snap.getString("banReason") ?: ""
+                updatedAt = snap.getTimestamp("updatedAt")
+                lastSeenAt = snap.getTimestamp("lastSeenAt")
+
+                // also load device ban status if we have deviceHash
+                if (userDeviceHash.isNotBlank()) {
+                    db.collection("bannedDevices").document(userDeviceHash).get()
+                        .addOnSuccessListener { ds ->
+                            deviceBanned = ds.getBoolean("banned") ?: false
+                            deviceBanReason = ds.getString("reason") ?: ""
+                            deviceBanUpdatedAt = ds.getTimestamp("updatedAt")
+                            setLoading(false)
+                            refreshHistory(u)
+                        }
+                        .addOnFailureListener { e ->
+                            setLoading(false)
+                            setError(e.message ?: "Failed to load bannedDevices/{deviceHash}")
+                            refreshHistory(u)
+                        }
+                } else {
+                    setLoading(false)
+                    refreshHistory(u)
+                }
+            }
+            .addOnFailureListener { e ->
+                setLoading(false)
+                setError(e.message ?: "Failed to load user")
+            }
+    }
+
+    fun writeEvent(
+        targetUid: String,
+        targetDeviceHash: String,
+        action: String,
+        reason: String
+    ) {
+        val data = hashMapOf(
+            "uid" to targetUid.trim(),               // keep legacy field name for querying
+            "targetUid" to targetUid.trim(),
+            "targetDeviceHash" to targetDeviceHash.trim(),
+            "action" to action,
+            "reason" to reason.trim(),
+            "createdAt" to FieldValue.serverTimestamp(),
+            "byDeviceHash" to byDeviceHash,
+            "byUid" to myUid,
+            "byAppId" to byAppId
+        )
+        db.collection("moderationEvents")
+            .add(data)
+            .addOnFailureListener { e ->
+                setError("Event write failed: ${e.message ?: "unknown"}")
+            }
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("Moderation (UID + Device ban)", style = MaterialTheme.typography.titleMedium)
+
+        ElevatedCard {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Lookup user (by UID)", style = MaterialTheme.typography.titleSmall)
+
+                OutlinedTextField(
+                    value = lookupUid,
+                    onValueChange = { lookupUid = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("User UID") },
+                    placeholder = { Text("paste uid here") }
+                )
+
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(
+                        onClick = { load(lookupUid) },
+                        enabled = lookupUid.trim().isNotBlank(),
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Load") }
+
+                    OutlinedButton(onClick = { clearLoaded() }, modifier = Modifier.weight(1f)) { Text("Clear") }
+                }
+            }
+        }
+
+        if (loadedUid == null) {
+            Text("No user loaded.", style = MaterialTheme.typography.bodySmall)
+            return
+        }
+
+        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("User: $loadedUid", style = MaterialTheme.typography.titleSmall)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        OutlinedButton(onClick = {
+                            clipboard.setText(AnnotatedString(loadedUid!!))
+                        }) { Text("Copy UID") }
+
+                        if (userDeviceHash.isNotBlank()) {
+                            OutlinedButton(onClick = {
+                                clipboard.setText(AnnotatedString(userDeviceHash))
+                            }) { Text("Copy device") }
+                        }
+                    }
+                }
+
+                Text("displayName=$displayName", fontFamily = FontFamily.Monospace)
+                Text("deviceHash=${userDeviceHash.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
+                Text("warned=$warned  uidBanned=$banned", fontFamily = FontFamily.Monospace)
+                Text("deviceBanned=$deviceBanned", fontFamily = FontFamily.Monospace)
+                Text("lastSeenAt=${lastSeenAt ?: "?"}", fontFamily = FontFamily.Monospace)
+                Text("updatedAt=${updatedAt ?: "?"}", fontFamily = FontFamily.Monospace)
+                if (userDeviceHash.isNotBlank()) {
+                    Text("deviceBanUpdatedAt=${deviceBanUpdatedAt ?: "?"}", fontFamily = FontFamily.Monospace)
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedButton(
+                        onClick = { load(loadedUid!!) },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Reload") }
+
+                    OutlinedButton(
+                        onClick = { refreshHistory(loadedUid!!) },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Refresh history") }
+                }
+            }
+        }
+
+        // WARN section (UID only)
+        ElevatedCard {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Warn (UID only)", style = MaterialTheme.typography.titleSmall)
+
+                OutlinedTextField(
+                    value = warnReason,
+                    onValueChange = { warnReason = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
+                    label = { Text("Warn reason (shown to user)") }
+                )
+
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(
+                        onClick = {
+                            val uid = loadedUid ?: return@Button
+                            setLoading(true); setError(null)
+
+                            db.collection("users").document(uid)
+                                .set(
+                                    mapOf(
+                                        "warned" to true,
+                                        "warnReason" to warnReason.trim(),
+                                        "updatedAt" to FieldValue.serverTimestamp()
+                                    ),
+                                    SetOptions.merge()
+                                )
+                                .addOnSuccessListener {
+                                    setLoading(false)
+                                    writeEvent(uid, userDeviceHash, "warn_uid", warnReason)
+                                    load(uid)
+                                }
+                                .addOnFailureListener { e ->
+                                    setLoading(false); setError(e.message ?: "Failed to warn")
+                                }
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Apply warn") }
+
+                    OutlinedButton(
+                        onClick = {
+                            val uid = loadedUid ?: return@OutlinedButton
+                            setLoading(true); setError(null)
+
+                            db.collection("users").document(uid)
+                                .set(
+                                    mapOf(
+                                        "warned" to false,
+                                        "warnReason" to "",
+                                        "updatedAt" to FieldValue.serverTimestamp()
+                                    ),
+                                    SetOptions.merge()
+                                )
+                                .addOnSuccessListener {
+                                    setLoading(false)
+                                    writeEvent(uid, userDeviceHash, "clear_warn_uid", "")
+                                    load(uid)
+                                }
+                                .addOnFailureListener { e ->
+                                    setLoading(false); setError(e.message ?: "Failed to clear warn")
+                                }
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Clear warn") }
+                }
+            }
+        }
+
+        // BAN section (C: UID and/or deviceHash)
+        ElevatedCard {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Ban (UID and/or device)", style = MaterialTheme.typography.titleSmall)
+
+                Text(
+                    "Choose what to apply. For reinstall-proof bans, enable Device ban.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Apply UID ban")
+                        Spacer(Modifier.width(8.dp))
+                        Switch(checked = applyUidBan, onCheckedChange = { applyUidBan = it })
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Apply Device ban")
+                        Spacer(Modifier.width(8.dp))
+                        Switch(
+                            checked = applyDeviceBan,
+                            onCheckedChange = { applyDeviceBan = it },
+                            enabled = userDeviceHash.isNotBlank()
+                        )
+                    }
+                }
+
+                OutlinedTextField(
+                    value = banReason,
+                    onValueChange = { banReason = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
+                    label = { Text("Ban reason (shown to user)") }
+                )
+
+                if (applyDeviceBan && userDeviceHash.isBlank()) {
+                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                        Column(Modifier.padding(10.dp)) {
+                            Text("Device ban is enabled but this user has no deviceHash yet.", style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                "They must open the app once on a current version to write deviceHash into users/{uid}.",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(
+                        onClick = {
+                            val uid = loadedUid ?: return@Button
+                            val reason = banReason.trim()
+                            val dh = userDeviceHash.trim()
+
+                            setLoading(true); setError(null)
+
+                            // 1) UID ban update (optional)
+                            fun doUidBan(next: () -> Unit) {
+                                if (!applyUidBan) return next()
+                                db.collection("users").document(uid)
+                                    .set(
+                                        mapOf(
+                                            "banned" to true,
+                                            "banReason" to reason,
+                                            "updatedAt" to FieldValue.serverTimestamp()
+                                        ),
+                                        SetOptions.merge()
+                                    )
+                                    .addOnSuccessListener { next() }
+                                    .addOnFailureListener { e ->
+                                        setLoading(false); setError(e.message ?: "Failed to UID-ban")
+                                    }
+                            }
+
+                            // 2) Device ban update (optional)
+                            fun doDeviceBan(done: () -> Unit) {
+                                if (!applyDeviceBan) return done()
+                                if (dh.isBlank()) {
+                                    setLoading(false)
+                                    setError("Cannot device-ban: deviceHash missing for this user.")
+                                    return
+                                }
+                                db.collection("bannedDevices").document(dh)
+                                    .set(
+                                        mapOf(
+                                            "banned" to true,
+                                            "reason" to reason,
+                                            "updatedAt" to FieldValue.serverTimestamp(),
+                                            "updatedByUid" to myUid,
+                                            "updatedByDeviceHash" to byDeviceHash,
+                                            "updatedByAppId" to byAppId
+                                        ),
+                                        SetOptions.merge()
+                                    )
+                                    .addOnSuccessListener { done() }
+                                    .addOnFailureListener { e ->
+                                        setLoading(false); setError(e.message ?: "Failed to device-ban")
+                                    }
+                            }
+
+                            doUidBan {
+                                doDeviceBan {
+                                    setLoading(false)
+                                    writeEvent(uid, dh, "ban", reason)
+                                    load(uid)
+                                }
+                            }
+                        },
+                        modifier = Modifier.weight(1f),
+                        enabled = (applyUidBan || (applyDeviceBan && userDeviceHash.isNotBlank()))
+                    ) { Text("Ban") }
+
+                    OutlinedButton(
+                        onClick = {
+                            val uid = loadedUid ?: return@OutlinedButton
+                            val dh = userDeviceHash.trim()
+
+                            setLoading(true); setError(null)
+
+                            fun doUidUnban(next: () -> Unit) {
+                                if (!applyUidBan) return next()
+                                db.collection("users").document(uid)
+                                    .set(
+                                        mapOf(
+                                            "banned" to false,
+                                            "banReason" to "",
+                                            "updatedAt" to FieldValue.serverTimestamp()
+                                        ),
+                                        SetOptions.merge()
+                                    )
+                                    .addOnSuccessListener { next() }
+                                    .addOnFailureListener { e ->
+                                        setLoading(false); setError(e.message ?: "Failed to UID-unban")
+                                    }
+                            }
+
+                            fun doDeviceUnban(done: () -> Unit) {
+                                if (!applyDeviceBan) return done()
+                                if (dh.isBlank()) {
+                                    setLoading(false)
+                                    setError("Cannot device-unban: deviceHash missing for this user.")
+                                    return
+                                }
+                                db.collection("bannedDevices").document(dh)
+                                    .set(
+                                        mapOf(
+                                            "banned" to false,
+                                            "reason" to "",
+                                            "updatedAt" to FieldValue.serverTimestamp(),
+                                            "updatedByUid" to myUid,
+                                            "updatedByDeviceHash" to byDeviceHash,
+                                            "updatedByAppId" to byAppId
+                                        ),
+                                        SetOptions.merge()
+                                    )
+                                    .addOnSuccessListener { done() }
+                                    .addOnFailureListener { e ->
+                                        setLoading(false); setError(e.message ?: "Failed to device-unban")
+                                    }
+                            }
+
+                            doUidUnban {
+                                doDeviceUnban {
+                                    setLoading(false)
+                                    writeEvent(uid, dh, "unban", "")
+                                    load(uid)
+                                }
+                            }
+                        },
+                        modifier = Modifier.weight(1f),
+                        enabled = (applyUidBan || (applyDeviceBan && userDeviceHash.isNotBlank()))
+                    ) { Text("Unban") }
+                }
+            }
+        }
+
+        // History
+        ElevatedCard {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("History", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "Latest moderation actions for this UID.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                if (history.isEmpty()) {
+                    Text("No history found.", style = MaterialTheme.typography.bodySmall)
+                } else {
+                    LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        items(history, key = { it.id }) { e ->
+                            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text(
+                                        "${e.action.ifBlank { "(no action)" }}  @  ${e.createdAt ?: "?"}",
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                    if (e.reason.isNotBlank()) {
+                                        Text("reason=${e.reason}", fontFamily = FontFamily.Monospace)
+                                    }
+                                    if (e.targetDeviceHash.isNotBlank()) {
+                                        Text(
+                                            "targetDevice=${e.targetDeviceHash.take(16)}…",
+                                            fontFamily = FontFamily.Monospace,
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                    Text(
+                                        "byUid=${e.byUid.ifBlank { "?" }}  byDevice=${e.byDeviceHash.take(12).ifBlank { "?" }}…",
+                                        fontFamily = FontFamily.Monospace,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                            }
+                        }
+                        item { Spacer(Modifier.height(10.dp)) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* =========================================================
+   OWNER: Admin manager (unchanged)
    ========================================================= */
 
 private data class DeviceRow(
@@ -813,7 +1295,10 @@ private fun OwnerAdminManagerSection(
 
         ElevatedCard {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Promote/demote admins without opening the Firestore website.")
+                Text(
+                    "Promote/demote admins without opening the Firestore website.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
 
                 OutlinedTextField(
                     value = search,
@@ -934,7 +1419,7 @@ private fun OwnerAdminManagerSection(
 }
 
 /* =========================================================
-   Announcements
+   Announcements (unchanged)
    ========================================================= */
 
 private data class AnnouncementRow(
@@ -1134,353 +1619,7 @@ private fun AdminAnnouncementsSection(
 }
 
 /* =========================================================
-   Moderation + History
-   ========================================================= */
-
-private data class ModerationEventRow(
-    val id: String,
-    val action: String,
-    val reason: String,
-    val createdAt: Timestamp?,
-    val byDeviceHash: String,
-    val byUid: String,
-    val byAppId: String
-)
-
-@Composable
-private fun AdminModerationSection(
-    db: FirebaseFirestore,
-    myUid: String,
-    byDeviceHash: String,
-    byAppId: String,
-    setLoading: (Boolean) -> Unit,
-    setError: (String?) -> Unit
-) {
-    var lookupUid by remember { mutableStateOf("") }
-    var loadedUid by remember { mutableStateOf<String?>(null) }
-
-    var alias by remember { mutableStateOf("") }
-    var displayName by remember { mutableStateOf("") }
-    var warned by remember { mutableStateOf(false) }
-    var banned by remember { mutableStateOf(false) }
-    var warnReason by remember { mutableStateOf("") }
-    var banReason by remember { mutableStateOf("") }
-    var updatedAt by remember { mutableStateOf<Timestamp?>(null) }
-
-    val history = remember { mutableStateListOf<ModerationEventRow>() }
-
-    fun clearLoaded() {
-        loadedUid = null
-        alias = ""
-        displayName = ""
-        warned = false
-        banned = false
-        warnReason = ""
-        banReason = ""
-        updatedAt = null
-        history.clear()
-    }
-
-    fun refreshHistory(uid: String) {
-        val u = uid.trim()
-        if (u.isBlank()) return
-        setLoading(true)
-        setError(null)
-
-        // NOTE: This requires a composite index: moderationEvents(uid ASC, createdAt DESC)
-        db.collection("moderationEvents")
-            .whereEqualTo("uid", u)
-            .orderBy("createdAt", Query.Direction.DESCENDING)
-            .limit(40)
-            .get()
-            .addOnSuccessListener { snap ->
-                history.clear()
-                for (d in snap.documents) {
-                    history.add(
-                        ModerationEventRow(
-                            id = d.id,
-                            action = d.getString("action") ?: "",
-                            reason = d.getString("reason") ?: "",
-                            createdAt = d.getTimestamp("createdAt"),
-                            byDeviceHash = d.getString("byDeviceHash") ?: "",
-                            byUid = d.getString("byUid") ?: "",
-                            byAppId = d.getString("byAppId") ?: ""
-                        )
-                    )
-                }
-                setLoading(false)
-            }
-            .addOnFailureListener { e ->
-                setLoading(false)
-                setError(e.message ?: "Failed to load moderation history")
-            }
-    }
-
-    fun load(uid: String) {
-        val u = uid.trim()
-        if (u.isBlank()) return
-        setLoading(true)
-        setError(null)
-
-        db.collection("users").document(u).get()
-            .addOnSuccessListener { snap ->
-                loadedUid = u
-                alias = (snap.getString("alias") ?: "").trim()
-                displayName = (snap.getString("displayName") ?: "").trim()
-                warned = snap.getBoolean("warned") ?: false
-                banned = snap.getBoolean("banned") ?: false
-                warnReason = snap.getString("warnReason") ?: ""
-                banReason = snap.getString("banReason") ?: ""
-                updatedAt = snap.getTimestamp("updatedAt")
-                setLoading(false)
-                refreshHistory(u)
-            }
-            .addOnFailureListener { e ->
-                setLoading(false)
-                setError(e.message ?: "Failed to load user")
-            }
-    }
-
-    fun writeEvent(uid: String, action: String, reason: String) {
-        val data = hashMapOf(
-            "uid" to uid.trim(),
-            "action" to action,
-            "reason" to reason.trim(),
-            "createdAt" to FieldValue.serverTimestamp(),
-            "byDeviceHash" to byDeviceHash,
-            "byUid" to myUid,
-            "byAppId" to byAppId
-        )
-        db.collection("moderationEvents")
-            .add(data)
-            .addOnFailureListener { e ->
-                setError("Event write failed: ${e.message ?: "unknown"}")
-            }
-    }
-
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("Moderation", style = MaterialTheme.typography.titleMedium)
-
-        ElevatedCard {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Lookup user (by UID)", style = MaterialTheme.typography.titleSmall)
-                OutlinedTextField(
-                    value = lookupUid,
-                    onValueChange = { lookupUid = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    label = { Text("User UID") },
-                    placeholder = { Text("paste uid here") }
-                )
-
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(
-                        onClick = { load(lookupUid) },
-                        enabled = lookupUid.trim().isNotBlank(),
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Load") }
-
-                    OutlinedButton(onClick = { clearLoaded() }, modifier = Modifier.weight(1f)) { Text("Clear") }
-                }
-            }
-        }
-
-        if (loadedUid == null) {
-            Text("No user loaded.", style = MaterialTheme.typography.bodySmall)
-            return
-        }
-
-        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("User: $loadedUid", style = MaterialTheme.typography.titleSmall)
-                Text("alias=${alias.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
-                Text("displayName=${displayName.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
-                Text("warned=$warned  banned=$banned", fontFamily = FontFamily.Monospace)
-                Text("updatedAt=${updatedAt ?: "?"}", fontFamily = FontFamily.Monospace)
-
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedButton(
-                        onClick = { refreshHistory(loadedUid!!) },
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Refresh history") }
-
-                    OutlinedButton(
-                        onClick = { load(loadedUid!!) },
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Reload user") }
-                }
-            }
-        }
-
-        ElevatedCard {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Warn", style = MaterialTheme.typography.titleSmall)
-                OutlinedTextField(
-                    value = warnReason,
-                    onValueChange = { warnReason = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    minLines = 2,
-                    label = { Text("Warn reason (shown to user)") }
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(
-                        onClick = {
-                            val uid = loadedUid ?: return@Button
-                            setLoading(true); setError(null)
-                            db.collection("users").document(uid)
-                                .set(
-                                    mapOf(
-                                        "warned" to true,
-                                        "warnReason" to warnReason.trim(),
-                                        "updatedAt" to FieldValue.serverTimestamp()
-                                    ),
-                                    SetOptions.merge()
-                                )
-                                .addOnSuccessListener {
-                                    setLoading(false)
-                                    writeEvent(uid, "warn", warnReason)
-                                    load(uid)
-                                }
-                                .addOnFailureListener { e ->
-                                    setLoading(false); setError(e.message ?: "Failed to warn")
-                                }
-                        },
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Apply warn") }
-
-                    OutlinedButton(
-                        onClick = {
-                            val uid = loadedUid ?: return@OutlinedButton
-                            setLoading(true); setError(null)
-                            db.collection("users").document(uid)
-                                .set(
-                                    mapOf(
-                                        "warned" to false,
-                                        "warnReason" to "",
-                                        "updatedAt" to FieldValue.serverTimestamp()
-                                    ),
-                                    SetOptions.merge()
-                                )
-                                .addOnSuccessListener {
-                                    setLoading(false)
-                                    writeEvent(uid, "clear_warn", "")
-                                    load(uid)
-                                }
-                                .addOnFailureListener { e ->
-                                    setLoading(false); setError(e.message ?: "Failed to clear warn")
-                                }
-                        },
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Clear warn") }
-                }
-            }
-        }
-
-        ElevatedCard {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Ban", style = MaterialTheme.typography.titleSmall)
-                OutlinedTextField(
-                    value = banReason,
-                    onValueChange = { banReason = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    minLines = 2,
-                    label = { Text("Ban reason (shown to user)") }
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(
-                        onClick = {
-                            val uid = loadedUid ?: return@Button
-                            setLoading(true); setError(null)
-                            db.collection("users").document(uid)
-                                .set(
-                                    mapOf(
-                                        "banned" to true,
-                                        "banReason" to banReason.trim(),
-                                        "updatedAt" to FieldValue.serverTimestamp()
-                                    ),
-                                    SetOptions.merge()
-                                )
-                                .addOnSuccessListener {
-                                    setLoading(false)
-                                    writeEvent(uid, "ban", banReason)
-                                    load(uid)
-                                }
-                                .addOnFailureListener { e ->
-                                    setLoading(false); setError(e.message ?: "Failed to ban")
-                                }
-                        },
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Ban user") }
-
-                    OutlinedButton(
-                        onClick = {
-                            val uid = loadedUid ?: return@OutlinedButton
-                            setLoading(true); setError(null)
-                            db.collection("users").document(uid)
-                                .set(
-                                    mapOf(
-                                        "banned" to false,
-                                        "banReason" to "",
-                                        "updatedAt" to FieldValue.serverTimestamp()
-                                    ),
-                                    SetOptions.merge()
-                                )
-                                .addOnSuccessListener {
-                                    setLoading(false)
-                                    writeEvent(uid, "unban", "")
-                                    load(uid)
-                                }
-                                .addOnFailureListener { e ->
-                                    setLoading(false); setError(e.message ?: "Failed to unban")
-                                }
-                        },
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Unban") }
-                }
-            }
-        }
-
-        ElevatedCard {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("History", style = MaterialTheme.typography.titleSmall)
-                Text(
-                    "Latest moderation actions for this UID.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-
-                if (history.isEmpty()) {
-                    Text("No history found.", style = MaterialTheme.typography.bodySmall)
-                } else {
-                    LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        items(history, key = { it.id }) { e ->
-                            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    Text(
-                                        "${e.action.ifBlank { "(no action)" }}  @  ${e.createdAt ?: "?"}",
-                                        fontFamily = FontFamily.Monospace
-                                    )
-                                    if (e.reason.isNotBlank()) {
-                                        Text("reason=${e.reason}", fontFamily = FontFamily.Monospace)
-                                    }
-                                    Text(
-                                        "byUid=${e.byUid.ifBlank { "?" }}  byDevice=${e.byDeviceHash.take(12).ifBlank { "?" }}…",
-                                        fontFamily = FontFamily.Monospace,
-                                        style = MaterialTheme.typography.bodySmall
-                                    )
-                                }
-                            }
-                        }
-                        item { Spacer(Modifier.height(10.dp)) }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/* =========================================================
-   ToS / Config
+   ToS / Config (unchanged)
    ========================================================= */
 
 @Composable
@@ -1599,90 +1738,3 @@ private fun AdminTosConfigSection(
         }
     }
 }
-
-/* =========================================================
-   Firestore rules + indexes snippets (kept inside codebase)
-   ========================================================= */
-
-private const val FIRESTORE_RULES_SNIPPET = """
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-
-    function isSignedIn() {
-      return request.auth != null;
-    }
-
-    // Device-gated admin flag: devices/{deviceHash}.adminEnabled == true
-    function isAdminDevice() {
-      return isSignedIn()
-        && exists(/databases/$(database)/documents/devices/$(request.auth.uid)) == false; // (placeholder, see note below)
-    }
-
-    // NOTE:
-    // You CANNOT read "deviceHash" from request on rules, because rules cannot read SharedPreferences.
-    // So the real admin gate is typically done by:
-    // - app reads devices/{deviceHash}.adminEnabled
-    // - rules: allow writes only from "trusted" conditions (or via Cloud Functions)
-    //
-    // For this project (simple + mobile), the practical approach is:
-    // 1) Public build: disallow writes to devices/
-    // 2) Admin build: use rules that allow writes to devices/ only for authenticated users (anonymous is ok)
-    // 3) Admin UI is still device-gated on client side by reading devices/{deviceHash}.adminEnabled
-
-    // ---- Public / shared ----
-
-    match /config/{doc} {
-      allow read: if true;
-      allow write: if isSignedIn(); // Admin-only by app build + device gate (client side)
-    }
-
-    match /announcements/{id} {
-      allow read: if true;
-      allow write: if isSignedIn(); // Admin-only by app build + device gate (client side)
-    }
-
-    // users/{uid}: user can write their own profile + heartbeat
-    match /users/{uid} {
-      allow read: if isSignedIn(); // or true if you want public reading (not recommended)
-      allow write: if isSignedIn() && request.auth.uid == uid;
-    }
-
-    // moderationEvents: append-only by admins (client gated)
-    match /moderationEvents/{id} {
-      allow read: if isSignedIn(); // admins use it
-      allow create: if isSignedIn();
-      allow update, delete: if false;
-    }
-
-    // devices: recommended to deny public build writes (client should never attempt in public build)
-    match /devices/{deviceHash} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn(); // admin build only (public build should never call it)
-    }
-  }
-}
-"""
-
-private const val FIRESTORE_INDEXES_SNIPPET = """
-Create these composite indexes (Firestore console -> Indexes):
-
-1) moderationEvents
-   Query: where uid == X, orderBy createdAt desc
-   Index:
-     Collection: moderationEvents
-     Fields:
-       uid Asc
-       createdAt Desc
-
-2) announcements (optional if you later query active + priority + createdAt)
-   If you ever use: where active==true, orderBy priority desc, orderBy createdAt desc
-   Index:
-     Collection: announcements
-     Fields:
-       active Asc
-       priority Desc
-       createdAt Desc
-
-NOTE: users list (orderBy lastSeenAt desc) does NOT need a composite index.
-"""
