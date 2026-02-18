@@ -248,14 +248,12 @@ private fun BootstrapScreen(
             if (working) {
                 CircularProgressIndicator()
             } else {
-                // If not working yet, keep the layout stable but don’t show a spinner.
                 Spacer(Modifier.height(4.dp))
             }
 
             if (error != null) {
                 Spacer(Modifier.height(18.dp))
 
-                // Error stays in a card so it's readable, but this is ONLY on failure.
                 ElevatedCard {
                     Column(
                         Modifier.padding(12.dp),
@@ -284,6 +282,7 @@ private fun CrashScreen(
     onClear: () -> Unit,
     onContinue: () -> Unit
 ) {
+    // Also flat: NO build/version/admin text
     Surface {
         Column(
             modifier = Modifier
@@ -293,16 +292,6 @@ private fun CrashScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Text("VRC-A crashed on last launch", style = MaterialTheme.typography.headlineSmall)
-
-            // (You didn’t ask to remove build info here; leaving it can help debugging.
-            // If you want it gone too, tell me and I’ll remove it.)
-            Text(
-                "Build: ${BuildConfig.APPLICATION_ID}\n" +
-                    "Version: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})\n" +
-                    "Admin: ${BuildConfig.IS_ADMIN_BUILD}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
 
             ElevatedCard {
                 Column(
