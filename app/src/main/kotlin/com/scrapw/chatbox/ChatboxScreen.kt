@@ -54,6 +54,7 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Power
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
@@ -224,6 +225,12 @@ private data class ModerationUi(
     val updatedAt: Timestamp? = null
 )
 
+// ✅ Profile fields live on users/{uid}
+private data class ProfileUi(
+    val alias: String = "", // users/{uid}.displayName
+    val updatedAt: Timestamp? = null
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatboxScreen(
@@ -308,6 +315,9 @@ fun ChatboxScreen(
     var announcements by remember { mutableStateOf<List<AnnouncementUi>>(emptyList()) }
     var moderation by remember { mutableStateOf(ModerationUi()) }
 
+    // ✅ Profile state (alias)
+    var profile by remember { mutableStateOf(ProfileUi()) }
+
     // Listen: config/app (ToS)
     DisposableEffect(Unit) {
         var reg: ListenerRegistration? = null
@@ -360,7 +370,7 @@ fun ChatboxScreen(
         onDispose { reg?.remove() }
     }
 
-    // Listen: moderation status for THIS user (public). Admins can also see their own record, harmless.
+    // Listen: moderation + profile fields for THIS user
     DisposableEffect(authedUid) {
         var reg: ListenerRegistration? = null
         val uid = authedUid
@@ -368,7 +378,7 @@ fun ChatboxScreen(
             reg = db.collection("users").document(uid)
                 .addSnapshotListener { snap, err ->
                     if (err != null) {
-                        reportFirebase("users/$uid", "Failed to load moderation", err)
+                        reportFirebase("users/$uid", "Failed to load user doc", err)
                         return@addSnapshotListener
                     }
                     if (snap != null && snap.exists()) {
@@ -379,12 +389,37 @@ fun ChatboxScreen(
                             banReason = snap.getString("banReason") ?: "",
                             updatedAt = snap.getTimestamp("updatedAt")
                         )
+                        profile = ProfileUi(
+                            alias = (snap.getString("displayName") ?: "").trim(),
+                            updatedAt = snap.getTimestamp("updatedAt")
+                        )
                     } else {
                         moderation = ModerationUi()
+                        profile = ProfileUi()
                     }
                 }
         }
         onDispose { reg?.remove() }
+    }
+
+    // Helper: write alias to users/{uid}.displayName (self doc)
+    fun writeAlias(alias: String, onDone: (() -> Unit)? = null) {
+        val uid = authedUid ?: return
+        val clean = alias.trim().take(40) // keep sane length
+        if (clean.isBlank()) return
+
+        db.collection("users").document(uid)
+            .set(
+                mapOf(
+                    "displayName" to clean,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                ),
+                SetOptions.merge()
+            )
+            .addOnSuccessListener { onDone?.invoke() }
+            .addOnFailureListener { e ->
+                reportFirebase("users/$uid", "Failed to save alias", e)
+            }
     }
 
     // --- ToS gate (remote) ---
@@ -401,12 +436,18 @@ fun ChatboxScreen(
             tosVersion = requiredTosVersion,
             tosText = remoteTos.tosText,
             tosUrl = remoteTos.tosUrl,
+            initialAlias = profile.alias,
             onOpenUrl = { url ->
                 runCatching {
                     ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
                 }
             },
-            onAccept = {
+            onAccept = { alias ->
+                // Require alias at ToS gate (planned behavior)
+                val clean = alias.trim()
+                if (clean.isNotBlank()) {
+                    writeAlias(clean) // write first (best-effort)
+                }
                 TosPrefs.accept(ctx, requiredTosVersion)
                 tosAccepted = true
             }
@@ -558,6 +599,17 @@ fun ChatboxScreen(
                 if (showSettingsSheet) {
                     SettingsSheet(
                         vm = chatboxViewModel,
+                        currentAlias = profile.alias,
+                        onSaveAlias = { newAlias ->
+                            val clean = newAlias.trim()
+                            if (clean.isBlank()) {
+                                scope.launch { snackbarHostState.showSnackbar("Alias can't be blank.") }
+                            } else {
+                                writeAlias(clean) {
+                                    scope.launch { snackbarHostState.showSnackbar("Alias saved.") }
+                                }
+                            }
+                        },
                         onDismiss = { showSettingsSheet = false }
                     )
                 }
@@ -665,7 +717,7 @@ private fun BannedScreen(
 }
 
 /* =========================
-   ToS Gate UI
+   ToS Gate UI (NOW includes Alias)
    ========================= */
 
 @Composable
@@ -673,10 +725,13 @@ private fun TosGate(
     tosVersion: Int,
     tosText: String,
     tosUrl: String,
+    initialAlias: String,
     onOpenUrl: (String) -> Unit,
-    onAccept: () -> Unit
+    onAccept: (alias: String) -> Unit
 ) {
     var checked by rememberSaveable { mutableStateOf(false) }
+    var alias by rememberSaveable { mutableStateOf(initialAlias) }
+    var aliasTouched by rememberSaveable { mutableStateOf(false) }
 
     val fallbackText = remember {
         """
@@ -689,6 +744,10 @@ By using this app, you agree to:
 If you do not agree, close the app.
         """.trimIndent()
     }
+
+    val cleanAlias = alias.trim()
+    val aliasOk = cleanAlias.length in 2..40
+    val canContinue = checked && aliasOk
 
     Surface {
         Column(
@@ -723,6 +782,38 @@ If you do not agree, close the app.
                 }
             }
 
+            ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Filled.Person, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Choose your Alias", style = MaterialTheme.typography.titleSmall)
+                    }
+
+                    OutlinedTextField(
+                        value = alias,
+                        onValueChange = {
+                            alias = it
+                            aliasTouched = true
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("Alias (shown to admins)") },
+                        placeholder = { Text("e.g. Ash") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+                        isError = aliasTouched && !aliasOk
+                    )
+
+                    Text(
+                        text = if (!aliasTouched) "2–40 characters. You can change this later in Settings."
+                        else if (aliasOk) "Looks good."
+                        else "Alias must be 2–40 characters.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (aliasTouched && !aliasOk) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -733,8 +824,8 @@ If you do not agree, close the app.
             }
 
             Button(
-                onClick = onAccept,
-                enabled = checked,
+                onClick = { onAccept(cleanAlias) },
+                enabled = canContinue,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text("Accept & Continue")
@@ -1780,16 +1871,24 @@ private fun DebugPage(vm: ChatboxViewModel, lastFirebaseIssue: String?) {
 }
 
 /* =========================
-   SETTINGS SHEET
+   SETTINGS SHEET (NOW includes Alias change)
    ========================= */
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsSheet(
     vm: ChatboxViewModel,
+    currentAlias: String,
+    onSaveAlias: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
     val ctx = LocalContext.current
+    var alias by rememberSaveable { mutableStateOf(currentAlias) }
+
+    LaunchedEffect(currentAlias) {
+        // If alias arrives later from Firestore, update field (unless user already typed something different)
+        if (alias.isBlank()) alias = currentAlias
+    }
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
@@ -1802,6 +1901,40 @@ private fun SettingsSheet(
                 Icon(Icons.Filled.Settings, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
                 Text("Settings & Setup", style = MaterialTheme.typography.titleMedium)
+            }
+
+            ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    SettingsGroupHeader("Profile")
+
+                    OutlinedTextField(
+                        value = alias,
+                        onValueChange = { alias = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("Alias") },
+                        placeholder = { Text("e.g. Ash") }
+                    )
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = { onSaveAlias(alias) },
+                            modifier = Modifier.weight(1f),
+                            enabled = alias.trim().length in 2..40
+                        ) { Text("Save Alias") }
+
+                        OutlinedButton(
+                            onClick = { alias = currentAlias },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Reset") }
+                    }
+
+                    Text(
+                        "Your alias is stored in users/{uid}.displayName and is visible to admins.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
 
             ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
