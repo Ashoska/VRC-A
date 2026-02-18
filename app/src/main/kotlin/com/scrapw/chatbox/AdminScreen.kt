@@ -2,6 +2,7 @@
 package com.scrapw.chatbox
 
 import android.content.Context
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -34,6 +36,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -273,7 +276,7 @@ fun AdminScreen() {
 
             AdminRulesCard()
 
-            // ✅ NEW: Admin-only user directory (paged / lazy / filterable)
+            // ✅ Admin-only user directory (paged / lazy / filterable)
             Divider()
             AdminUserDirectorySection(
                 db = db,
@@ -408,7 +411,7 @@ private fun AdminRulesCard() {
 }
 
 /* =========================================================
-   NEW: Admin User Directory (paged + filter)
+   Admin User Directory (paged + filter + inline expand)
    ========================================================= */
 
 private data class UserRow(
@@ -427,9 +430,15 @@ private fun AdminUserDirectorySection(
 ) {
     val users = remember { mutableStateListOf<UserRow>() }
 
-    var search by remember { mutableStateOf("") }
-    var filterWarned by remember { mutableStateOf(false) }
-    var filterBanned by remember { mutableStateOf(false) }
+    var search by rememberSaveable { mutableStateOf("") }
+    var filterWarned by rememberSaveable { mutableStateOf(false) }
+    var filterBanned by rememberSaveable { mutableStateOf(false) }
+
+    // ✅ Remember expanded user + keep place (no navigation away)
+    var expandedUid by rememberSaveable { mutableStateOf<String?>(null) }
+
+    // ✅ Remember scroll position (so expanding/collapsing doesn’t “jump”)
+    val listState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
 
     // Paging state
     var pagingLoading by remember { mutableStateOf(false) }
@@ -488,6 +497,7 @@ private fun AdminUserDirectorySection(
         users.clear()
         lastDoc = null
         hasMore = true
+        expandedUid = null
         loadNextPage()
     }
 
@@ -517,7 +527,7 @@ private fun AdminUserDirectorySection(
         ElevatedCard {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    "Loads users in pages so it doesn’t lag/crash. Lazy list means rows only render when visible.",
+                    "Scroll to auto-load more. Tap a user to expand (keeps your place).",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -572,28 +582,72 @@ private fun AdminUserDirectorySection(
         if (filtered.isEmpty()) {
             Text("No users loaded/matching filters yet.", style = MaterialTheme.typography.bodySmall)
         } else {
-            // LazyColumn virtualizes, so it won’t render everything at once.
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            LazyColumn(
+                state = listState,
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
                 itemsIndexed(filtered, key = { _, u -> u.uid }) { index, u ->
-                    // Pre-fetch next page when nearing bottom (smooth infinite scroll)
+                    // ✅ auto prefetch near bottom (infinite scroll)
                     if (hasMore && !pagingLoading && index >= filtered.size - 12) {
-                        // fire-and-forget
                         loadNextPage()
                     }
 
-                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                    val isExpanded = expandedUid == u.uid
+
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                expandedUid = if (isExpanded) null else u.uid
+                            }
+                    ) {
                         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text(u.uid, fontFamily = FontFamily.Monospace)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(u.uid, fontFamily = FontFamily.Monospace)
+                                Text(
+                                    if (isExpanded) "▾" else "▸",
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                            }
+
                             Text(
                                 "displayName=${u.displayName.ifBlank { "(blank)" }}",
                                 fontFamily = FontFamily.Monospace,
                                 style = MaterialTheme.typography.bodySmall
                             )
+
                             Text(
-                                "warned=${u.warned}  banned=${u.banned}  lastSeenAt=${u.lastSeenAt ?: "?"}",
+                                "warned=${u.warned}  banned=${u.banned}",
                                 fontFamily = FontFamily.Monospace,
                                 style = MaterialTheme.typography.bodySmall
                             )
+
+                            if (isExpanded) {
+                                Divider()
+
+                                Text(
+                                    "lastSeenAt=${u.lastSeenAt ?: "?"}",
+                                    fontFamily = FontFamily.Monospace,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+
+                                Text(
+                                    "Tip: copy UID and paste into Moderation section below to act on them.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+
+                                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    OutlinedButton(onClick = { expandedUid = null }, modifier = Modifier.weight(1f)) {
+                                        Text("Collapse")
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -612,7 +666,6 @@ private fun AdminUserDirectorySection(
         }
     }
 
-    // Keep the global loading spinner meaningful but not noisy
     LaunchedEffect(pagingLoading) {
         setLoading(pagingLoading)
     }
