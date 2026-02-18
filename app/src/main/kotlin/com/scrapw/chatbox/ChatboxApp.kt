@@ -6,8 +6,10 @@ import android.provider.Settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -28,6 +30,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.firebase.auth.FirebaseAuth
@@ -216,55 +219,59 @@ private fun BootstrapScreen(
     error: String?,
     onRetry: () -> Unit
 ) {
+    // Flat splash: NO ElevatedCard panel, NO build/version/admin text
     Surface {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+                .padding(20.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Text("Starting VRC-A…", style = MaterialTheme.typography.headlineSmall)
+            Text(
+                "Starting VRC-A…",
+                style = MaterialTheme.typography.headlineSmall,
+                textAlign = TextAlign.Center
+            )
 
-            ElevatedCard {
-                Column(
-                    Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text(
-                        "Preparing device session (safe) + starting app.",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    Text(
-                        "Build: ${BuildConfig.APPLICATION_ID}\n" +
-                            "Version: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})\n" +
-                            "Admin: ${BuildConfig.IS_ADMIN_BUILD}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
+            Spacer(Modifier.height(10.dp))
+
+            Text(
+                "Preparing device session…",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+
+            Spacer(Modifier.height(18.dp))
 
             if (working) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    CircularProgressIndicator()
-                }
+                CircularProgressIndicator()
+            } else {
+                // If not working yet, keep the layout stable but don’t show a spinner.
+                Spacer(Modifier.height(4.dp))
             }
 
             if (error != null) {
+                Spacer(Modifier.height(18.dp))
+
+                // Error stays in a card so it's readable, but this is ONLY on failure.
                 ElevatedCard {
                     Column(
                         Modifier.padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text("Startup error", style = MaterialTheme.typography.titleSmall)
-                        Text(error, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                        Text(
+                            error,
+                            fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodySmall
+                        )
                     }
                 }
+
+                Spacer(Modifier.height(12.dp))
+
                 Button(onClick = onRetry) { Text("Retry") }
             }
         }
@@ -287,6 +294,8 @@ private fun CrashScreen(
         ) {
             Text("VRC-A crashed on last launch", style = MaterialTheme.typography.headlineSmall)
 
+            // (You didn’t ask to remove build info here; leaving it can help debugging.
+            // If you want it gone too, tell me and I’ll remove it.)
             Text(
                 "Build: ${BuildConfig.APPLICATION_ID}\n" +
                     "Version: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})\n" +
