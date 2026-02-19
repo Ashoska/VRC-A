@@ -71,6 +71,7 @@ import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.SetOptions
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
+import kotlin.math.abs
 
 /**
  * Owner-only Admin screen.
@@ -210,9 +211,9 @@ fun AdminScreen() {
                                     Text("Copy UID")
                                 }
                             }
-                            Text("deviceHash=${deviceHash.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
-                            Text("uid=${myUid.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
-                            Text("ownerUid=${ownerUid.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
+                            Text("deviceHash=${shortId(deviceHash, 10, 6)}", fontFamily = FontFamily.Monospace)
+                            Text("uid=${shortId(myUid, 10, 6)}", fontFamily = FontFamily.Monospace)
+                            Text("ownerUid=${shortId(ownerUid, 10, 6)}", fontFamily = FontFamily.Monospace)
                         }
                     }
                 }
@@ -323,9 +324,10 @@ fun AdminScreen() {
                             }
                         }
 
-                        Text("deviceHash=${deviceHash.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
-                        Text("uid=${myUid.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
-                        Text("ownerUid=${ownerUid.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
+                        // Short display to prevent weird expansion/overflow
+                        Text("deviceHash=${shortId(deviceHash, 10, 6)}", fontFamily = FontFamily.Monospace)
+                        Text("uid=${shortId(myUid, 10, 6)}", fontFamily = FontFamily.Monospace)
+                        Text("ownerUid=${shortId(ownerUid, 10, 6)}", fontFamily = FontFamily.Monospace)
                     }
                 }
             }
@@ -418,7 +420,7 @@ fun AdminScreen() {
 private data class UserRow(
     val docId: String,
     val authUid: String,
-    val displayName: String,
+    val displayName: String, // kept for search / moderation, not displayed
     val deviceHash: String,
     val warned: Boolean,
     val banned: Boolean,
@@ -710,17 +712,19 @@ private fun UsersTab(
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
                                 Column(Modifier.weight(1f)) {
+                                    // displayName kept for search/mod target but NOT shown in UI anymore
                                     Text(
-                                        u.displayName.ifBlank { "(no displayName)" },
+                                        "User",
                                         style = MaterialTheme.typography.titleSmall
                                     )
+
                                     Text(
-                                        "docId=${u.docId}",
+                                        "docId=${if (isExpanded) u.docId else shortId(u.docId)}",
                                         fontFamily = FontFamily.Monospace,
                                         style = MaterialTheme.typography.bodySmall
                                     )
                                     Text(
-                                        "authUid=${u.authUid.ifBlank { "(blank)" }}",
+                                        "authUid=${if (isExpanded) u.authUid.ifBlank { "(blank)" } else shortId(u.authUid)}",
                                         fontFamily = FontFamily.Monospace,
                                         style = MaterialTheme.typography.bodySmall
                                     )
@@ -738,7 +742,7 @@ private fun UsersTab(
                             }
 
                             Text(
-                                "lastSeenAt=${u.lastSeenAt ?: "?"}   updatedAt=${u.updatedAt ?: "?"}",
+                                "lastSeen=${formatRelativeTime(u.lastSeenAt)}   updated=${formatRelativeTime(u.updatedAt)}",
                                 fontFamily = FontFamily.Monospace,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -747,6 +751,7 @@ private fun UsersTab(
                             if (isExpanded) {
                                 Divider()
 
+                                // Copy buttons row
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     OutlinedButton(onClick = { clipboardCopy(u.docId) }) {
                                         Icon(Icons.Filled.ContentCopy, contentDescription = null)
@@ -769,7 +774,10 @@ private fun UsersTab(
                                     }
                                 }
 
-                                Spacer(Modifier.height(6.dp))
+                                // IMPORTANT: this fixes your "huge empty space" issue
+                                // by not inserting any weighted/height-filling element here.
+
+                                Spacer(Modifier.height(8.dp))
 
                                 Button(
                                     onClick = {
@@ -789,7 +797,7 @@ private fun UsersTab(
                                     Text("Send to Moderation")
                                 }
 
-                                Spacer(Modifier.height(6.dp))
+                                Spacer(Modifier.height(8.dp))
 
                                 if (isDetailLoading) {
                                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -929,8 +937,6 @@ private fun ModerationTab(
     initialTarget: ModerationTarget?,
     onClearInitialTarget: () -> Unit
 ) {
-    // (UNCHANGED from your version)
-    // -------------------------------------------------------
     val scope = rememberCoroutineScope()
 
     var lookup by rememberSaveable { mutableStateOf("") } // can be docId or authUid
@@ -1012,13 +1018,13 @@ private fun ModerationTab(
                 deviceBanReason = ""
             }
 
+            // --- HISTORY (FIX: avoid composite index by NOT using orderBy with whereEqualTo) ---
             history.clear()
 
             val h1 = runCatching {
                 db.collection("moderationEvents")
                     .whereEqualTo("targetDocId", target.docId)
-                    .orderBy("createdAt", Query.Direction.DESCENDING)
-                    .limit(60)
+                    .limit(120)
                     .get()
                     .await()
             }.getOrNull()
@@ -1028,13 +1034,14 @@ private fun ModerationTab(
             } else {
                 db.collection("moderationEvents")
                     .whereEqualTo("uid", target.docId)
-                    .orderBy("createdAt", Query.Direction.DESCENDING)
-                    .limit(60)
+                    .limit(120)
                     .get()
                     .await()
             }
 
-            snapToUse.documents.forEach { d ->
+            val docsSorted = snapToUse.documents.sortedByDescending { it.getTimestamp("createdAt")?.seconds ?: 0L }
+
+            docsSorted.take(60).forEach { d ->
                 history.add(
                     ModerationEventRow(
                         id = d.id,
@@ -1149,10 +1156,11 @@ private fun ModerationTab(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Text("Target", style = MaterialTheme.typography.titleSmall)
-                Text("displayName=${t.displayName.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
-                Text("docId=${t.docId}", fontFamily = FontFamily.Monospace)
-                Text("authUid=${t.authUid.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
-                Text("deviceHash=${t.deviceHash.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
+
+                // displayName isn't a feature anymore -> keep it in data but don't display it
+                Text("docId=${shortId(t.docId)}", fontFamily = FontFamily.Monospace)
+                Text("authUid=${shortId(t.authUid)}", fontFamily = FontFamily.Monospace)
+                Text("deviceHash=${shortId(t.deviceHash)}", fontFamily = FontFamily.Monospace)
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = { clipboardCopy(t.docId) }) {
@@ -1423,7 +1431,7 @@ private fun ModerationTab(
                                     verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
                                     Text(
-                                        "${e.action.ifBlank { "(no action)" }}  @  ${e.createdAt ?: "?"}",
+                                        "${e.action.ifBlank { "(no action)" }}  @  ${formatRelativeTime(e.createdAt)}",
                                         fontFamily = FontFamily.Monospace
                                     )
                                     if (e.reason.isNotBlank()) {
@@ -1431,13 +1439,13 @@ private fun ModerationTab(
                                     }
                                     if (e.targetDeviceHash.isNotBlank()) {
                                         Text(
-                                            "targetDevice=${e.targetDeviceHash.take(16)}…",
+                                            "targetDevice=${shortId(e.targetDeviceHash, 10, 6)}",
                                             fontFamily = FontFamily.Monospace,
                                             style = MaterialTheme.typography.bodySmall
                                         )
                                     }
                                     Text(
-                                        "byUid=${e.byUid.ifBlank { "?" }}  byDevice=${e.byDeviceHash.take(12).ifBlank { "?" }}…",
+                                        "byUid=${shortId(e.byUid, 10, 6)}  byDevice=${shortId(e.byDeviceHash, 10, 6)}",
                                         fontFamily = FontFamily.Monospace,
                                         style = MaterialTheme.typography.bodySmall
                                     )
@@ -1625,7 +1633,7 @@ private fun AnnouncementsTab(
                             Column(Modifier.weight(1f)) {
                                 Text(a.title.ifBlank { "(no title)" }, style = MaterialTheme.typography.titleSmall)
                                 Text(
-                                    "priority=${a.priority}  active=${a.active}  createdAt=${a.createdAt ?: "?"}",
+                                    "priority=${a.priority}  active=${a.active}  created=${formatRelativeTime(a.createdAt)}",
                                     fontFamily = FontFamily.Monospace,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1794,7 +1802,7 @@ private fun ConfigTab(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text("ToS / App Config", style = MaterialTheme.typography.titleMedium)
-            Text("loadedAt=${loadedAt ?: "?"}", fontFamily = FontFamily.Monospace)
+            Text("loadedAt=${formatRelativeTime(loadedAt)}", fontFamily = FontFamily.Monospace)
 
             OutlinedTextField(
                 value = ownerUid,
@@ -1897,6 +1905,44 @@ private fun ErrorCard(message: String) {
             Text(message, fontFamily = FontFamily.Monospace)
         }
     }
+}
+
+/* =========================================================
+   TIME + ID FORMAT HELPERS
+   ========================================================= */
+
+private fun shortId(id: String, head: Int = 8, tail: Int = 6): String {
+    val t = id.trim()
+    if (t.isBlank()) return "(blank)"
+    if (t.length <= head + tail + 1) return t
+    return t.take(head) + "…" + t.takeLast(tail)
+}
+
+private fun tsToMillis(ts: Timestamp?): Long? {
+    if (ts == null) return null
+    return (ts.seconds * 1000L) + (ts.nanoseconds / 1_000_000L)
+}
+
+private fun formatRelativeTime(ts: Timestamp?, nowMs: Long = System.currentTimeMillis()): String {
+    val ms = tsToMillis(ts) ?: return "?"
+    val diff = nowMs - ms
+    val past = diff >= 0
+    val d = abs(diff)
+
+    val sec = d / 1000L
+    val min = sec / 60L
+    val hr = min / 60L
+    val day = hr / 24L
+
+    val core = when {
+        sec < 60 -> "${sec}s"
+        min < 60 -> "${min}m"
+        hr < 24 -> "${hr}h"
+        day < 7 -> "${day}d"
+        else -> "${day / 7}w"
+    }
+
+    return if (past) "${core} ago" else "in ${core}"
 }
 
 /* =========================================================
