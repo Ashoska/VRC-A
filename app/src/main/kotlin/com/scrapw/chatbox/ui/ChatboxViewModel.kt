@@ -47,17 +47,17 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * ChatboxViewModel (DEVICE-FIRST)
+ * ChatboxViewModel (DEVICE-FIRST) — FINAL
  *
- * ✅ Single source of truth:
- *   deviceUsers/{deviceHash}  <-- canonical doc
+ * ✅ Canonical doc:
+ *   users/{deviceHash}
  *
- * We still keep a SMALL legacy mirror doc:
- *   users/{authUid}   <-- link-only (so old tools don’t break)
+ * ✅ UID mapping:
+ *   usersByUid/{authUid} -> { deviceHash, ... }
  *
  * IMPORTANT:
- * - If deviceHash is missing, we fallback to authUid *for deviceUsers docId*.
- *   But on a normal install, deviceHash should always exist because ChatboxScreen ensures it.
+ * - ChatboxScreen already ensures deviceHash is created and users/{deviceHash} exists.
+ * - This VM continuously syncs full user state into users/{deviceHash}.
  */
 class ChatboxViewModel(
     private val app: ChatboxApplication,
@@ -90,10 +90,9 @@ class ChatboxViewModel(
         private const val PREF_DEVICE_ID_HASH = "device_id_hash"
         private const val PREF_AUTH_UID = "auth_uid"
 
-        // ✅ Canonical collection
-        private const val COL_DEVICE_USERS = "deviceUsers"
-        // ✅ Legacy link-only collection
-        private const val COL_LEGACY_USERS = "users"
+        // ✅ MUST MATCH ChatboxScreen + Firestore console expectations
+        private const val COL_USERS = "users"
+        private const val COL_USERS_BY_UID = "usersByUid"
 
         @MainThread
         fun isInstanceInitialized(): Boolean = ::instance.isInitialized
@@ -154,8 +153,8 @@ class ChatboxViewModel(
         return s.length in 16..128
     }
 
-    /** Canonical docId: deviceHash if present; else authUid fallback */
-    private fun computeDeviceUserDocId(authUid: String): String {
+    /** Canonical docId: deviceHash if present; else authUid fallback (should be rare). */
+    private fun computeUserDocId(authUid: String): String {
         val dh = readDeviceHashFromPrefs()
         return if (isValidDeviceHash(dh)) dh else authUid
     }
@@ -177,7 +176,7 @@ class ChatboxViewModel(
         val npTitle = lastNowPlayingTitle.trim()
         val npArtist = lastNowPlayingArtist.trim()
         val dev = readDeviceHashFromPrefs()
-        val docId = computeDeviceUserDocId(authUid)
+        val docId = computeUserDocId(authUid)
 
         return listOf(
             "doc=$docId",
@@ -202,21 +201,20 @@ class ChatboxViewModel(
     }
 
     /**
-     * Canonical snapshot for deviceUsers/{docId}.
-     * IMPORTANT: This collection is used by ChatboxScreen for moderation + bans.
+     * ✅ Full snapshot for users/{deviceHash}.
+     * This is what your Admin "Users" tab should display.
      */
-    private fun buildDeviceUserSnapshot(authUid: String): Map<String, Any> {
+    private fun buildUserSnapshot(authUid: String): Map<String, Any> {
         val cycleClean = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(10)
         val deviceHash = readDeviceHashFromPrefs()
-        val docId = computeDeviceUserDocId(authUid)
+        val docId = computeUserDocId(authUid)
 
         val data = linkedMapOf<String, Any>(
             // identity/debug
             "docId" to docId,
             "docIdType" to (if (isValidDeviceHash(deviceHash)) "deviceHash" else "authUid_fallback"),
-            "currentUid" to authUid,
-            "authUid" to authUid, // keep for admin queries
-            "uid" to authUid,     // legacy alias
+            "authUid" to authUid,
+            "uid" to authUid, // legacy alias (admin searches)
             "deviceHash" to deviceHash,
 
             // build
@@ -268,16 +266,16 @@ class ChatboxViewModel(
     }
 
     /**
-     * Legacy link doc: users/{authUid}
-     * Keep tiny, so "users" never becomes the primary list again.
+     * ✅ UID mapping: usersByUid/{uid} -> deviceHash docId
+     * Helps admin tools quickly resolve uid -> doc.
      */
-    private fun buildLegacyLink(authUid: String, deviceDocId: String): Map<String, Any> {
+    private fun buildUsersByUidLink(authUid: String, deviceDocId: String): Map<String, Any> {
         val deviceHash = readDeviceHashFromPrefs()
         return linkedMapOf(
+            "deviceHash" to deviceHash,
             "authUid" to authUid,
             "uid" to authUid,
-            "deviceHash" to deviceHash,
-            "deviceDocId" to deviceDocId,
+            "userDocId" to deviceDocId,
             "appId" to BuildConfig.APPLICATION_ID,
             "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
             "lastSeenAt" to FieldValue.serverTimestamp(),
@@ -299,18 +297,18 @@ class ChatboxViewModel(
                     val dueByChange = changed && (now - lastSelfSyncAtMs) >= SELF_SYNC_MIN_INTERVAL_MS
                     if (!dueByForce && !dueByChange) return@runCatching
 
-                    val docId = computeDeviceUserDocId(authUid)
-                    val snap = buildDeviceUserSnapshot(authUid)
+                    val docId = computeUserDocId(authUid)
+                    val snap = buildUserSnapshot(authUid)
 
                     // ✅ Canonical write
-                    db.collection(COL_DEVICE_USERS).document(docId)
+                    db.collection(COL_USERS).document(docId)
                         .set(snap, SetOptions.merge())
                         .await()
 
-                    // ✅ Legacy link-only write (safe if rules allow; ignore failure)
+                    // ✅ UID mapping (ignore failures, but usually should work)
                     runCatching {
-                        db.collection(COL_LEGACY_USERS).document(authUid)
-                            .set(buildLegacyLink(authUid, docId), SetOptions.merge())
+                        db.collection(COL_USERS_BY_UID).document(authUid)
+                            .set(buildUsersByUidLink(authUid, docId), SetOptions.merge())
                             .await()
                     }
 
