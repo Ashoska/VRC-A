@@ -5,6 +5,7 @@ import android.content.Context
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -12,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -234,11 +236,13 @@ fun AdminScreen() {
     val tabs = remember { listOf("Users", "Moderation", "Announcements", "Config") }
     var tabIndex by rememberSaveable { mutableIntStateOf(0) }
 
-    // ✅ FIX: ModerationTarget is NOT saveable (not Parcelable/Serializable) -> crash if rememberSaveable.
+    // ModerationTarget is NOT saveable (not Parcelable/Serializable)
     var moderationTarget by remember { mutableStateOf<ModerationTarget?>(null) }
 
     Surface {
-        Column(Modifier.padding(14.dp)) {
+        Column(
+            modifier = Modifier.padding(14.dp)
+        ) {
             // Header
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -298,42 +302,49 @@ fun AdminScreen() {
 
             Spacer(Modifier.height(12.dp))
 
-            when (tabIndex) {
-                0 -> UsersTab(
-                    db = db,
-                    clipboardCopy = { clipboard.setText(AnnotatedString(it)) },
-                    setGlobalLoading = { globalLoading = it },
-                    setError = ::setErr,
-                    onSendToModeration = { target ->
-                        moderationTarget = target
-                        tabIndex = 1
-                    }
-                )
+            // ✅ IMPORTANT FIX: give tab content the remaining height so lists can expand.
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            ) {
+                when (tabIndex) {
+                    0 -> UsersTab(
+                        db = db,
+                        clipboardCopy = { clipboard.setText(AnnotatedString(it)) },
+                        setGlobalLoading = { globalLoading = it },
+                        setError = ::setErr,
+                        onSendToModeration = { target ->
+                            moderationTarget = target
+                            tabIndex = 1
+                        }
+                    )
 
-                1 -> ModerationTab(
-                    db = db,
-                    myUid = myUid,
-                    byDeviceHash = deviceHash,
-                    byAppId = BuildConfig.APPLICATION_ID,
-                    clipboardCopy = { clipboard.setText(AnnotatedString(it)) },
-                    setGlobalLoading = { globalLoading = it },
-                    setError = ::setErr,
-                    initialTarget = moderationTarget,
-                    onClearInitialTarget = { moderationTarget = null }
-                )
+                    1 -> ModerationTab(
+                        db = db,
+                        myUid = myUid,
+                        byDeviceHash = deviceHash,
+                        byAppId = BuildConfig.APPLICATION_ID,
+                        clipboardCopy = { clipboard.setText(AnnotatedString(it)) },
+                        setGlobalLoading = { globalLoading = it },
+                        setError = ::setErr,
+                        initialTarget = moderationTarget,
+                        onClearInitialTarget = { moderationTarget = null }
+                    )
 
-                2 -> AnnouncementsTab(
-                    db = db,
-                    createdByDevice = deviceHash,
-                    setGlobalLoading = { globalLoading = it },
-                    setError = ::setErr
-                )
+                    2 -> AnnouncementsTab(
+                        db = db,
+                        createdByDevice = deviceHash,
+                        setGlobalLoading = { globalLoading = it },
+                        setError = ::setErr
+                    )
 
-                else -> ConfigTab(
-                    db = db,
-                    setGlobalLoading = { globalLoading = it },
-                    setError = ::setErr
-                )
+                    else -> ConfigTab(
+                        db = db,
+                        setGlobalLoading = { globalLoading = it },
+                        setError = ::setErr
+                    )
+                }
             }
 
             if (globalLoading) {
@@ -597,8 +608,12 @@ private fun UsersTab(
 
         Divider()
 
+        // ✅ FIX: list must take remaining space so it’s not a tiny strip.
         LazyColumn(
             state = listState,
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             if (filteredUsers.isEmpty()) {
@@ -864,7 +879,7 @@ private fun ModerationTab(
 
     var lookup by rememberSaveable { mutableStateOf("") } // can be docId or authUid
 
-    // ✅ FIX: ModerationTarget is NOT saveable -> do NOT use rememberSaveable here.
+    // loaded target is NOT saveable
     var loaded by remember { mutableStateOf<ModerationTarget?>(null) }
 
     var warned by remember { mutableStateOf(false) }
@@ -1458,228 +1473,237 @@ private fun AnnouncementsTab(
 
     LaunchedEffect(Unit) { refresh() }
 
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        ElevatedCard {
-            Column(
-                Modifier.padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Text("Announcements", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    "Create, enable/disable, delete, and adjust priority here.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-
-                OutlinedTextField(
-                    value = newTitle,
-                    onValueChange = { newTitle = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    label = { Text("Title") }
-                )
-
-                OutlinedTextField(
-                    value = newBody,
-                    onValueChange = { newBody = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    minLines = 3,
-                    label = { Text("Body") }
-                )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+    // ✅ FIX: Entire tab scrolls (create card + list).
+    LazyColumn(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            ElevatedCard {
+                Column(
+                    Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Row {
-                        Text("Active")
-                        Spacer(Modifier.width(8.dp))
-                        Switch(checked = newActive, onCheckedChange = { newActive = it })
-                    }
+                    Text("Announcements", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Create, enable/disable, delete, and adjust priority here.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("Priority", style = MaterialTheme.typography.labelLarge)
-                        IconButton(onClick = { newPriority = (newPriority - 1).coerceIn(-10, 10) }) {
-                            Icon(Icons.Filled.Remove, contentDescription = "Dec")
+                    OutlinedTextField(
+                        value = newTitle,
+                        onValueChange = { newTitle = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("Title") }
+                    )
+
+                    OutlinedTextField(
+                        value = newBody,
+                        onValueChange = { newBody = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 3,
+                        label = { Text("Body") }
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row {
+                            Text("Active")
+                            Spacer(Modifier.width(8.dp))
+                            Switch(checked = newActive, onCheckedChange = { newActive = it })
                         }
-                        Text(newPriority.toString(), fontFamily = FontFamily.Monospace)
-                        IconButton(onClick = { newPriority = (newPriority + 1).coerceIn(-10, 10) }) {
-                            Icon(Icons.Filled.Add, contentDescription = "Inc")
-                        }
-                    }
-                }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(
-                        onClick = {
-                            scope.launch {
-                                setGlobalLoading(true)
-                                setError(null)
-
-                                runCatching {
-                                    val data = hashMapOf(
-                                        "title" to newTitle.trim(),
-                                        "body" to newBody.trim(),
-                                        "active" to newActive,
-                                        "priority" to newPriority,
-                                        "createdAt" to FieldValue.serverTimestamp(),
-                                        "updatedAt" to FieldValue.serverTimestamp(),
-                                        "createdByDevice" to createdByDevice,
-                                        "createdByAppId" to BuildConfig.APPLICATION_ID
-                                    )
-                                    db.collection("announcements").add(data).await()
-
-                                    newTitle = ""
-                                    newBody = ""
-                                    newActive = true
-                                    newPriority = 0
-                                    refresh()
-                                }.onFailure { e ->
-                                    setGlobalLoading(false)
-                                    setError(e.message ?: "Failed to publish")
-                                }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("Priority", style = MaterialTheme.typography.labelLarge)
+                            IconButton(onClick = { newPriority = (newPriority - 1).coerceIn(-10, 10) }) {
+                                Icon(Icons.Filled.Remove, contentDescription = "Dec")
                             }
-                        },
-                        enabled = newTitle.trim().isNotBlank() && newBody.trim().isNotBlank(),
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Publish") }
+                            Text(newPriority.toString(), fontFamily = FontFamily.Monospace)
+                            IconButton(onClick = { newPriority = (newPriority + 1).coerceIn(-10, 10) }) {
+                                Icon(Icons.Filled.Add, contentDescription = "Inc")
+                            }
+                        }
+                    }
 
-                    OutlinedButton(
-                        onClick = { scope.launch { refresh() } },
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Refresh") }
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = {
+                                scope.launch {
+                                    setGlobalLoading(true)
+                                    setError(null)
+
+                                    runCatching {
+                                        val data = hashMapOf(
+                                            "title" to newTitle.trim(),
+                                            "body" to newBody.trim(),
+                                            "active" to newActive,
+                                            "priority" to newPriority,
+                                            "createdAt" to FieldValue.serverTimestamp(),
+                                            "updatedAt" to FieldValue.serverTimestamp(),
+                                            "createdByDevice" to createdByDevice,
+                                            "createdByAppId" to BuildConfig.APPLICATION_ID
+                                        )
+                                        db.collection("announcements").add(data).await()
+
+                                        newTitle = ""
+                                        newBody = ""
+                                        newActive = true
+                                        newPriority = 0
+                                        refresh()
+                                    }.onFailure { e ->
+                                        setGlobalLoading(false)
+                                        setError(e.message ?: "Failed to publish")
+                                    }
+                                }
+                            },
+                            enabled = newTitle.trim().isNotBlank() && newBody.trim().isNotBlank(),
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Publish") }
+
+                        OutlinedButton(
+                            onClick = { scope.launch { refresh() } },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Refresh") }
+                    }
                 }
             }
         }
 
         if (announcements.isEmpty()) {
-            Text("No announcements.", style = MaterialTheme.typography.bodySmall)
-            return
-        }
-
-        announcements.forEach { a ->
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+            item {
+                Text("No announcements.", style = MaterialTheme.typography.bodySmall)
+            }
+        } else {
+            itemsIndexed(announcements, key = { _, a -> a.id }) { _, a ->
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
+                    Column(
+                        Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Column(Modifier.weight(1f)) {
-                            Text(a.title.ifBlank { "(no title)" }, style = MaterialTheme.typography.titleSmall)
-                            Text(
-                                "priority=${a.priority}  active=${a.active}  createdAt=${a.createdAt ?: "?"}",
-                                fontFamily = FontFamily.Monospace,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-
-                        IconButton(
-                            onClick = {
-                                scope.launch {
-                                    setGlobalLoading(true)
-                                    setError(null)
-                                    runCatching {
-                                        db.collection("announcements").document(a.id).delete().await()
-                                        refresh()
-                                    }.onFailure { e ->
-                                        setGlobalLoading(false)
-                                        setError(e.message ?: "Failed to delete announcement")
-                                    }
-                                }
-                            }
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Icon(Icons.Filled.Delete, contentDescription = "Delete")
+                            Column(Modifier.weight(1f)) {
+                                Text(a.title.ifBlank { "(no title)" }, style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    "priority=${a.priority}  active=${a.active}  createdAt=${a.createdAt ?: "?"}",
+                                    fontFamily = FontFamily.Monospace,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
+                            IconButton(
+                                onClick = {
+                                    scope.launch {
+                                        setGlobalLoading(true)
+                                        setError(null)
+                                        runCatching {
+                                            db.collection("announcements").document(a.id).delete().await()
+                                            refresh()
+                                        }.onFailure { e ->
+                                            setGlobalLoading(false)
+                                            setError(e.message ?: "Failed to delete announcement")
+                                        }
+                                    }
+                                }
+                            ) {
+                                Icon(Icons.Filled.Delete, contentDescription = "Delete")
+                            }
                         }
-                    }
 
-                    if (a.body.isNotBlank()) {
-                        Text(a.body, style = MaterialTheme.typography.bodyMedium)
-                    }
+                        if (a.body.isNotBlank()) {
+                            Text(a.body, style = MaterialTheme.typography.bodyMedium)
+                        }
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        OutlinedButton(
-                            onClick = {
-                                scope.launch {
-                                    setGlobalLoading(true)
-                                    setError(null)
-                                    runCatching {
-                                        db.collection("announcements").document(a.id)
-                                            .set(
-                                                mapOf(
-                                                    "active" to !a.active,
-                                                    "updatedAt" to FieldValue.serverTimestamp()
-                                                ),
-                                                SetOptions.merge()
-                                            )
-                                            .await()
-                                        refresh()
-                                    }.onFailure { e ->
-                                        setGlobalLoading(false)
-                                        setError(e.message ?: "Failed to toggle active")
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            OutlinedButton(
+                                onClick = {
+                                    scope.launch {
+                                        setGlobalLoading(true)
+                                        setError(null)
+                                        runCatching {
+                                            db.collection("announcements").document(a.id)
+                                                .set(
+                                                    mapOf(
+                                                        "active" to !a.active,
+                                                        "updatedAt" to FieldValue.serverTimestamp()
+                                                    ),
+                                                    SetOptions.merge()
+                                                )
+                                                .await()
+                                            refresh()
+                                        }.onFailure { e ->
+                                            setGlobalLoading(false)
+                                            setError(e.message ?: "Failed to toggle active")
+                                        }
+                                    }
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) { Text(if (a.active) "Disable" else "Enable") }
+
+                            OutlinedButton(
+                                onClick = {
+                                    scope.launch {
+                                        setGlobalLoading(true)
+                                        setError(null)
+                                        runCatching {
+                                            db.collection("announcements").document(a.id)
+                                                .set(
+                                                    mapOf(
+                                                        "priority" to (a.priority - 1),
+                                                        "updatedAt" to FieldValue.serverTimestamp()
+                                                    ),
+                                                    SetOptions.merge()
+                                                )
+                                                .await()
+                                            refresh()
+                                        }.onFailure { e ->
+                                            setGlobalLoading(false)
+                                            setError(e.message ?: "Failed to change priority")
+                                        }
                                     }
                                 }
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) { Text(if (a.active) "Disable" else "Enable") }
+                            ) { Text("Priority -") }
 
-                        OutlinedButton(
-                            onClick = {
-                                scope.launch {
-                                    setGlobalLoading(true)
-                                    setError(null)
-                                    runCatching {
-                                        db.collection("announcements").document(a.id)
-                                            .set(
-                                                mapOf(
-                                                    "priority" to (a.priority - 1),
-                                                    "updatedAt" to FieldValue.serverTimestamp()
-                                                ),
-                                                SetOptions.merge()
-                                            )
-                                            .await()
-                                        refresh()
-                                    }.onFailure { e ->
-                                        setGlobalLoading(false)
-                                        setError(e.message ?: "Failed to change priority")
+                            OutlinedButton(
+                                onClick = {
+                                    scope.launch {
+                                        setGlobalLoading(true)
+                                        setError(null)
+                                        runCatching {
+                                            db.collection("announcements").document(a.id)
+                                                .set(
+                                                    mapOf(
+                                                        "priority" to (a.priority + 1),
+                                                        "updatedAt" to FieldValue.serverTimestamp()
+                                                    ),
+                                                    SetOptions.merge()
+                                                )
+                                                .await()
+                                            refresh()
+                                        }.onFailure { e ->
+                                            setGlobalLoading(false)
+                                            setError(e.message ?: "Failed to change priority")
+                                        }
                                     }
                                 }
-                            }
-                        ) { Text("Priority -") }
-
-                        OutlinedButton(
-                            onClick = {
-                                scope.launch {
-                                    setGlobalLoading(true)
-                                    setError(null)
-                                    runCatching {
-                                        db.collection("announcements").document(a.id)
-                                            .set(
-                                                mapOf(
-                                                    "priority" to (a.priority + 1),
-                                                    "updatedAt" to FieldValue.serverTimestamp()
-                                                ),
-                                                SetOptions.merge()
-                                            )
-                                            .await()
-                                        refresh()
-                                    }.onFailure { e ->
-                                        setGlobalLoading(false)
-                                        setError(e.message ?: "Failed to change priority")
-                                    }
-                                }
-                            }
-                        ) { Text("Priority +") }
+                            ) { Text("Priority +") }
+                        }
                     }
                 }
             }
         }
+
+        item { Spacer(Modifier.height(10.dp)) }
     }
 }
 
