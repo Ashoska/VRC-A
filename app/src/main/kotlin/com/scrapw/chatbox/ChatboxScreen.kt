@@ -223,6 +223,7 @@ private data class ModerationUi(
     val warnReason: String = "",
     val banned: Boolean = false,
     val banReason: String = "",
+    // legacy collection support:
     val deviceBanned: Boolean = false,
     val deviceBanReason: String = "",
     val updatedAt: Timestamp? = null
@@ -286,10 +287,10 @@ fun ChatboxScreen(
     // ✅ Ensure device hash exists for this install/user (survives reinstall)
     val deviceHash = remember { DeviceId.ensure(ctx) }
 
-    // Ensure public users have a UID (anonymous auth).
+    // We still use anonymous auth for basic access, but the APP is DEVICE-FIRST now.
     var authedUid by remember { mutableStateOf(auth.currentUser?.uid) }
 
-    // ✅ Capture last Firebase issue for Debug ONLY (never shown as a global orange banner)
+    // ✅ Capture last Firebase issue for Debug ONLY
     var lastFirebaseIssue by remember { mutableStateOf<String?>(null) }
 
     fun reportFirebase(tag: String, msg: String, t: Throwable? = null) {
@@ -297,6 +298,8 @@ fun ChatboxScreen(
         lastFirebaseIssue = full.take(4000)
         if (t != null) Log.w("VRC-A/Firebase", full, t) else Log.w("VRC-A/Firebase", full)
     }
+
+    fun safeUid(): String = authedUid?.trim().orEmpty()
 
     LaunchedEffect(Unit) {
         if (auth.currentUser == null) {
@@ -310,35 +313,69 @@ fun ChatboxScreen(
         }
     }
 
-    // ✅ Write/refresh user presence + deviceHash (for user list + ban linkage)
+    /* =========================================================
+       ✅ DEVICE-FIRST PRESENCE + LINKAGE (single source of truth)
+       =========================================================
+       deviceUsers/{deviceHash} is the primary identity document.
+
+       Fields recommended:
+       - currentUid: latest anonymous UID (changes if you clear app data)
+       - uids: array of UIDs seen on this device (optional)
+       - appId, adminBuild
+       - lastSeenAt, updatedAt
+     */
+
     LaunchedEffect(authedUid, deviceHash) {
-        val uid = authedUid?.trim().orEmpty()
-        if (uid.isBlank() || deviceHash.isBlank()) return@LaunchedEffect
+        val uid = safeUid()
+        val dh = deviceHash.trim()
+        if (dh.isBlank()) return@LaunchedEffect
 
         runCatching {
-            db.collection("users").document(uid)
+            db.collection("deviceUsers").document(dh)
                 .set(
                     mapOf(
-                        "deviceHash" to deviceHash,
+                        "deviceHash" to dh,
+                        "currentUid" to uid,
+                        "uids" to if (uid.isBlank()) FieldValue.arrayUnion() else FieldValue.arrayUnion(uid),
                         "appId" to BuildConfig.APPLICATION_ID,
+                        "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
                         "lastSeenAt" to FieldValue.serverTimestamp(),
                         "updatedAt" to FieldValue.serverTimestamp()
                     ),
                     SetOptions.merge()
                 )
         }.onFailure { e ->
-            reportFirebase("users/$uid", "Failed writing user presence/deviceHash", e)
+            reportFirebase("deviceUsers/$dh", "Failed writing device-first presence", e)
+        }
+
+        // Optional: keep legacy link doc so old tools don’t break (harmless)
+        if (uid.isNotBlank()) {
+            runCatching {
+                db.collection("users").document(uid)
+                    .set(
+                        mapOf(
+                            "deviceHash" to dh,
+                            "appId" to BuildConfig.APPLICATION_ID,
+                            "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
+                            "lastSeenAt" to FieldValue.serverTimestamp(),
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        ),
+                        SetOptions.merge()
+                    )
+            }.onFailure { e ->
+                reportFirebase("users/$uid", "Failed writing legacy uid->deviceHash link", e)
+            }
         }
     }
 
-    // ✅ Admin-build-only heartbeat for devices/{deviceHash}
-    // Public build does NOT write devices/ at all.
+    // ✅ Admin-build-only heartbeat for devices/{deviceHash} (admin diagnostics)
     if (BuildConfig.IS_ADMIN_BUILD) {
         LaunchedEffect(deviceHash) {
-            if (deviceHash.isBlank()) return@LaunchedEffect
+            val dh = deviceHash.trim()
+            if (dh.isBlank()) return@LaunchedEffect
 
             runCatching {
-                db.collection("devices").document(deviceHash)
+                db.collection("devices").document(dh)
                     .set(
                         mapOf(
                             "lastSeenAt" to FieldValue.serverTimestamp(),
@@ -349,13 +386,13 @@ fun ChatboxScreen(
                         SetOptions.merge()
                     )
             }.onFailure { e ->
-                reportFirebase("devices", "Failed writing admin heartbeat", e)
+                reportFirebase("devices/$dh", "Failed writing admin heartbeat", e)
             }
 
             while (true) {
                 delay(120_000L)
                 runCatching {
-                    db.collection("devices").document(deviceHash)
+                    db.collection("devices").document(dh)
                         .set(
                             mapOf(
                                 "lastSeenAt" to FieldValue.serverTimestamp(),
@@ -364,7 +401,7 @@ fun ChatboxScreen(
                             SetOptions.merge()
                         )
                 }.onFailure { e ->
-                    reportFirebase("devices", "Failed updating admin heartbeat", e)
+                    reportFirebase("devices/$dh", "Failed updating admin heartbeat", e)
                 }
             }
         }
@@ -375,8 +412,9 @@ fun ChatboxScreen(
     var announcements by remember { mutableStateOf<List<AnnouncementUi>>(emptyList()) }
 
     // Moderation:
-    // - user-based: users/{uid}.warned/banned + reasons
-    // - device-based: bannedDevices/{deviceHash}.banned + reason
+    // DEVICE-FIRST: deviceUsers/{deviceHash}.warned/banned + reasons (primary)
+    // LEGACY SUPPORT: bannedDevices/{deviceHash}.banned + reason (secondary)
+    // EXTRA LEGACY: users/{uid}.warned/banned still respected if present
     var moderation by remember { mutableStateOf(ModerationUi()) }
 
     // Listen: config/app (ToS)
@@ -431,15 +469,15 @@ fun ChatboxScreen(
         onDispose { reg?.remove() }
     }
 
-    // Listen: moderation status for THIS UID (users/{uid})
-    DisposableEffect(authedUid) {
+    // ✅ DEVICE-FIRST moderation: deviceUsers/{deviceHash}
+    DisposableEffect(deviceHash) {
         var reg: ListenerRegistration? = null
-        val uid = authedUid?.trim().orEmpty()
-        if (uid.isNotBlank()) {
-            reg = db.collection("users").document(uid)
+        val dh = deviceHash.trim()
+        if (dh.isNotBlank()) {
+            reg = db.collection("deviceUsers").document(dh)
                 .addSnapshotListener { snap, err ->
                     if (err != null) {
-                        reportFirebase("users/$uid", "Failed to load moderation", err)
+                        reportFirebase("deviceUsers/$dh", "Failed to load device moderation", err)
                         return@addSnapshotListener
                     }
 
@@ -449,6 +487,7 @@ fun ChatboxScreen(
                     val banReason = snap?.getString("banReason") ?: ""
                     val updatedAt = snap?.getTimestamp("updatedAt")
 
+                    // Keep legacy device ban fields as-is; we merge those in other listeners.
                     moderation = moderation.copy(
                         warned = warned,
                         warnReason = warnReason,
@@ -461,7 +500,7 @@ fun ChatboxScreen(
         onDispose { reg?.remove() }
     }
 
-    // ✅ Listen: device ban (bannedDevices/{deviceHash})
+    // ✅ Legacy device-ban collection support: bannedDevices/{deviceHash}
     DisposableEffect(deviceHash) {
         var reg: ListenerRegistration? = null
         val dh = deviceHash.trim()
@@ -469,7 +508,7 @@ fun ChatboxScreen(
             reg = db.collection("bannedDevices").document(dh)
                 .addSnapshotListener { snap, err ->
                     if (err != null) {
-                        reportFirebase("bannedDevices/$dh", "Failed to load device ban", err)
+                        reportFirebase("bannedDevices/$dh", "Failed to load legacy device ban", err)
                         return@addSnapshotListener
                     }
                     val banned = snap?.getBoolean("banned") ?: false
@@ -477,6 +516,40 @@ fun ChatboxScreen(
                     moderation = moderation.copy(
                         deviceBanned = banned,
                         deviceBanReason = reason
+                    )
+                }
+        }
+        onDispose { reg?.remove() }
+    }
+
+    // EXTRA legacy: users/{uid} moderation (if you still have old bans there)
+    DisposableEffect(authedUid) {
+        var reg: ListenerRegistration? = null
+        val uid = safeUid()
+        if (uid.isNotBlank()) {
+            reg = db.collection("users").document(uid)
+                .addSnapshotListener { snap, err ->
+                    if (err != null) {
+                        reportFirebase("users/$uid", "Failed to load legacy uid moderation", err)
+                        return@addSnapshotListener
+                    }
+
+                    // Only apply if fields exist; otherwise it would “clear” device moderation.
+                    val warnedAny = snap?.getBoolean("warned")
+                    val bannedAny = snap?.getBoolean("banned")
+                    val warnReasonAny = snap?.getString("warnReason")
+                    val banReasonAny = snap?.getString("banReason")
+                    val updatedAt = snap?.getTimestamp("updatedAt")
+
+                    val applyWarned = warnedAny != null || !warnReasonAny.isNullOrBlank()
+                    val applyBanned = bannedAny != null || !banReasonAny.isNullOrBlank()
+
+                    moderation = moderation.copy(
+                        warned = if (applyWarned) (warnedAny ?: moderation.warned) else moderation.warned,
+                        warnReason = if (applyWarned) (warnReasonAny ?: moderation.warnReason) else moderation.warnReason,
+                        banned = if (applyBanned) (bannedAny ?: moderation.banned) else moderation.banned,
+                        banReason = if (applyBanned) (banReasonAny ?: moderation.banReason) else moderation.banReason,
+                        updatedAt = updatedAt ?: moderation.updatedAt
                     )
                 }
         }
@@ -509,7 +582,8 @@ fun ChatboxScreen(
         return
     }
 
-    // --- Ban gate (C: UID banned OR device banned) ---
+    // --- Ban gate (DEVICE-FIRST) ---
+    // Effective ban = deviceUsers.banned OR legacy bannedDevices.banned OR legacy users/{uid}.banned
     val isBannedEffective = moderation.banned || moderation.deviceBanned
 
     var banStopRan by remember { mutableStateOf(false) }
@@ -607,7 +681,7 @@ fun ChatboxScreen(
                         AppPage.Home -> {
                             if (isBannedEffective) {
                                 BannedScreen(
-                                    uid = authedUid.orEmpty(),
+                                    uid = safeUid(),
                                     deviceHash = deviceHash,
                                     banReason = moderation.banReason,
                                     deviceBanReason = moderation.deviceBanReason,
@@ -746,8 +820,8 @@ private fun BannedScreen(
                     Text("You are banned from using this app.", style = MaterialTheme.typography.titleSmall)
 
                     val reasons = buildList {
-                        if (banReason.isNotBlank()) add("UID ban: $banReason")
-                        if (deviceBanReason.isNotBlank()) add("Device ban: $deviceBanReason")
+                        if (banReason.isNotBlank()) add("Device ban: $banReason")
+                        if (deviceBanReason.isNotBlank()) add("Legacy device ban: $deviceBanReason")
                     }.ifEmpty { listOf("No reason provided.") }
 
                     reasons.forEach { r ->
