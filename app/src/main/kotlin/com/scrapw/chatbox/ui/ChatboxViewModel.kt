@@ -47,17 +47,17 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * ChatboxViewModel (device-doc version)
+ * ChatboxViewModel (DEVICE-FIRST)
  *
- * Key change:
- * ✅ Firestore users/ document ID is deviceHash (when available), NOT the anonymous auth UID.
- *    This prevents "same device creates multiple user docs" after reinstall/clear-data.
+ * ✅ Single source of truth:
+ *   deviceUsers/{deviceHash}  <-- canonical doc
  *
- * We still store the current Firebase UID inside the doc:
- * - authUid: current session UID (changes on reinstall)
- * - uid: kept for backwards compatibility (same as authUid)
+ * We still keep a SMALL legacy mirror doc:
+ *   users/{authUid}   <-- link-only (so old tools don’t break)
  *
- * If deviceHash is missing, we fall back to uid to avoid breaking the app.
+ * IMPORTANT:
+ * - If deviceHash is missing, we fallback to authUid *for deviceUsers docId*.
+ *   But on a normal install, deviceHash should always exist because ChatboxScreen ensures it.
  */
 class ChatboxViewModel(
     private val app: ChatboxApplication,
@@ -67,38 +67,33 @@ class ChatboxViewModel(
     companion object {
         private lateinit var instance: ChatboxViewModel
 
-        // ✅ Locked delays (per your request)
         private const val CYCLE_INTERVAL_SECONDS_LOCKED = 10
         private const val MUSIC_REFRESH_SECONDS_LOCKED = 2
 
-        // ✅ VRChat limits
         private const val VRC_MAX_CHARS = 144
         private const val VRC_MAX_LINES = 9
 
-        // ✅ send floor (DO NOT go faster than this)
         private const val SEND_FLOOR_MS = 2_000L
 
-        // ✅ Now Playing: metadata stabilization to prevent "wrong song" on rapid skips
         private const val META_STABLE_MS = 1_100L
         private const val META_CONFIRM_MOVE_MS = 900L
         private const val META_GIVE_UP_MS = 2_400L
-
-        // ✅ If position resets near the start, we treat it as a definite track switch
         private const val POS_RESET_CONFIRM_MS = 1_800L
 
-        // ✅ Pause detection (your request)
         private const val NO_MOVE_PAUSE_MS = 5_000L
-
-        // ✅ Tick that updates pause detection even when notifications stop
         private const val UI_TICK_MS = 500L
 
-        // ✅ Firestore self snapshot throttling
         private const val SELF_SYNC_MIN_INTERVAL_MS = 12_000L
         private const val SELF_SYNC_FORCE_INTERVAL_MS = 90_000L
 
         private const val REMOTE_PREFS_FILE = "vrca_remote"
         private const val PREF_DEVICE_ID_HASH = "device_id_hash"
         private const val PREF_AUTH_UID = "auth_uid"
+
+        // ✅ Canonical collection
+        private const val COL_DEVICE_USERS = "deviceUsers"
+        // ✅ Legacy link-only collection
+        private const val COL_LEGACY_USERS = "users"
 
         @MainThread
         fun isInstanceInitialized(): Boolean = ::instance.isInitialized
@@ -130,7 +125,7 @@ class ChatboxViewModel(
     }
 
     // =========================
-    // Firebase (safe, throttled)
+    // Firebase
     // =========================
     private val auth: FirebaseAuth by lazy { FirebaseAuth.getInstance() }
     private val db: FirebaseFirestore by lazy { FirebaseFirestore.getInstance() }
@@ -144,13 +139,11 @@ class ChatboxViewModel(
 
     private fun prefs() = app.getSharedPreferences(REMOTE_PREFS_FILE, Context.MODE_PRIVATE)
 
-    private fun readDeviceHashFromPrefs(): String {
-        return prefs().getString(PREF_DEVICE_ID_HASH, "")?.trim().orEmpty()
-    }
+    private fun readDeviceHashFromPrefs(): String =
+        prefs().getString(PREF_DEVICE_ID_HASH, "")?.trim().orEmpty()
 
-    private fun readCachedUid(): String {
-        return prefs().getString(PREF_AUTH_UID, "")?.trim().orEmpty()
-    }
+    private fun readCachedUid(): String =
+        prefs().getString(PREF_AUTH_UID, "")?.trim().orEmpty()
 
     private fun writeCachedUid(uid: String) {
         prefs().edit().putString(PREF_AUTH_UID, uid.trim()).apply()
@@ -161,12 +154,8 @@ class ChatboxViewModel(
         return s.length in 16..128
     }
 
-    /**
-     * IMPORTANT:
-     * Firestore user doc ID should be deviceHash when available.
-     * This prevents duplicate docs after reinstall (new anonymous uid).
-     */
-    private fun computeUserDocId(authUid: String): String {
+    /** Canonical docId: deviceHash if present; else authUid fallback */
+    private fun computeDeviceUserDocId(authUid: String): String {
         val dh = readDeviceHashFromPrefs()
         return if (isValidDeviceHash(dh)) dh else authUid
     }
@@ -180,10 +169,6 @@ class ChatboxViewModel(
         }.getOrNull()
     }
 
-    /**
-     * Builds a stable-ish fingerprint string so we only write when the state changes.
-     * (No hashing lib needed; Firestore writes are already throttled.)
-     */
     private fun computeSelfFingerprint(authUid: String): String {
         val cycleClean = cycleLines.map { it.trim() }.take(10)
         val afkP = (1..3).joinToString("|") { getAfkPresetPreview(it) }
@@ -192,7 +177,7 @@ class ChatboxViewModel(
         val npTitle = lastNowPlayingTitle.trim()
         val npArtist = lastNowPlayingArtist.trim()
         val dev = readDeviceHashFromPrefs()
-        val docId = computeUserDocId(authUid)
+        val docId = computeDeviceUserDocId(authUid)
 
         return listOf(
             "doc=$docId",
@@ -216,34 +201,40 @@ class ChatboxViewModel(
         ).joinToString("||")
     }
 
-    private fun buildSelfSnapshot(authUid: String): Map<String, Any> {
+    /**
+     * Canonical snapshot for deviceUsers/{docId}.
+     * IMPORTANT: This collection is used by ChatboxScreen for moderation + bans.
+     */
+    private fun buildDeviceUserSnapshot(authUid: String): Map<String, Any> {
         val cycleClean = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(10)
         val deviceHash = readDeviceHashFromPrefs()
-        val docId = computeUserDocId(authUid)
+        val docId = computeDeviceUserDocId(authUid)
 
-        // Keep keys predictable; mirror in Firestore rules.
         val data = linkedMapOf<String, Any>(
-            // identity-ish / debug
+            // identity/debug
             "docId" to docId,
-            "docIdType" to (if (isValidDeviceHash(deviceHash)) "deviceHash" else "authUid"),
-            "authUid" to authUid,
-            "uid" to authUid, // legacy compatibility
+            "docIdType" to (if (isValidDeviceHash(deviceHash)) "deviceHash" else "authUid_fallback"),
+            "currentUid" to authUid,
+            "authUid" to authUid, // keep for admin queries
+            "uid" to authUid,     // legacy alias
             "deviceHash" to deviceHash,
+
+            // build
             "appId" to BuildConfig.APPLICATION_ID,
             "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
             "versionName" to BuildConfig.VERSION_NAME,
             "versionCode" to BuildConfig.VERSION_CODE,
 
-            // activity markers
+            // presence
             "lastSeenAt" to FieldValue.serverTimestamp(),
             "updatedAt" to FieldValue.serverTimestamp(),
 
-            // live feature state
+            // live state
             "afkEnabled" to afkEnabled,
             "afkMessage" to afkMessage.trim(),
 
             "cycleEnabled" to cycleEnabled,
-            "cycleIntervalSeconds" to cycleIntervalSeconds, // ✅ real field (still locked)
+            "cycleIntervalSeconds" to cycleIntervalSeconds,
             "cycleLines" to cycleClean,
             "cycleLinesText" to cycleClean.joinToString("\n"),
 
@@ -257,12 +248,12 @@ class ChatboxViewModel(
             "nowPlayingArtist" to lastNowPlayingArtist.takeIf { it != "(blank)" }?.trim().orEmpty(),
             "activePackage" to activePackage,
 
-            // UI preview / output
+            // UI preview
             "combinedPreviewText" to combinedPreviewText.trim(),
             "cycleTrimWarning" to cycleTrimWarning.trim()
         )
 
-        // presets (so Admin can view older setups)
+        // presets (admin visibility)
         data["afkPreset1"] = getAfkPresetPreview(1)
         data["afkPreset2"] = getAfkPresetPreview(2)
         data["afkPreset3"] = getAfkPresetPreview(3)
@@ -274,6 +265,24 @@ class ChatboxViewModel(
         data["cyclePreset5"] = cyclePresetMessages.getOrNull(4)?.trim().orEmpty()
 
         return data
+    }
+
+    /**
+     * Legacy link doc: users/{authUid}
+     * Keep tiny, so "users" never becomes the primary list again.
+     */
+    private fun buildLegacyLink(authUid: String, deviceDocId: String): Map<String, Any> {
+        val deviceHash = readDeviceHashFromPrefs()
+        return linkedMapOf(
+            "authUid" to authUid,
+            "uid" to authUid,
+            "deviceHash" to deviceHash,
+            "deviceDocId" to deviceDocId,
+            "appId" to BuildConfig.APPLICATION_ID,
+            "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
+            "lastSeenAt" to FieldValue.serverTimestamp(),
+            "updatedAt" to FieldValue.serverTimestamp()
+        )
     }
 
     private fun startSelfSyncLoopIfNeeded() {
@@ -288,22 +297,27 @@ class ChatboxViewModel(
                     val changed = fp != lastSelfSyncFingerprint
                     val dueByForce = (now - lastSelfSyncAtMs) >= SELF_SYNC_FORCE_INTERVAL_MS
                     val dueByChange = changed && (now - lastSelfSyncAtMs) >= SELF_SYNC_MIN_INTERVAL_MS
-
                     if (!dueByForce && !dueByChange) return@runCatching
 
-                    val docId = computeUserDocId(authUid)
-                    val snap = buildSelfSnapshot(authUid)
+                    val docId = computeDeviceUserDocId(authUid)
+                    val snap = buildDeviceUserSnapshot(authUid)
 
-                    // ✅ Write to users/{deviceHash} when possible; fallback to users/{authUid}
-                    db.collection("users").document(docId)
+                    // ✅ Canonical write
+                    db.collection(COL_DEVICE_USERS).document(docId)
                         .set(snap, SetOptions.merge())
                         .await()
+
+                    // ✅ Legacy link-only write (safe if rules allow; ignore failure)
+                    runCatching {
+                        db.collection(COL_LEGACY_USERS).document(authUid)
+                            .set(buildLegacyLink(authUid, docId), SetOptions.merge())
+                            .await()
+                    }
 
                     lastSelfSyncAtMs = now
                     lastSelfSyncFingerprint = fp
                     lastSelfSyncError = ""
                 }.onFailure { e ->
-                    // Don’t crash the app; just record.
                     lastSelfSyncError = (e.message ?: e.toString()).take(4000)
                 }
 
@@ -473,15 +487,12 @@ class ChatboxViewModel(
     var cycleEnabled by mutableStateOf(false)
         private set
 
-    // ✅ Locked to 10s
     var cycleIntervalSeconds by mutableStateOf(CYCLE_INTERVAL_SECONDS_LOCKED)
         private set
 
     private var cycleJob: Job? = null
     private var cycleIndex = 0
     val cycleLines = mutableStateListOf<String>()
-
-    // ✅ preview-only cycling timer (does NOT send, does NOT start the cycle job)
     private var lastCyclePreviewAdvanceMs: Long = 0L
 
     // =========================
@@ -495,24 +506,20 @@ class ChatboxViewModel(
     var spotifyPreset by mutableStateOf(1)
         private set
 
-    // ✅ Locked to 2s
     var musicRefreshSeconds by mutableStateOf(MUSIC_REFRESH_SECONDS_LOCKED)
         private set
 
     private var nowPlayingJob: Job? = null
 
-    // ---- Playing inference (plus pause restore) ----
     private var inferredIsPlaying = false
     private var lastTrackKeyForInference: String = ""
     private var lastMovementAtMs: Long = 0L
     private var pauseCandidateSinceMs: Long = 0L
 
-    // ✅ tick-based movement tracking using EFFECTIVE position (not raw snapshot)
     private var lastEffectivePosForTick: Long = 0L
     private var lastEffectiveTickAtMs: Long = 0L
     private var uiTickJob: Job? = null
 
-    // ---- Metadata stabilizer (song name follows progress) ----
     private var confirmedTrackKey: String = ""
     private var confirmedTitle: String = ""
     private var confirmedArtist: String = ""
@@ -576,7 +583,6 @@ class ChatboxViewModel(
     var combinedPreviewText by mutableStateOf("")
         private set
 
-    // warning shown when Cycle had to be trimmed/dropped to preserve Now Playing
     var cycleTrimWarning by mutableStateOf("")
         private set
 
@@ -591,7 +597,6 @@ class ChatboxViewModel(
     )
 
     init {
-        // Start remote snapshot loop (safe even if rules deny).
         startSelfSyncLoopIfNeeded()
 
         viewModelScope.launch {
@@ -619,7 +624,6 @@ class ChatboxViewModel(
 
         viewModelScope.launch {
             userPreferencesRepository.cycleInterval.collect {
-                // locked
                 cycleIntervalSeconds = CYCLE_INTERVAL_SECONDS_LOCKED
                 rebuildCombinedPreviewOnly()
                 startSelfSyncLoopIfNeeded()
@@ -652,7 +656,6 @@ class ChatboxViewModel(
         viewModelScope.launch { userPreferencesRepository.afkPresetsCollapsed.collect { afkPresetsCollapsed = it } }
         viewModelScope.launch { userPreferencesRepository.cyclePresetsCollapsed.collect { cyclePresetsCollapsed = it } }
 
-        // tick loop to keep pause detection honest even when notifications stop
         uiTickJob?.cancel()
         uiTickJob = viewModelScope.launch {
             while (true) {
@@ -705,7 +708,6 @@ class ChatboxViewModel(
         }
     }
 
-    // Cycle preview advances every 10s when enabled AND not actually running the cycle sender
     private fun tickCyclePreviewOnly() {
         if (!cycleEnabled) return
         if (cycleJob != null) return
@@ -725,7 +727,6 @@ class ChatboxViewModel(
         }
     }
 
-    // Effective position right now (used for movement detection)
     private fun effectivePosNowMs(): Long {
         val snap = nowPlayingPositionMs.coerceAtLeast(0L)
         val dur = nowPlayingDurationMs.coerceAtLeast(0L)
@@ -736,7 +737,6 @@ class ChatboxViewModel(
         return if (dur > 0L) eff.coerceAtMost(dur) else eff
     }
 
-    // Tick updates lastMovementAtMs based on EFFECTIVE movement, so it never false-pauses
     private fun tickNowPlayingMovement() {
         if (!spotifyEnabled) return
         if (!nowPlayingDetected && !spotifyDemoEnabled) return
@@ -795,16 +795,14 @@ class ChatboxViewModel(
     fun overlayPermissionIntent(): Intent =
         Intent(
             Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-            Uri.parse("package:${getApplicationIdSafely()}")
+            Uri.parse("package:${BuildConfig.APPLICATION_ID}")
         ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
     fun batteryOptimizationIntent(): Intent =
         Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-            data = Uri.parse("package:${getApplicationIdSafely()}")
+            data = Uri.parse("package:${BuildConfig.APPLICATION_ID}")
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
-
-    private fun getApplicationIdSafely(): String = BuildConfig.APPLICATION_ID
 
     // =========================
     // KILL switch
@@ -817,7 +815,7 @@ class ChatboxViewModel(
     }
 
     // =========================
-    // Enable flags (dashboard toggles)
+    // Enable flags
     // =========================
     fun setAfkEnabledFlag(enabled: Boolean) {
         afkEnabled = enabled
@@ -1138,12 +1136,6 @@ class ChatboxViewModel(
         lastCombinedSendMs = nowMs
     }
 
-    /**
-     * Builds the final text WITH VRChat limits + priority rules:
-     * - AFK is top line (always above Cycle)
-     * - Now Playing must not be cut by Cycle
-     * - Cycle is trimmed/dropped first if the combined output would exceed 144 chars or 9 lines
-     */
     private fun buildCombinedText(cycleLineOverride: String?): String {
         cycleTrimWarning = ""
 
@@ -1158,15 +1150,9 @@ class ChatboxViewModel(
         val rawLines = mutableListOf<LineWithPriority>()
         if (afkLine.isNotBlank()) rawLines += LineWithPriority(text = afkLine, priority = Priority.AFK)
         if (cycleLine.isNotBlank()) rawLines += LineWithPriority(text = cycleLine, priority = Priority.CYCLE)
-        for (m in musicLines) {
-            if (m.isNotBlank()) rawLines += LineWithPriority(text = m, priority = Priority.MUSIC)
-        }
+        for (m in musicLines) if (m.isNotBlank()) rawLines += LineWithPriority(text = m, priority = Priority.MUSIC)
 
-        val limited = limitWithPriority(
-            lines = rawLines,
-            maxChars = VRC_MAX_CHARS,
-            maxLines = VRC_MAX_LINES
-        )
+        val limited = limitWithPriority(rawLines, VRC_MAX_CHARS, VRC_MAX_LINES)
 
         if (limited.cycleWasModifiedToPreserveMusic) {
             cycleTrimWarning = "Cycle was trimmed to preserve Now Playing (VRChat limits)."
@@ -1187,13 +1173,9 @@ class ChatboxViewModel(
         return msgs.getOrNull(cycleIndex % msgs.size).orEmpty()
     }
 
-    // =========================
-    // Now Playing builder
-    // =========================
     private fun buildNowPlayingLines(): List<String> {
         val title = if (spotifyDemoEnabled && !nowPlayingDetected) "Pretty Girl" else lastNowPlayingTitle
         val artist = if (spotifyDemoEnabled && !nowPlayingDetected) "Clairo" else lastNowPlayingArtist
-
         if (!spotifyDemoEnabled && !nowPlayingDetected) return emptyList()
 
         val safeTitle = title.takeIf { it != "(blank)" }?.trim().orEmpty()
@@ -1219,59 +1201,34 @@ class ChatboxViewModel(
             val elapsed = SystemClock.elapsedRealtime() - nowPlayingPositionUpdateTimeMs
             val adj = (elapsed * nowPlayingSpeed).toLong()
             (posSnapshot + max(0L, adj)).coerceAtMost(dur)
-        } else {
-            posSnapshot
-        }
+        } else posSnapshot
 
-        val bar = renderProgressBar(
-            preset = spotifyPreset,
-            posMs = pos,
-            durMs = max(1L, dur),
-            isPlaying = nowPlayingIsPlaying
-        )
-
+        val bar = renderProgressBar(spotifyPreset, pos, max(1L, dur), nowPlayingIsPlaying)
         val time = "${fmtTime(pos)} / ${fmtTime(max(1L, dur))}"
         val status = if (!nowPlayingIsPlaying) "Paused" else ""
 
         val line2 = listOf(bar, time).joinToString(" ").trim()
         val line3 = status.takeIf { it.isNotBlank() }
 
-        return listOfNotNull(
-            line1.takeIf { it.isNotBlank() },
-            line2.takeIf { it.isNotBlank() },
-            line3
-        )
+        return listOfNotNull(line1.takeIf { it.isNotBlank() }, line2.takeIf { it.isNotBlank() }, line3)
     }
 
-    // =========================
-    // Priority limiter (Cycle is sacrificed before Music)
-    // =========================
     private enum class Priority { AFK, MUSIC, CYCLE }
     private data class LineWithPriority(val text: String, val priority: Priority)
     private data class LimitedResult(val text: String, val cycleWasModifiedToPreserveMusic: Boolean)
 
-    private fun limitWithPriority(
-        lines: List<LineWithPriority>,
-        maxChars: Int,
-        maxLines: Int
-    ): LimitedResult {
+    private fun limitWithPriority(lines: List<LineWithPriority>, maxChars: Int, maxLines: Int): LimitedResult {
         if (lines.isEmpty()) return LimitedResult("", false)
 
-        val cleaned = lines
-            .map { it.copy(text = it.text.trim()) }
-            .filter { it.text.isNotEmpty() }
-            .toMutableList()
-
+        val cleaned = lines.map { it.copy(text = it.text.trim()) }.filter { it.text.isNotEmpty() }.toMutableList()
         if (cleaned.isEmpty()) return LimitedResult("", false)
 
         var cycleModifiedForMusic = false
 
-        // Line count: drop lowest priority first (Cycle -> Music -> AFK)
         while (cleaned.size > maxLines) {
             val idxToRemove = cleaned.indexOfLast { it.priority == Priority.CYCLE }
                 .takeIf { it >= 0 }
-                ?: cleaned.indexOfLast { it.priority == Priority.MUSIC }
-                    .takeIf { it >= 0 }
+                ?: cleaned.indexOfLast { it.priority == Priority.MUSIC }.takeIf { it >= 0 }
                 ?: cleaned.indexOfLast { it.priority == Priority.AFK }
 
             if (idxToRemove >= 0) {
@@ -1284,7 +1241,7 @@ class ChatboxViewModel(
             var sum = 0
             list.forEachIndexed { idx, l ->
                 sum += l.text.length
-                if (idx != list.lastIndex) sum += 1 // newline
+                if (idx != list.lastIndex) sum += 1
             }
             return sum
         }
@@ -1343,7 +1300,6 @@ class ChatboxViewModel(
                 inner[idx] = '◉'
                 "♡" + inner.concatToString() + "♡"
             }
-
             2 -> {
                 val slots = 10
                 val idx = (p * (slots - 1)).toInt()
@@ -1351,7 +1307,6 @@ class ChatboxViewModel(
                 bg[idx] = '◉'
                 bg.concatToString()
             }
-
             3 -> {
                 val slots = 10
                 val idx = (p * (slots - 1)).toInt()
@@ -1359,9 +1314,7 @@ class ChatboxViewModel(
                 bg[idx] = '◉'
                 bg.concatToString()
             }
-
             4 -> renderSoundwaveBar(p, posMs, isPlaying)
-
             else -> {
                 val slots = 10
                 val idx = (p * (slots - 1)).toInt()
@@ -1396,10 +1349,7 @@ class ChatboxViewModel(
         val slots = 8
         val idx = (progress01 * (slots - 1)).toInt().coerceIn(0, slots - 1)
 
-        val patternIndex = if (isPlaying) {
-            ((posMs / 1400L) % soundwavePatterns.size).toInt()
-        } else -1
-
+        val patternIndex = if (isPlaying) ((posMs / 1400L) % soundwavePatterns.size).toInt() else -1
         val base = if (patternIndex >= 0) soundwavePatterns[patternIndex] else soundwavePaused
         val phase = if (isPlaying) ((posMs / 180L) % base.size).toInt() else ((posMs / 900L) % base.size).toInt()
 
@@ -1411,12 +1361,8 @@ class ChatboxViewModel(
         val out = StringBuilder(10)
         for (i in 0 until slots) {
             if (i == idx) {
-                out.append('[')
-                out.append('▣')
-                out.append(']')
-            } else {
-                out.append(chars[i])
-            }
+                out.append('[').append('▣').append(']')
+            } else out.append(chars[i])
         }
         return out.toString()
     }
@@ -1441,20 +1387,13 @@ class ChatboxViewModel(
 
     private fun sendToVrchatRaw(text: String, local: Boolean, addToConversation: Boolean) {
         val osc = if (!local) remoteChatboxOSC else localChatboxOSC
-        osc.sendMessage(
-            text,
-            messengerUiState.value.isSendImmediately,
-            triggerSFX = false
-        )
+        osc.sendMessage(text, messengerUiState.value.isSendImmediately, triggerSFX = false)
         lastSentToVrchatAtMs = System.currentTimeMillis()
-
-        if (addToConversation) {
-            conversationUiState.addMessage(Message(text, false, Instant.now()))
-        }
+        if (addToConversation) conversationUiState.addMessage(Message(text, false, Instant.now()))
     }
 
     // =========================
-    // metadata stabilization (song name follows progress)
+    // metadata stabilization
     // =========================
     private fun stabilizeNowPlayingMetadata(
         rawTitle: String,
