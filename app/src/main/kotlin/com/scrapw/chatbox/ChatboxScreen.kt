@@ -112,12 +112,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.Query
-import com.google.firebase.firestore.SetOptions
-import com.scrapw.chatbox.ui.ChatboxViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
@@ -224,7 +221,6 @@ private data class ModerationUi(
     val warnReason: String = "",
     val banned: Boolean = false,
     val banReason: String = "",
-    // legacy collection support (admin-only by default):
     val deviceBanned: Boolean = false,
     val deviceBanReason: String = "",
     val updatedAt: Timestamp? = null
@@ -276,26 +272,22 @@ private object DeviceId {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatboxScreen(
-    chatboxViewModel: ChatboxViewModel
+    chatboxViewModel: com.scrapw.chatbox.ui.ChatboxViewModel
 ) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    // --- Firebase (public + admin) ---
+    // --- Firebase (ToS + announcements only; moderation comes from ViewModel) ---
     val auth = remember { FirebaseAuth.getInstance() }
     val db = remember { FirebaseFirestore.getInstance() }
 
-    // ✅ Ensure device hash exists for this install/user (survives reinstall)
+    // Ensure device hash exists for this install/user (survives reinstall)
     val deviceHash = remember { DeviceId.ensure(ctx).trim() }
 
-    // Still use anon auth (rules can use request.auth != null), BUT identity is deviceHash.
     var authedUid by remember { mutableStateOf(auth.currentUser?.uid?.trim()) }
 
-    // ✅ Capture last Firebase issue for Debug ONLY
+    // Capture last Firebase issue for Debug ONLY (from ToS/announcements/auth)
     var lastFirebaseIssue by remember { mutableStateOf<String?>(null) }
-
-    // ✅ Gate: we do NOT attach moderation listener until we've written users/{deviceHash} with a real UID.
-    var userDocReady by remember { mutableStateOf(false) }
 
     fun reportFirebase(tag: String, msg: String, t: Throwable? = null) {
         val full = "[$tag] $msg" + (t?.let { " :: ${it.message ?: it::class.java.simpleName}" } ?: "")
@@ -305,7 +297,7 @@ fun ChatboxScreen(
 
     fun safeUid(): String = authedUid?.trim().orEmpty()
 
-    // ✅ Ensure anon auth ASAP
+    // Ensure anon auth ASAP (VM also does this, but we keep it for ToS/announcements listeners)
     LaunchedEffect(Unit) {
         if (auth.currentUser == null) {
             runCatching {
@@ -319,119 +311,9 @@ fun ChatboxScreen(
         }
     }
 
-    /* =========================================================
-       ✅ DEVICE-FIRST USER DOC
-       FIX: DO NOT WRITE UNTIL auth uid is NON-BLANK
-       Also: set userDocReady=true only after a successful write.
-       ========================================================= */
-    LaunchedEffect(authedUid, deviceHash) {
-        val dh = deviceHash.trim()
-        if (dh.isBlank()) return@LaunchedEffect
-
-        val uid = safeUid()
-        if (uid.isBlank()) return@LaunchedEffect
-
-        // If we already successfully wrote once this session, don't spam writes.
-        if (userDocReady) return@LaunchedEffect
-
-        var lastErr: Throwable? = null
-        repeat(3) { attempt ->
-            runCatching {
-                val data = hashMapOf<String, Any>(
-                    "deviceHash" to dh,
-                    "authUid" to uid,
-                    // legacy alias (some older code queries "uid")
-                    "uid" to uid,
-                    "appId" to BuildConfig.APPLICATION_ID,
-                    "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
-                    "lastSeenAt" to FieldValue.serverTimestamp(),
-                    "updatedAt" to FieldValue.serverTimestamp(),
-                    "versionCode" to BuildConfig.VERSION_CODE,
-                    "versionName" to BuildConfig.VERSION_NAME
-                )
-
-                db.collection("users").document(dh)
-                    .set(data, SetOptions.merge())
-                    .await()
-
-                // Optional: UID -> deviceHash mapping
-                db.collection("usersByUid").document(uid)
-                    .set(
-                        mapOf(
-                            "deviceHash" to dh,
-                            "authUid" to uid,
-                            "appId" to BuildConfig.APPLICATION_ID,
-                            "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
-                            "updatedAt" to FieldValue.serverTimestamp()
-                        ),
-                        SetOptions.merge()
-                    )
-                    .await()
-
-                userDocReady = true
-            }.onFailure { e ->
-                lastErr = e
-                // Small backoff then retry
-                delay(250L + attempt * 350L)
-            }
-            if (userDocReady) return@LaunchedEffect
-        }
-
-        if (!userDocReady && lastErr != null) {
-            reportFirebase("users/$dh", "Failed writing device-first user doc", lastErr)
-        }
-    }
-
-    // ✅ Admin-build-only heartbeat for devices/{deviceHash} (admin diagnostics)
-    if (BuildConfig.IS_ADMIN_BUILD) {
-        LaunchedEffect(deviceHash, authedUid) {
-            val dh = deviceHash.trim()
-            if (dh.isBlank()) return@LaunchedEffect
-            if (safeUid().isBlank()) return@LaunchedEffect
-
-            runCatching {
-                db.collection("devices").document(dh)
-                    .set(
-                        mapOf(
-                            "lastSeenAt" to FieldValue.serverTimestamp(),
-                            "appId" to BuildConfig.APPLICATION_ID,
-                            "adminBuild" to true,
-                            "updatedAt" to FieldValue.serverTimestamp()
-                        ),
-                        SetOptions.merge()
-                    )
-                    .await()
-            }.onFailure { e ->
-                reportFirebase("devices/$dh", "Failed writing admin heartbeat", e)
-            }
-
-            while (true) {
-                delay(120_000L)
-                runCatching {
-                    db.collection("devices").document(dh)
-                        .set(
-                            mapOf(
-                                "lastSeenAt" to FieldValue.serverTimestamp(),
-                                "updatedAt" to FieldValue.serverTimestamp()
-                            ),
-                            SetOptions.merge()
-                        )
-                        .await()
-                }.onFailure { e ->
-                    reportFirebase("devices/$dh", "Failed updating admin heartbeat", e)
-                }
-            }
-        }
-    }
-
     // --- Remote config state ---
     var remoteTos by remember { mutableStateOf(RemoteTosUi()) }
     var announcements by remember { mutableStateOf<List<AnnouncementUi>>(emptyList()) }
-
-    // Moderation state:
-    // PRIMARY: users/{deviceHash}.warned/banned (+ reasons)
-    // OPTIONAL legacy: bannedDevices/{deviceHash} (admin build only to avoid noise)
-    var moderation by remember { mutableStateOf(ModerationUi()) }
 
     // Listen: config/app (ToS)
     DisposableEffect(Unit) {
@@ -487,62 +369,24 @@ fun ChatboxScreen(
         onDispose { reg?.remove() }
     }
 
-    // ✅ PRIMARY moderation: users/{deviceHash}
-    // FIX: do NOT attach this listener until userDocReady=true (prevents first-run PERMISSION_DENIED spam).
-    DisposableEffect(deviceHash, userDocReady) {
-        var reg: ListenerRegistration? = null
-        val dh = deviceHash.trim()
-
-        if (userDocReady && dh.isNotBlank()) {
-            reg = db.collection("users").document(dh)
-                .addSnapshotListener { snap, err ->
-                    if (err != null) {
-                        // Now it’s a *real* error (not first-frame “doc doesn’t exist yet”).
-                        reportFirebase("users/$dh", "Failed to load moderation", err)
-                        return@addSnapshotListener
-                    }
-
-                    val warned = snap?.getBoolean("warned") ?: false
-                    val warnReason = (snap?.getString("warnReason") ?: "").trim()
-                    val banned = snap?.getBoolean("banned") ?: false
-                    val banReason = (snap?.getString("banReason") ?: "").trim()
-                    val updatedAt = snap?.getTimestamp("updatedAt")
-
-                    moderation = moderation.copy(
-                        warned = warned,
-                        warnReason = warnReason,
-                        banned = banned,
-                        banReason = banReason,
-                        updatedAt = updatedAt
-                    )
-                }
-        }
-
-        onDispose { reg?.remove() }
-    }
-
-    // Optional legacy device-ban collection support: bannedDevices/{deviceHash} (admin only)
-    if (BuildConfig.IS_ADMIN_BUILD) {
-        DisposableEffect(deviceHash, userDocReady) {
-            var reg: ListenerRegistration? = null
-            val dh = deviceHash.trim()
-            if (userDocReady && dh.isNotBlank()) {
-                reg = db.collection("bannedDevices").document(dh)
-                    .addSnapshotListener { snap, err ->
-                        if (err != null) {
-                            reportFirebase("bannedDevices/$dh", "Failed to load legacy device ban", err)
-                            return@addSnapshotListener
-                        }
-                        val banned = snap?.getBoolean("banned") ?: false
-                        val reason = (snap?.getString("reason") ?: "").trim()
-                        moderation = moderation.copy(
-                            deviceBanned = banned,
-                            deviceBanReason = reason
-                        )
-                    }
-            }
-            onDispose { reg?.remove() }
-        }
+    // --- Moderation state comes from ViewModel ---
+    val moderation = remember(
+        chatboxViewModel.warned,
+        chatboxViewModel.warnReason,
+        chatboxViewModel.uidBanned,
+        chatboxViewModel.banReason,
+        chatboxViewModel.deviceBanned,
+        chatboxViewModel.deviceBanReason
+    ) {
+        ModerationUi(
+            warned = chatboxViewModel.warned,
+            warnReason = chatboxViewModel.warnReason,
+            banned = chatboxViewModel.uidBanned,
+            banReason = chatboxViewModel.banReason,
+            deviceBanned = chatboxViewModel.deviceBanned,
+            deviceBanReason = chatboxViewModel.deviceBanReason,
+            updatedAt = null
+        )
     }
 
     // --- ToS gate (remote) ---
@@ -571,9 +415,10 @@ fun ChatboxScreen(
         return
     }
 
-    // --- Ban gate (DEVICE-FIRST) ---
-    val isBannedEffective = moderation.banned || moderation.deviceBanned
+    // --- Ban gate (from VM) ---
+    val isBannedEffective = chatboxViewModel.isBanned
 
+    // Ensure a one-time stop/clear when the ban flips on
     var banStopRan by remember { mutableStateOf(false) }
     LaunchedEffect(isBannedEffective) {
         if (isBannedEffective && !banStopRan) {
@@ -585,7 +430,7 @@ fun ChatboxScreen(
 
     var page by rememberSaveable { mutableStateOf(AppPage.Home) }
 
-    // ✅ SAFETY: if PUBLIC build, never allow landing on Admin
+    // Safety: if PUBLIC build, never allow landing on Admin
     LaunchedEffect(Unit) {
         if (!BuildConfig.IS_ADMIN_BUILD && page == AppPage.Admin) page = AppPage.Home
     }
@@ -653,13 +498,13 @@ fun ChatboxScreen(
             snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
             contentWindowInsets = WindowInsets(0)
         ) { padding ->
-            // ✅ Use Column so banners are NOT drawn on top of content.
+            // Use Column so banners are NOT drawn on top of content.
             Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                // ✅ Warning banner only (announcements are shown inside HomePage now)
+                // Warning banner only (ban shows full screen)
                 GlobalStatusBanner(moderation = moderation)
 
                 Crossfade(targetState = page, label = "page_crossfade") { p ->
@@ -680,15 +525,17 @@ fun ChatboxScreen(
                                     snackbarHostState = snackbarHostState,
                                     onOpenSettings = { showSettingsSheet = true },
                                     announcements = announcements,
-                                    moderation = moderation
+                                    moderation = moderation,
+                                    isBanned = false
                                 )
                             }
                         }
 
-                        AppPage.Automations -> AutomationsPage(chatboxViewModel)
+                        AppPage.Automations -> AutomationsPage(chatboxViewModel, isBanned = isBannedEffective)
 
                         AppPage.Music -> NowPlayingPage(
                             vm = chatboxViewModel,
+                            isBanned = isBannedEffective,
                             onPersistSpotifyEnabled = { UiPrefs.writeSpotifyEnabled(ctx, it) },
                             onPersistSpotifyDemo = { UiPrefs.writeSpotifyDemo(ctx, it) },
                             onPersistSpotifyPreset = { UiPrefs.writeSpotifyPreset(ctx, it) }
@@ -696,7 +543,8 @@ fun ChatboxScreen(
 
                         AppPage.Debug -> DebugPage(
                             vm = chatboxViewModel,
-                            lastFirebaseIssue = lastFirebaseIssue
+                            lastFirebaseIssue = lastFirebaseIssue,
+                            moderationError = chatboxViewModel.moderationLastError
                         )
 
                         AppPage.Admin -> {
@@ -708,7 +556,8 @@ fun ChatboxScreen(
                                     snackbarHostState = snackbarHostState,
                                     onOpenSettings = { showSettingsSheet = true },
                                     announcements = announcements,
-                                    moderation = moderation
+                                    moderation = moderation,
+                                    isBanned = isBannedEffective
                                 )
                             }
                         }
@@ -787,7 +636,7 @@ private fun BannedScreen(
 
                     val reasons = buildList {
                         if (banReason.isNotBlank()) add("Ban reason: $banReason")
-                        if (deviceBanReason.isNotBlank()) add("Legacy device ban: $deviceBanReason")
+                        if (deviceBanReason.isNotBlank()) add("Device ban: $deviceBanReason")
                     }.ifEmpty { listOf("No reason provided.") }
 
                     reasons.forEach { r ->
@@ -837,7 +686,7 @@ private fun TosGate(
 ) {
     var checked by rememberSaveable { mutableStateOf(false) }
 
-    // ✅ Always show something even if Firestore text is empty.
+    // Always show something even if Firestore text is empty.
     val fallbackText = remember {
         """
 TERMS OF SERVICE (SUMMARY)
@@ -1103,7 +952,8 @@ private fun HomePage(
     snackbarHostState: SnackbarHostState,
     onOpenSettings: () -> Unit,
     announcements: List<AnnouncementUi>,
-    moderation: ModerationUi
+    moderation: ModerationUi,
+    isBanned: Boolean
 ) {
     val uiState by vm.messengerUiState.collectAsState()
     val ctx = LocalContext.current
@@ -1185,11 +1035,13 @@ private fun HomePage(
                         vm.startAfkSender()
                         vm.startCycle()
                         vm.startNowPlayingSender()
-                    }
+                    },
+                    enabled = !isBanned
                 ) { Text("Start") }
 
                 Button(
                     onClick = { vm.killStopAndClear() },
+                    enabled = !isBanned,
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
                 ) {
                     Text("KILL", color = MaterialTheme.colorScheme.onError)
@@ -1264,9 +1116,9 @@ private fun HomePage(
             ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("Quick Toggles", style = MaterialTheme.typography.titleSmall)
-                    ToggleRow("AFK", vm.afkEnabled) { vm.setAfkEnabledFlag(it) }
-                    ToggleRow("Cycle", vm.cycleEnabled) { vm.setCycleEnabledFlag(it) }
-                    ToggleRow("Now Playing", vm.spotifyEnabled) { vm.setSpotifyEnabledFlag(it) }
+                    ToggleRow("AFK", vm.afkEnabled, enabled = !isBanned) { vm.setAfkEnabledFlag(it) }
+                    ToggleRow("Cycle", vm.cycleEnabled, enabled = !isBanned) { vm.setCycleEnabledFlag(it) }
+                    ToggleRow("Now Playing", vm.spotifyEnabled, enabled = !isBanned) { vm.setSpotifyEnabledFlag(it) }
                 }
             }
         }
@@ -1361,7 +1213,8 @@ private fun HomePage(
                     singleLine = true,
                     label = { Text("Headset IP address") },
                     placeholder = { Text("Example: 192.168.1.23") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+                    enabled = !isBanned
                 )
 
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -1375,12 +1228,14 @@ private fun HomePage(
                                     }
                                 }
                         },
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f),
+                        enabled = !isBanned
                     ) { Text("Apply") }
 
                     OutlinedButton(
                         onClick = { ipInputText = uiState.ipAddress },
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f),
+                        enabled = !isBanned
                     ) { Text("Reset") }
                 }
 
@@ -1401,9 +1256,14 @@ private fun HomePage(
                     onValueChange = { v: TextFieldValue -> vm.onMessageTextChange(v) },
                     modifier = Modifier.fillMaxWidth(),
                     minLines = 2,
-                    label = { Text("Message") }
+                    label = { Text("Message") },
+                    enabled = !isBanned
                 )
-                Button(onClick = { vm.sendMessage() }, modifier = Modifier.fillMaxWidth()) {
+                Button(
+                    onClick = { vm.sendMessage() },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !isBanned
+                ) {
                     Text("Send")
                 }
             }
@@ -1415,11 +1275,12 @@ private fun HomePage(
 private fun ToggleRow(
     label: String,
     checked: Boolean,
+    enabled: Boolean = true,
     onCheckedChange: (Boolean) -> Unit
 ) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
         Text(label)
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
     }
 }
 
@@ -1480,7 +1341,7 @@ private fun TutorialStep(
    ========================= */
 
 @Composable
-private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
+private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel, isBanned: Boolean) {
     val scope = rememberCoroutineScope()
     var tab by rememberSaveable { mutableStateOf(ChatboxAutomationsTab.AFK) }
 
@@ -1535,14 +1396,15 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
                     title = "AFK",
                     subtitle = "AFK always appears above Cycle + Music."
                 ) {
-                    ToggleRow("AFK enabled", vm.afkEnabled) { vm.setAfkEnabledFlag(it) }
+                    ToggleRow("AFK enabled", vm.afkEnabled, enabled = !isBanned) { vm.setAfkEnabledFlag(it) }
 
                     OutlinedTextField(
                         value = vm.afkMessage,
                         onValueChange = { s: String -> vm.updateAfkText(s) },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
-                        label = { Text("AFK text") }
+                        label = { Text("AFK text") },
+                        enabled = !isBanned
                     )
 
                     ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
@@ -1555,7 +1417,7 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
                             Row(
                                 Modifier
                                     .fillMaxWidth()
-                                    .clickable { vm.updateAfkPresetsCollapsed(!vm.afkPresetsCollapsed) },
+                                    .clickable(enabled = !isBanned) { vm.updateAfkPresetsCollapsed(!vm.afkPresetsCollapsed) },
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
@@ -1593,12 +1455,14 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
                                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                                     OutlinedButton(
                                                         onClick = { scope.launch { vm.loadAfkPreset(slot) } },
-                                                        modifier = Modifier.weight(1f)
+                                                        modifier = Modifier.weight(1f),
+                                                        enabled = !isBanned
                                                     ) { Text("Load") }
 
                                                     Button(
                                                         onClick = { scope.launch { vm.saveAfkPreset(slot, vm.afkMessage) } },
-                                                        modifier = Modifier.weight(1f)
+                                                        modifier = Modifier.weight(1f),
+                                                        enabled = !isBanned
                                                     ) { Text("Save") }
                                                 }
                                             }
@@ -1613,19 +1477,20 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
                         Button(
                             onClick = { vm.startAfkSender() },
                             modifier = Modifier.weight(1f),
-                            enabled = vm.afkEnabled
+                            enabled = !isBanned && vm.afkEnabled
                         ) { Text("Start") }
 
                         OutlinedButton(
                             onClick = { vm.stopAfkSender(clearFromChatbox = true) },
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.weight(1f),
+                            enabled = !isBanned
                         ) { Text("Stop") }
                     }
 
                     OutlinedButton(
                         onClick = { vm.sendAfkNow() },
                         modifier = Modifier.fillMaxWidth(),
-                        enabled = vm.afkEnabled
+                        enabled = !isBanned && vm.afkEnabled
                     ) { Text("Send once") }
                 }
             }
@@ -1635,7 +1500,7 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
                     title = "Cycle",
                     subtitle = "Up to 10 lines. Stop clears instantly."
                 ) {
-                    ToggleRow("Cycle enabled", vm.cycleEnabled) { vm.setCycleEnabledFlag(it) }
+                    ToggleRow("Cycle enabled", vm.cycleEnabled, enabled = !isBanned) { vm.setCycleEnabledFlag(it) }
 
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (vm.cycleLines.isEmpty()) {
@@ -1643,7 +1508,8 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
                         }
 
                         vm.cycleLines.forEachIndexed { idx, _ ->
-                            val fieldValue = cycleLineFields[idx] ?: TextFieldValue(vm.cycleLines.getOrNull(idx).orEmpty())
+                            val fieldValue =
+                                cycleLineFields[idx] ?: TextFieldValue(vm.cycleLines.getOrNull(idx).orEmpty())
 
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 OutlinedTextField(
@@ -1654,10 +1520,11 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
                                     },
                                     modifier = Modifier.weight(1f),
                                     singleLine = true,
-                                    label = { Text("Line ${idx + 1}") }
+                                    label = { Text("Line ${idx + 1}") },
+                                    enabled = !isBanned
                                 )
                                 Spacer(Modifier.width(8.dp))
-                                IconButton(onClick = { vm.removeCycleLine(idx) }) {
+                                IconButton(onClick = { vm.removeCycleLine(idx) }, enabled = !isBanned) {
                                     Icon(Icons.Filled.Delete, contentDescription = "Remove line")
                                 }
                             }
@@ -1666,7 +1533,7 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             OutlinedButton(
                                 onClick = { vm.addCycleLine() },
-                                enabled = vm.cycleLines.size < 10,
+                                enabled = !isBanned && vm.cycleLines.size < 10,
                                 modifier = Modifier.weight(1f)
                             ) {
                                 Icon(Icons.Filled.Add, contentDescription = null)
@@ -1676,7 +1543,7 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
 
                             OutlinedButton(
                                 onClick = { vm.clearCycleLines() },
-                                enabled = vm.cycleLines.isNotEmpty(),
+                                enabled = !isBanned && vm.cycleLines.isNotEmpty(),
                                 modifier = Modifier.weight(1f)
                             ) { Text("Clear") }
                         }
@@ -1698,7 +1565,7 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
                             Row(
                                 Modifier
                                     .fillMaxWidth()
-                                    .clickable { vm.updateCyclePresetsCollapsed(!vm.cyclePresetsCollapsed) },
+                                    .clickable(enabled = !isBanned) { vm.updateCyclePresetsCollapsed(!vm.cyclePresetsCollapsed) },
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
@@ -1736,12 +1603,14 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
                                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                                     OutlinedButton(
                                                         onClick = { scope.launch { vm.loadCyclePreset(slot) } },
-                                                        modifier = Modifier.weight(1f)
+                                                        modifier = Modifier.weight(1f),
+                                                        enabled = !isBanned
                                                     ) { Text("Load") }
 
                                                     Button(
                                                         onClick = { scope.launch { vm.saveCyclePreset(slot, vm.cycleLines.toList()) } },
-                                                        modifier = Modifier.weight(1f)
+                                                        modifier = Modifier.weight(1f),
+                                                        enabled = !isBanned
                                                     ) { Text("Save") }
                                                 }
                                             }
@@ -1756,12 +1625,13 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
                         Button(
                             onClick = { vm.startCycle() },
                             modifier = Modifier.weight(1f),
-                            enabled = vm.cycleEnabled && vm.cycleLines.any { it.trim().isNotEmpty() }
+                            enabled = !isBanned && vm.cycleEnabled && vm.cycleLines.any { it.trim().isNotEmpty() }
                         ) { Text("Start") }
 
                         OutlinedButton(
                             onClick = { vm.stopCycle(clearFromChatbox = true) },
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.weight(1f),
+                            enabled = !isBanned
                         ) { Text("Stop") }
                     }
                 }
@@ -1777,6 +1647,7 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
 @Composable
 private fun NowPlayingPage(
     vm: com.scrapw.chatbox.ui.ChatboxViewModel,
+    isBanned: Boolean,
     onPersistSpotifyEnabled: (Boolean) -> Unit,
     onPersistSpotifyDemo: (Boolean) -> Unit,
     onPersistSpotifyPreset: (Int) -> Unit
@@ -1797,11 +1668,11 @@ private fun NowPlayingPage(
             title = "Now Playing",
             subtitle = "Uses Notification Access. Stop clears instantly."
         ) {
-            ToggleRow("Enable Now Playing block", vm.spotifyEnabled) {
+            ToggleRow("Enable Now Playing block", vm.spotifyEnabled, enabled = !isBanned) {
                 vm.setSpotifyEnabledFlag(it)
                 onPersistSpotifyEnabled(it)
             }
-            ToggleRow("Demo mode (testing)", vm.spotifyDemoEnabled) {
+            ToggleRow("Demo mode (testing)", vm.spotifyDemoEnabled, enabled = !isBanned) {
                 vm.setSpotifyDemoFlag(it)
                 onPersistSpotifyDemo(it)
             }
@@ -1834,7 +1705,7 @@ private fun NowPlayingPage(
                             Modifier
                                 .fillMaxWidth()
                                 .padding(10.dp)
-                                .clickable {
+                                .clickable(enabled = !isBanned) {
                                     vm.updateSpotifyPreset(p)
                                     onPersistSpotifyPreset(p)
                                 },
@@ -1859,19 +1730,20 @@ private fun NowPlayingPage(
                 Button(
                     onClick = { vm.startNowPlayingSender() },
                     modifier = Modifier.weight(1f),
-                    enabled = vm.spotifyEnabled
+                    enabled = !isBanned && vm.spotifyEnabled
                 ) { Text("Start") }
 
                 OutlinedButton(
                     onClick = { vm.stopNowPlayingSender(clearFromChatbox = true) },
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.weight(1f),
+                    enabled = !isBanned
                 ) { Text("Stop") }
             }
 
             OutlinedButton(
                 onClick = { vm.sendNowPlayingOnce() },
                 modifier = Modifier.fillMaxWidth(),
-                enabled = vm.spotifyEnabled
+                enabled = !isBanned && vm.spotifyEnabled
             ) { Text("Send once now (test)") }
         }
 
@@ -1893,14 +1765,28 @@ private fun NowPlayingPage(
    ========================= */
 
 @Composable
-private fun DebugPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel, lastFirebaseIssue: String?) {
+private fun DebugPage(
+    vm: com.scrapw.chatbox.ui.ChatboxViewModel,
+    lastFirebaseIssue: String?,
+    moderationError: String?
+) {
     PageContainer {
         SectionCard(
             title = "Firebase (last issue)",
-            subtitle = "Only shown here. Not shown as a global banner."
+            subtitle = "ToS / Announcements / Auth errors captured here."
         ) {
             Text(
                 text = lastFirebaseIssue ?: "(none captured)",
+                fontFamily = FontFamily.Monospace
+            )
+        }
+
+        SectionCard(
+            title = "Moderation listener (last error)",
+            subtitle = "If non-empty, moderation reads may be failing."
+        ) {
+            Text(
+                text = moderationError?.ifBlank { "(none)" } ?: "(none)",
                 fontFamily = FontFamily.Monospace
             )
         }
