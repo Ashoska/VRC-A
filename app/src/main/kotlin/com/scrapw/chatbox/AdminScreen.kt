@@ -46,6 +46,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -68,6 +69,7 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.SetOptions
 import kotlinx.coroutines.launch
@@ -76,8 +78,17 @@ import kotlinx.coroutines.tasks.await
 /**
  * Owner-only Admin screen.
  *
- * Canonical users doc is:
- * - users/{docId}  (docId usually == deviceHash)
+ * Level 3 "reactive":
+ * - Users list: live listener
+ * - Selected user: live listener (detail updates immediately)
+ * - Moderation events: live listener (no composite-index requirement)
+ * - Announcements: live listener
+ *
+ * Fixes included:
+ * 1) Users showing "blank" data: list shows docId always + pulls authUid/deviceHash if present; selected view shows RAW fields too.
+ * 2) Big blank space on selected user view: Send button is now a bottom bar; content scrolls above it.
+ * 3) "FAILED_PRECONDITION requires an index" when sending to moderation: history listener avoids composite index by listening to
+ *    moderationEvents ordered only by createdAt and filtering client-side.
  */
 @Composable
 fun AdminScreen() {
@@ -181,10 +192,7 @@ fun AdminScreen() {
                 item { Text("Admin", style = MaterialTheme.typography.titleLarge) }
 
                 item {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
-                    ) {
+                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
                         Column(
                             Modifier.padding(12.dp),
                             verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -199,7 +207,7 @@ fun AdminScreen() {
                 }
 
                 item {
-                    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+                    ElevatedCard {
                         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("IDs", style = MaterialTheme.typography.titleSmall)
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -258,7 +266,7 @@ fun AdminScreen() {
                 .padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // Header (clean)
+            // Header
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
@@ -287,7 +295,7 @@ fun AdminScreen() {
                 }
             }
 
-            // IDs card (tight; never “squished”)
+            // IDs card (tight)
             AnimatedVisibility(visible = idsExpanded) {
                 ElevatedCard(
                     modifier = Modifier
@@ -417,7 +425,7 @@ fun AdminScreen() {
 }
 
 /* =========================================================
-   USERS TAB
+   USERS TAB (reactive list + reactive selected user)
    ========================================================= */
 
 private data class UserRow(
@@ -448,7 +456,8 @@ private data class UserDetail(
     val warnReason: String,
     val banReason: String,
     val afkPresets: List<String>,
-    val cyclePresets: List<String>
+    val cyclePresets: List<String>,
+    val raw: Map<String, Any?>
 )
 
 private data class ModerationTarget(
@@ -470,10 +479,6 @@ private fun UsersTab(
     val listState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
 
     val users = remember { mutableStateListOf<UserRow>() }
-    var pagingLoading by remember { mutableStateOf(false) }
-    var hasMore by remember { mutableStateOf(true) }
-    var lastDoc by remember { mutableStateOf<DocumentSnapshot?>(null) }
-    val pageSize = 75
 
     var search by rememberSaveable { mutableStateOf("") }
     var filterWarned by rememberSaveable { mutableStateOf(false) }
@@ -482,9 +487,9 @@ private fun UsersTab(
     // Selected user takes over whole Users tab until unselected
     var selectedDocId by rememberSaveable { mutableStateOf<String?>(null) }
 
-    // Cache details per user docId (loaded only when opened)
-    val detailsCache = remember { mutableMapOf<String, UserDetail>() }
-    var detailsLoadingFor by remember { mutableStateOf<String?>(null) }
+    // Live detail snapshot of selected user
+    var selectedDetail by remember { mutableStateOf<UserDetail?>(null) }
+    var selectedDetailLoading by remember { mutableStateOf(false) }
 
     fun rowMatches(u: UserRow, q: String): Boolean {
         if (q.isBlank()) return true
@@ -506,104 +511,112 @@ private fun UsersTab(
         }
     }
 
-    suspend fun loadNextPage() {
-        if (pagingLoading || !hasMore) return
-        pagingLoading = true
+    // Level 3: live users list
+    DisposableEffect(Unit) {
         setError(null)
+        setGlobalLoading(true)
 
-        runCatching {
-            var q: Query = db.collection("users")
-                .orderBy("lastSeenAt", Query.Direction.DESCENDING)
-                .limit(pageSize.toLong())
+        val reg: ListenerRegistration = db.collection("users")
+            .orderBy("lastSeenAt", Query.Direction.DESCENDING)
+            .limit(500)
+            .addSnapshotListener { snap, e ->
+                if (e != null) {
+                    setGlobalLoading(false)
+                    setError(e.message ?: "Users listener error")
+                    return@addSnapshotListener
+                }
+                if (snap == null) {
+                    setGlobalLoading(false)
+                    return@addSnapshotListener
+                }
 
-            lastDoc?.let { q = q.startAfter(it) }
-
-            val snap = q.get().await()
-            val docs = snap.documents
-
-            docs.forEach { d ->
-                val docId = d.id
-                val authUid = (d.getString("authUid") ?: d.getString("uid") ?: "").trim()
-                users.add(
+                val newList = snap.documents.map { d ->
+                    val docId = d.id
+                    // Never allow the row to be "all blank": show docId always.
+                    val authUid = (d.getString("authUid") ?: d.getString("uid") ?: "").trim()
+                    val deviceHash = (d.getString("deviceHash") ?: "").trim()
                     UserRow(
                         docId = docId,
                         authUid = authUid,
                         displayName = (d.getString("displayName") ?: "").trim(),
-                        deviceHash = (d.getString("deviceHash") ?: "").trim(),
+                        deviceHash = deviceHash,
                         warned = d.getBoolean("warned") ?: false,
                         banned = d.getBoolean("banned") ?: false,
                         lastSeenAt = d.getTimestamp("lastSeenAt"),
                         updatedAt = d.getTimestamp("updatedAt")
                     )
-                )
+                }
+
+                users.clear()
+                users.addAll(newList)
+                setGlobalLoading(false)
             }
 
-            lastDoc = docs.lastOrNull()
-            if (docs.size < pageSize) hasMore = false
-            pagingLoading = false
-        }.onFailure { e ->
-            pagingLoading = false
-            setError(e.message ?: "Failed to load users list")
-        }
+        onDispose { reg.remove() }
     }
 
-    suspend fun resetAndLoad() {
-        users.clear()
-        hasMore = true
-        lastDoc = null
-        selectedDocId = null
-        detailsCache.clear()
-        loadNextPage()
-    }
+    // Level 3: live selected user doc
+    DisposableEffect(selectedDocId) {
+        selectedDetail = null
+        val id = selectedDocId ?: return@DisposableEffect onDispose { }
 
-    suspend fun loadDetails(docId: String) {
-        if (detailsCache.containsKey(docId)) return
-        detailsLoadingFor = docId
+        selectedDetailLoading = true
         setError(null)
 
-        runCatching {
-            val snap = db.collection("users").document(docId).get().await()
+        val reg = db.collection("users").document(id)
+            .addSnapshotListener { snap, e ->
+                if (e != null) {
+                    selectedDetailLoading = false
+                    setError(e.message ?: "User detail listener error")
+                    return@addSnapshotListener
+                }
+                if (snap == null || !snap.exists()) {
+                    selectedDetailLoading = false
+                    selectedDetail = null
+                    return@addSnapshotListener
+                }
 
-            fun s(key: String) = (snap.getString(key) ?: "").trim()
-            fun b(key: String) = snap.getBoolean(key) ?: false
-            fun l(key: String) = snap.getLong(key) ?: 0L
+                fun s(key: String) = (snap.getString(key) ?: "").trim()
+                fun b(key: String) = snap.getBoolean(key) ?: false
+                fun l(key: String) = snap.getLong(key) ?: 0L
 
-            val afkPresets = listOf(s("afkPreset1"), s("afkPreset2"), s("afkPreset3"))
-            val cyclePresets = listOf(
-                s("cyclePreset1"),
-                s("cyclePreset2"),
-                s("cyclePreset3"),
-                s("cyclePreset4"),
-                s("cyclePreset5")
-            )
+                val afkPresets = listOf(s("afkPreset1"), s("afkPreset2"), s("afkPreset3"))
+                val cyclePresets = listOf(
+                    s("cyclePreset1"),
+                    s("cyclePreset2"),
+                    s("cyclePreset3"),
+                    s("cyclePreset4"),
+                    s("cyclePreset5")
+                )
 
-            detailsCache[docId] = UserDetail(
-                afkEnabled = b("afkEnabled"),
-                afkMessage = s("afkMessage"),
-                cycleEnabled = b("cycleEnabled"),
-                cycleIntervalSeconds = l("cycleIntervalSeconds"),
-                cycleLinesText = s("cycleLinesText"),
-                spotifyEnabled = b("spotifyEnabled"),
-                spotifyDemoEnabled = b("spotifyDemoEnabled"),
-                spotifyPreset = l("spotifyPreset"),
-                nowPlayingDetected = b("nowPlayingDetected"),
-                nowPlayingIsPlaying = b("nowPlayingIsPlaying"),
-                nowPlayingTitle = s("nowPlayingTitle"),
-                nowPlayingArtist = s("nowPlayingArtist"),
-                combinedPreviewText = s("combinedPreviewText"),
-                warnReason = s("warnReason"),
-                banReason = s("banReason"),
-                afkPresets = afkPresets,
-                cyclePresets = cyclePresets
-            )
-        }.onFailure { e ->
-            setError(e.message ?: "Failed to load user details")
-        }
+                // Raw map to help debug "why is it blank" without leaving app
+                val rawMap: Map<String, Any?> = snap.data?.toMap() ?: emptyMap()
 
-        detailsLoadingFor = null
+                selectedDetail = UserDetail(
+                    afkEnabled = b("afkEnabled"),
+                    afkMessage = s("afkMessage"),
+                    cycleEnabled = b("cycleEnabled"),
+                    cycleIntervalSeconds = l("cycleIntervalSeconds"),
+                    cycleLinesText = s("cycleLinesText"),
+                    spotifyEnabled = b("spotifyEnabled"),
+                    spotifyDemoEnabled = b("spotifyDemoEnabled"),
+                    spotifyPreset = l("spotifyPreset"),
+                    nowPlayingDetected = b("nowPlayingDetected"),
+                    nowPlayingIsPlaying = b("nowPlayingIsPlaying"),
+                    nowPlayingTitle = s("nowPlayingTitle"),
+                    nowPlayingArtist = s("nowPlayingArtist"),
+                    combinedPreviewText = s("combinedPreviewText"),
+                    warnReason = s("warnReason"),
+                    banReason = s("banReason"),
+                    afkPresets = afkPresets,
+                    cyclePresets = cyclePresets,
+                    raw = rawMap
+                )
+                selectedDetailLoading = false
+            }
+
+        onDispose { reg.remove() }
     }
-
-    LaunchedEffect(Unit) { resetAndLoad() }
 
     // If a user is selected, take over the whole Users tab with a dedicated detail view.
     val selectedRow = remember(selectedDocId, users.size) {
@@ -611,137 +624,158 @@ private fun UsersTab(
     }
 
     if (selectedRow != null) {
-        val docId = selectedRow.docId
-        val detail = detailsCache[docId]
-        val isDetailLoading = detailsLoadingFor == docId
-
-        LaunchedEffect(docId) { loadDetails(docId) }
-
-        // Full-height detail view (and full-width cards to avoid “squish”)
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            item {
-                ElevatedCard(modifier = Modifier.fillMaxWidth()) {
-                    Column(
-                        Modifier.padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
+        // FIX: remove weird empty space by using a bottom action bar;
+        // the detail content scrolls above it.
+        Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                item {
+                    ElevatedCard {
+                        Column(
+                            Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                IconButton(onClick = { selectedDocId = null }) {
-                                    Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    IconButton(onClick = { selectedDocId = null }) {
+                                        Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
+                                    }
+                                    Column {
+                                        Text(
+                                            selectedRow.displayName.ifBlank { "User" },
+                                            style = MaterialTheme.typography.titleMedium
+                                        )
+                                        Text(
+                                            "docId=${selectedRow.docId}",
+                                            fontFamily = FontFamily.Monospace,
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
                                 }
-                                Column {
+
+                                IconButton(onClick = {
+                                    // listener will update automatically; this just clears errors
+                                    setError(null)
+                                }) {
+                                    Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
+                                }
+                            }
+
+                            Text(
+                                "authUid=${selectedRow.authUid.ifBlank { "(blank)" }}",
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Text(
+                                "deviceHash=${selectedRow.deviceHash.ifBlank { "(blank)" }}",
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Text(
+                                "warned=${selectedRow.warned}  banned=${selectedRow.banned}",
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Text(
+                                "lastSeenAt=${selectedRow.lastSeenAt ?: "?"}   updatedAt=${selectedRow.updatedAt ?: "?"}",
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+
+                            Divider()
+
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedButton(onClick = { clipboardCopy(selectedRow.docId) }) {
+                                    Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Copy docId")
+                                }
+                                if (selectedRow.authUid.isNotBlank()) {
+                                    OutlinedButton(onClick = { clipboardCopy(selectedRow.authUid) }) {
+                                        Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                                        Spacer(Modifier.width(6.dp))
+                                        Text("Copy authUid")
+                                    }
+                                }
+                                if (selectedRow.deviceHash.isNotBlank()) {
+                                    OutlinedButton(onClick = { clipboardCopy(selectedRow.deviceHash) }) {
+                                        Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                                        Spacer(Modifier.width(6.dp))
+                                        Text("Copy device")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                item {
+                    if (selectedDetailLoading) {
+                        ElevatedCard {
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                CircularProgressIndicator()
+                                Text("Live updating…")
+                            }
+                        }
+                    } else {
+                        val d = selectedDetail
+                        if (d != null) {
+                            DetailBlock(d)
+                        } else {
+                            ElevatedCard {
+                                Column(
+                                    Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text("Details", style = MaterialTheme.typography.titleSmall)
                                     Text(
-                                        selectedRow.displayName.ifBlank { "User" },
-                                        style = MaterialTheme.typography.titleMedium
-                                    )
-                                    Text(
-                                        "docId=${selectedRow.docId}",
-                                        fontFamily = FontFamily.Monospace,
+                                        "No detail loaded (doc missing or empty).",
                                         style = MaterialTheme.typography.bodySmall
                                     )
-                                }
-                            }
-
-                            IconButton(onClick = { scope.launch { loadDetails(docId) } }) {
-                                Icon(Icons.Filled.Refresh, contentDescription = "Reload details")
-                            }
-                        }
-
-                        Text(
-                            "authUid=${selectedRow.authUid.ifBlank { "(blank)" }}",
-                            fontFamily = FontFamily.Monospace,
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                        Text(
-                            "warned=${selectedRow.warned}  banned=${selectedRow.banned}",
-                            fontFamily = FontFamily.Monospace,
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                        Text(
-                            "lastSeenAt=${selectedRow.lastSeenAt ?: "?"}   updatedAt=${selectedRow.updatedAt ?: "?"}",
-                            fontFamily = FontFamily.Monospace,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-
-                        Divider()
-
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedButton(onClick = { clipboardCopy(selectedRow.docId) }) {
-                                Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                                Spacer(Modifier.width(6.dp))
-                                Text("Copy docId")
-                            }
-                            if (selectedRow.authUid.isNotBlank()) {
-                                OutlinedButton(onClick = { clipboardCopy(selectedRow.authUid) }) {
-                                    Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                                    Spacer(Modifier.width(6.dp))
-                                    Text("Copy authUid")
-                                }
-                            }
-                            if (selectedRow.deviceHash.isNotBlank()) {
-                                OutlinedButton(onClick = { clipboardCopy(selectedRow.deviceHash) }) {
-                                    Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                                    Spacer(Modifier.width(6.dp))
-                                    Text("Copy device")
-                                }
-                            }
-                        }
-
-                        Button(
-                            onClick = {
-                                onSendToModeration(
-                                    ModerationTarget(
-                                        docId = selectedRow.docId,
-                                        authUid = selectedRow.authUid,
-                                        deviceHash = selectedRow.deviceHash,
-                                        displayName = selectedRow.displayName
+                                    Text(
+                                        "Tip: this usually means the PUBLIC app isn’t writing fields to users/{deviceHash}.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
-                                )
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Icon(Icons.Filled.ArrowForward, contentDescription = null)
-                            Spacer(Modifier.width(6.dp))
-                            Text("Send to Moderation")
+                                }
+                            }
                         }
                     }
                 }
+
+                item { Spacer(Modifier.height(6.dp)) }
             }
 
-            item {
-                if (isDetailLoading) {
-                    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
-                        Row(
-                            modifier = Modifier.padding(12.dp),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            CircularProgressIndicator()
-                            Text("Loading details…")
-                        }
-                    }
-                } else if (detail != null) {
-                    DetailBlock(detail)
-                } else {
-                    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
-                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text("Details", style = MaterialTheme.typography.titleSmall)
-                            Text("No detail loaded (try refresh).", style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
-                }
+            // Bottom action bar (no weird gaps)
+            Button(
+                onClick = {
+                    onSendToModeration(
+                        ModerationTarget(
+                            docId = selectedRow.docId,
+                            authUid = selectedRow.authUid,
+                            deviceHash = selectedRow.deviceHash,
+                            displayName = selectedRow.displayName
+                        )
+                    )
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Filled.ArrowForward, contentDescription = null)
+                Spacer(Modifier.width(6.dp))
+                Text("Send to Moderation")
             }
-
-            item { Spacer(Modifier.height(6.dp)) }
         }
-
         return
     }
 
@@ -750,8 +784,7 @@ private fun UsersTab(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // Compact controls card
-        ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+        ElevatedCard {
             Column(
                 Modifier.padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -792,21 +825,8 @@ private fun UsersTab(
                     }
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedButton(
-                        onClick = { scope.launch { resetAndLoad() } },
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Refresh") }
-
-                    Button(
-                        onClick = { scope.launch { loadNextPage() } },
-                        enabled = hasMore && !pagingLoading,
-                        modifier = Modifier.weight(1f)
-                    ) { Text(if (pagingLoading) "Loading…" else "More") }
-                }
-
                 Text(
-                    "More: ${if (hasMore) "yes" else "no"}",
+                    "Live updates: on",
                     fontFamily = FontFamily.Monospace,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -828,19 +848,12 @@ private fun UsersTab(
                     Text("No users loaded/matching filters yet.", style = MaterialTheme.typography.bodySmall)
                 }
             } else {
-                itemsIndexed(filteredUsers, key = { _, u -> u.docId }) { index, u ->
-                    if (hasMore && !pagingLoading && index >= filteredUsers.size - 12) {
-                        scope.launch { loadNextPage() }
-                    }
-
+                itemsIndexed(filteredUsers, key = { _, u -> u.docId }) { _, u ->
                     Card(
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable {
-                                // select user -> takes over Users tab
-                                selectedDocId = u.docId
-                            }
+                            .clickable { selectedDocId = u.docId }
                     ) {
                         Column(
                             Modifier.padding(12.dp),
@@ -884,15 +897,6 @@ private fun UsersTab(
                         }
                     }
                 }
-
-                item {
-                    if (pagingLoading) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.Center
-                        ) { CircularProgressIndicator() }
-                    }
-                }
             }
         }
     }
@@ -909,7 +913,7 @@ private fun DetailBlock(d: UserDetail) {
         )
     }
 
-    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+    ElevatedCard {
         Column(
             Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -929,10 +933,7 @@ private fun DetailBlock(d: UserDetail) {
 
             Spacer(Modifier.height(4.dp))
             Text("combinedPreviewText", style = MaterialTheme.typography.labelLarge)
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-            ) {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Text(
                     d.combinedPreviewText.ifBlank { "(blank)" },
                     modifier = Modifier.padding(10.dp),
@@ -964,10 +965,7 @@ private fun DetailBlock(d: UserDetail) {
             if (d.cycleLinesText.isNotBlank()) {
                 Spacer(Modifier.height(4.dp))
                 Text("cycleLinesText", style = MaterialTheme.typography.labelLarge)
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-                ) {
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                     Text(
                         d.cycleLinesText,
                         modifier = Modifier.padding(10.dp),
@@ -976,12 +974,26 @@ private fun DetailBlock(d: UserDetail) {
                     )
                 }
             }
+
+            // Debug helper: show raw keys when something is "blank"
+            Spacer(Modifier.height(4.dp))
+            Text("Raw fields (debug)", style = MaterialTheme.typography.titleSmall)
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                val keys = d.raw.keys.sorted()
+                val rawText = if (keys.isEmpty()) "(no fields)" else keys.joinToString(", ")
+                Text(
+                    rawText,
+                    modifier = Modifier.padding(10.dp),
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
         }
     }
 }
 
 /* =========================================================
-   MODERATION TAB
+   MODERATION TAB (reactive + no composite index)
    ========================================================= */
 
 private data class ModerationEventRow(
@@ -1082,7 +1094,6 @@ private fun ModerationTab(
             banReason = (snap.getString("banReason") ?: "").trim()
 
             val dh = (snap.getString("deviceHash") ?: target.deviceHash).trim()
-
             if (dh.isNotBlank()) {
                 val ds = db.collection("bannedDevices").document(dh).get().await()
                 deviceBanned = ds.getBoolean("banned") ?: false
@@ -1090,45 +1101,6 @@ private fun ModerationTab(
             } else {
                 deviceBanned = false
                 deviceBanReason = ""
-            }
-
-            history.clear()
-
-            val h1 = runCatching {
-                db.collection("moderationEvents")
-                    .whereEqualTo("targetDocId", target.docId)
-                    .orderBy("createdAt", Query.Direction.DESCENDING)
-                    .limit(60)
-                    .get()
-                    .await()
-            }.getOrNull()
-
-            val snapToUse = if (h1 != null && !h1.isEmpty) {
-                h1
-            } else {
-                db.collection("moderationEvents")
-                    .whereEqualTo("uid", target.docId)
-                    .orderBy("createdAt", Query.Direction.DESCENDING)
-                    .limit(60)
-                    .get()
-                    .await()
-            }
-
-            snapToUse.documents.forEach { d ->
-                history.add(
-                    ModerationEventRow(
-                        id = d.id,
-                        action = d.getString("action") ?: "",
-                        reason = d.getString("reason") ?: "",
-                        createdAt = d.getTimestamp("createdAt"),
-                        byDeviceHash = d.getString("byDeviceHash") ?: "",
-                        byUid = d.getString("byUid") ?: "",
-                        byAppId = d.getString("byAppId") ?: "",
-                        targetDocId = d.getString("targetDocId") ?: (d.getString("targetUid") ?: ""),
-                        targetAuthUid = d.getString("targetAuthUid") ?: "",
-                        targetDeviceHash = d.getString("targetDeviceHash") ?: ""
-                    )
-                )
             }
 
             loaded = target
@@ -1146,7 +1118,7 @@ private fun ModerationTab(
     ) {
         runCatching {
             val data = hashMapOf(
-                "uid" to target.docId,
+                "uid" to target.docId, // legacy compatibility
                 "targetUid" to target.docId,
                 "targetDocId" to target.docId,
                 "targetAuthUid" to target.authUid,
@@ -1164,6 +1136,47 @@ private fun ModerationTab(
         }
     }
 
+    // Level 3: reactive moderation history (NO composite index)
+    // Listen to last N events by createdAt, then filter client-side by target.
+    DisposableEffect(loaded?.docId) {
+        history.clear()
+        val t = loaded ?: return@DisposableEffect onDispose { }
+
+        val reg = db.collection("moderationEvents")
+            .orderBy("createdAt", Query.Direction.DESCENDING)
+            .limit(250)
+            .addSnapshotListener { snap, e ->
+                if (e != null) {
+                    setError(e.message ?: "Moderation history listener error")
+                    return@addSnapshotListener
+                }
+                if (snap == null) return@addSnapshotListener
+
+                val rows = snap.documents.map { d ->
+                    ModerationEventRow(
+                        id = d.id,
+                        action = d.getString("action") ?: "",
+                        reason = d.getString("reason") ?: "",
+                        createdAt = d.getTimestamp("createdAt"),
+                        byDeviceHash = d.getString("byDeviceHash") ?: "",
+                        byUid = d.getString("byUid") ?: "",
+                        byAppId = d.getString("byAppId") ?: "",
+                        targetDocId = d.getString("targetDocId") ?: (d.getString("targetUid") ?: (d.getString("uid") ?: "")),
+                        targetAuthUid = d.getString("targetAuthUid") ?: "",
+                        targetDeviceHash = d.getString("targetDeviceHash") ?: ""
+                    )
+                }.filter { row ->
+                    // match by new field OR legacy
+                    row.targetDocId == t.docId || row.targetAuthUid == t.authUid
+                }.sortedWith(compareByDescending<ModerationEventRow> { it.createdAt?.seconds ?: 0L })
+
+                history.clear()
+                history.addAll(rows)
+            }
+
+        onDispose { reg.remove() }
+    }
+
     LaunchedEffect(initialTarget?.docId) {
         val t = initialTarget ?: return@LaunchedEffect
         lookup = t.docId
@@ -1171,13 +1184,12 @@ private fun ModerationTab(
         onClearInitialTarget()
     }
 
-    // Use LazyColumn so moderation tools/history are always reachable (scroll).
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
-            ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+            ElevatedCard {
                 Column(
                     Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -1230,10 +1242,7 @@ private fun ModerationTab(
         }
 
         item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-            ) {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Column(
                     Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -1269,19 +1278,25 @@ private fun ModerationTab(
                     OutlinedButton(
                         onClick = { scope.launch { loadTarget(t) } },
                         modifier = Modifier.fillMaxWidth()
-                    ) { Text("Reload") }
+                    ) { Text("Reload flags") }
 
                     Text("warned=$warned  banned=$banned  deviceBanned=$deviceBanned", fontFamily = FontFamily.Monospace)
                     if (deviceBanned && deviceBanReason.isNotBlank()) {
                         Text("deviceBanReason=$deviceBanReason", fontFamily = FontFamily.Monospace)
                     }
+                    Text(
+                        "History: live (no index needed)",
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }
 
         // WARN
         item {
-            ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+            ElevatedCard {
                 Column(
                     Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -1359,7 +1374,7 @@ private fun ModerationTab(
 
         // BAN
         item {
-            ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+            ElevatedCard {
                 Column(
                     Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -1502,7 +1517,7 @@ private fun ModerationTab(
 
         // HISTORY
         item {
-            ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+            ElevatedCard {
                 Column(
                     Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -1514,10 +1529,7 @@ private fun ModerationTab(
                     } else {
                         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             history.forEach { e ->
-                                Card(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-                                ) {
+                                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                                     Column(
                                         Modifier.padding(10.dp),
                                         verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -1555,7 +1567,7 @@ private fun ModerationTab(
 }
 
 /* =========================================================
-   ANNOUNCEMENTS TAB
+   ANNOUNCEMENTS TAB (reactive)
    ========================================================= */
 
 private data class AnnouncementRow(
@@ -1582,20 +1594,26 @@ private fun AnnouncementsTab(
     var newActive by rememberSaveable { mutableStateOf(true) }
     var newPriority by rememberSaveable { mutableIntStateOf(0) }
 
-    suspend fun refresh() {
-        setGlobalLoading(true)
+    // Level 3: live announcements
+    DisposableEffect(Unit) {
         setError(null)
+        setGlobalLoading(true)
 
-        runCatching {
-            val snap = db.collection("announcements")
-                .orderBy("createdAt", Query.Direction.DESCENDING)
-                .limit(50)
-                .get()
-                .await()
+        val reg = db.collection("announcements")
+            .orderBy("createdAt", Query.Direction.DESCENDING)
+            .limit(100)
+            .addSnapshotListener { snap, e ->
+                if (e != null) {
+                    setGlobalLoading(false)
+                    setError(e.message ?: "Announcements listener error")
+                    return@addSnapshotListener
+                }
+                if (snap == null) {
+                    setGlobalLoading(false)
+                    return@addSnapshotListener
+                }
 
-            announcements.clear()
-            snap.documents.forEach { d ->
-                announcements.add(
+                val list = snap.documents.map { d ->
                     AnnouncementRow(
                         id = d.id,
                         title = (d.getString("title") ?: "").trim(),
@@ -1604,29 +1622,33 @@ private fun AnnouncementsTab(
                         priority = (d.getLong("priority") ?: 0L).toInt(),
                         createdAt = d.getTimestamp("createdAt")
                     )
-                )
+                }
+
+                announcements.clear()
+                announcements.addAll(list)
+                setGlobalLoading(false)
             }
 
-            setGlobalLoading(false)
-        }.onFailure { e ->
-            setGlobalLoading(false)
-            setError(e.message ?: "Failed to load announcements")
-        }
+        onDispose { reg.remove() }
     }
-
-    LaunchedEffect(Unit) { refresh() }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
-            ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+            ElevatedCard {
                 Column(
                     Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Text("Announcements", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Live updates: on",
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
 
                     OutlinedTextField(
                         value = newTitle,
@@ -1689,7 +1711,6 @@ private fun AnnouncementsTab(
                                         newBody = ""
                                         newActive = true
                                         newPriority = 0
-                                        refresh()
                                     }.onFailure { e ->
                                         setGlobalLoading(false)
                                         setError(e.message ?: "Failed to publish")
@@ -1701,9 +1722,9 @@ private fun AnnouncementsTab(
                         ) { Text("Publish") }
 
                         OutlinedButton(
-                            onClick = { scope.launch { refresh() } },
+                            onClick = { setError(null) },
                             modifier = Modifier.weight(1f)
-                        ) { Text("Refresh") }
+                        ) { Text("Clear error") }
                     }
                 }
             }
@@ -1742,7 +1763,6 @@ private fun AnnouncementsTab(
                                         setError(null)
                                         runCatching {
                                             db.collection("announcements").document(a.id).delete().await()
-                                            refresh()
                                         }.onFailure { e ->
                                             setGlobalLoading(false)
                                             setError(e.message ?: "Failed to delete announcement")
@@ -1774,7 +1794,6 @@ private fun AnnouncementsTab(
                                                     SetOptions.merge()
                                                 )
                                                 .await()
-                                            refresh()
                                         }.onFailure { e ->
                                             setGlobalLoading(false)
                                             setError(e.message ?: "Failed to toggle active")
@@ -1799,7 +1818,6 @@ private fun AnnouncementsTab(
                                                     SetOptions.merge()
                                                 )
                                                 .await()
-                                            refresh()
                                         }.onFailure { e ->
                                             setGlobalLoading(false)
                                             setError(e.message ?: "Failed to change priority")
@@ -1823,7 +1841,6 @@ private fun AnnouncementsTab(
                                                     SetOptions.merge()
                                                 )
                                                 .await()
-                                            refresh()
                                         }.onFailure { e ->
                                             setGlobalLoading(false)
                                             setError(e.message ?: "Failed to change priority")
@@ -1891,7 +1908,7 @@ private fun ConfigTab(
 
     LaunchedEffect(Unit) { load() }
 
-    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+    ElevatedCard {
         Column(
             Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -1991,10 +2008,7 @@ private fun ConfigTab(
 
 @Composable
 private fun ErrorCard(message: String) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
-    ) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
         Column(
             Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
