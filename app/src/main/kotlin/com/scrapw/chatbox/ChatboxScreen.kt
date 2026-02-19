@@ -302,7 +302,6 @@ fun ChatboxScreen(
 
     fun safeUid(): String = authedUid?.trim().orEmpty()
 
-    // ✅ Ensure anonymous auth exists.
     LaunchedEffect(Unit) {
         if (auth.currentUser == null) {
             runCatching {
@@ -317,31 +316,29 @@ fun ChatboxScreen(
     }
 
     /* =========================================================
-       ✅ DEVICE-FIRST USER DOC (FIXED)
+       ✅ DEVICE-FIRST USER DOC (THIS IS THE FIX)
        =========================================================
        PRIMARY identity doc is: users/{deviceHash}
 
-       IMPORTANT:
-       Firestore rules require uid to exist and equal request.auth.uid on create/update.
-       Therefore we MUST NOT write /users/{deviceHash} until authedUid is non-blank.
+       AdminScreen expects:
+       - users collection
+       - docId == deviceHash
+       - authUid stored as field
      */
 
     LaunchedEffect(authedUid, deviceHash) {
         val dh = deviceHash.trim()
-        val uid = safeUid()
+        if (dh.isBlank()) return@LaunchedEffect
 
-        // ✅ Critical: do not write until auth UID exists (rules require it)
-        if (dh.isBlank() || uid.isBlank()) return@LaunchedEffect
+        val uid = safeUid()
 
         runCatching {
             val data = hashMapOf<String, Any>(
                 "deviceHash" to dh,
-
                 // current session uid (changes if app data cleared)
                 "authUid" to uid,
                 // legacy alias (some older code queries "uid")
                 "uid" to uid,
-
                 "appId" to BuildConfig.APPLICATION_ID,
                 "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
                 "lastSeenAt" to FieldValue.serverTimestamp(),
@@ -350,6 +347,12 @@ fun ChatboxScreen(
                 "versionName" to BuildConfig.VERSION_NAME
             )
 
+            // Avoid writing blank strings as “real” values
+            if (uid.isBlank()) {
+                data.remove("authUid")
+                data.remove("uid")
+            }
+
             db.collection("users").document(dh)
                 .set(data, SetOptions.merge())
                 .await()
@@ -357,24 +360,26 @@ fun ChatboxScreen(
             reportFirebase("users/$dh", "Failed writing device-first user doc", e)
         }
 
-        // Optional: keep a legacy mapping doc for UID -> deviceHash.
-        // NOTE: Your current rules likely deny this (no /usersByUid match),
-        // so failures are only recorded in Debug and do not break the app.
-        runCatching {
-            db.collection("usersByUid").document(uid)
-                .set(
-                    mapOf(
-                        "deviceHash" to dh,
-                        "authUid" to uid,
-                        "appId" to BuildConfig.APPLICATION_ID,
-                        "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
-                        "updatedAt" to FieldValue.serverTimestamp()
-                    ),
-                    SetOptions.merge()
-                )
-                .await()
-        }.onFailure { e ->
-            reportFirebase("usersByUid/$uid", "Failed writing UID→device mapping", e)
+        // Optional: keep a legacy mapping doc for UID -> deviceHash (harmless).
+        // If your rules block it, it’s fine — failures are only shown in Debug.
+        val uid2 = safeUid()
+        if (uid2.isNotBlank()) {
+            runCatching {
+                db.collection("usersByUid").document(uid2)
+                    .set(
+                        mapOf(
+                            "deviceHash" to dh,
+                            "authUid" to uid2,
+                            "appId" to BuildConfig.APPLICATION_ID,
+                            "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        ),
+                        SetOptions.merge()
+                    )
+                    .await()
+            }.onFailure { e ->
+                reportFirebase("usersByUid/$uid2", "Failed writing UID→device mapping", e)
+            }
         }
     }
 
@@ -450,8 +455,7 @@ fun ChatboxScreen(
         onDispose { reg?.remove() }
     }
 
-    // ✅ Announcements listener FIX:
-    // Avoid composite index by ordering only by createdAt and sorting by priority locally.
+    // Announcements: keep as-is (you already avoided composite index)
     DisposableEffect(Unit) {
         var reg: ListenerRegistration? = null
         reg = db.collection("announcements")
@@ -483,7 +487,7 @@ fun ChatboxScreen(
         onDispose { reg?.remove() }
     }
 
-    // ✅ PRIMARY moderation: users/{deviceHash}
+    // PRIMARY moderation: users/{deviceHash}
     DisposableEffect(deviceHash) {
         var reg: ListenerRegistration? = null
         val dh = deviceHash.trim()
@@ -513,8 +517,7 @@ fun ChatboxScreen(
         onDispose { reg?.remove() }
     }
 
-    // ✅ Optional legacy device-ban collection support: bannedDevices/{deviceHash}
-    // Only listen on admin build to avoid PERMISSION_DENIED noise on public builds.
+    // Optional legacy device-ban collection support: bannedDevices/{deviceHash} (admin only)
     if (BuildConfig.IS_ADMIN_BUILD) {
         DisposableEffect(deviceHash) {
             var reg: ListenerRegistration? = null
@@ -646,16 +649,14 @@ fun ChatboxScreen(
             snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
             contentWindowInsets = WindowInsets(0)
         ) { padding ->
-            Box(
-                Modifier
+            // ✅ FIX: Use a Column so banners are NOT drawn on top of content.
+            Column(
+                modifier = Modifier
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                // Global banners (warn + announcements) ONLY
-                GlobalStatusBanner(
-                    moderation = moderation,
-                    announcements = announcements
-                )
+                // ✅ Warning banner only (announcements are shown inside HomePage now)
+                GlobalStatusBanner(moderation = moderation)
 
                 Crossfade(targetState = page, label = "page_crossfade") { p ->
                     when (p) {
@@ -726,15 +727,14 @@ fun ChatboxScreen(
 }
 
 /* =========================
-   Global banners
+   Global banners (WARNINGS ONLY)
    ========================= */
 
 @Composable
 private fun GlobalStatusBanner(
-    moderation: ModerationUi,
-    announcements: List<AnnouncementUi>
+    moderation: ModerationUi
 ) {
-    val topAnn = announcements.maxByOrNull { it.priority }
+    if (!moderation.warned || (moderation.banned || moderation.deviceBanned)) return
 
     Column(
         modifier = Modifier
@@ -742,32 +742,13 @@ private fun GlobalStatusBanner(
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        if (moderation.warned && !(moderation.banned || moderation.deviceBanned)) {
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
-                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("⚠️ Warning", style = MaterialTheme.typography.labelLarge)
-                    Text(
-                        moderation.warnReason.ifBlank { "You have been warned by moderators." },
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-            }
-        }
-
-        if (topAnn != null) {
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
-                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(
-                        topAnn.title.ifBlank { "Announcement" },
-                        style = MaterialTheme.typography.labelLarge
-                    )
-                    Text(
-                        topAnn.body.ifBlank { "" },
-                        style = MaterialTheme.typography.bodySmall,
-                        maxLines = 3,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
+        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+            Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("⚠️ Warning", style = MaterialTheme.typography.labelLarge)
+                Text(
+                    moderation.warnReason.ifBlank { "You have been warned by moderators." },
+                    style = MaterialTheme.typography.bodySmall
+                )
             }
         }
     }
@@ -1114,7 +1095,7 @@ private fun SectionCard(
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun HomePage(
-    vm: ChatboxViewModel,
+    vm: com.scrapw.chatbox.ui.ChatboxViewModel,
     snackbarHostState: SnackbarHostState,
     onOpenSettings: () -> Unit,
     announcements: List<AnnouncementUi>,
