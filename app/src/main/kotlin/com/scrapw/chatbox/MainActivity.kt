@@ -17,6 +17,7 @@ import com.scrapw.chatbox.keepalive.ChatboxKeepAliveService
 import com.scrapw.chatbox.overlay.OverlayDaemon
 import com.scrapw.chatbox.ui.theme.ChatboxTheme
 import java.security.MessageDigest
+import java.security.SecureRandom
 
 fun Context.getActivity(): ComponentActivity? = when (this) {
     is ComponentActivity -> this
@@ -27,25 +28,29 @@ fun Context.getActivity(): ComponentActivity? = when (this) {
 /**
  * Boot responsibilities (final):
  * - Start keep-alive service (notif permission on 33+).
- * - Ensure a stable device hash is present in SharedPreferences "vrca_remote" under key "device_id_hash".
- *   This is used for admin gating + device-linked enforcement (so clearing data/reinstall doesn’t change it).
+ * - Ensure a stable device hash is available in SharedPreferences "vrca_remote" under key "device_id_hash".
+ *
+ * Device hash strategy:
+ * - Primary: SHA-256("v2:<ANDROID_ID>:<SIGNING_CERT_SHA256>")
+ *   This is stable across reinstall (same device/user + same signing key).
+ * - Fallback: stored random (only used if ANDROID_ID is unavailable/blank).
  *
  * Notes:
- * - Primary source: ANDROID_ID (stable across reinstall for same signing key/user; can change on factory reset).
- * - Mixed with signing cert digest to make it app-signing-specific.
- * - If ANDROID_ID is unavailable, we fall back to a stored random value (less resistant to data wipe).
+ * - ANDROID_ID can change on factory reset; that’s expected.
+ * - Some OEMs/work profiles can return blank ANDROID_ID; fallback covers it.
  */
 class MainActivity : ComponentActivity() {
 
     private val notifPermLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { _ ->
-        // Even if denied, try to start anyway (some devices still allow FGS).
+        // Even if denied, still try to start (some devices allow FGS without notif permission).
         ChatboxKeepAliveService.start(applicationContext)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
         // ✅ Ensure device hash exists early (before any screen reads it).
@@ -93,32 +98,37 @@ private const val KEY_DEVICE_HASH_FALLBACK_RANDOM = "device_id_hash_fallback_ran
  */
 private fun ensureDeviceHash(ctx: Context): String {
     val prefs = ctx.getSharedPreferences(REMOTE_PREFS, Context.MODE_PRIVATE)
+
+    // If already present, return it.
     val existing = prefs.getString(KEY_DEVICE_HASH, "")?.trim().orEmpty()
     if (existing.isNotBlank()) return existing
 
     val androidId = runCatching {
-        Settings.Secure.getString(ctx.contentResolver, Settings.Secure.ANDROID_ID)?.trim().orEmpty()
+        Settings.Secure.getString(ctx.contentResolver, Settings.Secure.ANDROID_ID)
+            ?.trim()
+            .orEmpty()
     }.getOrDefault("")
 
     val signingDigest = runCatching { signingCertSha256Hex(ctx) }.getOrDefault("")
 
-    val stableSeed = buildString {
-        append("v1:")
-        append(androidId.ifBlank { "no_android_id" })
-        append(":")
-        append(signingDigest.ifBlank { "no_signing" })
+    // Primary (reinstall-stable if ANDROID_ID is stable):
+    val computedStable = if (androidId.isNotBlank() && signingDigest.isNotBlank()) {
+        sha256Hex("v2:$androidId:$signingDigest")
+    } else if (androidId.isNotBlank()) {
+        // Still stable-ish if we can't read cert for some reason.
+        sha256Hex("v2:$androidId:no_signing")
+    } else {
+        ""
     }
 
-    val computedStable = if (androidId.isNotBlank()) sha256Hex(stableSeed) else ""
-
-    // If we can compute a stable value, use it. Otherwise store a fallback random once.
+    // Fallback: stored random (NOT reinstall stable, but keeps app functional on devices with blank ANDROID_ID)
     val finalHash = if (computedStable.isNotBlank()) {
         computedStable
     } else {
         val fallbackExisting = prefs.getString(KEY_DEVICE_HASH_FALLBACK_RANDOM, "")?.trim().orEmpty()
         if (fallbackExisting.isNotBlank()) fallbackExisting
         else {
-            val r = sha256Hex("fallback:${System.nanoTime()}:${Math.random()}")
+            val r = secureRandomHex(32)
             prefs.edit().putString(KEY_DEVICE_HASH_FALLBACK_RANDOM, r).apply()
             r
         }
@@ -136,23 +146,28 @@ private fun signingCertSha256Hex(ctx: Context): String {
     val pm = ctx.packageManager
     val pkg = ctx.packageName
 
-    val certBytes: ByteArray = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-        val info = pm.getPackageInfo(pkg, PackageManager.GET_SIGNING_CERTIFICATES)
-        val signingInfo = info.signingInfo
-        val sigs = signingInfo.apkContentsSigners
-        (sigs.firstOrNull()?.toByteArray() ?: byteArrayOf())
-    } else {
-        @Suppress("DEPRECATION")
-        val info = pm.getPackageInfo(pkg, PackageManager.GET_SIGNATURES)
-        @Suppress("DEPRECATION")
-        (info.signatures?.firstOrNull()?.toByteArray() ?: byteArrayOf())
+    val certBytes: ByteArray = try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val info = pm.getPackageInfo(pkg, PackageManager.GET_SIGNING_CERTIFICATES)
+            val signingInfo = info.signingInfo
+            val sigs = signingInfo.apkContentsSigners
+            sigs.firstOrNull()?.toByteArray() ?: byteArrayOf()
+        } else {
+            @Suppress("DEPRECATION")
+            val info = pm.getPackageInfo(pkg, PackageManager.GET_SIGNATURES)
+            @Suppress("DEPRECATION")
+            info.signatures?.firstOrNull()?.toByteArray() ?: byteArrayOf()
+        }
+    } catch (_: Throwable) {
+        byteArrayOf()
     }
 
     if (certBytes.isEmpty()) return ""
     return sha256HexBytes(certBytes)
 }
 
-private fun sha256Hex(input: String): String = sha256HexBytes(input.toByteArray(Charsets.UTF_8))
+private fun sha256Hex(input: String): String =
+    sha256HexBytes(input.toByteArray(Charsets.UTF_8))
 
 private fun sha256HexBytes(bytes: ByteArray): String {
     val md = MessageDigest.getInstance("SHA-256")
@@ -164,4 +179,11 @@ private fun sha256HexBytes(bytes: ByteArray): String {
         sb.append(v.toString(16))
     }
     return sb.toString()
+}
+
+private fun secureRandomHex(numBytes: Int): String {
+    val rng = SecureRandom()
+    val bytes = ByteArray(numBytes)
+    rng.nextBytes(bytes)
+    return sha256HexBytes(bytes) // compact + already-hex
 }
