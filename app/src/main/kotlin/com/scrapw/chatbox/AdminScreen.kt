@@ -756,7 +756,7 @@ private fun DetailBlock(d: UserDetail) {
     }
 
     ElevatedCard {
-        Column(
+        androidx.compose.foundation.layout.Column(
             modifier = Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -786,7 +786,6 @@ private fun DetailBlock(d: UserDetail) {
         }
     }
 }
-
             if (d.warnReason.isNotBlank() || d.banReason.isNotBlank()) {
                 Spacer(Modifier.height(4.dp))
                 Text("Moderation Flags", style = MaterialTheme.typography.titleSmall)
