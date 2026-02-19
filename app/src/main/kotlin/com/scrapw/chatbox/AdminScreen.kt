@@ -15,12 +15,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
@@ -72,7 +72,6 @@ import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.SetOptions
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
-import kotlin.math.abs
 
 /**
  * Owner-only Admin screen.
@@ -212,9 +211,9 @@ fun AdminScreen() {
                                     Text("Copy UID")
                                 }
                             }
-                            Text("deviceHash=${shortId(deviceHash)}", fontFamily = FontFamily.Monospace)
-                            Text("uid=${shortId(myUid)}", fontFamily = FontFamily.Monospace)
-                            Text("ownerUid=${shortId(ownerUid)}", fontFamily = FontFamily.Monospace)
+                            Text("deviceHash=${deviceHash.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
+                            Text("uid=${myUid.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
+                            Text("ownerUid=${ownerUid.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
                         }
                     }
                 }
@@ -256,7 +255,7 @@ fun AdminScreen() {
                 .padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // Header
+            // Header (clean)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
@@ -285,12 +284,11 @@ fun AdminScreen() {
                 }
             }
 
-            // IDs drawer (FIXED: no accidental stretch / no giant blank space)
+            // IDs card (fix: NEVER stretch; keep tight + no weird empty space)
             AnimatedVisibility(visible = idsExpanded) {
                 ElevatedCard(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .wrapContentHeight()
                         .animateContentSize()
                 ) {
                     Column(
@@ -307,40 +305,29 @@ fun AdminScreen() {
                             }
                         }
 
-                        // buttons (two per row; never forces weird spacing)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedButton(
-                                onClick = { clipboard.setText(AnnotatedString(deviceHash)) },
-                                modifier = Modifier.weight(1f)
-                            ) {
+                            OutlinedButton(onClick = { clipboard.setText(AnnotatedString(deviceHash)) }) {
                                 Icon(Icons.Filled.ContentCopy, contentDescription = null)
                                 Spacer(Modifier.width(6.dp))
-                                Text("Copy device", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text("Copy device")
                             }
-                            OutlinedButton(
-                                onClick = { clipboard.setText(AnnotatedString(myUid)) },
-                                modifier = Modifier.weight(1f)
-                            ) {
+                            OutlinedButton(onClick = { clipboard.setText(AnnotatedString(myUid)) }) {
                                 Icon(Icons.Filled.ContentCopy, contentDescription = null)
                                 Spacer(Modifier.width(6.dp))
-                                Text("Copy UID", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text("Copy UID")
                             }
-                        }
-
-                        if (ownerUid.isNotBlank()) {
-                            OutlinedButton(
-                                onClick = { clipboard.setText(AnnotatedString(ownerUid)) },
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                                Spacer(Modifier.width(6.dp))
-                                Text("Copy owner")
+                            if (ownerUid.isNotBlank()) {
+                                OutlinedButton(onClick = { clipboard.setText(AnnotatedString(ownerUid)) }) {
+                                    Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Copy owner")
+                                }
                             }
                         }
 
-                        Text("deviceHash=${shortId(deviceHash)}", fontFamily = FontFamily.Monospace)
-                        Text("uid=${shortId(myUid)}", fontFamily = FontFamily.Monospace)
-                        Text("ownerUid=${shortId(ownerUid)}", fontFamily = FontFamily.Monospace)
+                        Text("deviceHash=${deviceHash.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
+                        Text("uid=${myUid.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
+                        Text("ownerUid=${ownerUid.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
                     }
                 }
             }
@@ -352,6 +339,7 @@ fun AdminScreen() {
                 }
             }
 
+            // Tabs
             ScrollableTabRow(
                 selectedTabIndex = tabIndex,
                 edgePadding = 0.dp
@@ -361,13 +349,17 @@ fun AdminScreen() {
                         selected = tabIndex == i,
                         onClick = { tabIndex = i },
                         text = {
-                            Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                label,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
                     )
                 }
             }
 
-            // Content
+            // Content gets remaining height
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -484,16 +476,16 @@ private fun UsersTab(
     var filterWarned by rememberSaveable { mutableStateOf(false) }
     var filterBanned by rememberSaveable { mutableStateOf(false) }
 
-    var expandedDocId by rememberSaveable { mutableStateOf<String?>(null) }
+    // NEW: selected user takes over whole Users tab until unselected
+    var selectedDocId by rememberSaveable { mutableStateOf<String?>(null) }
 
-    // Cache details per user docId (loaded only when expanded)
+    // Cache details per user docId (loaded only when opened)
     val detailsCache = remember { mutableMapOf<String, UserDetail>() }
     var detailsLoadingFor by remember { mutableStateOf<String?>(null) }
 
     fun rowMatches(u: UserRow, q: String): Boolean {
         if (q.isBlank()) return true
         val t = q.trim()
-        // keep displayName searchable, but don't need to display it
         return u.docId.contains(t, true) ||
             u.authUid.contains(t, true) ||
             u.deviceHash.contains(t, true) ||
@@ -556,7 +548,7 @@ private fun UsersTab(
         users.clear()
         hasMore = true
         lastDoc = null
-        expandedDocId = null
+        selectedDocId = null
         detailsCache.clear()
         loadNextPage()
     }
@@ -610,10 +602,152 @@ private fun UsersTab(
 
     LaunchedEffect(Unit) { resetAndLoad() }
 
+    // If a user is selected, take over the whole Users tab with a dedicated detail view.
+    val selectedRow = remember(selectedDocId, users.size) {
+        selectedDocId?.let { id -> users.firstOrNull { it.docId == id } }
+    }
+
+    if (selectedRow != null) {
+        val docId = selectedRow.docId
+        val detail = detailsCache[docId]
+        val isDetailLoading = detailsLoadingFor == docId
+
+        LaunchedEffect(docId) { loadDetails(docId) }
+
+        // Full-height detail view (fixes "squished" content)
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            item {
+                ElevatedCard {
+                    Column(
+                        Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                IconButton(onClick = { selectedDocId = null }) {
+                                    Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
+                                }
+                                Column {
+                                    Text(
+                                        selectedRow.displayName.ifBlank { "User" },
+                                        style = MaterialTheme.typography.titleMedium
+                                    )
+                                    Text(
+                                        "docId=${selectedRow.docId}",
+                                        fontFamily = FontFamily.Monospace,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                            }
+
+                            IconButton(onClick = { scope.launch { loadDetails(docId) } }) {
+                                Icon(Icons.Filled.Refresh, contentDescription = "Reload details")
+                            }
+                        }
+
+                        Text(
+                            "authUid=${selectedRow.authUid.ifBlank { "(blank)" }}",
+                            fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Text(
+                            "warned=${selectedRow.warned}  banned=${selectedRow.banned}",
+                            fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Text(
+                            "lastSeenAt=${selectedRow.lastSeenAt ?: "?"}   updatedAt=${selectedRow.updatedAt ?: "?"}",
+                            fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        Divider()
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(onClick = { clipboardCopy(selectedRow.docId) }) {
+                                Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                                Spacer(Modifier.width(6.dp))
+                                Text("Copy docId")
+                            }
+                            if (selectedRow.authUid.isNotBlank()) {
+                                OutlinedButton(onClick = { clipboardCopy(selectedRow.authUid) }) {
+                                    Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Copy authUid")
+                                }
+                            }
+                            if (selectedRow.deviceHash.isNotBlank()) {
+                                OutlinedButton(onClick = { clipboardCopy(selectedRow.deviceHash) }) {
+                                    Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Copy device")
+                                }
+                            }
+                        }
+
+                        Button(
+                            onClick = {
+                                onSendToModeration(
+                                    ModerationTarget(
+                                        docId = selectedRow.docId,
+                                        authUid = selectedRow.authUid,
+                                        deviceHash = selectedRow.deviceHash,
+                                        displayName = selectedRow.displayName
+                                    )
+                                )
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Filled.ArrowForward, contentDescription = null)
+                            Spacer(Modifier.width(6.dp))
+                            Text("Send to Moderation")
+                        }
+                    }
+                }
+            }
+
+            item {
+                if (isDetailLoading) {
+                    ElevatedCard {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            CircularProgressIndicator()
+                            Text("Loading details…")
+                        }
+                    }
+                } else if (detail != null) {
+                    DetailBlock(detail)
+                } else {
+                    ElevatedCard {
+                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("Details", style = MaterialTheme.typography.titleSmall)
+                            Text("No detail loaded (try refresh).", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            }
+
+            item { Spacer(Modifier.height(6.dp)) }
+        }
+
+        return
+    }
+
+    // Normal Users list view
     Column(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
+        // Compact controls card
         ElevatedCard {
             Column(
                 Modifier.padding(12.dp),
@@ -638,7 +772,7 @@ private fun UsersTab(
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     label = { Text("Search") },
-                    placeholder = { Text("docId / authUid / deviceHash") }
+                    placeholder = { Text("docId / authUid / deviceHash / displayName") }
                 )
 
                 Row(
@@ -687,46 +821,44 @@ private fun UsersTab(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             if (filteredUsers.isEmpty()) {
-                item { Text("No users loaded/matching filters yet.", style = MaterialTheme.typography.bodySmall) }
+                item {
+                    Text("No users loaded/matching filters yet.", style = MaterialTheme.typography.bodySmall)
+                }
             } else {
                 itemsIndexed(filteredUsers, key = { _, u -> u.docId }) { index, u ->
                     if (hasMore && !pagingLoading && index >= filteredUsers.size - 12) {
                         scope.launch { loadNextPage() }
                     }
 
-                    val isExpanded = expandedDocId == u.docId
-                    val detail = detailsCache[u.docId]
-                    val isDetailLoading = detailsLoadingFor == u.docId
-
                     Card(
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .animateContentSize()
                             .clickable {
-                                expandedDocId = if (isExpanded) null else u.docId
-                                if (!isExpanded) scope.launch { loadDetails(u.docId) }
+                                // select user -> takes over Users tab
+                                selectedDocId = u.docId
                             }
                     ) {
                         Column(
                             Modifier.padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
                                 Column(Modifier.weight(1f)) {
-                                    // No displayName shown in UI (still searchable)
-                                    Text("User", style = MaterialTheme.typography.titleSmall)
-
                                     Text(
-                                        "docId=${if (isExpanded) u.docId else shortId(u.docId)}",
+                                        u.displayName.ifBlank { "(no displayName)" },
+                                        style = MaterialTheme.typography.titleSmall
+                                    )
+                                    Text(
+                                        "docId=${u.docId}",
                                         fontFamily = FontFamily.Monospace,
                                         style = MaterialTheme.typography.bodySmall
                                     )
                                     Text(
-                                        "authUid=${if (isExpanded) u.authUid.ifBlank { "(blank)" } else shortId(u.authUid)}",
+                                        "authUid=${u.authUid.ifBlank { "(blank)" }}",
                                         fontFamily = FontFamily.Monospace,
                                         style = MaterialTheme.typography.bodySmall
                                     )
@@ -737,74 +869,15 @@ private fun UsersTab(
                                     )
                                 }
 
-                                Icon(
-                                    if (isExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                                    contentDescription = null
-                                )
+                                Icon(Icons.Filled.ExpandMore, contentDescription = null)
                             }
 
                             Text(
-                                "lastSeen=${relTimeOrQ(u.lastSeenAt)}   updated=${relTimeOrQ(u.updatedAt)}",
+                                "lastSeenAt=${u.lastSeenAt ?: "?"}   updatedAt=${u.updatedAt ?: "?"}",
                                 fontFamily = FontFamily.Monospace,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-
-                            if (isExpanded) {
-                                Divider()
-
-                                // FIXED: this section can’t create a huge “push apart” gap
-                                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        OutlinedButton(
-                                            onClick = { clipboardCopy(u.docId) },
-                                            modifier = Modifier.weight(1f)
-                                        ) {
-                                            Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                                            Spacer(Modifier.width(6.dp))
-                                            Text("Copy docId", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                        }
-                                        OutlinedButton(
-                                            onClick = { clipboardCopy(u.authUid) },
-                                            enabled = u.authUid.isNotBlank(),
-                                            modifier = Modifier.weight(1f)
-                                        ) {
-                                            Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                                            Spacer(Modifier.width(6.dp))
-                                            Text("Copy authUid", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                        }
-                                    }
-
-                                    Button(
-                                        onClick = {
-                                            onSendToModeration(
-                                                ModerationTarget(
-                                                    docId = u.docId,
-                                                    authUid = u.authUid,
-                                                    deviceHash = u.deviceHash,
-                                                    displayName = u.displayName
-                                                )
-                                            )
-                                        },
-                                        modifier = Modifier.fillMaxWidth()
-                                    ) {
-                                        Icon(Icons.Filled.ArrowForward, contentDescription = null)
-                                        Spacer(Modifier.width(6.dp))
-                                        Text("Send to Moderation")
-                                    }
-
-                                    if (isDetailLoading) {
-                                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                            CircularProgressIndicator()
-                                            Text("Loading details…")
-                                        }
-                                    } else if (detail != null) {
-                                        DetailBlock(detail)
-                                    } else {
-                                        Text("No detail loaded (tap again or refresh).", style = MaterialTheme.typography.bodySmall)
-                                    }
-                                }
-                            }
                         }
                     }
                 }
@@ -833,7 +906,7 @@ private fun DetailBlock(d: UserDetail) {
         )
     }
 
-    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+    ElevatedCard {
         Column(
             Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -868,12 +941,38 @@ private fun DetailBlock(d: UserDetail) {
                 if (d.warnReason.isNotBlank()) Mono("warnReason", d.warnReason)
                 if (d.banReason.isNotBlank()) Mono("banReason", d.banReason)
             }
+
+            Spacer(Modifier.height(4.dp))
+            Text("AFK Presets", style = MaterialTheme.typography.titleSmall)
+            d.afkPresets.forEachIndexed { i, p ->
+                Mono("afkPreset${i + 1}", p.ifBlank { "(blank)" })
+            }
+
+            Spacer(Modifier.height(4.dp))
+            Text("Cycle Presets", style = MaterialTheme.typography.titleSmall)
+            d.cyclePresets.forEachIndexed { i, p ->
+                val oneLine = p.lines().firstOrNull()?.trim().orEmpty()
+                Mono("cyclePreset${i + 1}", oneLine.ifBlank { "(blank)" })
+            }
+
+            if (d.cycleLinesText.isNotBlank()) {
+                Spacer(Modifier.height(4.dp))
+                Text("cycleLinesText", style = MaterialTheme.typography.labelLarge)
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                    Text(
+                        d.cycleLinesText,
+                        modifier = Modifier.padding(10.dp),
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
         }
     }
 }
 
 /* =========================================================
-   MODERATION TAB  (FIXED: now scrollable, tools always visible)
+   MODERATION TAB
    ========================================================= */
 
 private data class ModerationEventRow(
@@ -933,6 +1032,7 @@ private fun ModerationTab(
         val t = input.trim()
         if (t.isBlank()) return null
 
+        // Try docId directly
         runCatching {
             val doc = db.collection("users").document(t).get().await()
             if (doc.exists()) {
@@ -943,6 +1043,7 @@ private fun ModerationTab(
             }
         }
 
+        // Try lookup by authUid in users collection
         return runCatching {
             val q = db.collection("users")
                 .whereEqualTo("authUid", t)
@@ -984,22 +1085,28 @@ private fun ModerationTab(
 
             history.clear()
 
-            // No composite index needed: load a small set then sort in memory.
-            val snapA = db.collection("moderationEvents")
-                .whereEqualTo("targetDocId", target.docId)
-                .limit(200)
-                .get()
-                .await()
+            val h1 = runCatching {
+                db.collection("moderationEvents")
+                    .whereEqualTo("targetDocId", target.docId)
+                    .orderBy("createdAt", Query.Direction.DESCENDING)
+                    .limit(60)
+                    .get()
+                    .await()
+            }.getOrNull()
 
-            val snapB = db.collection("moderationEvents")
-                .whereEqualTo("uid", target.docId)
-                .limit(200)
-                .get()
-                .await()
+            val snapToUse = if (h1 != null && !h1.isEmpty) {
+                h1
+            } else {
+                db.collection("moderationEvents")
+                    .whereEqualTo("uid", target.docId)
+                    .orderBy("createdAt", Query.Direction.DESCENDING)
+                    .limit(60)
+                    .get()
+                    .await()
+            }
 
-            val rows = (snapA.documents + snapB.documents)
-                .distinctBy { it.id }
-                .map { d ->
+            snapToUse.documents.forEach { d ->
+                history.add(
                     ModerationEventRow(
                         id = d.id,
                         action = d.getString("action") ?: "",
@@ -1012,11 +1119,8 @@ private fun ModerationTab(
                         targetAuthUid = d.getString("targetAuthUid") ?: "",
                         targetDeviceHash = d.getString("targetDeviceHash") ?: ""
                     )
-                }
-                .sortedByDescending { it.createdAt?.seconds ?: Long.MIN_VALUE }
-                .take(60)
-
-            history.addAll(rows)
+                )
+            }
 
             loaded = target
             setGlobalLoading(false)
@@ -1026,7 +1130,11 @@ private fun ModerationTab(
         }
     }
 
-    suspend fun writeEvent(target: ModerationTarget, action: String, reason: String) {
+    suspend fun writeEvent(
+        target: ModerationTarget,
+        action: String,
+        reason: String
+    ) {
         runCatching {
             val data = hashMapOf(
                 "uid" to target.docId,
@@ -1054,7 +1162,8 @@ private fun ModerationTab(
         onClearInitialTarget()
     }
 
-    // FIXED: Scrollable moderation page, so tools never “disappear”
+    // FIX: moderation tools not showing because content was taller than the tab box.
+    // Use LazyColumn so everything is always reachable (scroll).
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -1119,24 +1228,30 @@ private fun ModerationTab(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text("Target", style = MaterialTheme.typography.titleSmall)
-                    Text("docId=${shortId(t.docId)}", fontFamily = FontFamily.Monospace)
-                    Text("authUid=${shortId(t.authUid)}", fontFamily = FontFamily.Monospace)
-                    Text("deviceHash=${shortId(t.deviceHash)}", fontFamily = FontFamily.Monospace)
+                    Text("displayName=${t.displayName.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
+                    Text("docId=${t.docId}", fontFamily = FontFamily.Monospace)
+                    Text("authUid=${t.authUid.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
+                    Text("deviceHash=${t.deviceHash.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
 
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = { clipboardCopy(t.docId) }, modifier = Modifier.weight(1f)) {
+                        OutlinedButton(onClick = { clipboardCopy(t.docId) }) {
                             Icon(Icons.Filled.ContentCopy, contentDescription = null)
                             Spacer(Modifier.width(6.dp))
-                            Text("Copy docId", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("Copy docId")
                         }
-                        OutlinedButton(
-                            onClick = { clipboardCopy(t.authUid) },
-                            enabled = t.authUid.isNotBlank(),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                            Spacer(Modifier.width(6.dp))
-                            Text("Copy authUid", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (t.authUid.isNotBlank()) {
+                            OutlinedButton(onClick = { clipboardCopy(t.authUid) }) {
+                                Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                                Spacer(Modifier.width(6.dp))
+                                Text("Copy authUid")
+                            }
+                        }
+                        if (t.deviceHash.isNotBlank()) {
+                            OutlinedButton(onClick = { clipboardCopy(t.deviceHash) }) {
+                                Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                                Spacer(Modifier.width(6.dp))
+                                Text("Copy device")
+                            }
                         }
                     }
 
@@ -1146,10 +1261,14 @@ private fun ModerationTab(
                     ) { Text("Reload") }
 
                     Text("warned=$warned  banned=$banned  deviceBanned=$deviceBanned", fontFamily = FontFamily.Monospace)
+                    if (deviceBanned && deviceBanReason.isNotBlank()) {
+                        Text("deviceBanReason=$deviceBanReason", fontFamily = FontFamily.Monospace)
+                    }
                 }
             }
         }
 
+        // WARN
         item {
             ElevatedCard {
                 Column(
@@ -1227,6 +1346,7 @@ private fun ModerationTab(
             }
         }
 
+        // BAN
         item {
             ElevatedCard {
                 Column(
@@ -1365,19 +1485,11 @@ private fun ModerationTab(
                             enabled = (applyUidBan || (applyDeviceBan && t.deviceHash.isNotBlank()))
                         ) { Text("Unban") }
                     }
-
-                    if (t.deviceHash.isNotBlank()) {
-                        Text(
-                            "deviceBanReason=${deviceBanReason.ifBlank { "(blank)" }}",
-                            fontFamily = FontFamily.Monospace,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
                 }
             }
         }
 
+        // HISTORY
         item {
             ElevatedCard {
                 Column(
@@ -1397,7 +1509,7 @@ private fun ModerationTab(
                                         verticalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
                                         Text(
-                                            "${e.action.ifBlank { "(no action)" }}  @  ${relTimeOrQ(e.createdAt)}",
+                                            "${e.action.ifBlank { "(no action)" }}  @  ${e.createdAt ?: "?"}",
                                             fontFamily = FontFamily.Monospace
                                         )
                                         if (e.reason.isNotBlank()) {
@@ -1405,13 +1517,13 @@ private fun ModerationTab(
                                         }
                                         if (e.targetDeviceHash.isNotBlank()) {
                                             Text(
-                                                "targetDevice=${shortId(e.targetDeviceHash)}",
+                                                "targetDevice=${e.targetDeviceHash.take(16)}…",
                                                 fontFamily = FontFamily.Monospace,
                                                 style = MaterialTheme.typography.bodySmall
                                             )
                                         }
                                         Text(
-                                            "byUid=${shortId(e.byUid)}  byDevice=${shortId(e.byDeviceHash)}",
+                                            "byUid=${e.byUid.ifBlank { "?" }}  byDevice=${e.byDeviceHash.take(12).ifBlank { "?" }}…",
                                             fontFamily = FontFamily.Monospace,
                                             style = MaterialTheme.typography.bodySmall
                                         )
@@ -1602,7 +1714,7 @@ private fun AnnouncementsTab(
                             Column(Modifier.weight(1f)) {
                                 Text(a.title.ifBlank { "(no title)" }, style = MaterialTheme.typography.titleSmall)
                                 Text(
-                                    "priority=${a.priority}  active=${a.active}  created=${relTimeOrQ(a.createdAt)}",
+                                    "priority=${a.priority}  active=${a.active}  createdAt=${a.createdAt ?: "?"}",
                                     fontFamily = FontFamily.Monospace,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1771,7 +1883,7 @@ private fun ConfigTab(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text("ToS / App Config", style = MaterialTheme.typography.titleMedium)
-            Text("loadedAt=${relTimeOrQ(loadedAt)}", fontFamily = FontFamily.Monospace)
+            Text("loadedAt=${loadedAt ?: "?"}", fontFamily = FontFamily.Monospace)
 
             OutlinedTextField(
                 value = ownerUid,
@@ -1873,41 +1985,6 @@ private fun ErrorCard(message: String) {
             Text("Error", style = MaterialTheme.typography.titleSmall)
             Text(message, fontFamily = FontFamily.Monospace)
         }
-    }
-}
-
-/* =========================================================
-   TIME + ID HELPERS
-   ========================================================= */
-
-private fun shortId(s: String, head: Int = 8, tail: Int = 6): String {
-    val t = s.trim()
-    if (t.isBlank()) return "(blank)"
-    if (t.length <= head + tail + 3) return t
-    return t.take(head) + "..." + t.takeLast(tail)
-}
-
-private fun relTimeOrQ(ts: Timestamp?): String {
-    if (ts == null) return "?"
-    return formatRelativeTime(ts)
-}
-
-private fun formatRelativeTime(ts: Timestamp): String {
-    val nowSec = Timestamp.now().seconds
-    val d = nowSec - ts.seconds
-    val past = d >= 0
-    val sec = abs(d)
-
-    fun out(v: Long, unit: String): String = if (past) "${v}${unit} ago" else "in ${v}${unit}"
-
-    return when {
-        sec < 60 -> out(sec, "s")
-        sec < 3600 -> out(sec / 60, "m")
-        sec < 86400 -> out(sec / 3600, "h")
-        sec < 86400 * 7 -> out(sec / 86400, "d")
-        sec < 86400 * 30 -> out(sec / (86400 * 7), "w")
-        sec < 86400 * 365 -> out(sec / (86400 * 30), "mo")
-        else -> out(sec / (86400 * 365), "y")
     }
 }
 
