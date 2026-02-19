@@ -15,9 +15,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
@@ -78,17 +78,11 @@ import kotlinx.coroutines.tasks.await
 /**
  * Owner-only Admin screen.
  *
- * Level 3 "reactive":
- * - Users list: live listener
- * - Selected user: live listener (detail updates immediately)
- * - Moderation events: live listener (no composite-index requirement)
- * - Announcements: live listener
+ * Canonical users doc is:
+ * - users/{docId}  (docId usually == deviceHash)
  *
- * Fixes included:
- * 1) Users showing "blank" data: list shows docId always + pulls authUid/deviceHash if present; selected view shows RAW fields too.
- * 2) Big blank space on selected user view: Send button is now a bottom bar; content scrolls above it.
- * 3) "FAILED_PRECONDITION requires an index" when sending to moderation: history listener avoids composite index by listening to
- *    moderationEvents ordered only by createdAt and filtering client-side.
+ * Mapping doc is:
+ * - usersById/{uid} -> { deviceHash, authUid, appId, adminBuild, updatedAt }
  */
 @Composable
 fun AdminScreen() {
@@ -108,12 +102,14 @@ fun AdminScreen() {
     // Hard block: should never be reachable on public build.
     if (!BuildConfig.IS_ADMIN_BUILD) {
         Surface {
-            LazyColumn(
-                modifier = Modifier.padding(14.dp),
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(14.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                item { Text("Admin", style = MaterialTheme.typography.titleLarge) }
-                item { ErrorCard("This page is only available in the Admin build.") }
+                Text("Admin", style = MaterialTheme.typography.titleLarge)
+                ErrorCard("This page is only available in the Admin build.")
             }
         }
         return
@@ -165,18 +161,18 @@ fun AdminScreen() {
     // Gate loading screen
     if (!ownerChecked) {
         Surface {
-            LazyColumn(
-                modifier = Modifier.padding(14.dp),
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(14.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                item { Text("Admin", style = MaterialTheme.typography.titleLarge) }
-                item {
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        CircularProgressIndicator()
-                        Text("Checking access…")
-                    }
+                Text("Admin", style = MaterialTheme.typography.titleLarge)
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    CircularProgressIndicator()
+                    Text("Checking access…")
                 }
-                if (error != null) item { ErrorCard(error!!) }
+                if (error != null) ErrorCard(error!!)
             }
         }
         return
@@ -185,63 +181,59 @@ fun AdminScreen() {
     // Access denied
     if (!isOwner) {
         Surface {
-            LazyColumn(
-                modifier = Modifier.padding(14.dp),
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(14.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                item { Text("Admin", style = MaterialTheme.typography.titleLarge) }
+                Text("Admin", style = MaterialTheme.typography.titleLarge)
 
-                item {
-                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
-                        Column(
-                            Modifier.padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Text("Access denied", style = MaterialTheme.typography.titleSmall)
-                            Text(
-                                "This account is not the owner.\n\nUID: ${myUid.ifBlank { "(not available yet)" }}",
-                                fontFamily = FontFamily.Monospace
-                            )
-                        }
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                    Column(
+                        Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text("Access denied", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "This account is not the owner.\n\nUID: ${myUid.ifBlank { "(not available yet)" }}",
+                            fontFamily = FontFamily.Monospace
+                        )
                     }
                 }
 
-                item {
-                    ElevatedCard {
-                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("IDs", style = MaterialTheme.typography.titleSmall)
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                OutlinedButton(onClick = { clipboard.setText(AnnotatedString(deviceHash)) }) {
-                                    Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                                    Spacer(Modifier.width(6.dp))
-                                    Text("Copy device")
-                                }
-                                OutlinedButton(onClick = { clipboard.setText(AnnotatedString(myUid)) }) {
-                                    Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                                    Spacer(Modifier.width(6.dp))
-                                    Text("Copy UID")
-                                }
+                ElevatedCard {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("IDs", style = MaterialTheme.typography.titleSmall)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(onClick = { clipboard.setText(AnnotatedString(deviceHash)) }) {
+                                Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                                Spacer(Modifier.width(6.dp))
+                                Text("Copy device")
                             }
-                            Text("deviceHash=${deviceHash.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
-                            Text("uid=${myUid.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
-                            Text("ownerUid=${ownerUid.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
+                            OutlinedButton(onClick = { clipboard.setText(AnnotatedString(myUid)) }) {
+                                Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                                Spacer(Modifier.width(6.dp))
+                                Text("Copy UID")
+                            }
                         }
+                        Text("deviceHash=${deviceHash.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
+                        Text("uid=${myUid.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
+                        Text("ownerUid=${ownerUid.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
                     }
                 }
 
-                item {
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        OutlinedButton(onClick = {
-                            myUid = readCachedUid(ctx).ifBlank { myUid }
-                            scope.launch { refreshOwnerGate() }
-                            setErr(null)
-                        }) { Text("Re-check") }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedButton(onClick = {
+                        myUid = readCachedUid(ctx).ifBlank { myUid }
+                        scope.launch { refreshOwnerGate() }
+                        setErr(null)
+                    }) { Text("Re-check") }
 
-                        if (error != null) OutlinedButton(onClick = { setErr(null) }) { Text("Clear error") }
-                    }
+                    if (error != null) OutlinedButton(onClick = { setErr(null) }) { Text("Clear error") }
                 }
 
-                if (error != null) item { ErrorCard(error!!) }
+                if (error != null) ErrorCard(error!!)
             }
         }
         return
@@ -266,7 +258,7 @@ fun AdminScreen() {
                 .padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // Header
+            // Header (clean)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
@@ -295,7 +287,7 @@ fun AdminScreen() {
                 }
             }
 
-            // IDs card (tight)
+            // IDs card
             AnimatedVisibility(visible = idsExpanded) {
                 ElevatedCard(
                     modifier = Modifier
@@ -360,11 +352,7 @@ fun AdminScreen() {
                         selected = tabIndex == i,
                         onClick = { tabIndex = i },
                         text = {
-                            Text(
-                                label,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
+                            Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     )
                 }
@@ -425,7 +413,7 @@ fun AdminScreen() {
 }
 
 /* =========================================================
-   USERS TAB (reactive list + reactive selected user)
+   USERS TAB (LIVE / REACTIVE)
    ========================================================= */
 
 private data class UserRow(
@@ -456,8 +444,7 @@ private data class UserDetail(
     val warnReason: String,
     val banReason: String,
     val afkPresets: List<String>,
-    val cyclePresets: List<String>,
-    val raw: Map<String, Any?>
+    val cyclePresets: List<String>
 )
 
 private data class ModerationTarget(
@@ -476,7 +463,6 @@ private fun UsersTab(
     onSendToModeration: (ModerationTarget) -> Unit
 ) {
     val scope = rememberCoroutineScope()
-    val listState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
 
     val users = remember { mutableStateListOf<UserRow>() }
 
@@ -487,7 +473,10 @@ private fun UsersTab(
     // Selected user takes over whole Users tab until unselected
     var selectedDocId by rememberSaveable { mutableStateOf<String?>(null) }
 
-    // Live detail snapshot of selected user
+    // "More" just increases live query limit (still realtime)
+    var liveLimit by rememberSaveable { mutableIntStateOf(75) }
+
+    // Selected details live doc listener
     var selectedDetail by remember { mutableStateOf<UserDetail?>(null) }
     var selectedDetailLoading by remember { mutableStateOf(false) }
 
@@ -511,18 +500,18 @@ private fun UsersTab(
         }
     }
 
-    // Level 3: live users list
-    DisposableEffect(Unit) {
+    // Live users list
+    DisposableEffect(liveLimit) {
         setError(null)
         setGlobalLoading(true)
 
         val reg: ListenerRegistration = db.collection("users")
             .orderBy("lastSeenAt", Query.Direction.DESCENDING)
-            .limit(500)
+            .limit(liveLimit.toLong())
             .addSnapshotListener { snap, e ->
                 if (e != null) {
                     setGlobalLoading(false)
-                    setError(e.message ?: "Users listener error")
+                    setError(e.message ?: "Users live update failed")
                     return@addSnapshotListener
                 }
                 if (snap == null) {
@@ -530,16 +519,14 @@ private fun UsersTab(
                     return@addSnapshotListener
                 }
 
-                val newList = snap.documents.map { d ->
+                val next = snap.documents.map { d ->
                     val docId = d.id
-                    // Never allow the row to be "all blank": show docId always.
                     val authUid = (d.getString("authUid") ?: d.getString("uid") ?: "").trim()
-                    val deviceHash = (d.getString("deviceHash") ?: "").trim()
                     UserRow(
                         docId = docId,
                         authUid = authUid,
                         displayName = (d.getString("displayName") ?: "").trim(),
-                        deviceHash = deviceHash,
+                        deviceHash = (d.getString("deviceHash") ?: "").trim(),
                         warned = d.getBoolean("warned") ?: false,
                         banned = d.getBoolean("banned") ?: false,
                         lastSeenAt = d.getTimestamp("lastSeenAt"),
@@ -548,26 +535,31 @@ private fun UsersTab(
                 }
 
                 users.clear()
-                users.addAll(newList)
+                users.addAll(next)
                 setGlobalLoading(false)
             }
 
         onDispose { reg.remove() }
     }
 
-    // Level 3: live selected user doc
+    // Live selected doc details
     DisposableEffect(selectedDocId) {
-        selectedDetail = null
-        val id = selectedDocId ?: return@DisposableEffect onDispose { }
+        val docId = selectedDocId
+        if (docId.isNullOrBlank()) {
+            selectedDetail = null
+            selectedDetailLoading = false
+            return@DisposableEffect onDispose { }
+        }
 
         selectedDetailLoading = true
         setError(null)
 
-        val reg = db.collection("users").document(id)
+        val reg = db.collection("users")
+            .document(docId)
             .addSnapshotListener { snap, e ->
                 if (e != null) {
                     selectedDetailLoading = false
-                    setError(e.message ?: "User detail listener error")
+                    setError(e.message ?: "User detail live update failed")
                     return@addSnapshotListener
                 }
                 if (snap == null || !snap.exists()) {
@@ -589,9 +581,6 @@ private fun UsersTab(
                     s("cyclePreset5")
                 )
 
-                // Raw map to help debug "why is it blank" without leaving app
-                val rawMap: Map<String, Any?> = snap.data?.toMap() ?: emptyMap()
-
                 selectedDetail = UserDetail(
                     afkEnabled = b("afkEnabled"),
                     afkMessage = s("afkMessage"),
@@ -609,8 +598,7 @@ private fun UsersTab(
                     warnReason = s("warnReason"),
                     banReason = s("banReason"),
                     afkPresets = afkPresets,
-                    cyclePresets = cyclePresets,
-                    raw = rawMap
+                    cyclePresets = cyclePresets
                 )
                 selectedDetailLoading = false
             }
@@ -618,163 +606,138 @@ private fun UsersTab(
         onDispose { reg.remove() }
     }
 
-    // If a user is selected, take over the whole Users tab with a dedicated detail view.
     val selectedRow = remember(selectedDocId, users.size) {
         selectedDocId?.let { id -> users.firstOrNull { it.docId == id } }
     }
 
+    // Detail view (scrollable Column) — removes the weird "big blank space" behavior
     if (selectedRow != null) {
-        // FIX: remove weird empty space by using a bottom action bar;
-        // the detail content scrolls above it.
-        Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                item {
-                    ElevatedCard {
-                        Column(
-                            Modifier.padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Row(
-                                Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    IconButton(onClick = { selectedDocId = null }) {
-                                        Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
-                                    }
-                                    Column {
-                                        Text(
-                                            selectedRow.displayName.ifBlank { "User" },
-                                            style = MaterialTheme.typography.titleMedium
-                                        )
-                                        Text(
-                                            "docId=${selectedRow.docId}",
-                                            fontFamily = FontFamily.Monospace,
-                                            style = MaterialTheme.typography.bodySmall
-                                        )
-                                    }
-                                }
+        val d = selectedDetail
 
-                                IconButton(onClick = {
-                                    // listener will update automatically; this just clears errors
-                                    setError(null)
-                                }) {
-                                    Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
-                                }
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            ElevatedCard {
+                Column(
+                    Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            IconButton(onClick = { selectedDocId = null }) {
+                                Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
                             }
-
-                            Text(
-                                "authUid=${selectedRow.authUid.ifBlank { "(blank)" }}",
-                                fontFamily = FontFamily.Monospace,
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                            Text(
-                                "deviceHash=${selectedRow.deviceHash.ifBlank { "(blank)" }}",
-                                fontFamily = FontFamily.Monospace,
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                            Text(
-                                "warned=${selectedRow.warned}  banned=${selectedRow.banned}",
-                                fontFamily = FontFamily.Monospace,
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                            Text(
-                                "lastSeenAt=${selectedRow.lastSeenAt ?: "?"}   updatedAt=${selectedRow.updatedAt ?: "?"}",
-                                fontFamily = FontFamily.Monospace,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-
-                            Divider()
-
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                OutlinedButton(onClick = { clipboardCopy(selectedRow.docId) }) {
-                                    Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                                    Spacer(Modifier.width(6.dp))
-                                    Text("Copy docId")
-                                }
-                                if (selectedRow.authUid.isNotBlank()) {
-                                    OutlinedButton(onClick = { clipboardCopy(selectedRow.authUid) }) {
-                                        Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                                        Spacer(Modifier.width(6.dp))
-                                        Text("Copy authUid")
-                                    }
-                                }
-                                if (selectedRow.deviceHash.isNotBlank()) {
-                                    OutlinedButton(onClick = { clipboardCopy(selectedRow.deviceHash) }) {
-                                        Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                                        Spacer(Modifier.width(6.dp))
-                                        Text("Copy device")
-                                    }
-                                }
+                            Column {
+                                Text(
+                                    selectedRow.displayName.ifBlank { "User" },
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                                Text(
+                                    "docId=${selectedRow.docId}",
+                                    fontFamily = FontFamily.Monospace,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
                             }
+                        }
+
+                        IconButton(onClick = { /* live already */ }) {
+                            Icon(Icons.Filled.Refresh, contentDescription = "Live")
                         }
                     }
-                }
 
-                item {
-                    if (selectedDetailLoading) {
-                        ElevatedCard {
-                            Row(
-                                modifier = Modifier.padding(12.dp),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                CircularProgressIndicator()
-                                Text("Live updating…")
-                            }
-                        }
-                    } else {
-                        val d = selectedDetail
-                        if (d != null) {
-                            DetailBlock(d)
-                        } else {
-                            ElevatedCard {
-                                Column(
-                                    Modifier.padding(12.dp),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Text("Details", style = MaterialTheme.typography.titleSmall)
-                                    Text(
-                                        "No detail loaded (doc missing or empty).",
-                                        style = MaterialTheme.typography.bodySmall
-                                    )
-                                    Text(
-                                        "Tip: this usually means the PUBLIC app isn’t writing fields to users/{deviceHash}.",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-
-                item { Spacer(Modifier.height(6.dp)) }
-            }
-
-            // Bottom action bar (no weird gaps)
-            Button(
-                onClick = {
-                    onSendToModeration(
-                        ModerationTarget(
-                            docId = selectedRow.docId,
-                            authUid = selectedRow.authUid,
-                            deviceHash = selectedRow.deviceHash,
-                            displayName = selectedRow.displayName
-                        )
+                    Text(
+                        "authUid=${selectedRow.authUid.ifBlank { "(blank)" }}",
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall
                     )
-                },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Icon(Icons.Filled.ArrowForward, contentDescription = null)
-                Spacer(Modifier.width(6.dp))
-                Text("Send to Moderation")
+                    Text(
+                        "warned=${selectedRow.warned}  banned=${selectedRow.banned}",
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        "lastSeenAt=${selectedRow.lastSeenAt ?: "?"}   updatedAt=${selectedRow.updatedAt ?: "?"}",
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Divider()
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { clipboardCopy(selectedRow.docId) }) {
+                            Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                            Spacer(Modifier.width(6.dp))
+                            Text("Copy docId")
+                        }
+                        if (selectedRow.authUid.isNotBlank()) {
+                            OutlinedButton(onClick = { clipboardCopy(selectedRow.authUid) }) {
+                                Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                                Spacer(Modifier.width(6.dp))
+                                Text("Copy authUid")
+                            }
+                        }
+                        if (selectedRow.deviceHash.isNotBlank()) {
+                            OutlinedButton(onClick = { clipboardCopy(selectedRow.deviceHash) }) {
+                                Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                                Spacer(Modifier.width(6.dp))
+                                Text("Copy device")
+                            }
+                        }
+                    }
+
+                    // No spacer/weight here — button stays directly under the copy row
+                    Button(
+                        onClick = {
+                            onSendToModeration(
+                                ModerationTarget(
+                                    docId = selectedRow.docId,
+                                    authUid = selectedRow.authUid,
+                                    deviceHash = selectedRow.deviceHash,
+                                    displayName = selectedRow.displayName
+                                )
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Filled.ArrowForward, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Send to Moderation")
+                    }
+                }
             }
+
+            if (selectedDetailLoading) {
+                ElevatedCard {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        CircularProgressIndicator()
+                        Text("Loading details…")
+                    }
+                }
+            } else if (d != null) {
+                DetailBlock(d)
+            } else {
+                ElevatedCard {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("Details", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "No detail loaded (doc missing or not yet written).",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
         }
         return
     }
@@ -825,8 +788,24 @@ private fun UsersTab(
                     }
                 }
 
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedButton(
+                        onClick = {
+                            // "Refresh" = reattach listener by nudging limit
+                            liveLimit = liveLimit.coerceAtLeast(1)
+                            setError(null)
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Live") }
+
+                    Button(
+                        onClick = { liveLimit = (liveLimit + 75).coerceAtMost(1000) },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("More") }
+                }
+
                 Text(
-                    "Live updates: on",
+                    "Live limit: $liveLimit",
                     fontFamily = FontFamily.Monospace,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -836,19 +815,16 @@ private fun UsersTab(
 
         Divider()
 
-        LazyColumn(
-            state = listState,
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             if (filteredUsers.isEmpty()) {
-                item {
-                    Text("No users loaded/matching filters yet.", style = MaterialTheme.typography.bodySmall)
-                }
+                Text("No users loaded/matching filters yet.", style = MaterialTheme.typography.bodySmall)
             } else {
-                itemsIndexed(filteredUsers, key = { _, u -> u.docId }) { _, u ->
+                filteredUsers.forEach { u ->
                     Card(
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                         modifier = Modifier
@@ -884,7 +860,6 @@ private fun UsersTab(
                                         style = MaterialTheme.typography.bodySmall
                                     )
                                 }
-
                                 Icon(Icons.Filled.ExpandMore, contentDescription = null)
                             }
 
@@ -974,26 +949,12 @@ private fun DetailBlock(d: UserDetail) {
                     )
                 }
             }
-
-            // Debug helper: show raw keys when something is "blank"
-            Spacer(Modifier.height(4.dp))
-            Text("Raw fields (debug)", style = MaterialTheme.typography.titleSmall)
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                val keys = d.raw.keys.sorted()
-                val rawText = if (keys.isEmpty()) "(no fields)" else keys.joinToString(", ")
-                Text(
-                    rawText,
-                    modifier = Modifier.padding(10.dp),
-                    fontFamily = FontFamily.Monospace,
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
         }
     }
 }
 
 /* =========================================================
-   MODERATION TAB (reactive + no composite index)
+   MODERATION TAB (LIVE + NO INDEX REQUIRED)
    ========================================================= */
 
 private data class ModerationEventRow(
@@ -1038,7 +999,12 @@ private fun ModerationTab(
 
     val history = remember { mutableStateListOf<ModerationEventRow>() }
 
+    var userDocReg by remember { mutableStateOf<ListenerRegistration?>(null) }
+    var deviceDocReg by remember { mutableStateOf<ListenerRegistration?>(null) }
+
     fun clearLoaded() {
+        userDocReg?.remove(); userDocReg = null
+        deviceDocReg?.remove(); deviceDocReg = null
         loaded = null
         warned = false
         banned = false
@@ -1053,7 +1019,7 @@ private fun ModerationTab(
         val t = input.trim()
         if (t.isBlank()) return null
 
-        // Try docId directly
+        // 1) Try docId directly (users/{deviceHash})
         runCatching {
             val doc = db.collection("users").document(t).get().await()
             if (doc.exists()) {
@@ -1064,7 +1030,25 @@ private fun ModerationTab(
             }
         }
 
-        // Try lookup by authUid in users collection
+        // 2) Try usersById/{uid} mapping
+        runCatching {
+            val map = db.collection("usersById").document(t).get().await()
+            if (map.exists()) {
+                val deviceHash = (map.getString("deviceHash") ?: "").trim()
+                val authUid = (map.getString("authUid") ?: t).trim()
+                if (deviceHash.isNotBlank()) {
+                    val doc = db.collection("users").document(deviceHash).get().await()
+                    if (doc.exists()) {
+                        val displayName = (doc.getString("displayName") ?: "").trim()
+                        return ModerationTarget(docId = deviceHash, authUid = authUid, deviceHash = deviceHash, displayName = displayName)
+                    }
+                    // mapping exists but user doc missing
+                    return ModerationTarget(docId = deviceHash, authUid = authUid, deviceHash = deviceHash, displayName = "")
+                }
+            }
+        }
+
+        // 3) Fallback: lookup by authUid in users collection
         return runCatching {
             val q = db.collection("users")
                 .whereEqualTo("authUid", t)
@@ -1081,29 +1065,83 @@ private fun ModerationTab(
         }.getOrNull()
     }
 
+    suspend fun loadHistoryNoIndex(target: ModerationTarget) {
+        // No orderBy here -> no composite index required
+        val snap = db.collection("moderationEvents")
+            .whereEqualTo("targetDocId", target.docId)
+            .limit(200)
+            .get()
+            .await()
+
+        val rows = snap.documents.map { d ->
+            ModerationEventRow(
+                id = d.id,
+                action = d.getString("action") ?: "",
+                reason = d.getString("reason") ?: "",
+                createdAt = d.getTimestamp("createdAt"),
+                byDeviceHash = d.getString("byDeviceHash") ?: "",
+                byUid = d.getString("byUid") ?: "",
+                byAppId = d.getString("byAppId") ?: "",
+                targetDocId = d.getString("targetDocId") ?: (d.getString("targetUid") ?: ""),
+                targetAuthUid = d.getString("targetAuthUid") ?: "",
+                targetDeviceHash = d.getString("targetDeviceHash") ?: ""
+            )
+        }.sortedByDescending { it.createdAt?.seconds ?: 0L }
+
+        history.clear()
+        history.addAll(rows)
+    }
+
+    fun attachLiveTarget(target: ModerationTarget) {
+        // remove old listeners
+        userDocReg?.remove(); userDocReg = null
+        deviceDocReg?.remove(); deviceDocReg = null
+
+        // live user doc
+        userDocReg = db.collection("users").document(target.docId)
+            .addSnapshotListener { snap, e ->
+                if (e != null) {
+                    setError(e.message ?: "Moderation live user update failed")
+                    return@addSnapshotListener
+                }
+                if (snap == null || !snap.exists()) return@addSnapshotListener
+
+                warned = snap.getBoolean("warned") ?: false
+                banned = snap.getBoolean("banned") ?: false
+                warnReason = (snap.getString("warnReason") ?: "").trim()
+                banReason = (snap.getString("banReason") ?: "").trim()
+
+                val dh = (snap.getString("deviceHash") ?: target.deviceHash).trim()
+                if (dh.isNotBlank()) {
+                    deviceDocReg?.remove()
+                    deviceDocReg = db.collection("bannedDevices").document(dh)
+                        .addSnapshotListener { ds, de ->
+                            if (de != null) {
+                                setError(de.message ?: "Moderation live device update failed")
+                                return@addSnapshotListener
+                            }
+                            if (ds == null || !ds.exists()) {
+                                deviceBanned = false
+                                deviceBanReason = ""
+                                return@addSnapshotListener
+                            }
+                            deviceBanned = ds.getBoolean("banned") ?: false
+                            deviceBanReason = (ds.getString("reason") ?: "").trim()
+                        }
+                } else {
+                    deviceBanned = false
+                    deviceBanReason = ""
+                }
+            }
+    }
+
     suspend fun loadTarget(target: ModerationTarget) {
         setGlobalLoading(true)
         setError(null)
-
         runCatching {
-            val snap = db.collection("users").document(target.docId).get().await()
-
-            warned = snap.getBoolean("warned") ?: false
-            banned = snap.getBoolean("banned") ?: false
-            warnReason = (snap.getString("warnReason") ?: "").trim()
-            banReason = (snap.getString("banReason") ?: "").trim()
-
-            val dh = (snap.getString("deviceHash") ?: target.deviceHash).trim()
-            if (dh.isNotBlank()) {
-                val ds = db.collection("bannedDevices").document(dh).get().await()
-                deviceBanned = ds.getBoolean("banned") ?: false
-                deviceBanReason = (ds.getString("reason") ?: "").trim()
-            } else {
-                deviceBanned = false
-                deviceBanReason = ""
-            }
-
             loaded = target
+            attachLiveTarget(target)
+            loadHistoryNoIndex(target)
             setGlobalLoading(false)
         }.onFailure { e ->
             setGlobalLoading(false)
@@ -1118,7 +1156,7 @@ private fun ModerationTab(
     ) {
         runCatching {
             val data = hashMapOf(
-                "uid" to target.docId, // legacy compatibility
+                "uid" to target.docId,
                 "targetUid" to target.docId,
                 "targetDocId" to target.docId,
                 "targetAuthUid" to target.authUid,
@@ -1136,47 +1174,6 @@ private fun ModerationTab(
         }
     }
 
-    // Level 3: reactive moderation history (NO composite index)
-    // Listen to last N events by createdAt, then filter client-side by target.
-    DisposableEffect(loaded?.docId) {
-        history.clear()
-        val t = loaded ?: return@DisposableEffect onDispose { }
-
-        val reg = db.collection("moderationEvents")
-            .orderBy("createdAt", Query.Direction.DESCENDING)
-            .limit(250)
-            .addSnapshotListener { snap, e ->
-                if (e != null) {
-                    setError(e.message ?: "Moderation history listener error")
-                    return@addSnapshotListener
-                }
-                if (snap == null) return@addSnapshotListener
-
-                val rows = snap.documents.map { d ->
-                    ModerationEventRow(
-                        id = d.id,
-                        action = d.getString("action") ?: "",
-                        reason = d.getString("reason") ?: "",
-                        createdAt = d.getTimestamp("createdAt"),
-                        byDeviceHash = d.getString("byDeviceHash") ?: "",
-                        byUid = d.getString("byUid") ?: "",
-                        byAppId = d.getString("byAppId") ?: "",
-                        targetDocId = d.getString("targetDocId") ?: (d.getString("targetUid") ?: (d.getString("uid") ?: "")),
-                        targetAuthUid = d.getString("targetAuthUid") ?: "",
-                        targetDeviceHash = d.getString("targetDeviceHash") ?: ""
-                    )
-                }.filter { row ->
-                    // match by new field OR legacy
-                    row.targetDocId == t.docId || row.targetAuthUid == t.authUid
-                }.sortedWith(compareByDescending<ModerationEventRow> { it.createdAt?.seconds ?: 0L })
-
-                history.clear()
-                history.addAll(rows)
-            }
-
-        onDispose { reg.remove() }
-    }
-
     LaunchedEffect(initialTarget?.docId) {
         val t = initialTarget ?: return@LaunchedEffect
         lookup = t.docId
@@ -1184,376 +1181,380 @@ private fun ModerationTab(
         onClearInitialTarget()
     }
 
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
+    DisposableEffect(Unit) {
+        onDispose {
+            userDocReg?.remove()
+            deviceDocReg?.remove()
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        item {
-            ElevatedCard {
-                Column(
-                    Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Text("Moderation", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        "Lookup accepts docId OR authUid.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+        ElevatedCard {
+            Column(
+                Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text("Moderation", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Lookup accepts docId OR authUid.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
 
-                    OutlinedTextField(
-                        value = lookup,
-                        onValueChange = { lookup = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        label = { Text("docId or authUid") },
-                        placeholder = { Text("paste here") }
-                    )
+                OutlinedTextField(
+                    value = lookup,
+                    onValueChange = { lookup = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("docId or authUid") },
+                    placeholder = { Text("paste here") }
+                )
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Button(
-                            onClick = {
-                                scope.launch {
-                                    setGlobalLoading(true)
-                                    setError(null)
-                                    val t = resolveUser(lookup)
-                                    setGlobalLoading(false)
-                                    if (t == null) setError("No matching user found for: ${lookup.trim()}")
-                                    else loadTarget(t)
-                                }
-                            },
-                            enabled = lookup.trim().isNotBlank(),
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Load") }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                setGlobalLoading(true)
+                                setError(null)
+                                val t = resolveUser(lookup)
+                                setGlobalLoading(false)
+                                if (t == null) setError("No matching user found for: ${lookup.trim()}")
+                                else loadTarget(t)
+                            }
+                        },
+                        enabled = lookup.trim().isNotBlank(),
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Load") }
 
-                        OutlinedButton(
-                            onClick = { clearLoaded() },
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Clear") }
-                    }
+                    OutlinedButton(
+                        onClick = { clearLoaded() },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Clear") }
                 }
             }
         }
 
         val t = loaded
         if (t == null) {
-            item { Text("No user loaded.", style = MaterialTheme.typography.bodySmall) }
-            return@LazyColumn
+            Text("No user loaded.", style = MaterialTheme.typography.bodySmall)
+            Spacer(Modifier.height(10.dp))
+            return
         }
 
-        item {
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                Column(
-                    Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text("Target", style = MaterialTheme.typography.titleSmall)
-                    Text("displayName=${t.displayName.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
-                    Text("docId=${t.docId}", fontFamily = FontFamily.Monospace)
-                    Text("authUid=${t.authUid.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
-                    Text("deviceHash=${t.deviceHash.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
+        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+            Column(
+                Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text("Target", style = MaterialTheme.typography.titleSmall)
+                Text("displayName=${t.displayName.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
+                Text("docId=${t.docId}", fontFamily = FontFamily.Monospace)
+                Text("authUid=${t.authUid.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
+                Text("deviceHash=${t.deviceHash.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = { clipboardCopy(t.docId) }) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { clipboardCopy(t.docId) }) {
+                        Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Copy docId")
+                    }
+                    if (t.authUid.isNotBlank()) {
+                        OutlinedButton(onClick = { clipboardCopy(t.authUid) }) {
                             Icon(Icons.Filled.ContentCopy, contentDescription = null)
                             Spacer(Modifier.width(6.dp))
-                            Text("Copy docId")
-                        }
-                        if (t.authUid.isNotBlank()) {
-                            OutlinedButton(onClick = { clipboardCopy(t.authUid) }) {
-                                Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                                Spacer(Modifier.width(6.dp))
-                                Text("Copy authUid")
-                            }
-                        }
-                        if (t.deviceHash.isNotBlank()) {
-                            OutlinedButton(onClick = { clipboardCopy(t.deviceHash) }) {
-                                Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                                Spacer(Modifier.width(6.dp))
-                                Text("Copy device")
-                            }
+                            Text("Copy authUid")
                         }
                     }
-
-                    OutlinedButton(
-                        onClick = { scope.launch { loadTarget(t) } },
-                        modifier = Modifier.fillMaxWidth()
-                    ) { Text("Reload flags") }
-
-                    Text("warned=$warned  banned=$banned  deviceBanned=$deviceBanned", fontFamily = FontFamily.Monospace)
-                    if (deviceBanned && deviceBanReason.isNotBlank()) {
-                        Text("deviceBanReason=$deviceBanReason", fontFamily = FontFamily.Monospace)
+                    if (t.deviceHash.isNotBlank()) {
+                        OutlinedButton(onClick = { clipboardCopy(t.deviceHash) }) {
+                            Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                            Spacer(Modifier.width(6.dp))
+                            Text("Copy device")
+                        }
                     }
-                    Text(
-                        "History: live (no index needed)",
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                }
+
+                OutlinedButton(
+                    onClick = { scope.launch { loadTarget(t) } },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Reload (history + live)") }
+
+                Text("warned=$warned  banned=$banned  deviceBanned=$deviceBanned", fontFamily = FontFamily.Monospace)
+                if (deviceBanned && deviceBanReason.isNotBlank()) {
+                    Text("deviceBanReason=$deviceBanReason", fontFamily = FontFamily.Monospace)
                 }
             }
         }
 
         // WARN
-        item {
-            ElevatedCard {
-                Column(
-                    Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Text("Warn", style = MaterialTheme.typography.titleSmall)
+        ElevatedCard {
+            Column(
+                Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text("Warn", style = MaterialTheme.typography.titleSmall)
 
-                    OutlinedTextField(
-                        value = warnReason,
-                        onValueChange = { warnReason = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        minLines = 2,
-                        label = { Text("Warn reason (shown to user)") }
-                    )
+                OutlinedTextField(
+                    value = warnReason,
+                    onValueChange = { warnReason = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
+                    label = { Text("Warn reason (shown to user)") }
+                )
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Button(
-                            onClick = {
-                                scope.launch {
-                                    setGlobalLoading(true)
-                                    setError(null)
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                setGlobalLoading(true)
+                                setError(null)
 
-                                    runCatching {
-                                        db.collection("users").document(t.docId)
-                                            .set(
-                                                mapOf(
-                                                    "warned" to true,
-                                                    "warnReason" to warnReason.trim(),
-                                                    "updatedAt" to FieldValue.serverTimestamp()
-                                                ),
-                                                SetOptions.merge()
-                                            )
-                                            .await()
-                                        writeEvent(t, "warn", warnReason)
-                                        loadTarget(t)
-                                    }.onFailure { e ->
-                                        setGlobalLoading(false)
-                                        setError(e.message ?: "Failed to warn")
-                                    }
+                                runCatching {
+                                    db.collection("users").document(t.docId)
+                                        .set(
+                                            mapOf(
+                                                "warned" to true,
+                                                "warnReason" to warnReason.trim(),
+                                                "updatedAt" to FieldValue.serverTimestamp()
+                                            ),
+                                            SetOptions.merge()
+                                        )
+                                        .await()
+                                    writeEvent(t, "warn", warnReason)
+                                    loadHistoryNoIndex(t)
+                                    setGlobalLoading(false)
+                                }.onFailure { e ->
+                                    setGlobalLoading(false)
+                                    setError(e.message ?: "Failed to warn")
                                 }
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Apply warn") }
+                            }
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Apply warn") }
 
-                        OutlinedButton(
-                            onClick = {
-                                scope.launch {
-                                    setGlobalLoading(true)
-                                    setError(null)
+                    OutlinedButton(
+                        onClick = {
+                            scope.launch {
+                                setGlobalLoading(true)
+                                setError(null)
 
-                                    runCatching {
-                                        db.collection("users").document(t.docId)
-                                            .set(
-                                                mapOf(
-                                                    "warned" to false,
-                                                    "warnReason" to "",
-                                                    "updatedAt" to FieldValue.serverTimestamp()
-                                                ),
-                                                SetOptions.merge()
-                                            )
-                                            .await()
-                                        writeEvent(t, "clear_warn", "")
-                                        loadTarget(t)
-                                    }.onFailure { e ->
-                                        setGlobalLoading(false)
-                                        setError(e.message ?: "Failed to clear warn")
-                                    }
+                                runCatching {
+                                    db.collection("users").document(t.docId)
+                                        .set(
+                                            mapOf(
+                                                "warned" to false,
+                                                "warnReason" to "",
+                                                "updatedAt" to FieldValue.serverTimestamp()
+                                            ),
+                                            SetOptions.merge()
+                                        )
+                                        .await()
+                                    writeEvent(t, "clear_warn", "")
+                                    loadHistoryNoIndex(t)
+                                    setGlobalLoading(false)
+                                }.onFailure { e ->
+                                    setGlobalLoading(false)
+                                    setError(e.message ?: "Failed to clear warn")
                                 }
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Clear warn") }
-                    }
+                            }
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Clear warn") }
                 }
             }
         }
 
         // BAN
-        item {
-            ElevatedCard {
-                Column(
-                    Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+        ElevatedCard {
+            Column(
+                Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text("Ban", style = MaterialTheme.typography.titleSmall)
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text("Ban", style = MaterialTheme.typography.titleSmall)
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("Apply UID")
-                            Switch(checked = applyUidBan, onCheckedChange = { applyUidBan = it })
-                        }
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("Apply Device")
-                            Switch(
-                                checked = applyDeviceBan,
-                                onCheckedChange = { applyDeviceBan = it },
-                                enabled = t.deviceHash.isNotBlank()
-                            )
-                        }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Apply UID")
+                        Switch(checked = applyUidBan, onCheckedChange = { applyUidBan = it })
                     }
-
-                    OutlinedTextField(
-                        value = banReason,
-                        onValueChange = { banReason = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        minLines = 2,
-                        label = { Text("Ban reason (shown to user)") }
-                    )
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Button(
-                            onClick = {
-                                scope.launch {
-                                    val reason = banReason.trim()
-                                    setGlobalLoading(true)
-                                    setError(null)
-
-                                    runCatching {
-                                        if (applyUidBan) {
-                                            db.collection("users").document(t.docId)
-                                                .set(
-                                                    mapOf(
-                                                        "banned" to true,
-                                                        "banReason" to reason,
-                                                        "updatedAt" to FieldValue.serverTimestamp()
-                                                    ),
-                                                    SetOptions.merge()
-                                                )
-                                                .await()
-                                        }
-
-                                        if (applyDeviceBan) {
-                                            if (t.deviceHash.isBlank()) {
-                                                throw IllegalStateException("Cannot device-ban: deviceHash missing.")
-                                            }
-                                            db.collection("bannedDevices").document(t.deviceHash)
-                                                .set(
-                                                    mapOf(
-                                                        "banned" to true,
-                                                        "reason" to reason,
-                                                        "updatedAt" to FieldValue.serverTimestamp(),
-                                                        "updatedByUid" to myUid,
-                                                        "updatedByDeviceHash" to byDeviceHash,
-                                                        "updatedByAppId" to byAppId
-                                                    ),
-                                                    SetOptions.merge()
-                                                )
-                                                .await()
-                                        }
-
-                                        writeEvent(t, "ban", reason)
-                                        loadTarget(t)
-                                    }.onFailure { e ->
-                                        setGlobalLoading(false)
-                                        setError(e.message ?: "Failed to ban")
-                                    }
-                                }
-                            },
-                            modifier = Modifier.weight(1f),
-                            enabled = (applyUidBan || (applyDeviceBan && t.deviceHash.isNotBlank()))
-                        ) { Text("Ban") }
-
-                        OutlinedButton(
-                            onClick = {
-                                scope.launch {
-                                    setGlobalLoading(true)
-                                    setError(null)
-
-                                    runCatching {
-                                        if (applyUidBan) {
-                                            db.collection("users").document(t.docId)
-                                                .set(
-                                                    mapOf(
-                                                        "banned" to false,
-                                                        "banReason" to "",
-                                                        "updatedAt" to FieldValue.serverTimestamp()
-                                                    ),
-                                                    SetOptions.merge()
-                                                )
-                                                .await()
-                                        }
-
-                                        if (applyDeviceBan) {
-                                            if (t.deviceHash.isBlank()) {
-                                                throw IllegalStateException("Cannot device-unban: deviceHash missing.")
-                                            }
-                                            db.collection("bannedDevices").document(t.deviceHash)
-                                                .set(
-                                                    mapOf(
-                                                        "banned" to false,
-                                                        "reason" to "",
-                                                        "updatedAt" to FieldValue.serverTimestamp(),
-                                                        "updatedByUid" to myUid,
-                                                        "updatedByDeviceHash" to byDeviceHash,
-                                                        "updatedByAppId" to byAppId
-                                                    ),
-                                                    SetOptions.merge()
-                                                )
-                                                .await()
-                                        }
-
-                                        writeEvent(t, "unban", "")
-                                        loadTarget(t)
-                                    }.onFailure { e ->
-                                        setGlobalLoading(false)
-                                        setError(e.message ?: "Failed to unban")
-                                    }
-                                }
-                            },
-                            modifier = Modifier.weight(1f),
-                            enabled = (applyUidBan || (applyDeviceBan && t.deviceHash.isNotBlank()))
-                        ) { Text("Unban") }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Apply Device")
+                        Switch(
+                            checked = applyDeviceBan,
+                            onCheckedChange = { applyDeviceBan = it },
+                            enabled = t.deviceHash.isNotBlank()
+                        )
                     }
+                }
+
+                OutlinedTextField(
+                    value = banReason,
+                    onValueChange = { banReason = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
+                    label = { Text("Ban reason (shown to user)") }
+                )
+
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                val reason = banReason.trim()
+                                setGlobalLoading(true)
+                                setError(null)
+
+                                runCatching {
+                                    if (applyUidBan) {
+                                        db.collection("users").document(t.docId)
+                                            .set(
+                                                mapOf(
+                                                    "banned" to true,
+                                                    "banReason" to reason,
+                                                    "updatedAt" to FieldValue.serverTimestamp()
+                                                ),
+                                                SetOptions.merge()
+                                            )
+                                            .await()
+                                    }
+
+                                    if (applyDeviceBan) {
+                                        if (t.deviceHash.isBlank()) {
+                                            throw IllegalStateException("Cannot device-ban: deviceHash missing.")
+                                        }
+                                        db.collection("bannedDevices").document(t.deviceHash)
+                                            .set(
+                                                mapOf(
+                                                    "banned" to true,
+                                                    "reason" to reason,
+                                                    "updatedAt" to FieldValue.serverTimestamp(),
+                                                    "updatedByUid" to myUid,
+                                                    "updatedByDeviceHash" to byDeviceHash,
+                                                    "updatedByAppId" to byAppId
+                                                ),
+                                                SetOptions.merge()
+                                            )
+                                            .await()
+                                    }
+
+                                    writeEvent(t, "ban", reason)
+                                    loadHistoryNoIndex(t)
+                                    setGlobalLoading(false)
+                                }.onFailure { e ->
+                                    setGlobalLoading(false)
+                                    setError(e.message ?: "Failed to ban")
+                                }
+                            }
+                        },
+                        modifier = Modifier.weight(1f),
+                        enabled = (applyUidBan || (applyDeviceBan && t.deviceHash.isNotBlank()))
+                    ) { Text("Ban") }
+
+                    OutlinedButton(
+                        onClick = {
+                            scope.launch {
+                                setGlobalLoading(true)
+                                setError(null)
+
+                                runCatching {
+                                    if (applyUidBan) {
+                                        db.collection("users").document(t.docId)
+                                            .set(
+                                                mapOf(
+                                                    "banned" to false,
+                                                    "banReason" to "",
+                                                    "updatedAt" to FieldValue.serverTimestamp()
+                                                ),
+                                                SetOptions.merge()
+                                            )
+                                            .await()
+                                    }
+
+                                    if (applyDeviceBan) {
+                                        if (t.deviceHash.isBlank()) {
+                                            throw IllegalStateException("Cannot device-unban: deviceHash missing.")
+                                        }
+                                        db.collection("bannedDevices").document(t.deviceHash)
+                                            .set(
+                                                mapOf(
+                                                    "banned" to false,
+                                                    "reason" to "",
+                                                    "updatedAt" to FieldValue.serverTimestamp(),
+                                                    "updatedByUid" to myUid,
+                                                    "updatedByDeviceHash" to byDeviceHash,
+                                                    "updatedByAppId" to byAppId
+                                                ),
+                                                SetOptions.merge()
+                                            )
+                                            .await()
+                                    }
+
+                                    writeEvent(t, "unban", "")
+                                    loadHistoryNoIndex(t)
+                                    setGlobalLoading(false)
+                                }.onFailure { e ->
+                                    setGlobalLoading(false)
+                                    setError(e.message ?: "Failed to unban")
+                                }
+                            }
+                        },
+                        modifier = Modifier.weight(1f),
+                        enabled = (applyUidBan || (applyDeviceBan && t.deviceHash.isNotBlank()))
+                    ) { Text("Unban") }
                 }
             }
         }
 
         // HISTORY
-        item {
-            ElevatedCard {
-                Column(
-                    Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+        ElevatedCard {
+            Column(
+                Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text("History", style = MaterialTheme.typography.titleSmall)
+                    OutlinedButton(onClick = { scope.launch { loadHistoryNoIndex(t) } }) { Text("Reload") }
+                }
 
-                    if (history.isEmpty()) {
-                        Text("No history found.", style = MaterialTheme.typography.bodySmall)
-                    } else {
-                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                            history.forEach { e ->
-                                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                                    Column(
-                                        Modifier.padding(10.dp),
-                                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                                    ) {
+                if (history.isEmpty()) {
+                    Text("No history found.", style = MaterialTheme.typography.bodySmall)
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        history.forEach { e ->
+                            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                                Column(
+                                    Modifier.padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        "${e.action.ifBlank { "(no action)" }}  @  ${e.createdAt ?: "?"}",
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                    if (e.reason.isNotBlank()) {
+                                        Text("reason=${e.reason}", fontFamily = FontFamily.Monospace)
+                                    }
+                                    if (e.targetDeviceHash.isNotBlank()) {
                                         Text(
-                                            "${e.action.ifBlank { "(no action)" }}  @  ${e.createdAt ?: "?"}",
-                                            fontFamily = FontFamily.Monospace
-                                        )
-                                        if (e.reason.isNotBlank()) {
-                                            Text("reason=${e.reason}", fontFamily = FontFamily.Monospace)
-                                        }
-                                        if (e.targetDeviceHash.isNotBlank()) {
-                                            Text(
-                                                "targetDevice=${e.targetDeviceHash.take(16)}…",
-                                                fontFamily = FontFamily.Monospace,
-                                                style = MaterialTheme.typography.bodySmall
-                                            )
-                                        }
-                                        Text(
-                                            "byUid=${e.byUid.ifBlank { "?" }}  byDevice=${e.byDeviceHash.take(12).ifBlank { "?" }}…",
+                                            "targetDevice=${e.targetDeviceHash.take(16)}…",
                                             fontFamily = FontFamily.Monospace,
                                             style = MaterialTheme.typography.bodySmall
                                         )
                                     }
+                                    Text(
+                                        "byUid=${e.byUid.ifBlank { "?" }}  byDevice=${e.byDeviceHash.take(12).ifBlank { "?" }}…",
+                                        fontFamily = FontFamily.Monospace,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
                                 }
                             }
                         }
@@ -1562,12 +1563,12 @@ private fun ModerationTab(
             }
         }
 
-        item { Spacer(Modifier.height(10.dp)) }
+        Spacer(Modifier.height(10.dp))
     }
 }
 
 /* =========================================================
-   ANNOUNCEMENTS TAB (reactive)
+   ANNOUNCEMENTS TAB
    ========================================================= */
 
 private data class AnnouncementRow(
@@ -1594,26 +1595,20 @@ private fun AnnouncementsTab(
     var newActive by rememberSaveable { mutableStateOf(true) }
     var newPriority by rememberSaveable { mutableIntStateOf(0) }
 
-    // Level 3: live announcements
-    DisposableEffect(Unit) {
-        setError(null)
+    suspend fun refresh() {
         setGlobalLoading(true)
+        setError(null)
 
-        val reg = db.collection("announcements")
-            .orderBy("createdAt", Query.Direction.DESCENDING)
-            .limit(100)
-            .addSnapshotListener { snap, e ->
-                if (e != null) {
-                    setGlobalLoading(false)
-                    setError(e.message ?: "Announcements listener error")
-                    return@addSnapshotListener
-                }
-                if (snap == null) {
-                    setGlobalLoading(false)
-                    return@addSnapshotListener
-                }
+        runCatching {
+            val snap = db.collection("announcements")
+                .orderBy("createdAt", Query.Direction.DESCENDING)
+                .limit(50)
+                .get()
+                .await()
 
-                val list = snap.documents.map { d ->
+            announcements.clear()
+            snap.documents.forEach { d ->
+                announcements.add(
                     AnnouncementRow(
                         id = d.id,
                         title = (d.getString("title") ?: "").trim(),
@@ -1622,118 +1617,115 @@ private fun AnnouncementsTab(
                         priority = (d.getLong("priority") ?: 0L).toInt(),
                         createdAt = d.getTimestamp("createdAt")
                     )
-                }
-
-                announcements.clear()
-                announcements.addAll(list)
-                setGlobalLoading(false)
+                )
             }
 
-        onDispose { reg.remove() }
+            setGlobalLoading(false)
+        }.onFailure { e ->
+            setGlobalLoading(false)
+            setError(e.message ?: "Failed to load announcements")
+        }
     }
 
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
+    LaunchedEffect(Unit) { refresh() }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        item {
-            ElevatedCard {
-                Column(
-                    Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+        ElevatedCard {
+            Column(
+                Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text("Announcements", style = MaterialTheme.typography.titleMedium)
+
+                OutlinedTextField(
+                    value = newTitle,
+                    onValueChange = { newTitle = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("Title") }
+                )
+
+                OutlinedTextField(
+                    value = newBody,
+                    onValueChange = { newBody = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 3,
+                    label = { Text("Body") }
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Text("Announcements", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        "Live updates: on",
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    OutlinedTextField(
-                        value = newTitle,
-                        onValueChange = { newTitle = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        label = { Text("Title") }
-                    )
-
-                    OutlinedTextField(
-                        value = newBody,
-                        onValueChange = { newBody = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        minLines = 3,
-                        label = { Text("Body") }
-                    )
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("Active")
-                            Switch(checked = newActive, onCheckedChange = { newActive = it })
-                        }
-
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("Priority", style = MaterialTheme.typography.labelLarge)
-                            IconButton(onClick = { newPriority = (newPriority - 1).coerceIn(-10, 10) }) {
-                                Icon(Icons.Filled.Remove, contentDescription = "Dec")
-                            }
-                            Text(newPriority.toString(), fontFamily = FontFamily.Monospace)
-                            IconButton(onClick = { newPriority = (newPriority + 1).coerceIn(-10, 10) }) {
-                                Icon(Icons.Filled.Add, contentDescription = "Inc")
-                            }
-                        }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Active")
+                        Switch(checked = newActive, onCheckedChange = { newActive = it })
                     }
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Button(
-                            onClick = {
-                                scope.launch {
-                                    setGlobalLoading(true)
-                                    setError(null)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Priority", style = MaterialTheme.typography.labelLarge)
+                        IconButton(onClick = { newPriority = (newPriority - 1).coerceIn(-10, 10) }) {
+                            Icon(Icons.Filled.Remove, contentDescription = "Dec")
+                        }
+                        Text(newPriority.toString(), fontFamily = FontFamily.Monospace)
+                        IconButton(onClick = { newPriority = (newPriority + 1).coerceIn(-10, 10) }) {
+                            Icon(Icons.Filled.Add, contentDescription = "Inc")
+                        }
+                    }
+                }
 
-                                    runCatching {
-                                        val data = hashMapOf(
-                                            "title" to newTitle.trim(),
-                                            "body" to newBody.trim(),
-                                            "active" to newActive,
-                                            "priority" to newPriority,
-                                            "createdAt" to FieldValue.serverTimestamp(),
-                                            "updatedAt" to FieldValue.serverTimestamp(),
-                                            "createdByDevice" to createdByDevice,
-                                            "createdByAppId" to BuildConfig.APPLICATION_ID
-                                        )
-                                        db.collection("announcements").add(data).await()
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                setGlobalLoading(true)
+                                setError(null)
 
-                                        newTitle = ""
-                                        newBody = ""
-                                        newActive = true
-                                        newPriority = 0
-                                    }.onFailure { e ->
-                                        setGlobalLoading(false)
-                                        setError(e.message ?: "Failed to publish")
-                                    }
+                                runCatching {
+                                    val data = hashMapOf(
+                                        "title" to newTitle.trim(),
+                                        "body" to newBody.trim(),
+                                        "active" to newActive,
+                                        "priority" to newPriority,
+                                        "createdAt" to FieldValue.serverTimestamp(),
+                                        "updatedAt" to FieldValue.serverTimestamp(),
+                                        "createdByDevice" to createdByDevice,
+                                        "createdByAppId" to BuildConfig.APPLICATION_ID
+                                    )
+                                    db.collection("announcements").add(data).await()
+
+                                    newTitle = ""
+                                    newBody = ""
+                                    newActive = true
+                                    newPriority = 0
+                                    refresh()
+                                }.onFailure { e ->
+                                    setGlobalLoading(false)
+                                    setError(e.message ?: "Failed to publish")
                                 }
-                            },
-                            enabled = newTitle.trim().isNotBlank() && newBody.trim().isNotBlank(),
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Publish") }
+                            }
+                        },
+                        enabled = newTitle.trim().isNotBlank() && newBody.trim().isNotBlank(),
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Publish") }
 
-                        OutlinedButton(
-                            onClick = { setError(null) },
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Clear error") }
-                    }
+                    OutlinedButton(
+                        onClick = { scope.launch { refresh() } },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("Refresh") }
                 }
             }
         }
 
         if (announcements.isEmpty()) {
-            item { Text("No announcements.", style = MaterialTheme.typography.bodySmall) }
+            Text("No announcements.", style = MaterialTheme.typography.bodySmall)
         } else {
-            itemsIndexed(announcements, key = { _, a -> a.id }) { _, a ->
+            announcements.forEach { a ->
                 Card(
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                     modifier = Modifier.fillMaxWidth()
@@ -1763,6 +1755,7 @@ private fun AnnouncementsTab(
                                         setError(null)
                                         runCatching {
                                             db.collection("announcements").document(a.id).delete().await()
+                                            refresh()
                                         }.onFailure { e ->
                                             setGlobalLoading(false)
                                             setError(e.message ?: "Failed to delete announcement")
@@ -1794,6 +1787,7 @@ private fun AnnouncementsTab(
                                                     SetOptions.merge()
                                                 )
                                                 .await()
+                                            refresh()
                                         }.onFailure { e ->
                                             setGlobalLoading(false)
                                             setError(e.message ?: "Failed to toggle active")
@@ -1818,6 +1812,7 @@ private fun AnnouncementsTab(
                                                     SetOptions.merge()
                                                 )
                                                 .await()
+                                            refresh()
                                         }.onFailure { e ->
                                             setGlobalLoading(false)
                                             setError(e.message ?: "Failed to change priority")
@@ -1841,6 +1836,7 @@ private fun AnnouncementsTab(
                                                     SetOptions.merge()
                                                 )
                                                 .await()
+                                            refresh()
                                         }.onFailure { e ->
                                             setGlobalLoading(false)
                                             setError(e.message ?: "Failed to change priority")
@@ -1854,7 +1850,7 @@ private fun AnnouncementsTab(
             }
         }
 
-        item { Spacer(Modifier.height(10.dp)) }
+        Spacer(Modifier.height(10.dp))
     }
 }
 
