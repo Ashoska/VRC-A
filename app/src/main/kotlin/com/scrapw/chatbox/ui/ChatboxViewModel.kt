@@ -47,14 +47,17 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * ChatboxViewModel (final admin-sync version)
+ * ChatboxViewModel (device-doc version)
  *
- * What changed vs your pasted version:
- *  ✅ Adds deviceHash to Firestore self snapshot (ban persistence / reinstall resistance)
- *  ✅ Stops hardcoding applicationId (uses BuildConfig.APPLICATION_ID)
- *  ✅ Writes real cycleIntervalSeconds field (even though it's locked, keep it correct)
- *  ✅ Firestore self-sync: safe, throttled, fingerprinted, never crashes app
- *  ✅ Keeps your locked timings + Now Playing stabilizer + cycle-preview tick
+ * Key change:
+ * ✅ Firestore users/ document ID is deviceHash (when available), NOT the anonymous auth UID.
+ *    This prevents "same device creates multiple user docs" after reinstall/clear-data.
+ *
+ * We still store the current Firebase UID inside the doc:
+ * - authUid: current session UID (changes on reinstall)
+ * - uid: kept for backwards compatibility (same as authUid)
+ *
+ * If deviceHash is missing, we fall back to uid to avoid breaking the app.
  */
 class ChatboxViewModel(
     private val app: ChatboxApplication,
@@ -95,6 +98,7 @@ class ChatboxViewModel(
 
         private const val REMOTE_PREFS_FILE = "vrca_remote"
         private const val PREF_DEVICE_ID_HASH = "device_id_hash"
+        private const val PREF_AUTH_UID = "auth_uid"
 
         @MainThread
         fun isInstanceInitialized(): Boolean = ::instance.isInitialized
@@ -138,15 +142,41 @@ class ChatboxViewModel(
     // Keep quiet; can surface in debug UI later.
     private var lastSelfSyncError: String = ""
 
+    private fun prefs() = app.getSharedPreferences(REMOTE_PREFS_FILE, Context.MODE_PRIVATE)
+
     private fun readDeviceHashFromPrefs(): String {
-        val prefs = app.getSharedPreferences(REMOTE_PREFS_FILE, Context.MODE_PRIVATE)
-        return prefs.getString(PREF_DEVICE_ID_HASH, "")?.trim().orEmpty()
+        return prefs().getString(PREF_DEVICE_ID_HASH, "")?.trim().orEmpty()
+    }
+
+    private fun readCachedUid(): String {
+        return prefs().getString(PREF_AUTH_UID, "")?.trim().orEmpty()
+    }
+
+    private fun writeCachedUid(uid: String) {
+        prefs().edit().putString(PREF_AUTH_UID, uid.trim()).apply()
+    }
+
+    private fun isValidDeviceHash(h: String): Boolean {
+        val s = h.trim()
+        return s.length in 16..128
+    }
+
+    /**
+     * IMPORTANT:
+     * Firestore user doc ID should be deviceHash when available.
+     * This prevents duplicate docs after reinstall (new anonymous uid).
+     */
+    private fun computeUserDocId(authUid: String): String {
+        val dh = readDeviceHashFromPrefs()
+        return if (isValidDeviceHash(dh)) dh else authUid
     }
 
     private suspend fun ensureAnonAuth(): String? {
         return runCatching {
             if (auth.currentUser == null) auth.signInAnonymously().await()
-            auth.currentUser?.uid
+            val uid = auth.currentUser?.uid
+            if (!uid.isNullOrBlank()) writeCachedUid(uid)
+            uid
         }.getOrNull()
     }
 
@@ -154,7 +184,7 @@ class ChatboxViewModel(
      * Builds a stable-ish fingerprint string so we only write when the state changes.
      * (No hashing lib needed; Firestore writes are already throttled.)
      */
-    private fun computeSelfFingerprint(): String {
+    private fun computeSelfFingerprint(authUid: String): String {
         val cycleClean = cycleLines.map { it.trim() }.take(10)
         val afkP = (1..3).joinToString("|") { getAfkPresetPreview(it) }
         val cycP = (1..5).joinToString("|") { getCyclePresetPreview(it) }
@@ -162,9 +192,12 @@ class ChatboxViewModel(
         val npTitle = lastNowPlayingTitle.trim()
         val npArtist = lastNowPlayingArtist.trim()
         val dev = readDeviceHashFromPrefs()
+        val docId = computeUserDocId(authUid)
 
         return listOf(
+            "doc=$docId",
             "dev=$dev",
+            "auth=$authUid",
             "afkE=$afkEnabled",
             "afkM=${afkMessage.trim()}",
             "cycE=$cycleEnabled",
@@ -183,14 +216,18 @@ class ChatboxViewModel(
         ).joinToString("||")
     }
 
-    private fun buildSelfSnapshot(uid: String): Map<String, Any> {
+    private fun buildSelfSnapshot(authUid: String): Map<String, Any> {
         val cycleClean = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(10)
         val deviceHash = readDeviceHashFromPrefs()
+        val docId = computeUserDocId(authUid)
 
         // Keep keys predictable; mirror in Firestore rules.
         val data = linkedMapOf<String, Any>(
             // identity-ish / debug
-            "uid" to uid,
+            "docId" to docId,
+            "docIdType" to (if (isValidDeviceHash(deviceHash)) "deviceHash" else "authUid"),
+            "authUid" to authUid,
+            "uid" to authUid, // legacy compatibility
             "deviceHash" to deviceHash,
             "appId" to BuildConfig.APPLICATION_ID,
             "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
@@ -244,18 +281,21 @@ class ChatboxViewModel(
         selfSyncJob = viewModelScope.launch {
             while (true) {
                 runCatching {
-                    val uid = ensureAnonAuth() ?: return@runCatching
+                    val authUid = ensureAnonAuth() ?: return@runCatching
                     val now = System.currentTimeMillis()
 
-                    val fp = computeSelfFingerprint()
+                    val fp = computeSelfFingerprint(authUid)
                     val changed = fp != lastSelfSyncFingerprint
                     val dueByForce = (now - lastSelfSyncAtMs) >= SELF_SYNC_FORCE_INTERVAL_MS
                     val dueByChange = changed && (now - lastSelfSyncAtMs) >= SELF_SYNC_MIN_INTERVAL_MS
 
                     if (!dueByForce && !dueByChange) return@runCatching
 
-                    val snap = buildSelfSnapshot(uid)
-                    db.collection("users").document(uid)
+                    val docId = computeUserDocId(authUid)
+                    val snap = buildSelfSnapshot(authUid)
+
+                    // ✅ Write to users/{deviceHash} when possible; fallback to users/{authUid}
+                    db.collection("users").document(docId)
                         .set(snap, SetOptions.merge())
                         .await()
 
