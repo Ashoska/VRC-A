@@ -5,6 +5,7 @@ import android.content.Context
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -192,7 +193,7 @@ fun AdminScreen() {
 
                 item {
                     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
-                        androidx.compose.foundation.layout.Column(
+                        Column(
                             Modifier.padding(12.dp),
                             verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
@@ -233,18 +234,17 @@ fun AdminScreen() {
     val tabs = remember { listOf("Users", "Moderation", "Announcements", "Config") }
     var tabIndex by rememberSaveable { mutableIntStateOf(0) }
 
-    // ✅ FIX: ModerationTarget is NOT saveable (not Parcelable/Serializable).
-    // Using rememberSaveable here crashes the app when Admin page is opened.
+    // ✅ FIX: ModerationTarget is NOT saveable (not Parcelable/Serializable) -> crash if rememberSaveable.
     var moderationTarget by remember { mutableStateOf<ModerationTarget?>(null) }
 
     Surface {
-        androidx.compose.foundation.layout.Column(Modifier.padding(14.dp)) {
+        Column(Modifier.padding(14.dp)) {
             // Header
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                androidx.compose.foundation.layout.Column(Modifier.weight(1f)) {
+                Column(Modifier.weight(1f)) {
                     Text("Admin", style = MaterialTheme.typography.titleLarge)
                     Text(
                         "DeviceHash: ${deviceHash.ifBlank { "(blank)" }}",
@@ -536,9 +536,9 @@ private fun UsersTab(
 
     LaunchedEffect(Unit) { resetAndLoad() }
 
-    androidx.compose.foundation.layout.Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         ElevatedCard {
-            androidx.compose.foundation.layout.Column(
+            Column(
                 Modifier.padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
@@ -627,7 +627,7 @@ private fun UsersTab(
                                 }
                             }
                     ) {
-                        androidx.compose.foundation.layout.Column(
+                        Column(
                             Modifier.padding(12.dp),
                             verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
@@ -635,7 +635,7 @@ private fun UsersTab(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
-                                androidx.compose.foundation.layout.Column(Modifier.weight(1f)) {
+                                Column(Modifier.weight(1f)) {
                                     Text(
                                         u.displayName.ifBlank { "(no displayName)" },
                                         style = MaterialTheme.typography.titleSmall
@@ -767,7 +767,7 @@ private fun DetailBlock(d: UserDetail) {
     }
 
     ElevatedCard {
-        androidx.compose.foundation.layout.Column(
+        Column(
             Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -864,7 +864,7 @@ private fun ModerationTab(
 
     var lookup by rememberSaveable { mutableStateOf("") } // can be docId or authUid
 
-    // ✅ FIX: loaded target is NOT saveable (ModerationTarget isn’t Parcelable/Serializable)
+    // ✅ FIX: ModerationTarget is NOT saveable -> do NOT use rememberSaveable here.
     var loaded by remember { mutableStateOf<ModerationTarget?>(null) }
 
     var warned by remember { mutableStateOf(false) }
@@ -1030,12 +1030,9 @@ private fun ModerationTab(
         onClearInitialTarget()
     }
 
-    // --- UI below is unchanged from your version ---
-    // (Everything else stays as-is; the crash was the saveable state.)
-
-    androidx.compose.foundation.layout.Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         ElevatedCard {
-            androidx.compose.foundation.layout.Column(
+            Column(
                 Modifier.padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
@@ -1088,13 +1085,9 @@ private fun ModerationTab(
             return
         }
 
-        // (rest of ModerationTab unchanged from your original file)
-        // NOTE: keeping the rest identical to avoid introducing new issues.
-        // Your original code continues here verbatim:
-
         // Summary + copy
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-            androidx.compose.foundation.layout.Column(
+            Column(
                 Modifier.padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -1139,7 +1132,7 @@ private fun ModerationTab(
 
         // WARN
         ElevatedCard {
-            androidx.compose.foundation.layout.Column(
+            Column(
                 Modifier.padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
@@ -1215,7 +1208,7 @@ private fun ModerationTab(
 
         // BAN
         ElevatedCard {
-            androidx.compose.foundation.layout.Column(
+            Column(
                 Modifier.padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
@@ -1358,7 +1351,7 @@ private fun ModerationTab(
 
         // HISTORY
         ElevatedCard {
-            androidx.compose.foundation.layout.Column(
+            Column(
                 Modifier.padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
@@ -1367,10 +1360,10 @@ private fun ModerationTab(
                 if (history.isEmpty()) {
                     Text("No history found.", style = MaterialTheme.typography.bodySmall)
                 } else {
-                    androidx.compose.foundation.layout.Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         history.forEach { e ->
                             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                                androidx.compose.foundation.layout.Column(
+                                Column(
                                     Modifier.padding(10.dp),
                                     verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
@@ -1465,9 +1458,9 @@ private fun AnnouncementsTab(
 
     LaunchedEffect(Unit) { refresh() }
 
-    androidx.compose.foundation.layout.Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         ElevatedCard {
-            androidx.compose.foundation.layout.Column(
+            Column(
                 Modifier.padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
@@ -1569,7 +1562,7 @@ private fun AnnouncementsTab(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                androidx.compose.foundation.layout.Column(
+                Column(
                     Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
@@ -1577,7 +1570,7 @@ private fun AnnouncementsTab(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        androidx.compose.foundation.layout.Column(Modifier.weight(1f)) {
+                        Column(Modifier.weight(1f)) {
                             Text(a.title.ifBlank { "(no title)" }, style = MaterialTheme.typography.titleSmall)
                             Text(
                                 "priority=${a.priority}  active=${a.active}  createdAt=${a.createdAt ?: "?"}",
@@ -1741,7 +1734,7 @@ private fun ConfigTab(
     LaunchedEffect(Unit) { load() }
 
     ElevatedCard {
-        androidx.compose.foundation.layout.Column(
+        Column(
             Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
@@ -1841,7 +1834,7 @@ private fun ConfigTab(
 @Composable
 private fun DeviceHashCard(deviceHash: String, onCopy: () -> Unit) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-        androidx.compose.foundation.layout.Column(
+        Column(
             Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
@@ -1863,7 +1856,7 @@ private fun DeviceHashCard(deviceHash: String, onCopy: () -> Unit) {
 @Composable
 private fun UidCard(uid: String, onCopy: () -> Unit) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-        androidx.compose.foundation.layout.Column(
+        Column(
             Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
@@ -1882,7 +1875,7 @@ private fun UidCard(uid: String, onCopy: () -> Unit) {
 @Composable
 private fun ErrorCard(message: String) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
-        androidx.compose.foundation.layout.Column(
+        Column(
             Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
