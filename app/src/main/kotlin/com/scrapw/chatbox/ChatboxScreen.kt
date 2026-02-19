@@ -302,6 +302,7 @@ fun ChatboxScreen(
 
     fun safeUid(): String = authedUid?.trim().orEmpty()
 
+    // ✅ Ensure anonymous auth exists.
     LaunchedEffect(Unit) {
         if (auth.currentUser == null) {
             runCatching {
@@ -316,29 +317,31 @@ fun ChatboxScreen(
     }
 
     /* =========================================================
-       ✅ DEVICE-FIRST USER DOC (THIS IS THE FIX)
+       ✅ DEVICE-FIRST USER DOC (FIXED)
        =========================================================
        PRIMARY identity doc is: users/{deviceHash}
 
-       AdminScreen expects:
-       - users collection
-       - docId == deviceHash
-       - authUid stored as field
+       IMPORTANT:
+       Firestore rules require uid to exist and equal request.auth.uid on create/update.
+       Therefore we MUST NOT write /users/{deviceHash} until authedUid is non-blank.
      */
 
     LaunchedEffect(authedUid, deviceHash) {
         val dh = deviceHash.trim()
-        if (dh.isBlank()) return@LaunchedEffect
-
         val uid = safeUid()
+
+        // ✅ Critical: do not write until auth UID exists (rules require it)
+        if (dh.isBlank() || uid.isBlank()) return@LaunchedEffect
 
         runCatching {
             val data = hashMapOf<String, Any>(
                 "deviceHash" to dh,
+
                 // current session uid (changes if app data cleared)
                 "authUid" to uid,
                 // legacy alias (some older code queries "uid")
                 "uid" to uid,
+
                 "appId" to BuildConfig.APPLICATION_ID,
                 "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
                 "lastSeenAt" to FieldValue.serverTimestamp(),
@@ -347,12 +350,6 @@ fun ChatboxScreen(
                 "versionName" to BuildConfig.VERSION_NAME
             )
 
-            // Avoid writing blank strings as “real” values
-            if (uid.isBlank()) {
-                data.remove("authUid")
-                data.remove("uid")
-            }
-
             db.collection("users").document(dh)
                 .set(data, SetOptions.merge())
                 .await()
@@ -360,26 +357,24 @@ fun ChatboxScreen(
             reportFirebase("users/$dh", "Failed writing device-first user doc", e)
         }
 
-        // Optional: keep a legacy mapping doc for UID -> deviceHash (harmless).
-        // If your rules block it, it’s fine — failures are only shown in Debug.
-        val uid = safeUid()
-        if (uid.isNotBlank()) {
-            runCatching {
-                db.collection("usersByUid").document(uid)
-                    .set(
-                        mapOf(
-                            "deviceHash" to dh,
-                            "authUid" to uid,
-                            "appId" to BuildConfig.APPLICATION_ID,
-                            "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
-                            "updatedAt" to FieldValue.serverTimestamp()
-                        ),
-                        SetOptions.merge()
-                    )
-                    .await()
-            }.onFailure { e ->
-                reportFirebase("usersByUid/$uid", "Failed writing UID→device mapping", e)
-            }
+        // Optional: keep a legacy mapping doc for UID -> deviceHash.
+        // NOTE: Your current rules likely deny this (no /usersByUid match),
+        // so failures are only recorded in Debug and do not break the app.
+        runCatching {
+            db.collection("usersByUid").document(uid)
+                .set(
+                    mapOf(
+                        "deviceHash" to dh,
+                        "authUid" to uid,
+                        "appId" to BuildConfig.APPLICATION_ID,
+                        "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                )
+                .await()
+        }.onFailure { e ->
+            reportFirebase("usersByUid/$uid", "Failed writing UID→device mapping", e)
         }
     }
 
@@ -456,8 +451,7 @@ fun ChatboxScreen(
     }
 
     // ✅ Announcements listener FIX:
-    // Your previous query required a composite index (active + priority + createdAt).
-    // We avoid that by only ordering by createdAt and sorting priority locally.
+    // Avoid composite index by ordering only by createdAt and sorting by priority locally.
     DisposableEffect(Unit) {
         var reg: ListenerRegistration? = null
         reg = db.collection("announcements")
@@ -520,7 +514,7 @@ fun ChatboxScreen(
     }
 
     // ✅ Optional legacy device-ban collection support: bannedDevices/{deviceHash}
-    // IMPORTANT: many rule-sets should keep this admin-only; so we only listen on admin build.
+    // Only listen on admin build to avoid PERMISSION_DENIED noise on public builds.
     if (BuildConfig.IS_ADMIN_BUILD) {
         DisposableEffect(deviceHash) {
             var reg: ListenerRegistration? = null
@@ -571,7 +565,6 @@ fun ChatboxScreen(
     }
 
     // --- Ban gate (DEVICE-FIRST) ---
-    // Effective ban = users/{deviceHash}.banned OR (admin build) bannedDevices legacy banned
     val isBannedEffective = moderation.banned || moderation.deviceBanned
 
     var banStopRan by remember { mutableStateOf(false) }
@@ -1502,7 +1495,7 @@ private fun TutorialStep(
    ========================= */
 
 @Composable
-private fun AutomationsPage(vm: ChatboxViewModel) {
+private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel) {
     val scope = rememberCoroutineScope()
     var tab by rememberSaveable { mutableStateOf(ChatboxAutomationsTab.AFK) }
 
@@ -1798,7 +1791,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
 
 @Composable
 private fun NowPlayingPage(
-    vm: ChatboxViewModel,
+    vm: com.scrapw.chatbox.ui.ChatboxViewModel,
     onPersistSpotifyEnabled: (Boolean) -> Unit,
     onPersistSpotifyDemo: (Boolean) -> Unit,
     onPersistSpotifyPreset: (Int) -> Unit
@@ -1915,7 +1908,7 @@ private fun NowPlayingPage(
    ========================= */
 
 @Composable
-private fun DebugPage(vm: ChatboxViewModel, lastFirebaseIssue: String?) {
+private fun DebugPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel, lastFirebaseIssue: String?) {
     PageContainer {
         SectionCard(
             title = "Firebase (last issue)",
@@ -1971,7 +1964,7 @@ private fun DebugPage(vm: ChatboxViewModel, lastFirebaseIssue: String?) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsSheet(
-    vm: ChatboxViewModel,
+    vm: com.scrapw.chatbox.ui.ChatboxViewModel,
     onDismiss: () -> Unit
 ) {
     val ctx = LocalContext.current
