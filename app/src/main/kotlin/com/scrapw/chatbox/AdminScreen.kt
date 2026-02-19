@@ -181,7 +181,10 @@ fun AdminScreen() {
                 item { Text("Admin", style = MaterialTheme.typography.titleLarge) }
 
                 item {
-                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+                    ) {
                         Column(
                             Modifier.padding(12.dp),
                             verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -196,7 +199,7 @@ fun AdminScreen() {
                 }
 
                 item {
-                    ElevatedCard {
+                    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("IDs", style = MaterialTheme.typography.titleSmall)
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -284,7 +287,7 @@ fun AdminScreen() {
                 }
             }
 
-            // IDs card (fix: NEVER stretch; keep tight + no weird empty space)
+            // IDs card (tight; never “squished”)
             AnimatedVisibility(visible = idsExpanded) {
                 ElevatedCard(
                     modifier = Modifier
@@ -476,7 +479,7 @@ private fun UsersTab(
     var filterWarned by rememberSaveable { mutableStateOf(false) }
     var filterBanned by rememberSaveable { mutableStateOf(false) }
 
-    // NEW: selected user takes over whole Users tab until unselected
+    // Selected user takes over whole Users tab until unselected
     var selectedDocId by rememberSaveable { mutableStateOf<String?>(null) }
 
     // Cache details per user docId (loaded only when opened)
@@ -614,13 +617,13 @@ private fun UsersTab(
 
         LaunchedEffect(docId) { loadDetails(docId) }
 
-        // Full-height detail view (fixes "squished" content)
+        // Full-height detail view (and full-width cards to avoid “squish”)
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             item {
-                ElevatedCard {
+                ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                     Column(
                         Modifier.padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -715,7 +718,7 @@ private fun UsersTab(
 
             item {
                 if (isDetailLoading) {
-                    ElevatedCard {
+                    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                         Row(
                             modifier = Modifier.padding(12.dp),
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -727,7 +730,7 @@ private fun UsersTab(
                 } else if (detail != null) {
                     DetailBlock(detail)
                 } else {
-                    ElevatedCard {
+                    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text("Details", style = MaterialTheme.typography.titleSmall)
                             Text("No detail loaded (try refresh).", style = MaterialTheme.typography.bodySmall)
@@ -748,7 +751,7 @@ private fun UsersTab(
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         // Compact controls card
-        ElevatedCard {
+        ElevatedCard(modifier = Modifier.fillMaxWidth()) {
             Column(
                 Modifier.padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -906,7 +909,7 @@ private fun DetailBlock(d: UserDetail) {
         )
     }
 
-    ElevatedCard {
+    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
         Column(
             Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -926,7 +929,10 @@ private fun DetailBlock(d: UserDetail) {
 
             Spacer(Modifier.height(4.dp))
             Text("combinedPreviewText", style = MaterialTheme.typography.labelLarge)
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            ) {
                 Text(
                     d.combinedPreviewText.ifBlank { "(blank)" },
                     modifier = Modifier.padding(10.dp),
@@ -958,7 +964,10 @@ private fun DetailBlock(d: UserDetail) {
             if (d.cycleLinesText.isNotBlank()) {
                 Spacer(Modifier.height(4.dp))
                 Text("cycleLinesText", style = MaterialTheme.typography.labelLarge)
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
                     Text(
                         d.cycleLinesText,
                         modifier = Modifier.padding(10.dp),
@@ -1162,14 +1171,13 @@ private fun ModerationTab(
         onClearInitialTarget()
     }
 
-    // FIX: moderation tools not showing because content was taller than the tab box.
-    // Use LazyColumn so everything is always reachable (scroll).
+    // Use LazyColumn so moderation tools/history are always reachable (scroll).
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
-            ElevatedCard {
+            ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                 Column(
                     Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -1222,7 +1230,10 @@ private fun ModerationTab(
         }
 
         item {
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            ) {
                 Column(
                     Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -1270,7 +1281,7 @@ private fun ModerationTab(
 
         // WARN
         item {
-            ElevatedCard {
+            ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                 Column(
                     Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -1348,7 +1359,7 @@ private fun ModerationTab(
 
         // BAN
         item {
-            ElevatedCard {
+            ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                 Column(
                     Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -1491,7 +1502,7 @@ private fun ModerationTab(
 
         // HISTORY
         item {
-            ElevatedCard {
+            ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                 Column(
                     Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -1503,7 +1514,10 @@ private fun ModerationTab(
                     } else {
                         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                             history.forEach { e ->
-                                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                                Card(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                                ) {
                                     Column(
                                         Modifier.padding(10.dp),
                                         verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -1607,7 +1621,7 @@ private fun AnnouncementsTab(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
-            ElevatedCard {
+            ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                 Column(
                     Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -1877,7 +1891,7 @@ private fun ConfigTab(
 
     LaunchedEffect(Unit) { load() }
 
-    ElevatedCard {
+    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
         Column(
             Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -1977,7 +1991,10 @@ private fun ConfigTab(
 
 @Composable
 private fun ErrorCard(message: String) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+    ) {
         Column(
             Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
