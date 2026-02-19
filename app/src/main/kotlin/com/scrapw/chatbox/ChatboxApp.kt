@@ -7,7 +7,6 @@ import android.os.Build
 import android.provider.Settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -39,9 +38,11 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.SetOptions
 import com.scrapw.chatbox.ui.ChatboxViewModel
 import kotlinx.coroutines.tasks.await
 import java.security.MessageDigest
+import java.security.SecureRandom
 
 /**
  * ChatboxApp
@@ -50,13 +51,8 @@ import java.security.MessageDigest
  *  - crash gate
  *  - bootstrap gate
  *  - anonymous auth (no login UI)
- *  - stable device identity cached in SharedPreferences ("vrca_remote"/"device_id_hash")
- *  - SAFE public writes ONLY to users/{uid} (self doc) for:
- *      deviceHash, lastSeenAt, appId, adminBuild, versionName, versionCode
- *
- * IMPORTANT:
- *  - Public build does NOT write to devices/{deviceHash} at all.
- *  - devices collection is reserved for owner/admin workflows ONLY (via rules).
+ *  - caches uid + deviceHash in SharedPreferences ("vrca_remote")
+ *  - SAFE public writes ONLY to users/{uid} (self doc)
  */
 @Composable
 fun ChatboxApp() {
@@ -100,6 +96,7 @@ fun ChatboxApp() {
     var bootOk by remember { mutableStateOf(false) }
     var bootWorking by remember { mutableStateOf(false) }
     var bootError by remember { mutableStateOf<String?>(null) }
+    var bootAttempt by remember { mutableStateOf(0) } // increments on Retry
 
     if (!bootOk) {
         BootstrapScreen(
@@ -109,10 +106,12 @@ fun ChatboxApp() {
                 bootOk = false
                 bootWorking = false
                 bootError = null
+                bootAttempt += 1
             }
         )
 
-        LaunchedEffect(bootOk) {
+        // Run bootstrap once per attempt.
+        LaunchedEffect(bootAttempt) {
             if (bootOk || bootWorking) return@LaunchedEffect
             bootWorking = true
             bootError = null
@@ -148,16 +147,16 @@ private object RemoteKeys {
     const val DEVICE_ID_HASH = "device_id_hash"
     const val AUTH_UID = "auth_uid"
 
-    // Optional: used if ANDROID_ID is unavailable (less resistant to data wipe)
+    // Used if ANDROID_ID is unavailable (NOT reinstall-stable)
     const val DEVICE_FALLBACK_RANDOM = "device_id_hash_fallback_random"
 }
 
 /**
  * Boot steps:
  *  1) anonymous auth
- *  2) ensure deviceHash is present + stable
+ *  2) ensure deviceHash exists (prefer reading the one created in MainActivity)
  *  3) cache uid + deviceHash locally
- *  4) SAFE self-write to users/{uid}: deviceHash + lastSeen (rules restrict!)
+ *  4) SAFE self-write to users/{uid}: deviceHash + lastSeen + app/build/version
  *
  * No writes to devices/{deviceHash} here.
  */
@@ -190,51 +189,51 @@ private suspend fun bootstrapFirebaseAndCache(ctx: Context) {
         "versionCode" to BuildConfig.VERSION_CODE
     )
 
-    // If rules deny, we still let the app continue (reads still work).
+    // If rules deny, we still let the app continue.
     runCatching {
-        userRef.set(safe, com.google.firebase.firestore.SetOptions.merge()).await()
+        userRef.set(safe, SetOptions.merge()).await()
     }
 }
 
 /* =========================================================
-   Device hash (stable across reinstall)
+   Device hash (matches MainActivity v2 logic)
    ========================================================= */
 
 /**
- * Ensures prefs contain a stable device hash.
- * Primary source: ANDROID_ID mixed with signing cert digest.
- *
- * Goal: reinstall / clear-app-data should not change deviceHash (ANDROID_ID path).
- * Note: factory reset can change ANDROID_ID; nothing purely local can survive that.
+ * Reads existing device hash from prefs if present.
+ * If missing (e.g. unusual boot order), compute it using v2:
+ *   SHA-256("v2:<ANDROID_ID>:<SIGNING_CERT_SHA256>")
+ * Fallback is stored random (NOT reinstall-stable).
  */
 private fun ensureDeviceHash(ctx: Context): String {
     val prefs = ctx.getSharedPreferences(REMOTE_PREFS_FILE, Context.MODE_PRIVATE)
+
     val existing = prefs.getString(RemoteKeys.DEVICE_ID_HASH, "")?.trim().orEmpty()
     if (existing.isNotBlank()) return existing
 
     val androidId = runCatching {
-        Settings.Secure.getString(ctx.contentResolver, Settings.Secure.ANDROID_ID)?.trim().orEmpty()
+        Settings.Secure.getString(ctx.contentResolver, Settings.Secure.ANDROID_ID)
+            ?.trim()
+            .orEmpty()
     }.getOrDefault("")
 
     val signingDigest = runCatching { signingCertSha256Hex(ctx) }.getOrDefault("")
 
-    val stableSeed = buildString {
-        append("v1:")
-        append(androidId.ifBlank { "no_android_id" })
-        append(":")
-        append(signingDigest.ifBlank { "no_signing" })
+    val computedStable = if (androidId.isNotBlank() && signingDigest.isNotBlank()) {
+        sha256Hex("v2:$androidId:$signingDigest")
+    } else if (androidId.isNotBlank()) {
+        sha256Hex("v2:$androidId:no_signing")
+    } else {
+        ""
     }
 
-    val computedStable = if (androidId.isNotBlank()) sha256Hex(stableSeed) else ""
-
-    // If we can compute a stable value, use it. Otherwise store a fallback random once.
     val finalHash = if (computedStable.isNotBlank()) {
         computedStable
     } else {
         val fallbackExisting = prefs.getString(RemoteKeys.DEVICE_FALLBACK_RANDOM, "")?.trim().orEmpty()
         if (fallbackExisting.isNotBlank()) fallbackExisting
         else {
-            val r = sha256Hex("fallback:${System.nanoTime()}:${Math.random()}")
+            val r = secureRandomHex(32)
             prefs.edit().putString(RemoteKeys.DEVICE_FALLBACK_RANDOM, r).apply()
             r
         }
@@ -244,30 +243,30 @@ private fun ensureDeviceHash(ctx: Context): String {
     return finalHash
 }
 
-/**
- * Returns SHA-256 of the app signing certificate (hex).
- * Helps make the device hash app-signing-specific.
- */
 private fun signingCertSha256Hex(ctx: Context): String {
     val pm = ctx.packageManager
     val pkg = ctx.packageName
 
-    val certBytes: ByteArray = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-        val info = pm.getPackageInfo(pkg, PackageManager.GET_SIGNING_CERTIFICATES)
-        val sigs = info.signingInfo.apkContentsSigners
-        (sigs.firstOrNull()?.toByteArray() ?: byteArrayOf())
-    } else {
-        @Suppress("DEPRECATION")
-        val info = pm.getPackageInfo(pkg, PackageManager.GET_SIGNATURES)
-        @Suppress("DEPRECATION")
-        (info.signatures?.firstOrNull()?.toByteArray() ?: byteArrayOf())
+    val certBytes: ByteArray = try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val info = pm.getPackageInfo(pkg, PackageManager.GET_SIGNING_CERTIFICATES)
+            info.signingInfo.apkContentsSigners.firstOrNull()?.toByteArray() ?: byteArrayOf()
+        } else {
+            @Suppress("DEPRECATION")
+            val info = pm.getPackageInfo(pkg, PackageManager.GET_SIGNATURES)
+            @Suppress("DEPRECATION")
+            info.signatures?.firstOrNull()?.toByteArray() ?: byteArrayOf()
+        }
+    } catch (_: Throwable) {
+        byteArrayOf()
     }
 
     if (certBytes.isEmpty()) return ""
     return sha256HexBytes(certBytes)
 }
 
-private fun sha256Hex(input: String): String = sha256HexBytes(input.toByteArray(Charsets.UTF_8))
+private fun sha256Hex(input: String): String =
+    sha256HexBytes(input.toByteArray(Charsets.UTF_8))
 
 private fun sha256HexBytes(bytes: ByteArray): String {
     val md = MessageDigest.getInstance("SHA-256")
@@ -281,6 +280,13 @@ private fun sha256HexBytes(bytes: ByteArray): String {
     return sb.toString()
 }
 
+private fun secureRandomHex(numBytes: Int): String {
+    val rng = SecureRandom()
+    val bytes = ByteArray(numBytes)
+    rng.nextBytes(bytes)
+    return sha256HexBytes(bytes)
+}
+
 /* =========================================================
    UI: Bootstrap + Crash
    ========================================================= */
@@ -291,7 +297,6 @@ private fun BootstrapScreen(
     error: String?,
     onRetry: () -> Unit
 ) {
-    // Flat splash: NO ElevatedCard panel, NO build/version/admin text
     Surface {
         Column(
             modifier = Modifier
@@ -317,20 +322,12 @@ private fun BootstrapScreen(
 
             Spacer(Modifier.height(18.dp))
 
-            if (working) {
-                CircularProgressIndicator()
-            } else {
-                Spacer(Modifier.height(4.dp))
-            }
+            if (working) CircularProgressIndicator() else Spacer(Modifier.height(4.dp))
 
             if (error != null) {
                 Spacer(Modifier.height(18.dp))
 
-                // Keep error visible, but compact + centered (no build info)
-                ElevatedCard(
-                    modifier = Modifier
-                        .widthIn(max = 520.dp)
-                ) {
+                ElevatedCard(modifier = Modifier.widthIn(max = 520.dp)) {
                     Column(
                         Modifier.padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -345,7 +342,6 @@ private fun BootstrapScreen(
                 }
 
                 Spacer(Modifier.height(12.dp))
-
                 Button(onClick = onRetry) { Text("Retry") }
             }
         }
@@ -358,7 +354,6 @@ private fun CrashScreen(
     onClear: () -> Unit,
     onContinue: () -> Unit
 ) {
-    // Also flat: NO build/version/admin text
     Surface {
         Column(
             modifier = Modifier
