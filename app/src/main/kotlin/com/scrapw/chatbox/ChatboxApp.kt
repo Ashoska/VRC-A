@@ -52,7 +52,7 @@ import java.security.SecureRandom
  *  - bootstrap gate
  *  - anonymous auth (no login UI)
  *  - caches uid + deviceHash in SharedPreferences ("vrca_remote")
- *  - SAFE public writes ONLY to users/{uid} (self doc)
+ *  - SAFE public write to users/{deviceHash} (self doc) so Admin can see users immediately
  */
 @Composable
 fun ChatboxApp() {
@@ -156,7 +156,7 @@ private object RemoteKeys {
  *  1) anonymous auth
  *  2) ensure deviceHash exists (prefer reading the one created in MainActivity)
  *  3) cache uid + deviceHash locally
- *  4) SAFE self-write to users/{uid}: deviceHash + lastSeen + app/build/version
+ *  4) SAFE self-write to users/{deviceHash} so rules pass and Admin can see the user
  *
  * No writes to devices/{deviceHash} here.
  */
@@ -176,20 +176,34 @@ private suspend fun bootstrapFirebaseAndCache(ctx: Context) {
         .putString(RemoteKeys.DEVICE_ID_HASH, deviceHash)
         .apply()
 
-    // SAFE public write (self doc only) — controlled by Firestore rules
+    // SAFE public write (self doc only) — MUST MATCH YOUR RULES (users/{deviceHash})
     val db = FirebaseFirestore.getInstance()
-    val userRef = db.collection("users").document(uid)
+    val userRef = db.collection("users").document(deviceHash)
 
+    // Keep keys strictly within selfMutableKeys() and consistent with rules:
+    // - uid/authUid/currentUid == request.auth.uid
+    // - deviceHash/docId == document id (deviceHash)
     val safe = hashMapOf<String, Any>(
+        // identity/debug
+        "docId" to deviceHash,
+        "docIdType" to "deviceHash",
+        "authUid" to uid,
+        "uid" to uid,
+        "currentUid" to uid,
         "deviceHash" to deviceHash,
+
+        // activity markers
         "lastSeenAt" to FieldValue.serverTimestamp(),
+        "updatedAt" to FieldValue.serverTimestamp(),
+
+        // app identity
         "appId" to BuildConfig.APPLICATION_ID,
         "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
         "versionName" to BuildConfig.VERSION_NAME,
         "versionCode" to BuildConfig.VERSION_CODE
     )
 
-    // If rules deny, we still let the app continue.
+    // If rules deny, still let app continue (VM will keep trying later).
     runCatching {
         userRef.set(safe, SetOptions.merge()).await()
     }
