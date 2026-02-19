@@ -294,6 +294,9 @@ fun ChatboxScreen(
     // ✅ Capture last Firebase issue for Debug ONLY
     var lastFirebaseIssue by remember { mutableStateOf<String?>(null) }
 
+    // ✅ Gate: we do NOT attach moderation listener until we've written users/{deviceHash} with a real UID.
+    var userDocReady by remember { mutableStateOf(false) }
+
     fun reportFirebase(tag: String, msg: String, t: Throwable? = null) {
         val full = "[$tag] $msg" + (t?.let { " :: ${it.message ?: it::class.java.simpleName}" } ?: "")
         lastFirebaseIssue = full.take(4000)
@@ -319,52 +322,63 @@ fun ChatboxScreen(
     /* =========================================================
        ✅ DEVICE-FIRST USER DOC
        FIX: DO NOT WRITE UNTIL auth uid is NON-BLANK
+       Also: set userDocReady=true only after a successful write.
        ========================================================= */
     LaunchedEffect(authedUid, deviceHash) {
         val dh = deviceHash.trim()
         if (dh.isBlank()) return@LaunchedEffect
 
-        // ✅ This is the important guard that stops the first-frame PERMISSION_DENIED spam.
         val uid = safeUid()
         if (uid.isBlank()) return@LaunchedEffect
 
-        runCatching {
-            val data = hashMapOf<String, Any>(
-                "deviceHash" to dh,
-                "authUid" to uid,
-                // legacy alias (some older code queries "uid")
-                "uid" to uid,
-                "appId" to BuildConfig.APPLICATION_ID,
-                "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
-                "lastSeenAt" to FieldValue.serverTimestamp(),
-                "updatedAt" to FieldValue.serverTimestamp(),
-                "versionCode" to BuildConfig.VERSION_CODE,
-                "versionName" to BuildConfig.VERSION_NAME
-            )
+        // If we already successfully wrote once this session, don't spam writes.
+        if (userDocReady) return@LaunchedEffect
 
-            db.collection("users").document(dh)
-                .set(data, SetOptions.merge())
-                .await()
-        }.onFailure { e ->
-            reportFirebase("users/$dh", "Failed writing device-first user doc", e)
+        var lastErr: Throwable? = null
+        repeat(3) { attempt ->
+            runCatching {
+                val data = hashMapOf<String, Any>(
+                    "deviceHash" to dh,
+                    "authUid" to uid,
+                    // legacy alias (some older code queries "uid")
+                    "uid" to uid,
+                    "appId" to BuildConfig.APPLICATION_ID,
+                    "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
+                    "lastSeenAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp(),
+                    "versionCode" to BuildConfig.VERSION_CODE,
+                    "versionName" to BuildConfig.VERSION_NAME
+                )
+
+                db.collection("users").document(dh)
+                    .set(data, SetOptions.merge())
+                    .await()
+
+                // Optional: UID -> deviceHash mapping
+                db.collection("usersByUid").document(uid)
+                    .set(
+                        mapOf(
+                            "deviceHash" to dh,
+                            "authUid" to uid,
+                            "appId" to BuildConfig.APPLICATION_ID,
+                            "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        ),
+                        SetOptions.merge()
+                    )
+                    .await()
+
+                userDocReady = true
+            }.onFailure { e ->
+                lastErr = e
+                // Small backoff then retry
+                delay(250L + attempt * 350L)
+            }
+            if (userDocReady) return@LaunchedEffect
         }
 
-        // Optional: UID -> deviceHash mapping
-        runCatching {
-            db.collection("usersByUid").document(uid)
-                .set(
-                    mapOf(
-                        "deviceHash" to dh,
-                        "authUid" to uid,
-                        "appId" to BuildConfig.APPLICATION_ID,
-                        "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
-                        "updatedAt" to FieldValue.serverTimestamp()
-                    ),
-                    SetOptions.merge()
-                )
-                .await()
-        }.onFailure { e ->
-            reportFirebase("usersByUid/$uid", "Failed writing UID→device mapping", e)
+        if (!userDocReady && lastErr != null) {
+            reportFirebase("users/$dh", "Failed writing device-first user doc", lastErr)
         }
     }
 
@@ -373,8 +387,6 @@ fun ChatboxScreen(
         LaunchedEffect(deviceHash, authedUid) {
             val dh = deviceHash.trim()
             if (dh.isBlank()) return@LaunchedEffect
-
-            // (Optional) also wait for auth so you don’t write anything before auth exists
             if (safeUid().isBlank()) return@LaunchedEffect
 
             runCatching {
@@ -418,7 +430,7 @@ fun ChatboxScreen(
 
     // Moderation state:
     // PRIMARY: users/{deviceHash}.warned/banned (+ reasons)
-    // OPTIONAL legacy: bannedDevices/{deviceHash} (admin build only)
+    // OPTIONAL legacy: bannedDevices/{deviceHash} (admin build only to avoid noise)
     var moderation by remember { mutableStateOf(ModerationUi()) }
 
     // Listen: config/app (ToS)
@@ -443,7 +455,7 @@ fun ChatboxScreen(
         onDispose { reg?.remove() }
     }
 
-    // Announcements: keep as-is (you already avoided composite index)
+    // Announcements
     DisposableEffect(Unit) {
         var reg: ListenerRegistration? = null
         reg = db.collection("announcements")
@@ -475,14 +487,17 @@ fun ChatboxScreen(
         onDispose { reg?.remove() }
     }
 
-    // PRIMARY moderation: users/{deviceHash}
-    DisposableEffect(deviceHash) {
+    // ✅ PRIMARY moderation: users/{deviceHash}
+    // FIX: do NOT attach this listener until userDocReady=true (prevents first-run PERMISSION_DENIED spam).
+    DisposableEffect(deviceHash, userDocReady) {
         var reg: ListenerRegistration? = null
         val dh = deviceHash.trim()
-        if (dh.isNotBlank()) {
+
+        if (userDocReady && dh.isNotBlank()) {
             reg = db.collection("users").document(dh)
                 .addSnapshotListener { snap, err ->
                     if (err != null) {
+                        // Now it’s a *real* error (not first-frame “doc doesn’t exist yet”).
                         reportFirebase("users/$dh", "Failed to load moderation", err)
                         return@addSnapshotListener
                     }
@@ -502,15 +517,16 @@ fun ChatboxScreen(
                     )
                 }
         }
+
         onDispose { reg?.remove() }
     }
 
     // Optional legacy device-ban collection support: bannedDevices/{deviceHash} (admin only)
     if (BuildConfig.IS_ADMIN_BUILD) {
-        DisposableEffect(deviceHash) {
+        DisposableEffect(deviceHash, userDocReady) {
             var reg: ListenerRegistration? = null
             val dh = deviceHash.trim()
-            if (dh.isNotBlank()) {
+            if (userDocReady && dh.isNotBlank()) {
                 reg = db.collection("bannedDevices").document(dh)
                     .addSnapshotListener { snap, err ->
                         if (err != null) {
@@ -643,7 +659,7 @@ fun ChatboxScreen(
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                // ✅ Warning banner only (announcements are shown inside HomePage)
+                // ✅ Warning banner only (announcements are shown inside HomePage now)
                 GlobalStatusBanner(moderation = moderation)
 
                 Crossfade(targetState = page, label = "page_crossfade") { p ->
@@ -2045,7 +2061,7 @@ private fun InfoSheet(onDismiss: () -> Unit) {
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
-            Modifier
+            Modifier( )
                 .fillMaxWidth()
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
