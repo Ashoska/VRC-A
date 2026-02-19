@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -211,9 +212,9 @@ fun AdminScreen() {
                                     Text("Copy UID")
                                 }
                             }
-                            Text("deviceHash=${shortId(deviceHash, 10, 6)}", fontFamily = FontFamily.Monospace)
-                            Text("uid=${shortId(myUid, 10, 6)}", fontFamily = FontFamily.Monospace)
-                            Text("ownerUid=${shortId(ownerUid, 10, 6)}", fontFamily = FontFamily.Monospace)
+                            Text("deviceHash=${shortId(deviceHash)}", fontFamily = FontFamily.Monospace)
+                            Text("uid=${shortId(myUid)}", fontFamily = FontFamily.Monospace)
+                            Text("ownerUid=${shortId(ownerUid)}", fontFamily = FontFamily.Monospace)
                         }
                     }
                 }
@@ -255,7 +256,7 @@ fun AdminScreen() {
                 .padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // Header (clean)
+            // Header
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
@@ -284,15 +285,17 @@ fun AdminScreen() {
                 }
             }
 
+            // IDs drawer (FIXED: no accidental stretch / no giant blank space)
             AnimatedVisibility(visible = idsExpanded) {
                 ElevatedCard(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .wrapContentHeight()
                         .animateContentSize()
                 ) {
                     Column(
                         Modifier.padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Row(
                             Modifier.fillMaxWidth(),
@@ -304,30 +307,40 @@ fun AdminScreen() {
                             }
                         }
 
+                        // buttons (two per row; never forces weird spacing)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedButton(onClick = { clipboard.setText(AnnotatedString(deviceHash)) }) {
+                            OutlinedButton(
+                                onClick = { clipboard.setText(AnnotatedString(deviceHash)) },
+                                modifier = Modifier.weight(1f)
+                            ) {
                                 Icon(Icons.Filled.ContentCopy, contentDescription = null)
                                 Spacer(Modifier.width(6.dp))
-                                Text("Copy device")
+                                Text("Copy device", maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
-                            OutlinedButton(onClick = { clipboard.setText(AnnotatedString(myUid)) }) {
+                            OutlinedButton(
+                                onClick = { clipboard.setText(AnnotatedString(myUid)) },
+                                modifier = Modifier.weight(1f)
+                            ) {
                                 Icon(Icons.Filled.ContentCopy, contentDescription = null)
                                 Spacer(Modifier.width(6.dp))
-                                Text("Copy UID")
-                            }
-                            if (ownerUid.isNotBlank()) {
-                                OutlinedButton(onClick = { clipboard.setText(AnnotatedString(ownerUid)) }) {
-                                    Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                                    Spacer(Modifier.width(6.dp))
-                                    Text("Copy owner")
-                                }
+                                Text("Copy UID", maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                         }
 
-                        // Short display to prevent weird expansion/overflow
-                        Text("deviceHash=${shortId(deviceHash, 10, 6)}", fontFamily = FontFamily.Monospace)
-                        Text("uid=${shortId(myUid, 10, 6)}", fontFamily = FontFamily.Monospace)
-                        Text("ownerUid=${shortId(ownerUid, 10, 6)}", fontFamily = FontFamily.Monospace)
+                        if (ownerUid.isNotBlank()) {
+                            OutlinedButton(
+                                onClick = { clipboard.setText(AnnotatedString(ownerUid)) },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                                Spacer(Modifier.width(6.dp))
+                                Text("Copy owner")
+                            }
+                        }
+
+                        Text("deviceHash=${shortId(deviceHash)}", fontFamily = FontFamily.Monospace)
+                        Text("uid=${shortId(myUid)}", fontFamily = FontFamily.Monospace)
+                        Text("ownerUid=${shortId(ownerUid)}", fontFamily = FontFamily.Monospace)
                     }
                 }
             }
@@ -339,7 +352,6 @@ fun AdminScreen() {
                 }
             }
 
-            // Tabs (fixed: scrollable + single-line labels)
             ScrollableTabRow(
                 selectedTabIndex = tabIndex,
                 edgePadding = 0.dp
@@ -349,17 +361,13 @@ fun AdminScreen() {
                         selected = tabIndex == i,
                         onClick = { tabIndex = i },
                         text = {
-                            Text(
-                                label,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
+                            Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     )
                 }
             }
 
-            // Content gets remaining height
+            // Content
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -420,7 +428,7 @@ fun AdminScreen() {
 private data class UserRow(
     val docId: String,
     val authUid: String,
-    val displayName: String, // kept for search / moderation, not displayed
+    val displayName: String,
     val deviceHash: String,
     val warned: Boolean,
     val banned: Boolean,
@@ -485,6 +493,7 @@ private fun UsersTab(
     fun rowMatches(u: UserRow, q: String): Boolean {
         if (q.isBlank()) return true
         val t = q.trim()
+        // keep displayName searchable, but don't need to display it
         return u.docId.contains(t, true) ||
             u.authUid.contains(t, true) ||
             u.deviceHash.contains(t, true) ||
@@ -605,7 +614,6 @@ private fun UsersTab(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // Compact controls card (shrunk)
         ElevatedCard {
             Column(
                 Modifier.padding(12.dp),
@@ -630,7 +638,7 @@ private fun UsersTab(
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     label = { Text("Search") },
-                    placeholder = { Text("docId / authUid / deviceHash / displayName") }
+                    placeholder = { Text("docId / authUid / deviceHash") }
                 )
 
                 Row(
@@ -671,7 +679,6 @@ private fun UsersTab(
 
         Divider()
 
-        // List takes remaining space and scrolls properly
         LazyColumn(
             state = listState,
             modifier = Modifier
@@ -680,9 +687,7 @@ private fun UsersTab(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             if (filteredUsers.isEmpty()) {
-                item {
-                    Text("No users loaded/matching filters yet.", style = MaterialTheme.typography.bodySmall)
-                }
+                item { Text("No users loaded/matching filters yet.", style = MaterialTheme.typography.bodySmall) }
             } else {
                 itemsIndexed(filteredUsers, key = { _, u -> u.docId }) { index, u ->
                     if (hasMore && !pagingLoading && index >= filteredUsers.size - 12) {
@@ -705,18 +710,15 @@ private fun UsersTab(
                     ) {
                         Column(
                             Modifier.padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
                                 Column(Modifier.weight(1f)) {
-                                    // displayName kept for search/mod target but NOT shown in UI anymore
-                                    Text(
-                                        "User",
-                                        style = MaterialTheme.typography.titleSmall
-                                    )
+                                    // No displayName shown in UI (still searchable)
+                                    Text("User", style = MaterialTheme.typography.titleSmall)
 
                                     Text(
                                         "docId=${if (isExpanded) u.docId else shortId(u.docId)}",
@@ -742,7 +744,7 @@ private fun UsersTab(
                             }
 
                             Text(
-                                "lastSeen=${formatRelativeTime(u.lastSeenAt)}   updated=${formatRelativeTime(u.updatedAt)}",
+                                "lastSeen=${relTimeOrQ(u.lastSeenAt)}   updated=${relTimeOrQ(u.updatedAt)}",
                                 fontFamily = FontFamily.Monospace,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -751,66 +753,56 @@ private fun UsersTab(
                             if (isExpanded) {
                                 Divider()
 
-                                // Copy buttons row
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    OutlinedButton(onClick = { clipboardCopy(u.docId) }) {
-                                        Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                                        Spacer(Modifier.width(6.dp))
-                                        Text("Copy docId")
-                                    }
-                                    if (u.authUid.isNotBlank()) {
-                                        OutlinedButton(onClick = { clipboardCopy(u.authUid) }) {
+                                // FIXED: this section can’t create a huge “push apart” gap
+                                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        OutlinedButton(
+                                            onClick = { clipboardCopy(u.docId) },
+                                            modifier = Modifier.weight(1f)
+                                        ) {
                                             Icon(Icons.Filled.ContentCopy, contentDescription = null)
                                             Spacer(Modifier.width(6.dp))
-                                            Text("Copy authUid")
+                                            Text("Copy docId", maxLines = 1, overflow = TextOverflow.Ellipsis)
                                         }
-                                    }
-                                    if (u.deviceHash.isNotBlank()) {
-                                        OutlinedButton(onClick = { clipboardCopy(u.deviceHash) }) {
+                                        OutlinedButton(
+                                            onClick = { clipboardCopy(u.authUid) },
+                                            enabled = u.authUid.isNotBlank(),
+                                            modifier = Modifier.weight(1f)
+                                        ) {
                                             Icon(Icons.Filled.ContentCopy, contentDescription = null)
                                             Spacer(Modifier.width(6.dp))
-                                            Text("Copy device")
+                                            Text("Copy authUid", maxLines = 1, overflow = TextOverflow.Ellipsis)
                                         }
                                     }
-                                }
 
-                                // IMPORTANT: this fixes your "huge empty space" issue
-                                // by not inserting any weighted/height-filling element here.
-
-                                Spacer(Modifier.height(8.dp))
-
-                                Button(
-                                    onClick = {
-                                        onSendToModeration(
-                                            ModerationTarget(
-                                                docId = u.docId,
-                                                authUid = u.authUid,
-                                                deviceHash = u.deviceHash,
-                                                displayName = u.displayName
+                                    Button(
+                                        onClick = {
+                                            onSendToModeration(
+                                                ModerationTarget(
+                                                    docId = u.docId,
+                                                    authUid = u.authUid,
+                                                    deviceHash = u.deviceHash,
+                                                    displayName = u.displayName
+                                                )
                                             )
-                                        )
-                                    },
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Icon(Icons.Filled.ArrowForward, contentDescription = null)
-                                    Spacer(Modifier.width(6.dp))
-                                    Text("Send to Moderation")
-                                }
-
-                                Spacer(Modifier.height(8.dp))
-
-                                if (isDetailLoading) {
-                                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                        CircularProgressIndicator()
-                                        Text("Loading details…")
+                                        },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Icon(Icons.Filled.ArrowForward, contentDescription = null)
+                                        Spacer(Modifier.width(6.dp))
+                                        Text("Send to Moderation")
                                     }
-                                } else if (detail != null) {
-                                    DetailBlock(detail)
-                                } else {
-                                    Text(
-                                        "No detail loaded (tap again or refresh).",
-                                        style = MaterialTheme.typography.bodySmall
-                                    )
+
+                                    if (isDetailLoading) {
+                                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                            CircularProgressIndicator()
+                                            Text("Loading details…")
+                                        }
+                                    } else if (detail != null) {
+                                        DetailBlock(detail)
+                                    } else {
+                                        Text("No detail loaded (tap again or refresh).", style = MaterialTheme.typography.bodySmall)
+                                    }
                                 }
                             }
                         }
@@ -822,9 +814,7 @@ private fun UsersTab(
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.Center
-                        ) {
-                            CircularProgressIndicator()
-                        }
+                        ) { CircularProgressIndicator() }
                     }
                 }
             }
@@ -843,7 +833,7 @@ private fun DetailBlock(d: UserDetail) {
         )
     }
 
-    ElevatedCard {
+    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
         Column(
             Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -878,38 +868,12 @@ private fun DetailBlock(d: UserDetail) {
                 if (d.warnReason.isNotBlank()) Mono("warnReason", d.warnReason)
                 if (d.banReason.isNotBlank()) Mono("banReason", d.banReason)
             }
-
-            Spacer(Modifier.height(4.dp))
-            Text("AFK Presets", style = MaterialTheme.typography.titleSmall)
-            d.afkPresets.forEachIndexed { i, p ->
-                Mono("afkPreset${i + 1}", p.ifBlank { "(blank)" })
-            }
-
-            Spacer(Modifier.height(4.dp))
-            Text("Cycle Presets", style = MaterialTheme.typography.titleSmall)
-            d.cyclePresets.forEachIndexed { i, p ->
-                val oneLine = p.lines().firstOrNull()?.trim().orEmpty()
-                Mono("cyclePreset${i + 1}", oneLine.ifBlank { "(blank)" })
-            }
-
-            if (d.cycleLinesText.isNotBlank()) {
-                Spacer(Modifier.height(4.dp))
-                Text("cycleLinesText", style = MaterialTheme.typography.labelLarge)
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                    Text(
-                        d.cycleLinesText,
-                        modifier = Modifier.padding(10.dp),
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-            }
         }
     }
 }
 
 /* =========================================================
-   MODERATION TAB
+   MODERATION TAB  (FIXED: now scrollable, tools always visible)
    ========================================================= */
 
 private data class ModerationEventRow(
@@ -1018,31 +982,24 @@ private fun ModerationTab(
                 deviceBanReason = ""
             }
 
-            // --- HISTORY (FIX: avoid composite index by NOT using orderBy with whereEqualTo) ---
             history.clear()
 
-            val h1 = runCatching {
-                db.collection("moderationEvents")
-                    .whereEqualTo("targetDocId", target.docId)
-                    .limit(120)
-                    .get()
-                    .await()
-            }.getOrNull()
+            // No composite index needed: load a small set then sort in memory.
+            val snapA = db.collection("moderationEvents")
+                .whereEqualTo("targetDocId", target.docId)
+                .limit(200)
+                .get()
+                .await()
 
-            val snapToUse = if (h1 != null && !h1.isEmpty) {
-                h1
-            } else {
-                db.collection("moderationEvents")
-                    .whereEqualTo("uid", target.docId)
-                    .limit(120)
-                    .get()
-                    .await()
-            }
+            val snapB = db.collection("moderationEvents")
+                .whereEqualTo("uid", target.docId)
+                .limit(200)
+                .get()
+                .await()
 
-            val docsSorted = snapToUse.documents.sortedByDescending { it.getTimestamp("createdAt")?.seconds ?: 0L }
-
-            docsSorted.take(60).forEach { d ->
-                history.add(
+            val rows = (snapA.documents + snapB.documents)
+                .distinctBy { it.id }
+                .map { d ->
                     ModerationEventRow(
                         id = d.id,
                         action = d.getString("action") ?: "",
@@ -1055,8 +1012,11 @@ private fun ModerationTab(
                         targetAuthUid = d.getString("targetAuthUid") ?: "",
                         targetDeviceHash = d.getString("targetDeviceHash") ?: ""
                     )
-                )
-            }
+                }
+                .sortedByDescending { it.createdAt?.seconds ?: Long.MIN_VALUE }
+                .take(60)
+
+            history.addAll(rows)
 
             loaded = target
             setGlobalLoading(false)
@@ -1066,11 +1026,7 @@ private fun ModerationTab(
         }
     }
 
-    suspend fun writeEvent(
-        target: ModerationTarget,
-        action: String,
-        reason: String
-    ) {
+    suspend fun writeEvent(target: ModerationTarget, action: String, reason: String) {
         runCatching {
             val data = hashMapOf(
                 "uid" to target.docId,
@@ -1098,357 +1054,368 @@ private fun ModerationTab(
         onClearInitialTarget()
     }
 
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        ElevatedCard {
-            Column(
-                Modifier.padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Text("Moderation", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    "Lookup accepts docId OR authUid.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+    // FIXED: Scrollable moderation page, so tools never “disappear”
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            ElevatedCard {
+                Column(
+                    Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text("Moderation", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Lookup accepts docId OR authUid.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
 
-                OutlinedTextField(
-                    value = lookup,
-                    onValueChange = { lookup = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    label = { Text("docId or authUid") },
-                    placeholder = { Text("paste here") }
-                )
+                    OutlinedTextField(
+                        value = lookup,
+                        onValueChange = { lookup = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("docId or authUid") },
+                        placeholder = { Text("paste here") }
+                    )
 
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(
-                        onClick = {
-                            scope.launch {
-                                setGlobalLoading(true)
-                                setError(null)
-                                val t = resolveUser(lookup)
-                                setGlobalLoading(false)
-                                if (t == null) setError("No matching user found for: ${lookup.trim()}")
-                                else loadTarget(t)
-                            }
-                        },
-                        enabled = lookup.trim().isNotBlank(),
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Load") }
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = {
+                                scope.launch {
+                                    setGlobalLoading(true)
+                                    setError(null)
+                                    val t = resolveUser(lookup)
+                                    setGlobalLoading(false)
+                                    if (t == null) setError("No matching user found for: ${lookup.trim()}")
+                                    else loadTarget(t)
+                                }
+                            },
+                            enabled = lookup.trim().isNotBlank(),
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Load") }
 
-                    OutlinedButton(
-                        onClick = { clearLoaded() },
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Clear") }
+                        OutlinedButton(
+                            onClick = { clearLoaded() },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Clear") }
+                    }
                 }
             }
         }
 
         val t = loaded
         if (t == null) {
-            Text("No user loaded.", style = MaterialTheme.typography.bodySmall)
-            return
+            item { Text("No user loaded.", style = MaterialTheme.typography.bodySmall) }
+            return@LazyColumn
         }
 
-        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-            Column(
-                Modifier.padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Text("Target", style = MaterialTheme.typography.titleSmall)
+        item {
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                Column(
+                    Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("Target", style = MaterialTheme.typography.titleSmall)
+                    Text("docId=${shortId(t.docId)}", fontFamily = FontFamily.Monospace)
+                    Text("authUid=${shortId(t.authUid)}", fontFamily = FontFamily.Monospace)
+                    Text("deviceHash=${shortId(t.deviceHash)}", fontFamily = FontFamily.Monospace)
 
-                // displayName isn't a feature anymore -> keep it in data but don't display it
-                Text("docId=${shortId(t.docId)}", fontFamily = FontFamily.Monospace)
-                Text("authUid=${shortId(t.authUid)}", fontFamily = FontFamily.Monospace)
-                Text("deviceHash=${shortId(t.deviceHash)}", fontFamily = FontFamily.Monospace)
-
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { clipboardCopy(t.docId) }) {
-                        Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                        Spacer(Modifier.width(6.dp))
-                        Text("Copy docId")
-                    }
-                    if (t.authUid.isNotBlank()) {
-                        OutlinedButton(onClick = { clipboardCopy(t.authUid) }) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { clipboardCopy(t.docId) }, modifier = Modifier.weight(1f)) {
                             Icon(Icons.Filled.ContentCopy, contentDescription = null)
                             Spacer(Modifier.width(6.dp))
-                            Text("Copy authUid")
+                            Text("Copy docId", maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                    }
-                    if (t.deviceHash.isNotBlank()) {
-                        OutlinedButton(onClick = { clipboardCopy(t.deviceHash) }) {
+                        OutlinedButton(
+                            onClick = { clipboardCopy(t.authUid) },
+                            enabled = t.authUid.isNotBlank(),
+                            modifier = Modifier.weight(1f)
+                        ) {
                             Icon(Icons.Filled.ContentCopy, contentDescription = null)
                             Spacer(Modifier.width(6.dp))
-                            Text("Copy device")
+                            Text("Copy authUid", maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
-                }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     OutlinedButton(
                         onClick = { scope.launch { loadTarget(t) } },
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.fillMaxWidth()
                     ) { Text("Reload") }
-                }
 
-                Text("warned=$warned  banned=$banned  deviceBanned=$deviceBanned", fontFamily = FontFamily.Monospace)
-            }
-        }
-
-        // WARN
-        ElevatedCard {
-            Column(
-                Modifier.padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Text("Warn", style = MaterialTheme.typography.titleSmall)
-
-                OutlinedTextField(
-                    value = warnReason,
-                    onValueChange = { warnReason = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    minLines = 2,
-                    label = { Text("Warn reason (shown to user)") }
-                )
-
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(
-                        onClick = {
-                            scope.launch {
-                                setGlobalLoading(true)
-                                setError(null)
-
-                                runCatching {
-                                    db.collection("users").document(t.docId)
-                                        .set(
-                                            mapOf(
-                                                "warned" to true,
-                                                "warnReason" to warnReason.trim(),
-                                                "updatedAt" to FieldValue.serverTimestamp()
-                                            ),
-                                            SetOptions.merge()
-                                        )
-                                        .await()
-                                    writeEvent(t, "warn", warnReason)
-                                    loadTarget(t)
-                                }.onFailure { e ->
-                                    setGlobalLoading(false)
-                                    setError(e.message ?: "Failed to warn")
-                                }
-                            }
-                        },
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Apply warn") }
-
-                    OutlinedButton(
-                        onClick = {
-                            scope.launch {
-                                setGlobalLoading(true)
-                                setError(null)
-
-                                runCatching {
-                                    db.collection("users").document(t.docId)
-                                        .set(
-                                            mapOf(
-                                                "warned" to false,
-                                                "warnReason" to "",
-                                                "updatedAt" to FieldValue.serverTimestamp()
-                                            ),
-                                            SetOptions.merge()
-                                        )
-                                        .await()
-                                    writeEvent(t, "clear_warn", "")
-                                    loadTarget(t)
-                                }.onFailure { e ->
-                                    setGlobalLoading(false)
-                                    setError(e.message ?: "Failed to clear warn")
-                                }
-                            }
-                        },
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Clear warn") }
+                    Text("warned=$warned  banned=$banned  deviceBanned=$deviceBanned", fontFamily = FontFamily.Monospace)
                 }
             }
         }
 
-        // BAN
-        ElevatedCard {
-            Column(
-                Modifier.padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Text("Ban", style = MaterialTheme.typography.titleSmall)
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+        item {
+            ElevatedCard {
+                Column(
+                    Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("Apply UID")
-                        Switch(checked = applyUidBan, onCheckedChange = { applyUidBan = it })
+                    Text("Warn", style = MaterialTheme.typography.titleSmall)
+
+                    OutlinedTextField(
+                        value = warnReason,
+                        onValueChange = { warnReason = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 2,
+                        label = { Text("Warn reason (shown to user)") }
+                    )
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = {
+                                scope.launch {
+                                    setGlobalLoading(true)
+                                    setError(null)
+
+                                    runCatching {
+                                        db.collection("users").document(t.docId)
+                                            .set(
+                                                mapOf(
+                                                    "warned" to true,
+                                                    "warnReason" to warnReason.trim(),
+                                                    "updatedAt" to FieldValue.serverTimestamp()
+                                                ),
+                                                SetOptions.merge()
+                                            )
+                                            .await()
+                                        writeEvent(t, "warn", warnReason)
+                                        loadTarget(t)
+                                    }.onFailure { e ->
+                                        setGlobalLoading(false)
+                                        setError(e.message ?: "Failed to warn")
+                                    }
+                                }
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Apply warn") }
+
+                        OutlinedButton(
+                            onClick = {
+                                scope.launch {
+                                    setGlobalLoading(true)
+                                    setError(null)
+
+                                    runCatching {
+                                        db.collection("users").document(t.docId)
+                                            .set(
+                                                mapOf(
+                                                    "warned" to false,
+                                                    "warnReason" to "",
+                                                    "updatedAt" to FieldValue.serverTimestamp()
+                                                ),
+                                                SetOptions.merge()
+                                            )
+                                            .await()
+                                        writeEvent(t, "clear_warn", "")
+                                        loadTarget(t)
+                                    }.onFailure { e ->
+                                        setGlobalLoading(false)
+                                        setError(e.message ?: "Failed to clear warn")
+                                    }
+                                }
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Clear warn") }
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("Apply Device")
-                        Switch(
-                            checked = applyDeviceBan,
-                            onCheckedChange = { applyDeviceBan = it },
-                            enabled = t.deviceHash.isNotBlank()
+                }
+            }
+        }
+
+        item {
+            ElevatedCard {
+                Column(
+                    Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text("Ban", style = MaterialTheme.typography.titleSmall)
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("Apply UID")
+                            Switch(checked = applyUidBan, onCheckedChange = { applyUidBan = it })
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("Apply Device")
+                            Switch(
+                                checked = applyDeviceBan,
+                                onCheckedChange = { applyDeviceBan = it },
+                                enabled = t.deviceHash.isNotBlank()
+                            )
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = banReason,
+                        onValueChange = { banReason = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 2,
+                        label = { Text("Ban reason (shown to user)") }
+                    )
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = {
+                                scope.launch {
+                                    val reason = banReason.trim()
+                                    setGlobalLoading(true)
+                                    setError(null)
+
+                                    runCatching {
+                                        if (applyUidBan) {
+                                            db.collection("users").document(t.docId)
+                                                .set(
+                                                    mapOf(
+                                                        "banned" to true,
+                                                        "banReason" to reason,
+                                                        "updatedAt" to FieldValue.serverTimestamp()
+                                                    ),
+                                                    SetOptions.merge()
+                                                )
+                                                .await()
+                                        }
+
+                                        if (applyDeviceBan) {
+                                            if (t.deviceHash.isBlank()) {
+                                                throw IllegalStateException("Cannot device-ban: deviceHash missing.")
+                                            }
+                                            db.collection("bannedDevices").document(t.deviceHash)
+                                                .set(
+                                                    mapOf(
+                                                        "banned" to true,
+                                                        "reason" to reason,
+                                                        "updatedAt" to FieldValue.serverTimestamp(),
+                                                        "updatedByUid" to myUid,
+                                                        "updatedByDeviceHash" to byDeviceHash,
+                                                        "updatedByAppId" to byAppId
+                                                    ),
+                                                    SetOptions.merge()
+                                                )
+                                                .await()
+                                        }
+
+                                        writeEvent(t, "ban", reason)
+                                        loadTarget(t)
+                                    }.onFailure { e ->
+                                        setGlobalLoading(false)
+                                        setError(e.message ?: "Failed to ban")
+                                    }
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                            enabled = (applyUidBan || (applyDeviceBan && t.deviceHash.isNotBlank()))
+                        ) { Text("Ban") }
+
+                        OutlinedButton(
+                            onClick = {
+                                scope.launch {
+                                    setGlobalLoading(true)
+                                    setError(null)
+
+                                    runCatching {
+                                        if (applyUidBan) {
+                                            db.collection("users").document(t.docId)
+                                                .set(
+                                                    mapOf(
+                                                        "banned" to false,
+                                                        "banReason" to "",
+                                                        "updatedAt" to FieldValue.serverTimestamp()
+                                                    ),
+                                                    SetOptions.merge()
+                                                )
+                                                .await()
+                                        }
+
+                                        if (applyDeviceBan) {
+                                            if (t.deviceHash.isBlank()) {
+                                                throw IllegalStateException("Cannot device-unban: deviceHash missing.")
+                                            }
+                                            db.collection("bannedDevices").document(t.deviceHash)
+                                                .set(
+                                                    mapOf(
+                                                        "banned" to false,
+                                                        "reason" to "",
+                                                        "updatedAt" to FieldValue.serverTimestamp(),
+                                                        "updatedByUid" to myUid,
+                                                        "updatedByDeviceHash" to byDeviceHash,
+                                                        "updatedByAppId" to byAppId
+                                                    ),
+                                                    SetOptions.merge()
+                                                )
+                                                .await()
+                                        }
+
+                                        writeEvent(t, "unban", "")
+                                        loadTarget(t)
+                                    }.onFailure { e ->
+                                        setGlobalLoading(false)
+                                        setError(e.message ?: "Failed to unban")
+                                    }
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                            enabled = (applyUidBan || (applyDeviceBan && t.deviceHash.isNotBlank()))
+                        ) { Text("Unban") }
+                    }
+
+                    if (t.deviceHash.isNotBlank()) {
+                        Text(
+                            "deviceBanReason=${deviceBanReason.ifBlank { "(blank)" }}",
+                            fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
-
-                OutlinedTextField(
-                    value = banReason,
-                    onValueChange = { banReason = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    minLines = 2,
-                    label = { Text("Ban reason (shown to user)") }
-                )
-
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(
-                        onClick = {
-                            scope.launch {
-                                val reason = banReason.trim()
-                                setGlobalLoading(true)
-                                setError(null)
-
-                                runCatching {
-                                    if (applyUidBan) {
-                                        db.collection("users").document(t.docId)
-                                            .set(
-                                                mapOf(
-                                                    "banned" to true,
-                                                    "banReason" to reason,
-                                                    "updatedAt" to FieldValue.serverTimestamp()
-                                                ),
-                                                SetOptions.merge()
-                                            )
-                                            .await()
-                                    }
-
-                                    if (applyDeviceBan) {
-                                        if (t.deviceHash.isBlank()) {
-                                            throw IllegalStateException("Cannot device-ban: deviceHash missing.")
-                                        }
-                                        db.collection("bannedDevices").document(t.deviceHash)
-                                            .set(
-                                                mapOf(
-                                                    "banned" to true,
-                                                    "reason" to reason,
-                                                    "updatedAt" to FieldValue.serverTimestamp(),
-                                                    "updatedByUid" to myUid,
-                                                    "updatedByDeviceHash" to byDeviceHash,
-                                                    "updatedByAppId" to byAppId
-                                                ),
-                                                SetOptions.merge()
-                                            )
-                                            .await()
-                                    }
-
-                                    writeEvent(t, "ban", reason)
-                                    loadTarget(t)
-                                }.onFailure { e ->
-                                    setGlobalLoading(false)
-                                    setError(e.message ?: "Failed to ban")
-                                }
-                            }
-                        },
-                        modifier = Modifier.weight(1f),
-                        enabled = (applyUidBan || (applyDeviceBan && t.deviceHash.isNotBlank()))
-                    ) { Text("Ban") }
-
-                    OutlinedButton(
-                        onClick = {
-                            scope.launch {
-                                setGlobalLoading(true)
-                                setError(null)
-
-                                runCatching {
-                                    if (applyUidBan) {
-                                        db.collection("users").document(t.docId)
-                                            .set(
-                                                mapOf(
-                                                    "banned" to false,
-                                                    "banReason" to "",
-                                                    "updatedAt" to FieldValue.serverTimestamp()
-                                                ),
-                                                SetOptions.merge()
-                                            )
-                                            .await()
-                                    }
-
-                                    if (applyDeviceBan) {
-                                        if (t.deviceHash.isBlank()) {
-                                            throw IllegalStateException("Cannot device-unban: deviceHash missing.")
-                                        }
-                                        db.collection("bannedDevices").document(t.deviceHash)
-                                            .set(
-                                                mapOf(
-                                                    "banned" to false,
-                                                    "reason" to "",
-                                                    "updatedAt" to FieldValue.serverTimestamp(),
-                                                    "updatedByUid" to myUid,
-                                                    "updatedByDeviceHash" to byDeviceHash,
-                                                    "updatedByAppId" to byAppId
-                                                ),
-                                                SetOptions.merge()
-                                            )
-                                            .await()
-                                    }
-
-                                    writeEvent(t, "unban", "")
-                                    loadTarget(t)
-                                }.onFailure { e ->
-                                    setGlobalLoading(false)
-                                    setError(e.message ?: "Failed to unban")
-                                }
-                            }
-                        },
-                        modifier = Modifier.weight(1f),
-                        enabled = (applyUidBan || (applyDeviceBan && t.deviceHash.isNotBlank()))
-                    ) { Text("Unban") }
-                }
             }
         }
 
-        // HISTORY
-        ElevatedCard {
-            Column(
-                Modifier.padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Text("History", style = MaterialTheme.typography.titleSmall)
+        item {
+            ElevatedCard {
+                Column(
+                    Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text("History", style = MaterialTheme.typography.titleSmall)
 
-                if (history.isEmpty()) {
-                    Text("No history found.", style = MaterialTheme.typography.bodySmall)
-                } else {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        history.forEach { e ->
-                            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                                Column(
-                                    Modifier.padding(10.dp),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Text(
-                                        "${e.action.ifBlank { "(no action)" }}  @  ${formatRelativeTime(e.createdAt)}",
-                                        fontFamily = FontFamily.Monospace
-                                    )
-                                    if (e.reason.isNotBlank()) {
-                                        Text("reason=${e.reason}", fontFamily = FontFamily.Monospace)
-                                    }
-                                    if (e.targetDeviceHash.isNotBlank()) {
+                    if (history.isEmpty()) {
+                        Text("No history found.", style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            history.forEach { e ->
+                                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                                    Column(
+                                        Modifier.padding(10.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
                                         Text(
-                                            "targetDevice=${shortId(e.targetDeviceHash, 10, 6)}",
+                                            "${e.action.ifBlank { "(no action)" }}  @  ${relTimeOrQ(e.createdAt)}",
+                                            fontFamily = FontFamily.Monospace
+                                        )
+                                        if (e.reason.isNotBlank()) {
+                                            Text("reason=${e.reason}", fontFamily = FontFamily.Monospace)
+                                        }
+                                        if (e.targetDeviceHash.isNotBlank()) {
+                                            Text(
+                                                "targetDevice=${shortId(e.targetDeviceHash)}",
+                                                fontFamily = FontFamily.Monospace,
+                                                style = MaterialTheme.typography.bodySmall
+                                            )
+                                        }
+                                        Text(
+                                            "byUid=${shortId(e.byUid)}  byDevice=${shortId(e.byDeviceHash)}",
                                             fontFamily = FontFamily.Monospace,
                                             style = MaterialTheme.typography.bodySmall
                                         )
                                     }
-                                    Text(
-                                        "byUid=${shortId(e.byUid, 10, 6)}  byDevice=${shortId(e.byDeviceHash, 10, 6)}",
-                                        fontFamily = FontFamily.Monospace,
-                                        style = MaterialTheme.typography.bodySmall
-                                    )
                                 }
                             }
                         }
@@ -1456,6 +1423,8 @@ private fun ModerationTab(
                 }
             }
         }
+
+        item { Spacer(Modifier.height(10.dp)) }
     }
 }
 
@@ -1633,7 +1602,7 @@ private fun AnnouncementsTab(
                             Column(Modifier.weight(1f)) {
                                 Text(a.title.ifBlank { "(no title)" }, style = MaterialTheme.typography.titleSmall)
                                 Text(
-                                    "priority=${a.priority}  active=${a.active}  created=${formatRelativeTime(a.createdAt)}",
+                                    "priority=${a.priority}  active=${a.active}  created=${relTimeOrQ(a.createdAt)}",
                                     fontFamily = FontFamily.Monospace,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1802,7 +1771,7 @@ private fun ConfigTab(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text("ToS / App Config", style = MaterialTheme.typography.titleMedium)
-            Text("loadedAt=${formatRelativeTime(loadedAt)}", fontFamily = FontFamily.Monospace)
+            Text("loadedAt=${relTimeOrQ(loadedAt)}", fontFamily = FontFamily.Monospace)
 
             OutlinedTextField(
                 value = ownerUid,
@@ -1908,41 +1877,38 @@ private fun ErrorCard(message: String) {
 }
 
 /* =========================================================
-   TIME + ID FORMAT HELPERS
+   TIME + ID HELPERS
    ========================================================= */
 
-private fun shortId(id: String, head: Int = 8, tail: Int = 6): String {
-    val t = id.trim()
+private fun shortId(s: String, head: Int = 8, tail: Int = 6): String {
+    val t = s.trim()
     if (t.isBlank()) return "(blank)"
-    if (t.length <= head + tail + 1) return t
-    return t.take(head) + "…" + t.takeLast(tail)
+    if (t.length <= head + tail + 3) return t
+    return t.take(head) + "..." + t.takeLast(tail)
 }
 
-private fun tsToMillis(ts: Timestamp?): Long? {
-    if (ts == null) return null
-    return (ts.seconds * 1000L) + (ts.nanoseconds / 1_000_000L)
+private fun relTimeOrQ(ts: Timestamp?): String {
+    if (ts == null) return "?"
+    return formatRelativeTime(ts)
 }
 
-private fun formatRelativeTime(ts: Timestamp?, nowMs: Long = System.currentTimeMillis()): String {
-    val ms = tsToMillis(ts) ?: return "?"
-    val diff = nowMs - ms
-    val past = diff >= 0
-    val d = abs(diff)
+private fun formatRelativeTime(ts: Timestamp): String {
+    val nowSec = Timestamp.now().seconds
+    val d = nowSec - ts.seconds
+    val past = d >= 0
+    val sec = abs(d)
 
-    val sec = d / 1000L
-    val min = sec / 60L
-    val hr = min / 60L
-    val day = hr / 24L
+    fun out(v: Long, unit: String): String = if (past) "${v}${unit} ago" else "in ${v}${unit}"
 
-    val core = when {
-        sec < 60 -> "${sec}s"
-        min < 60 -> "${min}m"
-        hr < 24 -> "${hr}h"
-        day < 7 -> "${day}d"
-        else -> "${day / 7}w"
+    return when {
+        sec < 60 -> out(sec, "s")
+        sec < 3600 -> out(sec / 60, "m")
+        sec < 86400 -> out(sec / 3600, "h")
+        sec < 86400 * 7 -> out(sec / 86400, "d")
+        sec < 86400 * 30 -> out(sec / (86400 * 7), "w")
+        sec < 86400 * 365 -> out(sec / (86400 * 30), "mo")
+        else -> out(sec / (86400 * 365), "y")
     }
-
-    return if (past) "${core} ago" else "in ${core}"
 }
 
 /* =========================================================
