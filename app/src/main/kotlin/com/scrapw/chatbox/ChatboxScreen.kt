@@ -2061,7 +2061,7 @@ private fun InfoSheet(onDismiss: () -> Unit) {
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
-            Modifier( )
+            Modifier
                 .fillMaxWidth()
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
