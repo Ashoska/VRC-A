@@ -816,7 +816,7 @@ private fun UsersTab(
                     ) { Text("Live") }
 
                     Button(
-                        onClick = { liveLimit = (liveLimit + 75).coerceAtMost(1000) },
+                        onClick = { liveLimit = (liveLimit + 500).coerceAtMost(10000) },
                         modifier = Modifier.weight(1f)
                     ) { Text("More") }
                 }
