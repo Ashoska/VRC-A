@@ -746,13 +746,18 @@ private fun UsersTab(
 
 @Composable
 private fun DetailBlock(d: UserDetail) {
+    @Composable
     fun mono(label: String, value: String) {
-        Text("$label=$value", fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+        Text(
+            text = "$label=$value",
+            fontFamily = FontFamily.Monospace,
+            style = MaterialTheme.typography.bodySmall
+        )
     }
 
     ElevatedCard {
-        androidx.compose.foundation.layout.Column(
-            Modifier.padding(12.dp),
+        Column(
+            modifier = Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text("Live State", style = MaterialTheme.typography.titleSmall)
@@ -772,12 +777,15 @@ private fun DetailBlock(d: UserDetail) {
             Text("combinedPreviewText", style = MaterialTheme.typography.labelLarge)
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Text(
-                    d.combinedPreviewText.ifBlank { "(blank)" },
+                    text = d.combinedPreviewText.ifBlank { "(blank)" },
                     modifier = Modifier.padding(10.dp),
                     fontFamily = FontFamily.Monospace,
                     style = MaterialTheme.typography.bodySmall
                 )
             }
+        }
+    }
+}
 
             if (d.warnReason.isNotBlank() || d.banReason.isNotBlank()) {
                 Spacer(Modifier.height(4.dp))
