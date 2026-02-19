@@ -51,6 +51,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -66,12 +67,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.SetOptions
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 
@@ -351,9 +352,7 @@ fun AdminScreen() {
                     Tab(
                         selected = tabIndex == i,
                         onClick = { tabIndex = i },
-                        text = {
-                            Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
+                        text = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
                     )
                 }
             }
@@ -462,8 +461,6 @@ private fun UsersTab(
     setError: (String?) -> Unit,
     onSendToModeration: (ModerationTarget) -> Unit
 ) {
-    val scope = rememberCoroutineScope()
-
     val users = remember { mutableStateListOf<UserRow>() }
 
     var search by rememberSaveable { mutableStateOf("") }
@@ -479,6 +476,15 @@ private fun UsersTab(
     // Selected details live doc listener
     var selectedDetail by remember { mutableStateOf<UserDetail?>(null) }
     var selectedDetailLoading by remember { mutableStateOf(false) }
+
+    // ticker for relative times
+    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            nowMs = System.currentTimeMillis()
+            delay(1000L)
+        }
+    }
 
     fun rowMatches(u: UserRow, q: String): Boolean {
         if (q.isBlank()) return true
@@ -610,7 +616,7 @@ private fun UsersTab(
         selectedDocId?.let { id -> users.firstOrNull { it.docId == id } }
     }
 
-    // Detail view (scrollable Column) — removes the weird "big blank space" behavior
+    // Detail view
     if (selectedRow != null) {
         val d = selectedDetail
 
@@ -634,12 +640,17 @@ private fun UsersTab(
                                 Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
                             }
                             Column {
+                                // 요구사항: name line should be "User"
+                                Text("User", style = MaterialTheme.typography.titleMedium)
+                                if (selectedRow.displayName.isNotBlank()) {
+                                    Text(
+                                        selectedRow.displayName,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                                 Text(
-                                    selectedRow.displayName.ifBlank { "User" },
-                                    style = MaterialTheme.typography.titleMedium
-                                )
-                                Text(
-                                    "docId=${selectedRow.docId}",
+                                    "docId=${shortId(selectedRow.docId)}",
                                     fontFamily = FontFamily.Monospace,
                                     style = MaterialTheme.typography.bodySmall
                                 )
@@ -652,7 +663,12 @@ private fun UsersTab(
                     }
 
                     Text(
-                        "authUid=${selectedRow.authUid.ifBlank { "(blank)" }}",
+                        "authUid=${shortId(selectedRow.authUid.ifBlank { "(blank)" })}",
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        "device=${shortId(selectedRow.deviceHash.ifBlank { "(blank)" })}",
                         fontFamily = FontFamily.Monospace,
                         style = MaterialTheme.typography.bodySmall
                     )
@@ -661,8 +677,11 @@ private fun UsersTab(
                         fontFamily = FontFamily.Monospace,
                         style = MaterialTheme.typography.bodySmall
                     )
+
+                    val lastSeenRel = relativeTime(selectedRow.lastSeenAt, nowMs)
+                    val updatedRel = relativeTime(selectedRow.updatedAt, nowMs)
                     Text(
-                        "lastSeenAt=${selectedRow.lastSeenAt ?: "?"}   updatedAt=${selectedRow.updatedAt ?: "?"}",
+                        "lastSeen=$lastSeenRel   updated=$updatedRel",
                         fontFamily = FontFamily.Monospace,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -692,7 +711,6 @@ private fun UsersTab(
                         }
                     }
 
-                    // No spacer/weight here — button stays directly under the copy row
                     Button(
                         onClick = {
                             onSendToModeration(
@@ -791,7 +809,6 @@ private fun UsersTab(
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     OutlinedButton(
                         onClick = {
-                            // "Refresh" = reattach listener by nudging limit
                             liveLimit = liveLimit.coerceAtLeast(1)
                             setError(null)
                         },
@@ -840,17 +857,28 @@ private fun UsersTab(
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
                                 Column(Modifier.weight(1f)) {
+                                    // 요구사항: name shows "User" (not displayName)
+                                    Text("User", style = MaterialTheme.typography.titleSmall)
+                                    if (u.displayName.isNotBlank()) {
+                                        Text(
+                                            u.displayName,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+
                                     Text(
-                                        u.displayName.ifBlank { "(no displayName)" },
-                                        style = MaterialTheme.typography.titleSmall
-                                    )
-                                    Text(
-                                        "docId=${u.docId}",
+                                        "docId=${shortId(u.docId)}",
                                         fontFamily = FontFamily.Monospace,
                                         style = MaterialTheme.typography.bodySmall
                                     )
                                     Text(
-                                        "authUid=${u.authUid.ifBlank { "(blank)" }}",
+                                        "authUid=${shortId(u.authUid.ifBlank { "(blank)" })}",
+                                        fontFamily = FontFamily.Monospace,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                    Text(
+                                        "device=${shortId(u.deviceHash.ifBlank { "(blank)" })}",
                                         fontFamily = FontFamily.Monospace,
                                         style = MaterialTheme.typography.bodySmall
                                     )
@@ -863,8 +891,10 @@ private fun UsersTab(
                                 Icon(Icons.Filled.ExpandMore, contentDescription = null)
                             }
 
+                            val lastSeenRel = relativeTime(u.lastSeenAt, nowMs)
+                            val updatedRel = relativeTime(u.updatedAt, nowMs)
                             Text(
-                                "lastSeenAt=${u.lastSeenAt ?: "?"}   updatedAt=${u.updatedAt ?: "?"}",
+                                "lastSeen=$lastSeenRel   updated=$updatedRel",
                                 fontFamily = FontFamily.Monospace,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -987,10 +1017,17 @@ private fun ModerationTab(
     var lookup by rememberSaveable { mutableStateOf("") } // can be docId or authUid
     var loaded by remember { mutableStateOf<ModerationTarget?>(null) }
 
-    var warned by remember { mutableStateOf(false) }
-    var banned by remember { mutableStateOf(false) }
-    var warnReason by remember { mutableStateOf("") }
-    var banReason by remember { mutableStateOf("") }
+    // LIVE state from Firestore (never bind these directly to TextFields)
+    var liveWarned by remember { mutableStateOf(false) }
+    var liveBanned by remember { mutableStateOf(false) }
+    var liveWarnReason by remember { mutableStateOf("") }
+    var liveBanReason by remember { mutableStateOf("") }
+
+    // EDITOR state (TextFields bind to these)
+    var editWarnReason by rememberSaveable { mutableStateOf("") }
+    var editBanReason by rememberSaveable { mutableStateOf("") }
+    var editingWarn by rememberSaveable { mutableStateOf(false) }
+    var editingBan by rememberSaveable { mutableStateOf(false) }
 
     var deviceBanned by remember { mutableStateOf(false) }
     var deviceBanReason by remember { mutableStateOf("") }
@@ -1006,10 +1043,17 @@ private fun ModerationTab(
         userDocReg?.remove(); userDocReg = null
         deviceDocReg?.remove(); deviceDocReg = null
         loaded = null
-        warned = false
-        banned = false
-        warnReason = ""
-        banReason = ""
+
+        liveWarned = false
+        liveBanned = false
+        liveWarnReason = ""
+        liveBanReason = ""
+
+        editWarnReason = ""
+        editBanReason = ""
+        editingWarn = false
+        editingBan = false
+
         deviceBanned = false
         deviceBanReason = ""
         history.clear()
@@ -1093,11 +1137,9 @@ private fun ModerationTab(
     }
 
     fun attachLiveTarget(target: ModerationTarget) {
-        // remove old listeners
         userDocReg?.remove(); userDocReg = null
         deviceDocReg?.remove(); deviceDocReg = null
 
-        // live user doc
         userDocReg = db.collection("users").document(target.docId)
             .addSnapshotListener { snap, e ->
                 if (e != null) {
@@ -1106,10 +1148,14 @@ private fun ModerationTab(
                 }
                 if (snap == null || !snap.exists()) return@addSnapshotListener
 
-                warned = snap.getBoolean("warned") ?: false
-                banned = snap.getBoolean("banned") ?: false
-                warnReason = (snap.getString("warnReason") ?: "").trim()
-                banReason = (snap.getString("banReason") ?: "").trim()
+                liveWarned = snap.getBoolean("warned") ?: false
+                liveBanned = snap.getBoolean("banned") ?: false
+                liveWarnReason = (snap.getString("warnReason") ?: "").trim()
+                liveBanReason = (snap.getString("banReason") ?: "").trim()
+
+                // Only refresh the editor if user is NOT actively editing
+                if (!editingWarn) editWarnReason = liveWarnReason
+                if (!editingBan) editBanReason = liveBanReason
 
                 val dh = (snap.getString("deviceHash") ?: target.deviceHash).trim()
                 if (dh.isNotBlank()) {
@@ -1140,6 +1186,9 @@ private fun ModerationTab(
         setError(null)
         runCatching {
             loaded = target
+            // reset editing flags for a new target so fields behave
+            editingWarn = false
+            editingBan = false
             attachLiveTarget(target)
             loadHistoryNoIndex(target)
             setGlobalLoading(false)
@@ -1149,11 +1198,7 @@ private fun ModerationTab(
         }
     }
 
-    suspend fun writeEvent(
-        target: ModerationTarget,
-        action: String,
-        reason: String
-    ) {
+    suspend fun writeEvent(target: ModerationTarget, action: String, reason: String) {
         runCatching {
             val data = hashMapOf(
                 "uid" to target.docId,
@@ -1284,7 +1329,10 @@ private fun ModerationTab(
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("Reload (history + live)") }
 
-                Text("warned=$warned  banned=$banned  deviceBanned=$deviceBanned", fontFamily = FontFamily.Monospace)
+                Text(
+                    "warned=$liveWarned  banned=$liveBanned  deviceBanned=$deviceBanned",
+                    fontFamily = FontFamily.Monospace
+                )
                 if (deviceBanned && deviceBanReason.isNotBlank()) {
                     Text("deviceBanReason=$deviceBanReason", fontFamily = FontFamily.Monospace)
                 }
@@ -1300,8 +1348,11 @@ private fun ModerationTab(
                 Text("Warn", style = MaterialTheme.typography.titleSmall)
 
                 OutlinedTextField(
-                    value = warnReason,
-                    onValueChange = { warnReason = it },
+                    value = editWarnReason,
+                    onValueChange = {
+                        editingWarn = true
+                        editWarnReason = it
+                    },
                     modifier = Modifier.fillMaxWidth(),
                     minLines = 2,
                     label = { Text("Warn reason (shown to user)") }
@@ -1315,18 +1366,21 @@ private fun ModerationTab(
                                 setError(null)
 
                                 runCatching {
+                                    val reason = editWarnReason.trim()
                                     db.collection("users").document(t.docId)
                                         .set(
                                             mapOf(
                                                 "warned" to true,
-                                                "warnReason" to warnReason.trim(),
+                                                "warnReason" to reason,
                                                 "updatedAt" to FieldValue.serverTimestamp()
                                             ),
                                             SetOptions.merge()
                                         )
                                         .await()
-                                    writeEvent(t, "warn", warnReason)
+                                    writeEvent(t, "warn", reason)
                                     loadHistoryNoIndex(t)
+
+                                    editingWarn = false
                                     setGlobalLoading(false)
                                 }.onFailure { e ->
                                     setGlobalLoading(false)
@@ -1354,17 +1408,33 @@ private fun ModerationTab(
                                             SetOptions.merge()
                                         )
                                         .await()
-                                    writeEvent(t, "clear_warn", "")
+                                    writeEvent(t, "remove_warn", "")
                                     loadHistoryNoIndex(t)
+
+                                    // reset editor immediately too
+                                    editWarnReason = ""
+                                    editingWarn = false
+
                                     setGlobalLoading(false)
                                 }.onFailure { e ->
                                     setGlobalLoading(false)
-                                    setError(e.message ?: "Failed to clear warn")
+                                    setError(e.message ?: "Failed to remove warn")
                                 }
                             }
                         },
                         modifier = Modifier.weight(1f)
-                    ) { Text("Clear warn") }
+                    ) { Text("Remove warn") }
+                }
+
+                // quick "use live" in case you're mid-edit and want to discard
+                if (editingWarn) {
+                    OutlinedButton(
+                        onClick = {
+                            editWarnReason = liveWarnReason
+                            editingWarn = false
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Discard typing (use live)") }
                 }
             }
         }
@@ -1396,8 +1466,11 @@ private fun ModerationTab(
                 }
 
                 OutlinedTextField(
-                    value = banReason,
-                    onValueChange = { banReason = it },
+                    value = editBanReason,
+                    onValueChange = {
+                        editingBan = true
+                        editBanReason = it
+                    },
                     modifier = Modifier.fillMaxWidth(),
                     minLines = 2,
                     label = { Text("Ban reason (shown to user)") }
@@ -1407,7 +1480,7 @@ private fun ModerationTab(
                     Button(
                         onClick = {
                             scope.launch {
-                                val reason = banReason.trim()
+                                val reason = editBanReason.trim()
                                 setGlobalLoading(true)
                                 setError(null)
 
@@ -1446,6 +1519,8 @@ private fun ModerationTab(
 
                                     writeEvent(t, "ban", reason)
                                     loadHistoryNoIndex(t)
+
+                                    editingBan = false
                                     setGlobalLoading(false)
                                 }.onFailure { e ->
                                     setGlobalLoading(false)
@@ -1498,6 +1573,10 @@ private fun ModerationTab(
 
                                     writeEvent(t, "unban", "")
                                     loadHistoryNoIndex(t)
+
+                                    editBanReason = ""
+                                    editingBan = false
+
                                     setGlobalLoading(false)
                                 }.onFailure { e ->
                                     setGlobalLoading(false)
@@ -1508,6 +1587,16 @@ private fun ModerationTab(
                         modifier = Modifier.weight(1f),
                         enabled = (applyUidBan || (applyDeviceBan && t.deviceHash.isNotBlank()))
                     ) { Text("Unban") }
+                }
+
+                if (editingBan) {
+                    OutlinedButton(
+                        onClick = {
+                            editBanReason = liveBanReason
+                            editingBan = false
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Discard typing (use live)") }
                 }
             }
         }
@@ -2013,6 +2102,32 @@ private fun ErrorCard(message: String) {
             Text(message, fontFamily = FontFamily.Monospace)
         }
     }
+}
+
+/* =========================================================
+   SMALL HELPERS
+   ========================================================= */
+
+private fun shortId(s: String, head: Int = 10, tail: Int = 6): String {
+    val t = s.trim()
+    if (t.isBlank()) return "(blank)"
+    if (t.length <= head + tail + 1) return t
+    return t.take(head) + "…" + t.takeLast(tail)
+}
+
+private fun relativeTime(ts: Timestamp?, nowMs: Long): String {
+    if (ts == null) return "?"
+    val then = ts.toDate().time
+    val diff = nowMs - then
+    if (diff < 0) return "0s ago"
+    val s = diff / 1000L
+    if (s < 60L) return "${s}s ago"
+    val m = s / 60L
+    if (m < 60L) return "${m}m ago"
+    val h = m / 60L
+    if (h < 24L) return "${h}h ago"
+    val d = h / 24L
+    return "${d}d ago"
 }
 
 /* =========================================================
