@@ -47,16 +47,17 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * ChatboxViewModel (HYBRID WRITE STRATEGY) — FIXED
+ * ChatboxViewModel (DEVICE-FIRST) — RESTORED + RULES-COMPAT
  *
- * Goals:
- * - Keep deviceHash for device-based moderation (bannedDevices/{deviceHash})
- * - Avoid public-build Firestore PERMISSION_DENIED when rules only allow users/{authUid}
+ * ✅ Canonical doc:
+ *   users/{deviceHash}
  *
- * Strategy:
- * - Prefer users/{deviceHash} (device-first) IF permitted by rules.
- * - If denied (PERMISSION_DENIED), auto-fallback to users/{authUid} and remember the fallback in prefs.
- * - Always write usersByUid/{authUid} -> { deviceHash, userDocId, ... } so Admin can resolve quickly.
+ * ✅ UID mapping (matches YOUR RULES file):
+ *   usersById/{authUid} -> { deviceHash, authUid, appId, adminBuild, updatedAt }
+ *
+ * Why this fixes the earlier public-branch error:
+ * - Public clients are no longer trying to write users/{uid} or usersByUid/{uid},
+ *   which your Firestore rules would deny.
  */
 class ChatboxViewModel(
     private val app: ChatboxApplication,
@@ -82,19 +83,18 @@ class ChatboxViewModel(
         private const val NO_MOVE_PAUSE_MS = 5_000L
         private const val UI_TICK_MS = 500L
 
+        // Firestore sync throttles (kept from your newer VM)
         private const val SELF_SYNC_MIN_INTERVAL_MS = 12_000L
         private const val SELF_SYNC_FORCE_INTERVAL_MS = 90_000L
 
+        // SharedPrefs (must match AdminScreen + ChatboxApp/MainActivity)
         private const val REMOTE_PREFS_FILE = "vrca_remote"
         private const val PREF_DEVICE_ID_HASH = "device_id_hash"
         private const val PREF_AUTH_UID = "auth_uid"
 
-        // If true, we stop attempting users/{deviceHash} writes (because rules denied it)
-        private const val PREF_DEVICE_FIRST_DENIED = "device_first_denied"
-
-        // Collections
-        private const val COL_USERS = "users"
-        private const val COL_USERS_BY_UID = "usersByUid"
+        // Collections (MUST MATCH YOUR RULES)
+        private const val COL_USERS = "users"          // users/{deviceHash}
+        private const val COL_USERS_BY_ID = "usersById" // usersById/{uid}
 
         @MainThread
         fun isInstanceInitialized(): Boolean = ::instance.isInitialized
@@ -134,8 +134,6 @@ class ChatboxViewModel(
     private var selfSyncJob: Job? = null
     private var lastSelfSyncAtMs: Long = 0L
     private var lastSelfSyncFingerprint: String = ""
-
-    // Keep quiet; can surface in debug UI later.
     private var lastSelfSyncError: String = ""
 
     private fun prefs() = app.getSharedPreferences(REMOTE_PREFS_FILE, Context.MODE_PRIVATE)
@@ -150,28 +148,9 @@ class ChatboxViewModel(
         prefs().edit().putString(PREF_AUTH_UID, uid.trim()).apply()
     }
 
-    private fun readDeviceFirstDenied(): Boolean =
-        prefs().getBoolean(PREF_DEVICE_FIRST_DENIED, false)
-
-    private fun markDeviceFirstDenied() {
-        prefs().edit().putBoolean(PREF_DEVICE_FIRST_DENIED, true).apply()
-    }
-
     private fun isValidDeviceHash(h: String): Boolean {
         val s = h.trim()
         return s.length in 16..128
-    }
-
-    /**
-     * Decide which users/{docId} we are allowed to write.
-     * - If we've previously seen PERMISSION_DENIED for deviceHash doc, use authUid.
-     * - Otherwise try deviceHash (if valid), else authUid.
-     */
-    private fun computeWritableUserDocId(authUid: String): String {
-        val dh = readDeviceHashFromPrefs()
-        val deviceOk = isValidDeviceHash(dh)
-        if (readDeviceFirstDenied()) return authUid
-        return if (deviceOk) dh else authUid
     }
 
     private suspend fun ensureAnonAuth(): String? {
@@ -183,19 +162,17 @@ class ChatboxViewModel(
         }.getOrNull()
     }
 
-    private fun computeSelfFingerprint(authUid: String): String {
+    private fun computeSelfFingerprint(authUid: String, deviceHash: String): String {
         val cycleClean = cycleLines.map { it.trim() }.take(10)
         val afkP = (1..3).joinToString("|") { getAfkPresetPreview(it) }
         val cycP = (1..5).joinToString("|") { getCyclePresetPreview(it) }
 
         val npTitle = lastNowPlayingTitle.trim()
         val npArtist = lastNowPlayingArtist.trim()
-        val dev = readDeviceHashFromPrefs()
-        val docId = computeWritableUserDocId(authUid)
 
         return listOf(
-            "doc=$docId",
-            "dev=$dev",
+            "doc=$deviceHash",
+            "dev=$deviceHash",
             "auth=$authUid",
             "afkE=$afkEnabled",
             "afkM=${afkMessage.trim()}",
@@ -211,27 +188,24 @@ class ChatboxViewModel(
             "npA=$npArtist",
             "prev=${combinedPreviewText.trim()}",
             "afkP=$afkP",
-            "cycP=$cycP",
-            "devDenied=${readDeviceFirstDenied()}"
+            "cycP=$cycP"
         ).joinToString("||")
     }
 
     /**
-     * Snapshot fields for users/{docId}.
-     * IMPORTANT:
-     * - "deviceHash" is always stored for device-ban / admin resolution.
-     * - docId itself might be deviceHash OR authUid depending on rules.
+     * ✅ Full snapshot for users/{deviceHash}
+     * Must stay inside your Firestore rules' selfMutableKeys() list.
      */
-    private fun buildUserSnapshot(authUid: String, writtenDocId: String): Map<String, Any> {
+    private fun buildUserSnapshot(authUid: String, deviceHash: String): Map<String, Any> {
         val cycleClean = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(10)
-        val deviceHash = readDeviceHashFromPrefs()
 
         val data = linkedMapOf<String, Any>(
-            // identity/debug
-            "docId" to writtenDocId,
-            "docIdType" to (if (writtenDocId == deviceHash && isValidDeviceHash(deviceHash)) "deviceHash" else "authUid"),
+            // identity/debug (rules require uid/authUid to match request.auth.uid)
+            "docId" to deviceHash,
+            "docIdType" to "deviceHash",
             "authUid" to authUid,
-            "uid" to authUid, // legacy alias (admin searches)
+            "uid" to authUid,              // legacy alias (admin searches)
+            "currentUid" to authUid,       // your rules mention this; keep it consistent
             "deviceHash" to deviceHash,
 
             // build
@@ -283,96 +257,58 @@ class ChatboxViewModel(
     }
 
     /**
-     * UID mapping: usersByUid/{uid} -> { deviceHash, userDocId, ... }
-     * Helps Admin resolve uid -> deviceHash -> user doc quickly.
+     * ✅ UID mapping per YOUR RULES:
+     * usersById/{uid} keys must be ONLY:
+     *   deviceHash, authUid, appId, adminBuild, updatedAt
      */
-    private fun buildUsersByUidLink(authUid: String, userDocId: String): Map<String, Any> {
-        val deviceHash = readDeviceHashFromPrefs()
+    private fun buildUsersByIdLink(authUid: String, deviceHash: String): Map<String, Any> {
         return linkedMapOf(
             "deviceHash" to deviceHash,
             "authUid" to authUid,
-            "uid" to authUid,
-            "userDocId" to userDocId,
             "appId" to BuildConfig.APPLICATION_ID,
             "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
-            "lastSeenAt" to FieldValue.serverTimestamp(),
             "updatedAt" to FieldValue.serverTimestamp()
         )
     }
 
-    private fun isPermissionDenied(t: Throwable): Boolean {
-        val m = (t.message ?: "").uppercase()
-        return m.contains("PERMISSION_DENIED") || m.contains("INSUFFICIENT PERMISSIONS")
-    }
-
-    /**
-     * Write self snapshot, preferring deviceHash doc if allowed.
-     * If denied, permanently fallback to users/{authUid} for this install (until prefs cleared).
-     */
-    private suspend fun writeSelfSnapshot(authUid: String) {
-        val deviceHash = readDeviceHashFromPrefs()
-        val preferDevice = !readDeviceFirstDenied() && isValidDeviceHash(deviceHash)
-
-        // attempt order: deviceHash then authUid (fallback)
-        val docAttempts = if (preferDevice) listOf(deviceHash, authUid) else listOf(authUid)
-
-        var lastErr: Throwable? = null
-        for ((idx, docId) in docAttempts.withIndex()) {
-            try {
-                val snap = buildUserSnapshot(authUid, writtenDocId = docId)
-                db.collection(COL_USERS).document(docId)
-                    .set(snap, SetOptions.merge())
-                    .await()
-
-                // mapping write (best-effort)
-                runCatching {
-                    db.collection(COL_USERS_BY_UID).document(authUid)
-                        .set(buildUsersByUidLink(authUid, docId), SetOptions.merge())
-                        .await()
-                }
-
-                // If we had to fallback away from deviceHash due to deny, remember it
-                if (idx == 1 && preferDevice) {
-                    markDeviceFirstDenied()
-                }
-
-                lastSelfSyncError = ""
-                return
-            } catch (t: Throwable) {
-                lastErr = t
-                // If the first attempt (deviceHash) was denied, mark and continue to fallback attempt
-                if (preferDevice && docId == deviceHash && isPermissionDenied(t)) {
-                    markDeviceFirstDenied()
-                    continue
-                }
-                // otherwise: stop trying (or if fallback also fails)
-                break
-            }
-        }
-
-        if (lastErr != null) {
-            lastSelfSyncError = (lastErr.message ?: lastErr.toString()).take(4000)
-        }
-    }
-
     private fun startSelfSyncLoopIfNeeded() {
         if (selfSyncJob != null) return
+
         selfSyncJob = viewModelScope.launch {
             while (true) {
                 runCatching {
                     val authUid = ensureAnonAuth() ?: return@runCatching
-                    val now = System.currentTimeMillis()
 
-                    val fp = computeSelfFingerprint(authUid)
+                    val deviceHash = readDeviceHashFromPrefs()
+                    if (!isValidDeviceHash(deviceHash)) {
+                        // Do NOT fall back to authUid here, because your rules are deviceHash-canonical.
+                        lastSelfSyncError = "deviceHash missing/invalid. Ensure MainActivity/ChatboxApp sets prefs key device_id_hash."
+                        return@runCatching
+                    }
+
+                    val now = System.currentTimeMillis()
+                    val fp = computeSelfFingerprint(authUid, deviceHash)
+
                     val changed = fp != lastSelfSyncFingerprint
                     val dueByForce = (now - lastSelfSyncAtMs) >= SELF_SYNC_FORCE_INTERVAL_MS
                     val dueByChange = changed && (now - lastSelfSyncAtMs) >= SELF_SYNC_MIN_INTERVAL_MS
                     if (!dueByForce && !dueByChange) return@runCatching
 
-                    writeSelfSnapshot(authUid)
+                    // ✅ Canonical write: users/{deviceHash}
+                    db.collection(COL_USERS).document(deviceHash)
+                        .set(buildUserSnapshot(authUid, deviceHash), SetOptions.merge())
+                        .await()
+
+                    // ✅ UID mapping: usersById/{uid}
+                    runCatching {
+                        db.collection(COL_USERS_BY_ID).document(authUid)
+                            .set(buildUsersByIdLink(authUid, deviceHash), SetOptions.merge())
+                            .await()
+                    }
 
                     lastSelfSyncAtMs = now
                     lastSelfSyncFingerprint = fp
+                    lastSelfSyncError = ""
                 }.onFailure { e ->
                     lastSelfSyncError = (e.message ?: e.toString()).take(4000)
                 }
@@ -653,6 +589,7 @@ class ChatboxViewModel(
     )
 
     init {
+        // Start periodic self sync (rules-compatible).
         startSelfSyncLoopIfNeeded()
 
         viewModelScope.launch {
@@ -899,7 +836,7 @@ class ChatboxViewModel(
     fun setSpotifyDemoFlag(enabled: Boolean) {
         spotifyDemoEnabled = enabled
         rebuildCombinedPreviewOnly()
-        noteSync()
+        startSelfSyncLoopIfNeeded()
     }
 
     fun updateSpotifyPreset(preset: Int) {
@@ -907,10 +844,6 @@ class ChatboxViewModel(
         spotifyPreset = v
         viewModelScope.launch { userPreferencesRepository.saveSpotifyPreset(v) }
         rebuildCombinedPreviewOnly()
-        noteSync()
-    }
-
-    private fun noteSync() {
         startSelfSyncLoopIfNeeded()
     }
 
@@ -921,7 +854,7 @@ class ChatboxViewModel(
         afkMessage = text
         viewModelScope.launch { userPreferencesRepository.saveAfkMessage(text) }
         rebuildCombinedPreviewOnly()
-        noteSync()
+        startSelfSyncLoopIfNeeded()
     }
 
     // =========================
@@ -938,7 +871,7 @@ class ChatboxViewModel(
     private fun persistCycleLinesPreserve() {
         val joined = cycleLines.take(10).joinToString("\n")
         viewModelScope.launch { userPreferencesRepository.saveCycleMessages(joined) }
-        noteSync()
+        startSelfSyncLoopIfNeeded()
     }
 
     fun addCycleLine() {
@@ -1008,7 +941,7 @@ class ChatboxViewModel(
             2 -> userPreferencesRepository.saveAfkPreset2(text)
             else -> userPreferencesRepository.saveAfkPreset3(text)
         }
-        noteSync()
+        startSelfSyncLoopIfNeeded()
     }
 
     suspend fun loadAfkPreset(slot: Int) {
@@ -1018,7 +951,7 @@ class ChatboxViewModel(
             else -> userPreferencesRepository.afkPreset3.first()
         }
         updateAfkText(txt)
-        noteSync()
+        startSelfSyncLoopIfNeeded()
     }
 
     suspend fun saveCyclePreset(slot: Int, lines: List<String>) {
@@ -1038,7 +971,7 @@ class ChatboxViewModel(
             4 -> userPreferencesRepository.saveCyclePreset4(messages, interval)
             else -> userPreferencesRepository.saveCyclePreset5(messages, interval)
         }
-        noteSync()
+        startSelfSyncLoopIfNeeded()
     }
 
     suspend fun loadCyclePreset(slot: Int) {
@@ -1056,7 +989,7 @@ class ChatboxViewModel(
 
         setCycleLinesFromTextPreserve(messages)
         persistCycleLinesPreserve()
-        noteSync()
+        startSelfSyncLoopIfNeeded()
     }
 
     // =========================
@@ -1071,19 +1004,19 @@ class ChatboxViewModel(
                 delay(afkForcedIntervalSeconds.toLong() * 1000L)
             }
         }
-        noteSync()
+        startSelfSyncLoopIfNeeded()
     }
 
     fun stopAfkSender(clearFromChatbox: Boolean) {
         afkJob?.cancel()
         afkJob = null
         if (clearFromChatbox) rebuildAndMaybeSendCombined(forceSend = true, forceClearIfAllOff = true)
-        noteSync()
+        startSelfSyncLoopIfNeeded()
     }
 
     fun sendAfkNow(local: Boolean = false) {
         rebuildAndMaybeSendCombined(forceSend = true, local = local)
-        noteSync()
+        startSelfSyncLoopIfNeeded()
     }
 
     // =========================
@@ -1111,7 +1044,7 @@ class ChatboxViewModel(
                 delay(CYCLE_INTERVAL_SECONDS_LOCKED.toLong() * 1000L)
             }
         }
-        noteSync()
+        startSelfSyncLoopIfNeeded()
     }
 
     fun stopCycle(clearFromChatbox: Boolean) {
@@ -1119,7 +1052,7 @@ class ChatboxViewModel(
         cycleJob = null
         if (clearFromChatbox) rebuildAndMaybeSendCombined(forceSend = true, forceClearIfAllOff = true)
         lastCyclePreviewAdvanceMs = 0L
-        noteSync()
+        startSelfSyncLoopIfNeeded()
     }
 
     // =========================
@@ -1139,19 +1072,19 @@ class ChatboxViewModel(
                 delay(10L)
             }
         }
-        noteSync()
+        startSelfSyncLoopIfNeeded()
     }
 
     fun stopNowPlayingSender(clearFromChatbox: Boolean) {
         nowPlayingJob?.cancel()
         nowPlayingJob = null
         if (clearFromChatbox) rebuildAndMaybeSendCombined(forceSend = true, forceClearIfAllOff = true)
-        noteSync()
+        startSelfSyncLoopIfNeeded()
     }
 
     fun sendNowPlayingOnce(local: Boolean = false) {
         rebuildAndMaybeSendCombined(forceSend = true, local = local)
-        noteSync()
+        startSelfSyncLoopIfNeeded()
     }
 
     fun stopAll(clearFromChatbox: Boolean) {
@@ -1159,7 +1092,7 @@ class ChatboxViewModel(
         stopNowPlayingSender(clearFromChatbox = false)
         stopAfkSender(clearFromChatbox = false)
         if (clearFromChatbox) clearChatbox()
-        noteSync()
+        startSelfSyncLoopIfNeeded()
     }
 
     // =========================
