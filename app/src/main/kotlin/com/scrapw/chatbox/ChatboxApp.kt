@@ -52,7 +52,9 @@ import java.security.SecureRandom
  *  - bootstrap gate
  *  - anonymous auth (no login UI)
  *  - caches uid + deviceHash in SharedPreferences ("vrca_remote")
- *  - SAFE public write to users/{deviceHash} (self doc) so Admin can see users immediately
+ *  - SAFE public write to:
+ *      - users/{deviceHash}  (canonical self doc)
+ *      - usersById/{uid}     (mapping uid -> deviceHash)
  */
 @Composable
 fun ChatboxApp() {
@@ -154,9 +156,11 @@ private object RemoteKeys {
 /**
  * Boot steps:
  *  1) anonymous auth
- *  2) ensure deviceHash exists (prefer reading the one created in MainActivity)
+ *  2) ensure deviceHash exists
  *  3) cache uid + deviceHash locally
- *  4) SAFE self-write to users/{deviceHash} so rules pass and Admin can see the user
+ *  4) SAFE public write:
+ *      - users/{deviceHash} (canonical)
+ *      - usersById/{uid} (mapping)
  *
  * No writes to devices/{deviceHash} here.
  */
@@ -176,14 +180,13 @@ private suspend fun bootstrapFirebaseAndCache(ctx: Context) {
         .putString(RemoteKeys.DEVICE_ID_HASH, deviceHash)
         .apply()
 
-    // SAFE public write (self doc only) — MUST MATCH YOUR RULES (users/{deviceHash})
     val db = FirebaseFirestore.getInstance()
-    val userRef = db.collection("users").document(deviceHash)
 
+    // ✅ SAFE public write to canonical self doc: users/{deviceHash}
     // Keep keys strictly within selfMutableKeys() and consistent with rules:
     // - uid/authUid/currentUid == request.auth.uid
     // - deviceHash/docId == document id (deviceHash)
-    val safe = hashMapOf<String, Any>(
+    val safeUser = hashMapOf<String, Any>(
         // identity/debug
         "docId" to deviceHash,
         "docIdType" to "deviceHash",
@@ -203,9 +206,27 @@ private suspend fun bootstrapFirebaseAndCache(ctx: Context) {
         "versionCode" to BuildConfig.VERSION_CODE
     )
 
+    // ✅ SAFE public write to mapping doc: usersById/{uid}
+    // Must match your rules: keys only [deviceHash, authUid, appId, adminBuild, updatedAt]
+    val safeLink = hashMapOf<String, Any>(
+        "deviceHash" to deviceHash,
+        "authUid" to uid,
+        "appId" to BuildConfig.APPLICATION_ID,
+        "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
+        "updatedAt" to FieldValue.serverTimestamp()
+    )
+
     // If rules deny, still let app continue (VM will keep trying later).
     runCatching {
-        userRef.set(safe, SetOptions.merge()).await()
+        db.collection("users").document(deviceHash)
+            .set(safeUser, SetOptions.merge())
+            .await()
+    }
+
+    runCatching {
+        db.collection("usersById").document(uid)
+            .set(safeLink, SetOptions.merge())
+            .await()
     }
 }
 
