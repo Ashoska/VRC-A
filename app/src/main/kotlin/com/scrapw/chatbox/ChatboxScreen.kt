@@ -302,6 +302,7 @@ fun ChatboxScreen(
 
     fun safeUid(): String = authedUid?.trim().orEmpty()
 
+    // ✅ Ensure anon auth ASAP
     LaunchedEffect(Unit) {
         if (auth.currentUser == null) {
             runCatching {
@@ -316,26 +317,20 @@ fun ChatboxScreen(
     }
 
     /* =========================================================
-       ✅ DEVICE-FIRST USER DOC (THIS IS THE FIX)
-       =========================================================
-       PRIMARY identity doc is: users/{deviceHash}
-
-       AdminScreen expects:
-       - users collection
-       - docId == deviceHash
-       - authUid stored as field
-     */
-
+       ✅ DEVICE-FIRST USER DOC
+       FIX: DO NOT WRITE UNTIL auth uid is NON-BLANK
+       ========================================================= */
     LaunchedEffect(authedUid, deviceHash) {
         val dh = deviceHash.trim()
         if (dh.isBlank()) return@LaunchedEffect
 
+        // ✅ This is the important guard that stops the first-frame PERMISSION_DENIED spam.
         val uid = safeUid()
+        if (uid.isBlank()) return@LaunchedEffect
 
         runCatching {
             val data = hashMapOf<String, Any>(
                 "deviceHash" to dh,
-                // current session uid (changes if app data cleared)
                 "authUid" to uid,
                 // legacy alias (some older code queries "uid")
                 "uid" to uid,
@@ -347,12 +342,6 @@ fun ChatboxScreen(
                 "versionName" to BuildConfig.VERSION_NAME
             )
 
-            // Avoid writing blank strings as “real” values
-            if (uid.isBlank()) {
-                data.remove("authUid")
-                data.remove("uid")
-            }
-
             db.collection("users").document(dh)
                 .set(data, SetOptions.merge())
                 .await()
@@ -360,34 +349,33 @@ fun ChatboxScreen(
             reportFirebase("users/$dh", "Failed writing device-first user doc", e)
         }
 
-        // Optional: keep a legacy mapping doc for UID -> deviceHash (harmless).
-        // If your rules block it, it’s fine — failures are only shown in Debug.
-        val uid2 = safeUid()
-        if (uid2.isNotBlank()) {
-            runCatching {
-                db.collection("usersByUid").document(uid2)
-                    .set(
-                        mapOf(
-                            "deviceHash" to dh,
-                            "authUid" to uid2,
-                            "appId" to BuildConfig.APPLICATION_ID,
-                            "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
-                            "updatedAt" to FieldValue.serverTimestamp()
-                        ),
-                        SetOptions.merge()
-                    )
-                    .await()
-            }.onFailure { e ->
-                reportFirebase("usersByUid/$uid2", "Failed writing UID→device mapping", e)
-            }
+        // Optional: UID -> deviceHash mapping
+        runCatching {
+            db.collection("usersByUid").document(uid)
+                .set(
+                    mapOf(
+                        "deviceHash" to dh,
+                        "authUid" to uid,
+                        "appId" to BuildConfig.APPLICATION_ID,
+                        "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                )
+                .await()
+        }.onFailure { e ->
+            reportFirebase("usersByUid/$uid", "Failed writing UID→device mapping", e)
         }
     }
 
     // ✅ Admin-build-only heartbeat for devices/{deviceHash} (admin diagnostics)
     if (BuildConfig.IS_ADMIN_BUILD) {
-        LaunchedEffect(deviceHash) {
+        LaunchedEffect(deviceHash, authedUid) {
             val dh = deviceHash.trim()
             if (dh.isBlank()) return@LaunchedEffect
+
+            // (Optional) also wait for auth so you don’t write anything before auth exists
+            if (safeUid().isBlank()) return@LaunchedEffect
 
             runCatching {
                 db.collection("devices").document(dh)
@@ -430,7 +418,7 @@ fun ChatboxScreen(
 
     // Moderation state:
     // PRIMARY: users/{deviceHash}.warned/banned (+ reasons)
-    // OPTIONAL legacy: bannedDevices/{deviceHash} (admin build only to avoid PERMISSION_DENIED noise)
+    // OPTIONAL legacy: bannedDevices/{deviceHash} (admin build only)
     var moderation by remember { mutableStateOf(ModerationUi()) }
 
     // Listen: config/app (ToS)
@@ -649,13 +637,13 @@ fun ChatboxScreen(
             snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
             contentWindowInsets = WindowInsets(0)
         ) { padding ->
-            // ✅ FIX: Use a Column so banners are NOT drawn on top of content.
+            // ✅ Use Column so banners are NOT drawn on top of content.
             Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                // ✅ Warning banner only (announcements are shown inside HomePage now)
+                // ✅ Warning banner only (announcements are shown inside HomePage)
                 GlobalStatusBanner(moderation = moderation)
 
                 Crossfade(targetState = page, label = "page_crossfade") { p ->
