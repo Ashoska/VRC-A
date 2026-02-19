@@ -2,7 +2,6 @@
 package com.scrapw.chatbox
 
 import android.content.Context
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -16,6 +15,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
@@ -23,7 +23,6 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Remove
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -91,7 +90,9 @@ fun AdminScreen() {
 
     var globalLoading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    fun setErr(msg: String?) { error = msg?.trim()?.takeIf { it.isNotBlank() }?.take(4000) }
+    fun setErr(msg: String?) {
+        error = msg?.trim()?.takeIf { it.isNotBlank() }?.take(4000)
+    }
 
     // Hard block: should never be reachable on public build.
     if (!BuildConfig.IS_ADMIN_BUILD) {
@@ -307,6 +308,7 @@ fun AdminScreen() {
                         tabIndex = 1
                     }
                 )
+
                 1 -> ModerationTab(
                     db = db,
                     myUid = myUid,
@@ -318,12 +320,14 @@ fun AdminScreen() {
                     initialTarget = moderationTarget,
                     onClearInitialTarget = { moderationTarget = null }
                 )
+
                 2 -> AnnouncementsTab(
                     db = db,
                     createdByDevice = deviceHash,
                     setGlobalLoading = { globalLoading = it },
                     setError = ::setErr
                 )
+
                 else -> ConfigTab(
                     db = db,
                     setGlobalLoading = { globalLoading = it },
@@ -495,7 +499,13 @@ private fun UsersTab(
             fun l(key: String) = snap.getLong(key) ?: 0L
 
             val afkPresets = listOf(s("afkPreset1"), s("afkPreset2"), s("afkPreset3"))
-            val cyclePresets = listOf(s("cyclePreset1"), s("cyclePreset2"), s("cyclePreset3"), s("cyclePreset4"), s("cyclePreset5"))
+            val cyclePresets = listOf(
+                s("cyclePreset1"),
+                s("cyclePreset2"),
+                s("cyclePreset3"),
+                s("cyclePreset4"),
+                s("cyclePreset5")
+            )
 
             detailsCache[docId] = UserDetail(
                 afkEnabled = b("afkEnabled"),
@@ -746,10 +756,11 @@ private fun UsersTab(
 
 @Composable
 private fun DetailBlock(d: UserDetail) {
+    // ✅ FIX: This helper *invokes Text*, so it must be @Composable.
     @Composable
-    fun mono(label: String, value: String) {
+    fun Mono(label: String, value: String) {
         Text(
-            text = "$label=$value",
+            "$label=$value",
             fontFamily = FontFamily.Monospace,
             style = MaterialTheme.typography.bodySmall
         )
@@ -757,53 +768,51 @@ private fun DetailBlock(d: UserDetail) {
 
     ElevatedCard {
         androidx.compose.foundation.layout.Column(
-            modifier = Modifier.padding(12.dp),
+            Modifier.padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text("Live State", style = MaterialTheme.typography.titleSmall)
-            mono("afkEnabled", d.afkEnabled.toString())
-            mono("afkMessage", d.afkMessage.ifBlank { "(blank)" })
-            mono("cycleEnabled", d.cycleEnabled.toString())
-            mono("cycleIntervalSeconds", d.cycleIntervalSeconds.toString())
-            mono("spotifyEnabled", d.spotifyEnabled.toString())
-            mono("spotifyDemoEnabled", d.spotifyDemoEnabled.toString())
-            mono("spotifyPreset", d.spotifyPreset.toString())
-            mono("nowPlayingDetected", d.nowPlayingDetected.toString())
-            mono("nowPlayingIsPlaying", d.nowPlayingIsPlaying.toString())
-            mono("nowPlayingTitle", d.nowPlayingTitle.ifBlank { "(blank)" })
-            mono("nowPlayingArtist", d.nowPlayingArtist.ifBlank { "(blank)" })
+            Mono("afkEnabled", d.afkEnabled.toString())
+            Mono("afkMessage", d.afkMessage.ifBlank { "(blank)" })
+            Mono("cycleEnabled", d.cycleEnabled.toString())
+            Mono("cycleIntervalSeconds", d.cycleIntervalSeconds.toString())
+            Mono("spotifyEnabled", d.spotifyEnabled.toString())
+            Mono("spotifyDemoEnabled", d.spotifyDemoEnabled.toString())
+            Mono("spotifyPreset", d.spotifyPreset.toString())
+            Mono("nowPlayingDetected", d.nowPlayingDetected.toString())
+            Mono("nowPlayingIsPlaying", d.nowPlayingIsPlaying.toString())
+            Mono("nowPlayingTitle", d.nowPlayingTitle.ifBlank { "(blank)" })
+            Mono("nowPlayingArtist", d.nowPlayingArtist.ifBlank { "(blank)" })
 
             Spacer(Modifier.height(4.dp))
             Text("combinedPreviewText", style = MaterialTheme.typography.labelLarge)
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Text(
-                    text = d.combinedPreviewText.ifBlank { "(blank)" },
+                    d.combinedPreviewText.ifBlank { "(blank)" },
                     modifier = Modifier.padding(10.dp),
                     fontFamily = FontFamily.Monospace,
                     style = MaterialTheme.typography.bodySmall
                 )
             }
-        }
-    }
-}
+
             if (d.warnReason.isNotBlank() || d.banReason.isNotBlank()) {
                 Spacer(Modifier.height(4.dp))
                 Text("Moderation Flags", style = MaterialTheme.typography.titleSmall)
-                if (d.warnReason.isNotBlank()) mono("warnReason", d.warnReason)
-                if (d.banReason.isNotBlank()) mono("banReason", d.banReason)
+                if (d.warnReason.isNotBlank()) Mono("warnReason", d.warnReason)
+                if (d.banReason.isNotBlank()) Mono("banReason", d.banReason)
             }
 
             Spacer(Modifier.height(4.dp))
             Text("AFK Presets", style = MaterialTheme.typography.titleSmall)
             d.afkPresets.forEachIndexed { i, p ->
-                mono("afkPreset${i + 1}", p.ifBlank { "(blank)" })
+                Mono("afkPreset${i + 1}", p.ifBlank { "(blank)" })
             }
 
             Spacer(Modifier.height(4.dp))
             Text("Cycle Presets", style = MaterialTheme.typography.titleSmall)
             d.cyclePresets.forEachIndexed { i, p ->
                 val oneLine = p.lines().firstOrNull()?.trim().orEmpty()
-                mono("cyclePreset${i + 1}", oneLine.ifBlank { "(blank)" })
+                Mono("cyclePreset${i + 1}", oneLine.ifBlank { "(blank)" })
             }
 
             if (d.cycleLinesText.isNotBlank()) {
