@@ -1468,12 +1468,9 @@ private data class AnnouncementRow(
 private fun AnnouncementsTab(
     db: FirebaseFirestore,
     createdByDevice: String,
-    setGlobalLoading: (Boolean) ->()
-    ,
+    setGlobalLoading: (Boolean) -> Unit,
     setError: (String?) -> Unit
 ) {
-    // NOTE: keep your original AnnouncementsTab implementation if you prefer.
-    // I’m keeping it unchanged except signature formatting.
     val scope = rememberCoroutineScope()
     val announcements = remember { mutableStateListOf<AnnouncementRow>() }
 
