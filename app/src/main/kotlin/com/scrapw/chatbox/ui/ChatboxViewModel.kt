@@ -56,14 +56,15 @@ import kotlin.math.min
  * ✅ UID mapping (matches YOUR RULES file):
  *   usersById/{authUid} -> { deviceHash, authUid, appId, adminBuild, updatedAt }
  *
- * Why this fixes the earlier public-branch error:
- * - Public clients are no longer trying to write users/{uid} or usersByUid/{uid},
- *   which your Firestore rules would deny.
- *
  * NOTE (important):
  * - Admin build and Public build can have DIFFERENT anon-auth UIDs.
  * - If both write to the SAME users/{deviceHash}, your rules will deny one of them.
  * - So: Admin build does NOT self-sync (no background writes) to avoid UID tug-of-war.
+ *
+ * MODERATION ENFORCEMENT:
+ * - Public build listens to users/{deviceHash} for warned/banned flags (+ reasons)
+ * - Optional: listens to bannedDevices/{deviceHash} (legacy device ban doc)
+ * - When banned, ALL OSC sends are blocked (including typing, realtime, AFK/Cycle/Music, manual send).
  */
 class ChatboxViewModel(
     private val app: ChatboxApplication,
@@ -89,9 +90,12 @@ class ChatboxViewModel(
         private const val NO_MOVE_PAUSE_MS = 5_000L
         private const val UI_TICK_MS = 500L
 
-        // Firestore sync throttles (kept from your newer VM)
+        // Firestore sync throttles
         private const val SELF_SYNC_MIN_INTERVAL_MS = 12_000L
         private const val SELF_SYNC_FORCE_INTERVAL_MS = 90_000L
+
+        // Moderation attach retry
+        private const val MOD_ATTACH_RETRY_MS = 1_250L
 
         // SharedPrefs (must match AdminScreen + ChatboxApp/MainActivity)
         private const val REMOTE_PREFS_FILE = "vrca_remote"
@@ -99,8 +103,8 @@ class ChatboxViewModel(
         private const val PREF_AUTH_UID = "auth_uid"
 
         // Collections (MUST MATCH YOUR RULES)
-        private const val COL_USERS = "users"          // users/{deviceHash}
-        private const val COL_USERS_BY_ID = "usersById" // usersById/{uid}
+        private const val COL_USERS = "users"             // users/{deviceHash}
+        private const val COL_USERS_BY_ID = "usersById"   // usersById/{uid}
         private const val COL_BANNED_DEVICES = "bannedDevices"
 
         @MainThread
@@ -128,6 +132,7 @@ class ChatboxViewModel(
     override fun onCleared() {
         uiTickJob?.cancel()
         selfSyncJob?.cancel()
+        moderationAttachJob?.cancel()
         moderationUserReg?.remove()
         moderationDeviceReg?.remove()
         stopAll(clearFromChatbox = false)
@@ -209,25 +214,21 @@ class ChatboxViewModel(
         val cycleClean = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(10)
 
         val data = linkedMapOf<String, Any>(
-            // identity/debug (rules require uid/authUid to match request.auth.uid)
             "docId" to deviceHash,
             "docIdType" to "deviceHash",
             "authUid" to authUid,
-            "uid" to authUid,              // legacy alias (admin searches)
-            "currentUid" to authUid,       // your rules mention this; keep it consistent
+            "uid" to authUid,
+            "currentUid" to authUid,
             "deviceHash" to deviceHash,
 
-            // build
             "appId" to BuildConfig.APPLICATION_ID,
             "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
             "versionName" to BuildConfig.VERSION_NAME,
             "versionCode" to BuildConfig.VERSION_CODE,
 
-            // presence
             "lastSeenAt" to FieldValue.serverTimestamp(),
             "updatedAt" to FieldValue.serverTimestamp(),
 
-            // live state
             "afkEnabled" to afkEnabled,
             "afkMessage" to afkMessage.trim(),
 
@@ -246,12 +247,10 @@ class ChatboxViewModel(
             "nowPlayingArtist" to lastNowPlayingArtist.takeIf { it != "(blank)" }?.trim().orEmpty(),
             "activePackage" to activePackage,
 
-            // UI preview
             "combinedPreviewText" to combinedPreviewText.trim(),
             "cycleTrimWarning" to cycleTrimWarning.trim()
         )
 
-        // presets (admin visibility)
         data["afkPreset1"] = getAfkPresetPreview(1)
         data["afkPreset2"] = getAfkPresetPreview(2)
         data["afkPreset3"] = getAfkPresetPreview(3)
@@ -281,8 +280,7 @@ class ChatboxViewModel(
     }
 
     /**
-     * IMPORTANT: Admin build does NOT self-sync to avoid UID tug-of-war with Public build
-     * on the same deviceHash doc.
+     * IMPORTANT: Admin build does NOT self-sync to avoid UID tug-of-war with Public build.
      */
     private fun startSelfSyncLoopIfNeeded() {
         if (BuildConfig.IS_ADMIN_BUILD) return
@@ -295,9 +293,8 @@ class ChatboxViewModel(
 
                     val deviceHash = readDeviceHashFromPrefs()
                     if (!isValidDeviceHash(deviceHash)) {
-                        // Do NOT fall back to authUid here, because your rules are deviceHash-canonical.
                         lastSelfSyncError =
-                            "deviceHash missing/invalid. Ensure MainActivity/ChatboxApp sets prefs key device_id_hash."
+                            "deviceHash missing/invalid. Ensure app sets prefs key device_id_hash."
                         return@runCatching
                     }
 
@@ -309,12 +306,10 @@ class ChatboxViewModel(
                     val dueByChange = changed && (now - lastSelfSyncAtMs) >= SELF_SYNC_MIN_INTERVAL_MS
                     if (!dueByForce && !dueByChange) return@runCatching
 
-                    // ✅ Canonical write: users/{deviceHash}
                     db.collection(COL_USERS).document(deviceHash)
                         .set(buildUserSnapshot(authUid, deviceHash), SetOptions.merge())
                         .await()
 
-                    // ✅ UID mapping: usersById/{uid}
                     runCatching {
                         db.collection(COL_USERS_BY_ID).document(authUid)
                             .set(buildUsersByIdLink(authUid, deviceHash), SetOptions.merge())
@@ -334,10 +329,11 @@ class ChatboxViewModel(
     }
 
     // =========================
-    // Moderation / punishments (public build reads flags)
+    // Moderation / punishments
     // =========================
     private var moderationUserReg: ListenerRegistration? = null
     private var moderationDeviceReg: ListenerRegistration? = null
+    private var moderationAttachJob: Job? = null
 
     var warned by mutableStateOf(false)
         private set
@@ -362,93 +358,108 @@ class ChatboxViewModel(
     val isBanned: Boolean
         get() = uidBanned || deviceBanned
 
-    private fun applyPunishmentState() {
-        if (!isBanned) return
+    private var lastBanEffective: Boolean = false
 
-        // Stop any background senders immediately.
-        stopAll(clearFromChatbox = false)
+    private fun enforceIfBannedChanged() {
+        val nowBanned = isBanned
+        if (nowBanned == lastBanEffective) return
+        lastBanEffective = nowBanned
 
-        // Also force flags off so UI doesn't keep "running" features while banned.
-        // (keeps behavior predictable; user can still toggle UI but it won't send)
-        if (afkEnabled) stopAfkSender(clearFromChatbox = false)
-        if (cycleEnabled) stopCycle(clearFromChatbox = false)
-        if (spotifyEnabled) stopNowPlayingSender(clearFromChatbox = false)
+        if (nowBanned) {
+            // Hard stop all running jobs immediately. Do NOT clear chatbox while banned (no OSC allowed).
+            stopAll(clearFromChatbox = false)
+
+            // Ensure typing indicator is off locally (no OSC send; just state safety).
+            remoteChatboxOSC.typing = false
+            localChatboxOSC.typing = false
+        }
     }
 
-    private fun attachModerationListenersIfNeeded() {
-        if (BuildConfig.IS_ADMIN_BUILD) return // admin build doesn't need this for enforcement
-        if (moderationUserReg != null) return  // already attached
+    private fun attachModerationListenersLoopOnce() {
+        if (BuildConfig.IS_ADMIN_BUILD) return
+        if (moderationAttachJob != null) return
 
-        viewModelScope.launch {
-            val authUid = ensureAnonAuth()
-            if (authUid.isNullOrBlank()) {
-                moderationLastError = "Auth unavailable (cannot read moderation flags)."
-                moderationConnected = false
-                return@launch
-            }
+        moderationAttachJob = viewModelScope.launch {
+            while (true) {
+                val uid = ensureAnonAuth().orEmpty().trim()
+                val deviceHash = readDeviceHashFromPrefs().trim()
 
-            val deviceHash = readDeviceHashFromPrefs()
-            if (!isValidDeviceHash(deviceHash)) {
-                moderationLastError = "deviceHash missing/invalid (cannot read moderation flags)."
-                moderationConnected = false
-                return@launch
-            }
+                if (uid.isBlank()) {
+                    moderationConnected = false
+                    moderationLastError = "Auth unavailable (cannot read moderation flags)."
+                    delay(MOD_ATTACH_RETRY_MS)
+                    continue
+                }
+                if (!isValidDeviceHash(deviceHash)) {
+                    moderationConnected = false
+                    moderationLastError = "deviceHash missing/invalid (cannot read moderation flags)."
+                    delay(MOD_ATTACH_RETRY_MS)
+                    continue
+                }
 
-            moderationLastError = ""
-            moderationConnected = true
-
-            // users/{deviceHash} flags
-            moderationUserReg?.remove()
-            moderationUserReg = db.collection(COL_USERS).document(deviceHash)
-                .addSnapshotListener { snap, e ->
-                    if (e != null) {
-                        moderationLastError = (e.message ?: "Moderation listen failed").take(4000)
-                        moderationConnected = false
-                        return@addSnapshotListener
-                    }
-                    if (snap == null || !snap.exists()) {
-                        // no doc yet -> clear flags
-                        warned = false
-                        warnReason = ""
-                        uidBanned = false
-                        banReason = ""
-                        moderationConnected = true
-                        return@addSnapshotListener
-                    }
-
-                    warned = snap.getBoolean("warned") ?: false
-                    warnReason = (snap.getString("warnReason") ?: "").trim()
-
-                    uidBanned = snap.getBoolean("banned") ?: false
-                    banReason = (snap.getString("banReason") ?: "").trim()
-
-                    moderationConnected = true
+                // Attach once.
+                if (moderationUserReg == null) {
                     moderationLastError = ""
+                    moderationConnected = true
 
-                    applyPunishmentState()
+                    moderationUserReg = db.collection(COL_USERS).document(deviceHash)
+                        .addSnapshotListener { snap, e ->
+                            if (e != null) {
+                                moderationLastError = (e.message ?: "Moderation listen failed").take(4000)
+                                moderationConnected = false
+                                return@addSnapshotListener
+                            }
+
+                            if (snap == null || !snap.exists()) {
+                                warned = false
+                                warnReason = ""
+                                uidBanned = false
+                                banReason = ""
+                                moderationConnected = true
+                                moderationLastError = ""
+                                enforceIfBannedChanged()
+                                return@addSnapshotListener
+                            }
+
+                            warned = snap.getBoolean("warned") ?: false
+                            warnReason = (snap.getString("warnReason") ?: "").trim()
+
+                            uidBanned = snap.getBoolean("banned") ?: false
+                            banReason = (snap.getString("banReason") ?: "").trim()
+
+                            moderationConnected = true
+                            moderationLastError = ""
+                            enforceIfBannedChanged()
+                        }
                 }
 
-            // bannedDevices/{deviceHash} flags
-            moderationDeviceReg?.remove()
-            moderationDeviceReg = db.collection(COL_BANNED_DEVICES).document(deviceHash)
-                .addSnapshotListener { snap, e ->
-                    if (e != null) {
-                        // don't flip connected false just because device ban doc isn't readable yet
-                        moderationLastError = (e.message ?: "Device-ban listen failed").take(4000)
-                        return@addSnapshotListener
-                    }
-                    if (snap == null || !snap.exists()) {
-                        deviceBanned = false
-                        deviceBanReason = ""
-                        applyPunishmentState()
-                        return@addSnapshotListener
-                    }
+                if (moderationDeviceReg == null) {
+                    moderationDeviceReg = db.collection(COL_BANNED_DEVICES).document(deviceHash)
+                        .addSnapshotListener { snap, e ->
+                            if (e != null) {
+                                // Legacy doc may be unreadable for some users; don't hard-fail connected.
+                                moderationLastError = (e.message ?: "Device-ban listen failed").take(4000)
+                                enforceIfBannedChanged()
+                                return@addSnapshotListener
+                            }
 
-                    deviceBanned = snap.getBoolean("banned") ?: false
-                    deviceBanReason = (snap.getString("reason") ?: "").trim()
+                            if (snap == null || !snap.exists()) {
+                                deviceBanned = false
+                                deviceBanReason = ""
+                                enforceIfBannedChanged()
+                                return@addSnapshotListener
+                            }
 
-                    applyPunishmentState()
+                            deviceBanned = snap.getBoolean("banned") ?: false
+                            deviceBanReason = (snap.getString("reason") ?: "").trim()
+                            enforceIfBannedChanged()
+                        }
                 }
+
+                // Once both are attached, stop retry loop.
+                moderationAttachJob = null
+                return@launch
+            }
         }
     }
 
@@ -533,14 +544,14 @@ class ChatboxViewModel(
         remoteChatboxOSC.ipAddress = address
         viewModelScope.launch { userPreferencesRepository.saveIpAddress(address) }
         startSelfSyncLoopIfNeeded()
-        attachModerationListenersIfNeeded()
+        attachModerationListenersLoopOnce()
     }
 
     fun portApply(port: Int) {
         remoteChatboxOSC.port = port
         viewModelScope.launch { userPreferencesRepository.savePort(port) }
         startSelfSyncLoopIfNeeded()
-        attachModerationListenersIfNeeded()
+        attachModerationListenersLoopOnce()
     }
 
     fun onRealtimeMsgChanged(value: Boolean) {
@@ -736,8 +747,8 @@ class ChatboxViewModel(
         // Admin build: startSelfSyncLoopIfNeeded() is a no-op (prevents UID tug-of-war).
         startSelfSyncLoopIfNeeded()
 
-        // Public build: attach moderation listeners so bans/warns can be received/enforced.
-        attachModerationListenersIfNeeded()
+        // Public build: attach moderation listeners once deviceHash + auth are available.
+        attachModerationListenersLoopOnce()
 
         viewModelScope.launch {
             userPreferencesRepository.afkMessage.collect {
@@ -804,7 +815,6 @@ class ChatboxViewModel(
                 nowPlayingIsPlaying = computeDisplayedPlaying()
                 rebuildCombinedPreviewOnly()
                 startSelfSyncLoopIfNeeded()
-                attachModerationListenersIfNeeded()
                 delay(UI_TICK_MS)
             }
         }
@@ -846,7 +856,6 @@ class ChatboxViewModel(
                 nowPlayingIsPlaying = computeDisplayedPlaying()
                 rebuildCombinedPreviewOnly()
                 startSelfSyncLoopIfNeeded()
-                attachModerationListenersIfNeeded()
             }
         }
     }
@@ -952,7 +961,7 @@ class ChatboxViewModel(
     // =========================
     fun killStopAndClear(local: Boolean = false) {
         stopAll(clearFromChatbox = false)
-        clearChatbox(local)
+        if (!isBanned) clearChatbox(local)
         rebuildCombinedPreviewOnly(forceClearIfAllOff = true)
         startSelfSyncLoopIfNeeded()
     }
@@ -1175,7 +1184,7 @@ class ChatboxViewModel(
     fun stopAfkSender(clearFromChatbox: Boolean) {
         afkJob?.cancel()
         afkJob = null
-        if (clearFromChatbox) rebuildAndMaybeSendCombined(forceSend = true, forceClearIfAllOff = true)
+        if (clearFromChatbox && !isBanned) rebuildAndMaybeSendCombined(forceSend = true, forceClearIfAllOff = true)
         startSelfSyncLoopIfNeeded()
     }
 
@@ -1217,7 +1226,7 @@ class ChatboxViewModel(
     fun stopCycle(clearFromChatbox: Boolean) {
         cycleJob?.cancel()
         cycleJob = null
-        if (clearFromChatbox) rebuildAndMaybeSendCombined(forceSend = true, forceClearIfAllOff = true)
+        if (clearFromChatbox && !isBanned) rebuildAndMaybeSendCombined(forceSend = true, forceClearIfAllOff = true)
         lastCyclePreviewAdvanceMs = 0L
         startSelfSyncLoopIfNeeded()
     }
@@ -1246,7 +1255,7 @@ class ChatboxViewModel(
     fun stopNowPlayingSender(clearFromChatbox: Boolean) {
         nowPlayingJob?.cancel()
         nowPlayingJob = null
-        if (clearFromChatbox) rebuildAndMaybeSendCombined(forceSend = true, forceClearIfAllOff = true)
+        if (clearFromChatbox && !isBanned) rebuildAndMaybeSendCombined(forceSend = true, forceClearIfAllOff = true)
         startSelfSyncLoopIfNeeded()
     }
 
@@ -1260,7 +1269,7 @@ class ChatboxViewModel(
         stopCycle(clearFromChatbox = false)
         stopNowPlayingSender(clearFromChatbox = false)
         stopAfkSender(clearFromChatbox = false)
-        if (clearFromChatbox) clearChatbox()
+        if (clearFromChatbox && !isBanned) clearChatbox()
         startSelfSyncLoopIfNeeded()
     }
 
@@ -1303,6 +1312,7 @@ class ChatboxViewModel(
     private fun buildCombinedText(cycleLineOverride: String?): String {
         cycleTrimWarning = ""
 
+        // If banned, preview can still show what WOULD be sent, but nothing will send.
         val afkLine = if (afkEnabled && afkMessage.trim().isNotEmpty()) afkMessage.trim() else ""
         val cycleLine = if (cycleEnabled) (cycleLineOverride ?: currentCycleLinePreview()) else ""
         val musicLines = if (spotifyEnabled) buildNowPlayingLines() else emptyList()
