@@ -120,6 +120,7 @@ import com.google.firebase.firestore.SetOptions
 import com.scrapw.chatbox.ui.ChatboxViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 import java.security.MessageDigest
 
 private enum class AppPage(val title: String) {
@@ -223,7 +224,7 @@ private data class ModerationUi(
     val warnReason: String = "",
     val banned: Boolean = false,
     val banReason: String = "",
-    // legacy collection support:
+    // legacy collection support (admin-only by default):
     val deviceBanned: Boolean = false,
     val deviceBanReason: String = "",
     val updatedAt: Timestamp? = null
@@ -285,10 +286,10 @@ fun ChatboxScreen(
     val db = remember { FirebaseFirestore.getInstance() }
 
     // ✅ Ensure device hash exists for this install/user (survives reinstall)
-    val deviceHash = remember { DeviceId.ensure(ctx) }
+    val deviceHash = remember { DeviceId.ensure(ctx).trim() }
 
-    // We still use anonymous auth for basic access, but the APP is DEVICE-FIRST now.
-    var authedUid by remember { mutableStateOf(auth.currentUser?.uid) }
+    // Still use anon auth (rules can use request.auth != null), BUT identity is deviceHash.
+    var authedUid by remember { mutableStateOf(auth.currentUser?.uid?.trim()) }
 
     // ✅ Capture last Firebase issue for Debug ONLY
     var lastFirebaseIssue by remember { mutableStateOf<String?>(null) }
@@ -304,66 +305,80 @@ fun ChatboxScreen(
     LaunchedEffect(Unit) {
         if (auth.currentUser == null) {
             runCatching {
-                auth.signInAnonymously()
-                    .addOnSuccessListener { res -> authedUid = res.user?.uid }
-                    .addOnFailureListener { e -> reportFirebase("auth", "Anonymous auth failed", e) }
+                auth.signInAnonymously().await()
+                authedUid = auth.currentUser?.uid?.trim()
             }.onFailure { e ->
                 reportFirebase("auth", "Anonymous auth failed", e)
             }
+        } else {
+            authedUid = auth.currentUser?.uid?.trim()
         }
     }
 
     /* =========================================================
-       ✅ DEVICE-FIRST PRESENCE + LINKAGE (single source of truth)
+       ✅ DEVICE-FIRST USER DOC (THIS IS THE FIX)
        =========================================================
-       deviceUsers/{deviceHash} is the primary identity document.
+       PRIMARY identity doc is: users/{deviceHash}
 
-       Fields recommended:
-       - currentUid: latest anonymous UID (changes if you clear app data)
-       - uids: array of UIDs seen on this device (optional)
-       - appId, adminBuild
-       - lastSeenAt, updatedAt
+       AdminScreen expects:
+       - users collection
+       - docId == deviceHash
+       - authUid stored as field
      */
 
     LaunchedEffect(authedUid, deviceHash) {
-        val uid = safeUid()
         val dh = deviceHash.trim()
         if (dh.isBlank()) return@LaunchedEffect
 
+        val uid = safeUid()
+
         runCatching {
-            db.collection("deviceUsers").document(dh)
-                .set(
-                    mapOf(
-                        "deviceHash" to dh,
-                        "currentUid" to uid,
-                        "uids" to if (uid.isBlank()) FieldValue.arrayUnion() else FieldValue.arrayUnion(uid),
-                        "appId" to BuildConfig.APPLICATION_ID,
-                        "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
-                        "lastSeenAt" to FieldValue.serverTimestamp(),
-                        "updatedAt" to FieldValue.serverTimestamp()
-                    ),
-                    SetOptions.merge()
-                )
+            val data = hashMapOf<String, Any>(
+                "deviceHash" to dh,
+                // current session uid (changes if app data cleared)
+                "authUid" to uid,
+                // legacy alias (some older code queries "uid")
+                "uid" to uid,
+                "appId" to BuildConfig.APPLICATION_ID,
+                "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
+                "lastSeenAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp(),
+                "versionCode" to BuildConfig.VERSION_CODE,
+                "versionName" to BuildConfig.VERSION_NAME
+            )
+
+            // Avoid writing blank strings as “real” values
+            if (uid.isBlank()) {
+                data.remove("authUid")
+                data.remove("uid")
+            }
+
+            db.collection("users").document(dh)
+                .set(data, SetOptions.merge())
+                .await()
         }.onFailure { e ->
-            reportFirebase("deviceUsers/$dh", "Failed writing device-first presence", e)
+            reportFirebase("users/$dh", "Failed writing device-first user doc", e)
         }
 
-        // Optional: keep legacy link doc so old tools don’t break (harmless)
+        // Optional: keep a legacy mapping doc for UID -> deviceHash (harmless).
+        // If your rules block it, it’s fine — failures are only shown in Debug.
+        val uid = safeUid()
         if (uid.isNotBlank()) {
             runCatching {
-                db.collection("users").document(uid)
+                db.collection("usersByUid").document(uid)
                     .set(
                         mapOf(
                             "deviceHash" to dh,
+                            "authUid" to uid,
                             "appId" to BuildConfig.APPLICATION_ID,
                             "adminBuild" to BuildConfig.IS_ADMIN_BUILD,
-                            "lastSeenAt" to FieldValue.serverTimestamp(),
                             "updatedAt" to FieldValue.serverTimestamp()
                         ),
                         SetOptions.merge()
                     )
+                    .await()
             }.onFailure { e ->
-                reportFirebase("users/$uid", "Failed writing legacy uid->deviceHash link", e)
+                reportFirebase("usersByUid/$uid", "Failed writing UID→device mapping", e)
             }
         }
     }
@@ -385,6 +400,7 @@ fun ChatboxScreen(
                         ),
                         SetOptions.merge()
                     )
+                    .await()
             }.onFailure { e ->
                 reportFirebase("devices/$dh", "Failed writing admin heartbeat", e)
             }
@@ -400,6 +416,7 @@ fun ChatboxScreen(
                             ),
                             SetOptions.merge()
                         )
+                        .await()
                 }.onFailure { e ->
                     reportFirebase("devices/$dh", "Failed updating admin heartbeat", e)
                 }
@@ -411,10 +428,9 @@ fun ChatboxScreen(
     var remoteTos by remember { mutableStateOf(RemoteTosUi()) }
     var announcements by remember { mutableStateOf<List<AnnouncementUi>>(emptyList()) }
 
-    // Moderation:
-    // DEVICE-FIRST: deviceUsers/{deviceHash}.warned/banned + reasons (primary)
-    // LEGACY SUPPORT: bannedDevices/{deviceHash}.banned + reason (secondary)
-    // EXTRA LEGACY: users/{uid}.warned/banned still respected if present
+    // Moderation state:
+    // PRIMARY: users/{deviceHash}.warned/banned (+ reasons)
+    // OPTIONAL legacy: bannedDevices/{deviceHash} (admin build only to avoid PERMISSION_DENIED noise)
     var moderation by remember { mutableStateOf(ModerationUi()) }
 
     // Listen: config/app (ToS)
@@ -439,14 +455,15 @@ fun ChatboxScreen(
         onDispose { reg?.remove() }
     }
 
-    // Listen: announcements (active only)
+    // ✅ Announcements listener FIX:
+    // Your previous query required a composite index (active + priority + createdAt).
+    // We avoid that by only ordering by createdAt and sorting priority locally.
     DisposableEffect(Unit) {
         var reg: ListenerRegistration? = null
         reg = db.collection("announcements")
             .whereEqualTo("active", true)
-            .orderBy("priority", Query.Direction.DESCENDING)
             .orderBy("createdAt", Query.Direction.DESCENDING)
-            .limit(30)
+            .limit(60)
             .addSnapshotListener { snap, err ->
                 if (err != null) {
                     reportFirebase("announcements", "Failed to load announcements", err)
@@ -462,32 +479,34 @@ fun ChatboxScreen(
                             priority = (d.getLong("priority") ?: 0L).toInt(),
                             createdAt = d.getTimestamp("createdAt")
                         )
-                    }
+                    }.sortedWith(
+                        compareByDescending<AnnouncementUi> { it.priority }
+                            .thenByDescending { it.createdAt }
+                    )
                     announcements = list
                 }
             }
         onDispose { reg?.remove() }
     }
 
-    // ✅ DEVICE-FIRST moderation: deviceUsers/{deviceHash}
+    // ✅ PRIMARY moderation: users/{deviceHash}
     DisposableEffect(deviceHash) {
         var reg: ListenerRegistration? = null
         val dh = deviceHash.trim()
         if (dh.isNotBlank()) {
-            reg = db.collection("deviceUsers").document(dh)
+            reg = db.collection("users").document(dh)
                 .addSnapshotListener { snap, err ->
                     if (err != null) {
-                        reportFirebase("deviceUsers/$dh", "Failed to load device moderation", err)
+                        reportFirebase("users/$dh", "Failed to load moderation", err)
                         return@addSnapshotListener
                     }
 
                     val warned = snap?.getBoolean("warned") ?: false
-                    val warnReason = snap?.getString("warnReason") ?: ""
+                    val warnReason = (snap?.getString("warnReason") ?: "").trim()
                     val banned = snap?.getBoolean("banned") ?: false
-                    val banReason = snap?.getString("banReason") ?: ""
+                    val banReason = (snap?.getString("banReason") ?: "").trim()
                     val updatedAt = snap?.getTimestamp("updatedAt")
 
-                    // Keep legacy device ban fields as-is; we merge those in other listeners.
                     moderation = moderation.copy(
                         warned = warned,
                         warnReason = warnReason,
@@ -500,60 +519,29 @@ fun ChatboxScreen(
         onDispose { reg?.remove() }
     }
 
-    // ✅ Legacy device-ban collection support: bannedDevices/{deviceHash}
-    DisposableEffect(deviceHash) {
-        var reg: ListenerRegistration? = null
-        val dh = deviceHash.trim()
-        if (dh.isNotBlank()) {
-            reg = db.collection("bannedDevices").document(dh)
-                .addSnapshotListener { snap, err ->
-                    if (err != null) {
-                        reportFirebase("bannedDevices/$dh", "Failed to load legacy device ban", err)
-                        return@addSnapshotListener
+    // ✅ Optional legacy device-ban collection support: bannedDevices/{deviceHash}
+    // IMPORTANT: many rule-sets should keep this admin-only; so we only listen on admin build.
+    if (BuildConfig.IS_ADMIN_BUILD) {
+        DisposableEffect(deviceHash) {
+            var reg: ListenerRegistration? = null
+            val dh = deviceHash.trim()
+            if (dh.isNotBlank()) {
+                reg = db.collection("bannedDevices").document(dh)
+                    .addSnapshotListener { snap, err ->
+                        if (err != null) {
+                            reportFirebase("bannedDevices/$dh", "Failed to load legacy device ban", err)
+                            return@addSnapshotListener
+                        }
+                        val banned = snap?.getBoolean("banned") ?: false
+                        val reason = (snap?.getString("reason") ?: "").trim()
+                        moderation = moderation.copy(
+                            deviceBanned = banned,
+                            deviceBanReason = reason
+                        )
                     }
-                    val banned = snap?.getBoolean("banned") ?: false
-                    val reason = snap?.getString("reason") ?: ""
-                    moderation = moderation.copy(
-                        deviceBanned = banned,
-                        deviceBanReason = reason
-                    )
-                }
+            }
+            onDispose { reg?.remove() }
         }
-        onDispose { reg?.remove() }
-    }
-
-    // EXTRA legacy: users/{uid} moderation (if you still have old bans there)
-    DisposableEffect(authedUid) {
-        var reg: ListenerRegistration? = null
-        val uid = safeUid()
-        if (uid.isNotBlank()) {
-            reg = db.collection("users").document(uid)
-                .addSnapshotListener { snap, err ->
-                    if (err != null) {
-                        reportFirebase("users/$uid", "Failed to load legacy uid moderation", err)
-                        return@addSnapshotListener
-                    }
-
-                    // Only apply if fields exist; otherwise it would “clear” device moderation.
-                    val warnedAny = snap?.getBoolean("warned")
-                    val bannedAny = snap?.getBoolean("banned")
-                    val warnReasonAny = snap?.getString("warnReason")
-                    val banReasonAny = snap?.getString("banReason")
-                    val updatedAt = snap?.getTimestamp("updatedAt")
-
-                    val applyWarned = warnedAny != null || !warnReasonAny.isNullOrBlank()
-                    val applyBanned = bannedAny != null || !banReasonAny.isNullOrBlank()
-
-                    moderation = moderation.copy(
-                        warned = if (applyWarned) (warnedAny ?: moderation.warned) else moderation.warned,
-                        warnReason = if (applyWarned) (warnReasonAny ?: moderation.warnReason) else moderation.warnReason,
-                        banned = if (applyBanned) (bannedAny ?: moderation.banned) else moderation.banned,
-                        banReason = if (applyBanned) (banReasonAny ?: moderation.banReason) else moderation.banReason,
-                        updatedAt = updatedAt ?: moderation.updatedAt
-                    )
-                }
-        }
-        onDispose { reg?.remove() }
     }
 
     // --- ToS gate (remote) ---
@@ -583,7 +571,7 @@ fun ChatboxScreen(
     }
 
     // --- Ban gate (DEVICE-FIRST) ---
-    // Effective ban = deviceUsers.banned OR legacy bannedDevices.banned OR legacy users/{uid}.banned
+    // Effective ban = users/{deviceHash}.banned OR (admin build) bannedDevices legacy banned
     val isBannedEffective = moderation.banned || moderation.deviceBanned
 
     var banStopRan by remember { mutableStateOf(false) }
@@ -820,7 +808,7 @@ private fun BannedScreen(
                     Text("You are banned from using this app.", style = MaterialTheme.typography.titleSmall)
 
                     val reasons = buildList {
-                        if (banReason.isNotBlank()) add("Device ban: $banReason")
+                        if (banReason.isNotBlank()) add("Ban reason: $banReason")
                         if (deviceBanReason.isNotBlank()) add("Legacy device ban: $deviceBanReason")
                     }.ifEmpty { listOf("No reason provided.") }
 
