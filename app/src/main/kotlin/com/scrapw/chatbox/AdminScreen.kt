@@ -171,7 +171,7 @@ fun AdminScreen() {
                 Text("Admin", style = MaterialTheme.typography.titleLarge)
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     CircularProgressIndicator()
-                    Text("Checking access…")
+                    Text("Checking accessâ€¦")
                 }
                 if (error != null) ErrorCard(error!!)
             }
@@ -252,6 +252,15 @@ fun AdminScreen() {
     // Compact IDs drawer
     var idsExpanded by rememberSaveable { mutableStateOf(false) }
 
+    // ticker for relative times (used across tabs)
+    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            nowMs = System.currentTimeMillis()
+            delay(1000L)
+        }
+    }
+
     Surface {
         Column(
             modifier = Modifier
@@ -267,7 +276,7 @@ fun AdminScreen() {
                 Column(Modifier.weight(1f)) {
                     Text("Admin", style = MaterialTheme.typography.titleLarge)
                     Text(
-                        "Owner build • ${BuildConfig.APPLICATION_ID}",
+                        "Owner build â€¢ ${BuildConfig.APPLICATION_ID}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -390,12 +399,14 @@ fun AdminScreen() {
                     2 -> AnnouncementsTab(
                         db = db,
                         createdByDevice = deviceHash,
+                        nowMs = nowMs,
                         setGlobalLoading = { globalLoading = it },
                         setError = ::setErr
                     )
 
                     else -> ConfigTab(
                         db = db,
+                        nowMs = nowMs,
                         setGlobalLoading = { globalLoading = it },
                         setError = ::setErr
                     )
@@ -640,7 +651,7 @@ private fun UsersTab(
                                 Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
                             }
                             Column {
-                                // 요구사항: name line should be "User"
+                                // ìš”êµ¬ì‚¬í•­: name line should be "User"
                                 Text("User", style = MaterialTheme.typography.titleMedium)
                                 if (selectedRow.displayName.isNotBlank()) {
                                     Text(
@@ -738,7 +749,7 @@ private fun UsersTab(
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         CircularProgressIndicator()
-                        Text("Loading details…")
+                        Text("Loading detailsâ€¦")
                     }
                 }
             } else if (d != null) {
@@ -857,7 +868,7 @@ private fun UsersTab(
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
                                 Column(Modifier.weight(1f)) {
-                                    // 요구사항: name shows "User" (not displayName)
+                                    // ìš”êµ¬ì‚¬í•­: name shows "User" (not displayName)
                                     Text("User", style = MaterialTheme.typography.titleSmall)
                                     if (u.displayName.isNotBlank()) {
                                         Text(
@@ -1634,13 +1645,13 @@ private fun ModerationTab(
                                     }
                                     if (e.targetDeviceHash.isNotBlank()) {
                                         Text(
-                                            "targetDevice=${e.targetDeviceHash.take(16)}…",
+                                            "targetDevice=${e.targetDeviceHash.take(16)}â€¦",
                                             fontFamily = FontFamily.Monospace,
                                             style = MaterialTheme.typography.bodySmall
                                         )
                                     }
                                     Text(
-                                        "byUid=${e.byUid.ifBlank { "?" }}  byDevice=${e.byDeviceHash.take(12).ifBlank { "?" }}…",
+                                        "byUid=${e.byUid.ifBlank { "?" }}  byDevice=${e.byDeviceHash.take(12).ifBlank { "?" }}â€¦",
                                         fontFamily = FontFamily.Monospace,
                                         style = MaterialTheme.typography.bodySmall
                                     )
@@ -1673,6 +1684,7 @@ private data class AnnouncementRow(
 private fun AnnouncementsTab(
     db: FirebaseFirestore,
     createdByDevice: String,
+    nowMs: Long,
     setGlobalLoading: (Boolean) -> Unit,
     setError: (String?) -> Unit
 ) {
@@ -1830,7 +1842,7 @@ private fun AnnouncementsTab(
                             Column(Modifier.weight(1f)) {
                                 Text(a.title.ifBlank { "(no title)" }, style = MaterialTheme.typography.titleSmall)
                                 Text(
-                                    "priority=${a.priority}  active=${a.active}  createdAt=${a.createdAt ?: "?"}",
+                                    "priority=${a.priority}  active=${a.active}  created=${relativeTime(a.createdAt, nowMs)}",
                                     fontFamily = FontFamily.Monospace,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1962,6 +1974,7 @@ private const val DEFAULT_TOS_TEXT: String =
 @Composable
 private fun ConfigTab(
     db: FirebaseFirestore,
+    nowMs: Long,
     setGlobalLoading: (Boolean) -> Unit,
     setError: (String?) -> Unit
 ) {
@@ -1999,7 +2012,7 @@ private fun ConfigTab(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text("ToS / App Config", style = MaterialTheme.typography.titleMedium)
-            Text("loadedAt=${loadedAt ?: "?"}", fontFamily = FontFamily.Monospace)
+            Text("loadedAt=${relativeTime(loadedAt, nowMs)}", fontFamily = FontFamily.Monospace)
 
             OutlinedTextField(
                 value = ownerUid,
@@ -2016,7 +2029,7 @@ private fun ConfigTab(
             ) {
                 Text("ToS version", style = MaterialTheme.typography.labelLarge)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { tosVersion = (tosVersion - 1).coerceAtLeast(1) }) { Text("−") }
+                    OutlinedButton(onClick = { tosVersion = (tosVersion - 1).coerceAtLeast(1) }) { Text("âˆ’") }
                     Text(tosVersion.toString(), fontFamily = FontFamily.Monospace)
                     OutlinedButton(onClick = { tosVersion += 1 }) { Text("+") }
                 }
@@ -2028,7 +2041,7 @@ private fun ConfigTab(
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
                 label = { Text("ToS URL (optional)") },
-                placeholder = { Text("https://…") }
+                placeholder = { Text("https://â€¦") }
             )
 
             OutlinedTextField(
@@ -2112,7 +2125,7 @@ private fun shortId(s: String, head: Int = 10, tail: Int = 6): String {
     val t = s.trim()
     if (t.isBlank()) return "(blank)"
     if (t.length <= head + tail + 1) return t
-    return t.take(head) + "…" + t.takeLast(tail)
+    return t.take(head) + "â€¦" + t.takeLast(tail)
 }
 
 private fun relativeTime(ts: Timestamp?, nowMs: Long): String {
