@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -78,7 +77,8 @@ import kotlinx.coroutines.tasks.await
 
 private fun parseTimestampStringToMillis(ts: String): Long? {
     // Expected: Timestamp(seconds=123, nanoseconds=456)
-    val m = Regex("Timestamp\(seconds=(\d+),\s*nanoseconds=(\d+)\)").find(ts) ?: return null
+    // FIX: Kotlin strings treat \d, \(, \s as illegal escapes unless escaped or raw string.
+    val m = Regex("""Timestamp\(seconds=(\d+),\s*nanoseconds=(\d+)\)""").find(ts) ?: return null
     val sec = m.groupValues.getOrNull(1)?.toLongOrNull() ?: return null
     val ns = m.groupValues.getOrNull(2)?.toLongOrNull() ?: 0L
     return sec * 1000L + (ns / 1_000_000L)
@@ -95,7 +95,6 @@ private fun fmtRelativeTime(nowMs: Long, thenMs: Long): String {
         else -> "${sec / 86400}d ago"
     }
 }
-
 
 /**
  * Owner-only Admin screen.
@@ -192,7 +191,7 @@ fun AdminScreen() {
                 Text("Admin", style = MaterialTheme.typography.titleLarge)
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     CircularProgressIndicator()
-                    Text("Checking accessâ€¦")
+                    Text("Checking access…")
                 }
                 if (error != null) ErrorCard(error!!)
             }
@@ -288,7 +287,7 @@ fun AdminScreen() {
                 Column(Modifier.weight(1f)) {
                     Text("Admin", style = MaterialTheme.typography.titleLarge)
                     Text(
-                        "Owner build â€¢ ${BuildConfig.APPLICATION_ID}",
+                        "Owner build • ${BuildConfig.APPLICATION_ID}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -643,7 +642,8 @@ private fun UsersTab(
 
         Column(
             modifier = Modifier
-                .fillMaxWidth().verticalScroll(rememberScrollState()),
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             ElevatedCard {
@@ -660,7 +660,6 @@ private fun UsersTab(
                                 Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
                             }
                             Column {
-                                // ìš”êµ¬ì‚¬í•­: name line should be "User"
                                 Text("User", style = MaterialTheme.typography.titleMedium)
                                 if (selectedRow.displayName.isNotBlank()) {
                                     Text(
@@ -758,7 +757,7 @@ private fun UsersTab(
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         CircularProgressIndicator()
-                        Text("Loading detailsâ€¦")
+                        Text("Loading details…")
                     }
                 }
             } else if (d != null) {
@@ -877,7 +876,6 @@ private fun UsersTab(
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
                                 Column(Modifier.weight(1f)) {
-                                    // ìš”êµ¬ì‚¬í•­: name shows "User" (not displayName)
                                     Text("User", style = MaterialTheme.typography.titleSmall)
                                     if (u.displayName.isNotBlank()) {
                                         Text(
@@ -1255,7 +1253,8 @@ private fun ModerationTab(
 
     Column(
         modifier = Modifier
-            .fillMaxWidth().verticalScroll(rememberScrollState()),
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         ElevatedCard {
@@ -1653,13 +1652,13 @@ private fun ModerationTab(
                                     }
                                     if (e.targetDeviceHash.isNotBlank()) {
                                         Text(
-                                            "targetDevice=${e.targetDeviceHash.take(16)}â€¦",
+                                            "targetDevice=${e.targetDeviceHash.take(16)}…",
                                             fontFamily = FontFamily.Monospace,
                                             style = MaterialTheme.typography.bodySmall
                                         )
                                     }
                                     Text(
-                                        "byUid=${e.byUid.ifBlank { "?" }}  byDevice=${e.byDeviceHash.take(12).ifBlank { "?" }}â€¦",
+                                        "byUid=${e.byUid.ifBlank { "?" }}  byDevice=${e.byDeviceHash.take(12).ifBlank { "?" }}…",
                                         fontFamily = FontFamily.Monospace,
                                         style = MaterialTheme.typography.bodySmall
                                     )
@@ -1739,7 +1738,8 @@ private fun AnnouncementsTab(
 
     Column(
         modifier = Modifier
-            .fillMaxWidth().verticalScroll(rememberScrollState()),
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         ElevatedCard {
@@ -2034,7 +2034,7 @@ private fun ConfigTab(
             ) {
                 Text("ToS version", style = MaterialTheme.typography.labelLarge)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { tosVersion = (tosVersion - 1).coerceAtLeast(1) }) { Text("âˆ’") }
+                    OutlinedButton(onClick = { tosVersion = (tosVersion - 1).coerceAtLeast(1) }) { Text("−") }
                     Text(tosVersion.toString(), fontFamily = FontFamily.Monospace)
                     OutlinedButton(onClick = { tosVersion += 1 }) { Text("+") }
                 }
@@ -2046,7 +2046,7 @@ private fun ConfigTab(
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
                 label = { Text("ToS URL (optional)") },
-                placeholder = { Text("https://â€¦") }
+                placeholder = { Text("https://…") }
             )
 
             OutlinedTextField(
@@ -2130,7 +2130,7 @@ private fun shortId(s: String, head: Int = 10, tail: Int = 6): String {
     val t = s.trim()
     if (t.isBlank()) return "(blank)"
     if (t.length <= head + tail + 1) return t
-    return t.take(head) + "â€¦" + t.takeLast(tail)
+    return t.take(head) + "…" + t.takeLast(tail)
 }
 
 private fun relativeTime(ts: Timestamp?, nowMs: Long): String {
