@@ -186,18 +186,4 @@ private fun secureRandomHex(numBytes: Int): String {
     val bytes = ByteArray(numBytes)
     rng.nextBytes(bytes)
     return sha256HexBytes(bytes) // compact + already-hex
-
-    override fun onStop() {
-        super.onStop()
-
-        // When the app leaves the foreground, disable Now Playing so it doesn't stay on after reopen.
-        // Avoid toggling on config changes like rotation.
-        if (!isChangingConfigurations) {
-            runCatching {
-                val vm = com.scrapw.chatbox.ui.ChatboxViewModel.getInstance()
-                vm.setSpotifyEnabledFlag(false)
-            }
-        }
-    }
-
 }
