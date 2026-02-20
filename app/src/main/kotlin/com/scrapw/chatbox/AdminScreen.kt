@@ -76,6 +76,27 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 
+private fun parseTimestampStringToMillis(ts: String): Long? {
+    // Expected: Timestamp(seconds=123, nanoseconds=456)
+    val m = Regex("Timestamp\(seconds=(\d+),\s*nanoseconds=(\d+)\)").find(ts) ?: return null
+    val sec = m.groupValues.getOrNull(1)?.toLongOrNull() ?: return null
+    val ns = m.groupValues.getOrNull(2)?.toLongOrNull() ?: 0L
+    return sec * 1000L + (ns / 1_000_000L)
+}
+
+private fun fmtRelativeTime(nowMs: Long, thenMs: Long): String {
+    val delta = kotlin.math.abs(nowMs - thenMs)
+    val sec = delta / 1000L
+    return when {
+        sec < 5 -> "just now"
+        sec < 60 -> "${sec}s ago"
+        sec < 3600 -> "${sec / 60}m ago"
+        sec < 86400 -> "${sec / 3600}h ago"
+        else -> "${sec / 86400}d ago"
+    }
+}
+
+
 /**
  * Owner-only Admin screen.
  *
@@ -252,15 +273,6 @@ fun AdminScreen() {
     // Compact IDs drawer
     var idsExpanded by rememberSaveable { mutableStateOf(false) }
 
-    // ticker for relative times (used across tabs)
-    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            nowMs = System.currentTimeMillis()
-            delay(1000L)
-        }
-    }
-
     Surface {
         Column(
             modifier = Modifier
@@ -399,14 +411,12 @@ fun AdminScreen() {
                     2 -> AnnouncementsTab(
                         db = db,
                         createdByDevice = deviceHash,
-                        nowMs = nowMs,
                         setGlobalLoading = { globalLoading = it },
                         setError = ::setErr
                     )
 
                     else -> ConfigTab(
                         db = db,
-                        nowMs = nowMs,
                         setGlobalLoading = { globalLoading = it },
                         setError = ::setErr
                     )
@@ -633,8 +643,7 @@ private fun UsersTab(
 
         Column(
             modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState()),
+                .fillMaxWidth().verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             ElevatedCard {
@@ -1246,8 +1255,7 @@ private fun ModerationTab(
 
     Column(
         modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState()),
+            .fillMaxWidth().verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         ElevatedCard {
@@ -1684,7 +1692,6 @@ private data class AnnouncementRow(
 private fun AnnouncementsTab(
     db: FirebaseFirestore,
     createdByDevice: String,
-    nowMs: Long,
     setGlobalLoading: (Boolean) -> Unit,
     setError: (String?) -> Unit
 ) {
@@ -1732,8 +1739,7 @@ private fun AnnouncementsTab(
 
     Column(
         modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState()),
+            .fillMaxWidth().verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         ElevatedCard {
@@ -1842,7 +1848,7 @@ private fun AnnouncementsTab(
                             Column(Modifier.weight(1f)) {
                                 Text(a.title.ifBlank { "(no title)" }, style = MaterialTheme.typography.titleSmall)
                                 Text(
-                                    "priority=${a.priority}  active=${a.active}  created=${relativeTime(a.createdAt, nowMs)}",
+                                    "priority=${a.priority}  active=${a.active}  createdAt=${a.createdAt ?: "?"}",
                                     fontFamily = FontFamily.Monospace,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1974,7 +1980,6 @@ private const val DEFAULT_TOS_TEXT: String =
 @Composable
 private fun ConfigTab(
     db: FirebaseFirestore,
-    nowMs: Long,
     setGlobalLoading: (Boolean) -> Unit,
     setError: (String?) -> Unit
 ) {
@@ -2012,7 +2017,7 @@ private fun ConfigTab(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text("ToS / App Config", style = MaterialTheme.typography.titleMedium)
-            Text("loadedAt=${relativeTime(loadedAt, nowMs)}", fontFamily = FontFamily.Monospace)
+            Text("loadedAt=${loadedAt ?: "?"}", fontFamily = FontFamily.Monospace)
 
             OutlinedTextField(
                 value = ownerUid,
