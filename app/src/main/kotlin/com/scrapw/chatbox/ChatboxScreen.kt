@@ -442,11 +442,12 @@ fun ChatboxScreen(
     val snackbarHostState = remember { SnackbarHostState() }
 
     // Apply persisted music UI settings once
-    // IMPORTANT: "Now Playing" enabled state should NOT persist across app restarts.
-    // It must start OFF on every launch (like AFK/Cycle).
     LaunchedEffect(Unit) {
-        chatboxViewModel.setSpotifyEnabledFlag(false)
+        // Now Playing enabled should NOT persist across a full app restart.
+        // We force it OFF on each fresh launch, but leave the rest of the music UI settings.
         UiPrefs.writeSpotifyEnabled(ctx, false)
+        chatboxViewModel.setSpotifyEnabledFlag(false)
+
         chatboxViewModel.setSpotifyDemoFlag(UiPrefs.readSpotifyDemo(ctx))
         chatboxViewModel.updateSpotifyPreset(UiPrefs.readSpotifyPreset(ctx))
     }
