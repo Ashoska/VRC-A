@@ -176,7 +176,7 @@ private object UiPrefs {
 }
 
 /**
- * ✅ ToS acceptance storage.
+ * âœ… ToS acceptance storage.
  * We store an "accepted_version" integer locally.
  * "version" is fetched remotely.
  */
@@ -442,8 +442,11 @@ fun ChatboxScreen(
     val snackbarHostState = remember { SnackbarHostState() }
 
     // Apply persisted music UI settings once
+    // IMPORTANT: "Now Playing" enabled state should NOT persist across app restarts.
+    // It must start OFF on every launch (like AFK/Cycle).
     LaunchedEffect(Unit) {
-        chatboxViewModel.setSpotifyEnabledFlag(UiPrefs.readSpotifyEnabled(ctx))
+        chatboxViewModel.setSpotifyEnabledFlag(false)
+        UiPrefs.writeSpotifyEnabled(ctx, false)
         chatboxViewModel.setSpotifyDemoFlag(UiPrefs.readSpotifyDemo(ctx))
         chatboxViewModel.updateSpotifyPreset(UiPrefs.readSpotifyPreset(ctx))
     }
@@ -597,7 +600,7 @@ private fun GlobalStatusBanner(
     ) {
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
             Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text("⚠️ Warning", style = MaterialTheme.typography.labelLarge)
+                Text("âš ï¸ Warning", style = MaterialTheme.typography.labelLarge)
                 Text(
                     moderation.warnReason.ifBlank { "You have been warned by moderators." },
                     style = MaterialTheme.typography.bodySmall
@@ -650,7 +653,7 @@ private fun BannedScreen(
                     Text("IDs (for support/admin)", style = MaterialTheme.typography.titleSmall)
                     Text("uid=${uid.ifBlank { "?" }}", fontFamily = FontFamily.Monospace)
                     Text(
-                        "deviceHash=${deviceHash.take(16).ifBlank { "?" }}…",
+                        "deviceHash=${deviceHash.take(16).ifBlank { "?" }}â€¦",
                         fontFamily = FontFamily.Monospace
                     )
                 }
@@ -659,8 +662,8 @@ private fun BannedScreen(
             ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("What you can do", style = MaterialTheme.typography.titleSmall)
-                    Text("• You can still open Settings and Info.")
-                    Text("• If this is a mistake, contact the app moderators.")
+                    Text("â€¢ You can still open Settings and Info.")
+                    Text("â€¢ If this is a mistake, contact the app moderators.")
                 }
             }
 
@@ -692,11 +695,11 @@ private fun TosGate(
 TERMS OF SERVICE (SUMMARY)
 
 By using this app, you agree to:
-• Use it responsibly and legally
-• Not use it to harass, spam, or impersonate others
-• Understand VRChat chatbox limits apply and messages may be trimmed
-• Accept that settings/history are stored locally on your device
-• You may be moderated (warned/banned) for abuse
+â€¢ Use it responsibly and legally
+â€¢ Not use it to harass, spam, or impersonate others
+â€¢ Understand VRChat chatbox limits apply and messages may be trimmed
+â€¢ Accept that settings/history are stored locally on your device
+â€¢ You may be moderated (warned/banned) for abuse
 
 If you do not agree, close the app.
         """.trimIndent()
@@ -1016,7 +1019,7 @@ private fun HomePage(
             ) {
                 Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
                     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("⚠️ You have been warned.", style = MaterialTheme.typography.titleSmall)
+                        Text("âš ï¸ You have been warned.", style = MaterialTheme.typography.titleSmall)
                         Text(
                             moderation.warnReason.ifBlank { "No reason provided." },
                             style = MaterialTheme.typography.bodyMedium
@@ -1147,10 +1150,10 @@ private fun HomePage(
                     TutorialStep(
                         number = 0,
                         title = "Enable OSC in VRChat",
-                        subtitle = "VRChat → Settings → OSC → Enable OSC.",
+                        subtitle = "VRChat â†’ Settings â†’ OSC â†’ Enable OSC.",
                         icon = Icons.Filled.Bolt,
                         primary = "How"
-                    ) { scope.launch { snackbarHostState.showSnackbar("Open VRChat → Settings → OSC → Enable OSC") } }
+                    ) { scope.launch { snackbarHostState.showSnackbar("Open VRChat â†’ Settings â†’ OSC â†’ Enable OSC") } }
 
                     TutorialStep(
                         number = 1,
@@ -1248,7 +1251,7 @@ private fun HomePage(
 
         SectionCard(
             title = "Manual Send",
-            subtitle = "One-off message (doesn’t affect AFK/Cycle/Now Playing)."
+            subtitle = "One-off message (doesnâ€™t affect AFK/Cycle/Now Playing)."
         ) {
             Column(Modifier.bringIntoViewRequester(manualSendBring)) {
                 OutlinedTextField(
@@ -1364,7 +1367,7 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel, isBanned
             val p = vm.getAfkPresetPreview(slot).ifBlank { "empty" }
             "${slot}:${p}"
         }
-        return parts.joinToString("  •  ").let { if (it.length > 80) it.take(79) + "…" else it }
+        return parts.joinToString("  â€¢  ").let { if (it.length > 80) it.take(79) + "â€¦" else it }
     }
 
     fun cyclePresetsPreview(): String {
@@ -1372,7 +1375,7 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel, isBanned
             val p = vm.getCyclePresetPreview(slot).ifBlank { "empty" }
             "${slot}:${p}"
         }
-        return parts.joinToString("  •  ").let { if (it.length > 80) it.take(79) + "…" else it }
+        return parts.joinToString("  â€¢  ").let { if (it.length > 80) it.take(79) + "â€¦" else it }
     }
 
     PageContainer {
@@ -1450,7 +1453,7 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel, isBanned
                                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                                             ) {
                                                 val preview = vm.getAfkPresetPreview(slot).ifBlank { "(empty)" }
-                                                Text("Preset $slot — $preview")
+                                                Text("Preset $slot â€” $preview")
 
                                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                                     OutlinedButton(
@@ -1598,7 +1601,7 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel, isBanned
                                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                                             ) {
                                                 val preview = vm.getCyclePresetPreview(slot).ifBlank { "(empty)" }
-                                                Text("Preset $slot — $preview")
+                                                Text("Preset $slot â€” $preview")
 
                                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                                     OutlinedButton(
@@ -1974,9 +1977,9 @@ private fun InfoSheet(onDismiss: () -> Unit) {
                         """
 VRC-A (VRChat Assistant)
 
-• Sends OSC chatbox text to your Quest/PC target
-• Includes: AFK, Cycle, Now Playing, Manual Send
-• Use KILL to stop all senders and clear the VRChat chatbox
+â€¢ Sends OSC chatbox text to your Quest/PC target
+â€¢ Includes: AFK, Cycle, Now Playing, Manual Send
+â€¢ Use KILL to stop all senders and clear the VRChat chatbox
                         """.trimIndent()
                     }
 
@@ -1985,18 +1988,18 @@ VRC-A (VRChat Assistant)
 HELP
 
 Nothing appears in VRChat:
-• VRChat → Settings → OSC → Enable OSC
-• Phone + headset on the same Wi-Fi
-• Set the correct headset IP (Home → Connection)
-• Try Manual Send
+â€¢ VRChat â†’ Settings â†’ OSC â†’ Enable OSC
+â€¢ Phone + headset on the same Wi-Fi
+â€¢ Set the correct headset IP (Home â†’ Connection)
+â€¢ Try Manual Send
 
 Now Playing blank:
-• Enable Notification Access
-• Reopen the app
-• Start music so a notification exists
+â€¢ Enable Notification Access
+â€¢ Reopen the app
+â€¢ Start music so a notification exists
 
 Stops sending with screen off:
-• Disable Battery Optimization for VRC-A
+â€¢ Disable Battery Optimization for VRC-A
                         """.trimIndent()
                     }
 
