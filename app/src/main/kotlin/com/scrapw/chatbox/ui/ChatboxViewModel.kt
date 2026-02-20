@@ -1240,13 +1240,9 @@ class ChatboxViewModel(
         nowPlayingJob?.cancel()
         nowPlayingJob = viewModelScope.launch {
             while (spotifyEnabled && !isBanned) {
-                val now = System.currentTimeMillis()
-                val nextAllowed = lastCombinedSendMs + SEND_FLOOR_MS
-                val waitMs = max(0L, nextAllowed - now)
-                if (waitMs > 0L) delay(waitMs + 25L)
-
+                // ✅ ONLY CHANGE: run on a 2s cadence so OSC updates match public behavior
                 rebuildAndMaybeSendCombined(forceSend = true, local = local)
-                delay(10L)
+                delay(SEND_FLOOR_MS)
             }
         }
         startSelfSyncLoopIfNeeded()
