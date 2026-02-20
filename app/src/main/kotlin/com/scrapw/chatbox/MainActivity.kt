@@ -36,7 +36,7 @@ fun Context.getActivity(): ComponentActivity? = when (this) {
  * - Fallback: stored random (only used if ANDROID_ID is unavailable/blank).
  *
  * Notes:
- * - ANDROID_ID can change on factory reset; that’s expected.
+ * - ANDROID_ID can change on factory reset; thatâ€™s expected.
  * - Some OEMs/work profiles can return blank ANDROID_ID; fallback covers it.
  */
 class MainActivity : ComponentActivity() {
@@ -53,7 +53,7 @@ class MainActivity : ComponentActivity() {
 
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
-        // ✅ Ensure device hash exists early (before any screen reads it).
+        // âœ… Ensure device hash exists early (before any screen reads it).
         runCatching { ensureDeviceHash(applicationContext) }
 
         // Keep-alive for screen-off reliability.
@@ -77,7 +77,7 @@ class MainActivity : ComponentActivity() {
                 // App routing (ToS gate + Admin-only UI) lives in ChatboxApp.kt
                 ChatboxApp()
 
-                // ✅ Overlay MUST stay inside Compose because OverlayDaemon is @Composable
+                // âœ… Overlay MUST stay inside Compose because OverlayDaemon is @Composable
                 OverlayDaemon(this@MainActivity)
             }
         }
@@ -186,4 +186,18 @@ private fun secureRandomHex(numBytes: Int): String {
     val bytes = ByteArray(numBytes)
     rng.nextBytes(bytes)
     return sha256HexBytes(bytes) // compact + already-hex
+
+    override fun onStop() {
+        super.onStop()
+
+        // When the app leaves the foreground, disable Now Playing so it doesn't stay on after reopen.
+        // Avoid toggling on config changes like rotation.
+        if (!isChangingConfigurations) {
+            runCatching {
+                val vm = com.scrapw.chatbox.ui.ChatboxViewModel.getInstance()
+                vm.setSpotifyEnabledFlag(false)
+            }
+        }
+    }
+
 }
