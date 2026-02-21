@@ -141,19 +141,10 @@ private enum class ChatboxInfoTab(val title: String) {
 /** Simple persisted UI prefs (no VM changes required). */
 private object UiPrefs {
     private const val FILE = "vrca_ui_prefs"
-    private const val KEY_SPOTIFY_ENABLED = "spotify_enabled"
-    private const val KEY_SPOTIFY_DEMO = "spotify_demo"
+private const val KEY_SPOTIFY_DEMO = "spotify_demo"
     private const val KEY_SPOTIFY_PRESET = "spotify_preset"
     private const val KEY_TUTORIAL_EXPANDED = "tutorial_expanded"
-
-    fun readSpotifyEnabled(ctx: Context): Boolean =
-        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getBoolean(KEY_SPOTIFY_ENABLED, false)
-
-    fun writeSpotifyEnabled(ctx: Context, v: Boolean) {
-        ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit().putBoolean(KEY_SPOTIFY_ENABLED, v).apply()
-    }
-
-    fun readSpotifyDemo(ctx: Context): Boolean =
+fun readSpotifyDemo(ctx: Context): Boolean =
         ctx.getSharedPreferences(FILE, MODE_PRIVATE).getBoolean(KEY_SPOTIFY_DEMO, false)
 
     fun writeSpotifyDemo(ctx: Context, v: Boolean) {
@@ -443,11 +434,9 @@ fun ChatboxScreen(
 
     // Apply persisted music UI settings once
     LaunchedEffect(Unit) {
-        // Now Playing enabled should NOT persist across a full app restart.
-        // We force it OFF on each fresh launch, but leave the rest of the music UI settings.
-        UiPrefs.writeSpotifyEnabled(ctx, false)
         chatboxViewModel.setSpotifyEnabledFlag(false)
 
+        // Keep demo + preset restore.
         chatboxViewModel.setSpotifyDemoFlag(UiPrefs.readSpotifyDemo(ctx))
         chatboxViewModel.updateSpotifyPreset(UiPrefs.readSpotifyPreset(ctx))
     }
@@ -509,8 +498,7 @@ fun ChatboxScreen(
                     .padding(padding)
             ) {
                 // Warning banner only (ban shows full screen)
-                GlobalStatusBanner(moderation = moderation)
-
+                
                 Crossfade(targetState = page, label = "page_crossfade") { p ->
                     when (p) {
                         AppPage.Home -> {
@@ -540,8 +528,7 @@ fun ChatboxScreen(
                         AppPage.Music -> NowPlayingPage(
                             vm = chatboxViewModel,
                             isBanned = isBannedEffective,
-                            onPersistSpotifyEnabled = { UiPrefs.writeSpotifyEnabled(ctx, it) },
-                            onPersistSpotifyDemo = { UiPrefs.writeSpotifyDemo(ctx, it) },
+onPersistSpotifyDemo = { UiPrefs.writeSpotifyDemo(ctx, it) },
                             onPersistSpotifyPreset = { UiPrefs.writeSpotifyPreset(ctx, it) }
                         )
 
@@ -601,7 +588,7 @@ private fun GlobalStatusBanner(
     ) {
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
             Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text("âš ï¸ Warning", style = MaterialTheme.typography.labelLarge)
+                Text("Warning", style = MaterialTheme.typography.labelLarge)
                 Text(
                     moderation.warnReason.ifBlank { "You have been warned by moderators." },
                     style = MaterialTheme.typography.bodySmall
@@ -1020,7 +1007,7 @@ private fun HomePage(
             ) {
                 Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
                     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("âš ï¸ You have been warned.", style = MaterialTheme.typography.titleSmall)
+                        Text("You have been warned.", style = MaterialTheme.typography.titleSmall)
                         Text(
                             moderation.warnReason.ifBlank { "No reason provided." },
                             style = MaterialTheme.typography.bodyMedium
@@ -1674,8 +1661,7 @@ private fun NowPlayingPage(
         ) {
             ToggleRow("Enable Now Playing block", vm.spotifyEnabled, enabled = !isBanned) {
                 vm.setSpotifyEnabledFlag(it)
-                onPersistSpotifyEnabled(it)
-            }
+}
             ToggleRow("Demo mode (testing)", vm.spotifyDemoEnabled, enabled = !isBanned) {
                 vm.setSpotifyDemoFlag(it)
                 onPersistSpotifyDemo(it)
