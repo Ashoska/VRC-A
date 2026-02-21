@@ -141,10 +141,19 @@ private enum class ChatboxInfoTab(val title: String) {
 /** Simple persisted UI prefs (no VM changes required). */
 private object UiPrefs {
     private const val FILE = "vrca_ui_prefs"
-private const val KEY_SPOTIFY_DEMO = "spotify_demo"
+    private const val KEY_SPOTIFY_ENABLED = "spotify_enabled"
+    private const val KEY_SPOTIFY_DEMO = "spotify_demo"
     private const val KEY_SPOTIFY_PRESET = "spotify_preset"
     private const val KEY_TUTORIAL_EXPANDED = "tutorial_expanded"
-fun readSpotifyDemo(ctx: Context): Boolean =
+
+    fun readSpotifyEnabled(ctx: Context): Boolean =
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getBoolean(KEY_SPOTIFY_ENABLED, false)
+
+    fun writeSpotifyEnabled(ctx: Context, v: Boolean) {
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit().putBoolean(KEY_SPOTIFY_ENABLED, v).apply()
+    }
+
+    fun readSpotifyDemo(ctx: Context): Boolean =
         ctx.getSharedPreferences(FILE, MODE_PRIVATE).getBoolean(KEY_SPOTIFY_DEMO, false)
 
     fun writeSpotifyDemo(ctx: Context, v: Boolean) {
@@ -434,6 +443,8 @@ fun ChatboxScreen(
 
     // Apply persisted music UI settings once
     LaunchedEffect(Unit) {
+        // Do NOT persist Now Playing toggle across app restarts.
+        UiPrefs.writeSpotifyEnabled(ctx, false)
         chatboxViewModel.setSpotifyEnabledFlag(false)
 
         // Keep demo + preset restore.
@@ -528,7 +539,8 @@ fun ChatboxScreen(
                         AppPage.Music -> NowPlayingPage(
                             vm = chatboxViewModel,
                             isBanned = isBannedEffective,
-onPersistSpotifyDemo = { UiPrefs.writeSpotifyDemo(ctx, it) },
+                            onPersistSpotifyEnabled = { UiPrefs.writeSpotifyEnabled(ctx, it) },
+                            onPersistSpotifyDemo = { UiPrefs.writeSpotifyDemo(ctx, it) },
                             onPersistSpotifyPreset = { UiPrefs.writeSpotifyPreset(ctx, it) }
                         )
 
@@ -641,7 +653,7 @@ private fun BannedScreen(
                     Text("IDs (for support/admin)", style = MaterialTheme.typography.titleSmall)
                     Text("uid=${uid.ifBlank { "?" }}", fontFamily = FontFamily.Monospace)
                     Text(
-                        "deviceHash=${deviceHash.take(16).ifBlank { "?" }}â€¦",
+                        "deviceHash=${deviceHash.take(16).ifBlank { "?" }}...",
                         fontFamily = FontFamily.Monospace
                     )
                 }
@@ -650,8 +662,8 @@ private fun BannedScreen(
             ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("What you can do", style = MaterialTheme.typography.titleSmall)
-                    Text("â€¢ You can still open Settings and Info.")
-                    Text("â€¢ If this is a mistake, contact the app moderators.")
+                    Text("- You can still open Settings and Info.")
+                    Text("- If this is a mistake, contact the app moderators.")
                 }
             }
 
@@ -683,11 +695,11 @@ private fun TosGate(
 TERMS OF SERVICE (SUMMARY)
 
 By using this app, you agree to:
-â€¢ Use it responsibly and legally
-â€¢ Not use it to harass, spam, or impersonate others
-â€¢ Understand VRChat chatbox limits apply and messages may be trimmed
-â€¢ Accept that settings/history are stored locally on your device
-â€¢ You may be moderated (warned/banned) for abuse
+- Use it responsibly and legally
+- Not use it to harass, spam, or impersonate others
+- Understand VRChat chatbox limits apply and messages may be trimmed
+- Accept that settings/history are stored locally on your device
+- You may be moderated (warned/banned) for abuse
 
 If you do not agree, close the app.
         """.trimIndent()
@@ -1355,7 +1367,7 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel, isBanned
             val p = vm.getAfkPresetPreview(slot).ifBlank { "empty" }
             "${slot}:${p}"
         }
-        return parts.joinToString("  â€¢  ").let { if (it.length > 80) it.take(79) + "â€¦" else it }
+        return parts.joinToString("  -  ").let { if (it.length > 80) it.take(79) + "..." else it }
     }
 
     fun cyclePresetsPreview(): String {
@@ -1363,7 +1375,7 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel, isBanned
             val p = vm.getCyclePresetPreview(slot).ifBlank { "empty" }
             "${slot}:${p}"
         }
-        return parts.joinToString("  â€¢  ").let { if (it.length > 80) it.take(79) + "â€¦" else it }
+        return parts.joinToString("  -  ").let { if (it.length > 80) it.take(79) + "..." else it }
     }
 
     PageContainer {
@@ -1661,7 +1673,8 @@ private fun NowPlayingPage(
         ) {
             ToggleRow("Enable Now Playing block", vm.spotifyEnabled, enabled = !isBanned) {
                 vm.setSpotifyEnabledFlag(it)
-}
+                onPersistSpotifyEnabled(it)
+            }
             ToggleRow("Demo mode (testing)", vm.spotifyDemoEnabled, enabled = !isBanned) {
                 vm.setSpotifyDemoFlag(it)
                 onPersistSpotifyDemo(it)
@@ -1964,9 +1977,9 @@ private fun InfoSheet(onDismiss: () -> Unit) {
                         """
 VRC-A (VRChat Assistant)
 
-â€¢ Sends OSC chatbox text to your Quest/PC target
-â€¢ Includes: AFK, Cycle, Now Playing, Manual Send
-â€¢ Use KILL to stop all senders and clear the VRChat chatbox
+- Sends OSC chatbox text to your Quest/PC target
+- Includes: AFK, Cycle, Now Playing, Manual Send
+- Use KILL to stop all senders and clear the VRChat chatbox
                         """.trimIndent()
                     }
 
@@ -1975,18 +1988,18 @@ VRC-A (VRChat Assistant)
 HELP
 
 Nothing appears in VRChat:
-â€¢ VRChat â†’ Settings â†’ OSC â†’ Enable OSC
-â€¢ Phone + headset on the same Wi-Fi
-â€¢ Set the correct headset IP (Home â†’ Connection)
-â€¢ Try Manual Send
+- VRChat â†’ Settings â†’ OSC â†’ Enable OSC
+- Phone + headset on the same Wi-Fi
+- Set the correct headset IP (Home â†’ Connection)
+- Try Manual Send
 
 Now Playing blank:
-â€¢ Enable Notification Access
-â€¢ Reopen the app
-â€¢ Start music so a notification exists
+- Enable Notification Access
+- Reopen the app
+- Start music so a notification exists
 
 Stops sending with screen off:
-â€¢ Disable Battery Optimization for VRC-A
+- Disable Battery Optimization for VRC-A
                         """.trimIndent()
                     }
 
