@@ -53,7 +53,7 @@ class MainActivity : ComponentActivity() {
 
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
-        // âœ… Ensure device hash exists early (before any screen reads it).
+        //Ensure device hash exists early (before any screen reads it).
         runCatching { ensureDeviceHash(applicationContext) }
 
         // Keep-alive for screen-off reliability.
@@ -77,7 +77,7 @@ class MainActivity : ComponentActivity() {
                 // App routing (ToS gate + Admin-only UI) lives in ChatboxApp.kt
                 ChatboxApp()
 
-                // âœ… Overlay MUST stay inside Compose because OverlayDaemon is @Composable
+                //Overlay MUST stay inside Compose because OverlayDaemon is @Composable
                 OverlayDaemon(this@MainActivity)
             }
         }
