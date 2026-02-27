@@ -126,7 +126,7 @@ class NowPlayingListenerService : NotificationListenerService() {
             // Push an immediate snapshot so UI/OSC updates right away.
             pushSnapshot(pkg, controller.metadata, controller.playbackState, controller)
         } catch (_: Throwable) {
-            // If MediaController fails, do nothing (don’t fall back to non-media notifications).
+            // If MediaController fails, do nothing (donâ€™t fall back to non-media notifications).
         }
     }
 
@@ -158,30 +158,36 @@ class NowPlayingListenerService : NotificationListenerService() {
     private fun classifySpecial(pkg: String, title: String, artist: String): SpecialKind? {
         if (pkg != "com.spotify.music") return null
 
-        val t = title.trim().lowercase()
-        val a = artist.trim().lowercase()
+        val tRaw = title.trim()
+        val aRaw = artist.trim()
+        val t = tRaw.lowercase()
+        val a = aRaw.lowercase()
 
-        // Common Spotify ad / dj patterns.
         // Ads often show "Advertisement" (or similar) with blank/Spotify artist.
         val looksLikeAd =
-            t.contains("advert") ||
+            t == "advertisement" ||
                 t == "ad" ||
-                t.contains("spotify") && t.contains("ad") ||
-                (t.contains("advertisement") || t.contains("sponsored"))
+                t.contains("advert") ||
+                t.contains("sponsored") ||
+                (t.contains("spotify") && t.contains("ad"))
 
-        // Spotify DJ often shows "DJ" / "Spotify DJ" / voice segments.
+        // Spotify DJ: be strict to avoid false positives (e.g. "DJ Khaled").
+        // Common patterns:
+        // - Title exactly "DJ"
+        // - Title contains "Spotify DJ"
+        // - Artist is Spotify / Spotify DJ and title is short/blankish
         val looksLikeDj =
             t == "dj" ||
                 t.contains("spotify dj") ||
-                t.startsWith("dj ") ||
-                t.contains(" dj ") ||
-                (t.contains("dj") && (a.contains("spotify") || a.isBlank()))
+                a == "spotify dj" ||
+                (a == "spotify" && t.length <= 6 && t.contains("dj"))
 
         return when {
             looksLikeAd -> SpecialKind.AD
             looksLikeDj -> SpecialKind.DJ
             else -> null
         }
+    }
     }
 
     private fun pushSnapshot(
@@ -246,11 +252,11 @@ class NowPlayingListenerService : NotificationListenerService() {
     }
 
     private fun startPollForRealTrack(pkg: String, controller: MediaController) {
-        // If already polling, keep it (don’t stack runnables).
+        // If already polling, keep it (donâ€™t stack runnables).
         if (pollRunnablesByPackage.containsKey(pkg)) return
 
         val startAt = SystemClock.elapsedRealtime()
-        val maxMs = 30_000L // only a short window; enough to catch the next song after DJ/ad
+        val maxMs = 30 * 60_000L // up to 30 minutes; DJ segments can be long
 
         val r = object : Runnable {
             override fun run() {
@@ -281,12 +287,12 @@ class NowPlayingListenerService : NotificationListenerService() {
                     return
                 }
 
-                mainHandler.postDelayed(this, 1000L)
+                mainHandler.postDelayed(this, 2_000L)
             }
         }
 
         pollRunnablesByPackage[pkg] = r
-        mainHandler.postDelayed(r, 1000L)
+        mainHandler.postDelayed(r, 2_000L)
     }
 
     private fun stopPoll(pkg: String) {
