@@ -21,7 +21,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowForward
-import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
@@ -58,9 +57,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -74,15 +71,6 @@ import com.google.firebase.firestore.SetOptions
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
-
-private fun parseTimestampStringToMillis(ts: String): Long? {
-    // Expected: Timestamp(seconds=123, nanoseconds=456)
-    // FIX: Kotlin strings treat \d, \(, \s as illegal escapes unless escaped or raw string.
-    val m = Regex("""Timestamp\(seconds=(\d+),\s*nanoseconds=(\d+)\)""").find(ts) ?: return null
-    val sec = m.groupValues.getOrNull(1)?.toLongOrNull() ?: return null
-    val ns = m.groupValues.getOrNull(2)?.toLongOrNull() ?: 0L
-    return sec * 1000L + (ns / 1_000_000L)
-}
 
 private fun fmtRelativeTime(nowMs: Long, thenMs: Long): String {
     val delta = kotlin.math.abs(nowMs - thenMs)
@@ -108,7 +96,6 @@ private fun fmtRelativeTime(nowMs: Long, thenMs: Long): String {
 @Composable
 fun AdminScreen() {
     val ctx = LocalContext.current
-    val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
 
     val db = remember { FirebaseFirestore.getInstance() }
@@ -191,7 +178,7 @@ fun AdminScreen() {
                 Text("Admin", style = MaterialTheme.typography.titleLarge)
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     CircularProgressIndicator()
-                    Text("Checking access…")
+                    Text("Checking accessâ€¦")
                 }
                 if (error != null) ErrorCard(error!!)
             }
@@ -226,18 +213,6 @@ fun AdminScreen() {
                 ElevatedCard {
                     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text("IDs", style = MaterialTheme.typography.titleSmall)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedButton(onClick = { clipboard.setText(AnnotatedString(deviceHash)) }) {
-                                Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                                Spacer(Modifier.width(6.dp))
-                                Text("Copy device")
-                            }
-                            OutlinedButton(onClick = { clipboard.setText(AnnotatedString(myUid)) }) {
-                                Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                                Spacer(Modifier.width(6.dp))
-                                Text("Copy UID")
-                            }
-                        }
                         Text("deviceHash=${deviceHash.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
                         Text("uid=${myUid.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
                         Text("ownerUid=${ownerUid.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
@@ -287,7 +262,7 @@ fun AdminScreen() {
                 Column(Modifier.weight(1f)) {
                     Text("Admin", style = MaterialTheme.typography.titleLarge)
                     Text(
-                        "Owner build • ${BuildConfig.APPLICATION_ID}",
+                        "Owner build â€¢ ${BuildConfig.APPLICATION_ID}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -329,26 +304,6 @@ fun AdminScreen() {
                             }
                         }
 
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedButton(onClick = { clipboard.setText(AnnotatedString(deviceHash)) }) {
-                                Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                                Spacer(Modifier.width(6.dp))
-                                Text("Copy device")
-                            }
-                            OutlinedButton(onClick = { clipboard.setText(AnnotatedString(myUid)) }) {
-                                Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                                Spacer(Modifier.width(6.dp))
-                                Text("Copy UID")
-                            }
-                            if (ownerUid.isNotBlank()) {
-                                OutlinedButton(onClick = { clipboard.setText(AnnotatedString(ownerUid)) }) {
-                                    Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                                    Spacer(Modifier.width(6.dp))
-                                    Text("Copy owner")
-                                }
-                            }
-                        }
-
                         Text("deviceHash=${deviceHash.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
                         Text("uid=${myUid.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
                         Text("ownerUid=${ownerUid.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
@@ -386,7 +341,7 @@ fun AdminScreen() {
                 when (tabIndex) {
                     0 -> UsersTab(
                         db = db,
-                        clipboardCopy = { clipboard.setText(AnnotatedString(it)) },
+                        clipboardCopy = { /* removed */ },
                         setGlobalLoading = { globalLoading = it },
                         setError = ::setErr,
                         onSendToModeration = { target ->
@@ -400,7 +355,7 @@ fun AdminScreen() {
                         myUid = myUid,
                         byDeviceHash = deviceHash,
                         byAppId = BuildConfig.APPLICATION_ID,
-                        clipboardCopy = { clipboard.setText(AnnotatedString(it)) },
+                        clipboardCopy = { /* removed */ },
                         setGlobalLoading = { globalLoading = it },
                         setError = ::setErr,
                         initialTarget = moderationTarget,
@@ -708,26 +663,6 @@ private fun UsersTab(
 
                     Divider()
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = { clipboardCopy(selectedRow.docId) }) {
-                            Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                            Spacer(Modifier.width(6.dp))
-                            Text("Copy docId")
-                        }
-                        if (selectedRow.authUid.isNotBlank()) {
-                            OutlinedButton(onClick = { clipboardCopy(selectedRow.authUid) }) {
-                                Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                                Spacer(Modifier.width(6.dp))
-                                Text("Copy authUid")
-                            }
-                        }
-                        if (selectedRow.deviceHash.isNotBlank()) {
-                            OutlinedButton(onClick = { clipboardCopy(selectedRow.deviceHash) }) {
-                                Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                                Spacer(Modifier.width(6.dp))
-                                Text("Copy device")
-                            }
-                        }
                     }
 
                     Button(
@@ -757,7 +692,7 @@ private fun UsersTab(
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         CircularProgressIndicator()
-                        Text("Loading details…")
+                        Text("Loading detailsâ€¦")
                     }
                 }
             } else if (d != null) {
@@ -1320,26 +1255,6 @@ private fun ModerationTab(
                 Text("authUid=${t.authUid.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
                 Text("deviceHash=${t.deviceHash.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { clipboardCopy(t.docId) }) {
-                        Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                        Spacer(Modifier.width(6.dp))
-                        Text("Copy docId")
-                    }
-                    if (t.authUid.isNotBlank()) {
-                        OutlinedButton(onClick = { clipboardCopy(t.authUid) }) {
-                            Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                            Spacer(Modifier.width(6.dp))
-                            Text("Copy authUid")
-                        }
-                    }
-                    if (t.deviceHash.isNotBlank()) {
-                        OutlinedButton(onClick = { clipboardCopy(t.deviceHash) }) {
-                            Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                            Spacer(Modifier.width(6.dp))
-                            Text("Copy device")
-                        }
-                    }
                 }
 
                 OutlinedButton(
@@ -1652,13 +1567,13 @@ private fun ModerationTab(
                                     }
                                     if (e.targetDeviceHash.isNotBlank()) {
                                         Text(
-                                            "targetDevice=${e.targetDeviceHash.take(16)}…",
+                                            "targetDevice=${e.targetDeviceHash.take(16)}â€¦",
                                             fontFamily = FontFamily.Monospace,
                                             style = MaterialTheme.typography.bodySmall
                                         )
                                     }
                                     Text(
-                                        "byUid=${e.byUid.ifBlank { "?" }}  byDevice=${e.byDeviceHash.take(12).ifBlank { "?" }}…",
+                                        "byUid=${e.byUid.ifBlank { "?" }}  byDevice=${e.byDeviceHash.take(12).ifBlank { "?" }}â€¦",
                                         fontFamily = FontFamily.Monospace,
                                         style = MaterialTheme.typography.bodySmall
                                     )
@@ -2034,7 +1949,7 @@ private fun ConfigTab(
             ) {
                 Text("ToS version", style = MaterialTheme.typography.labelLarge)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { tosVersion = (tosVersion - 1).coerceAtLeast(1) }) { Text("−") }
+                    OutlinedButton(onClick = { tosVersion = (tosVersion - 1).coerceAtLeast(1) }) { Text("âˆ’") }
                     Text(tosVersion.toString(), fontFamily = FontFamily.Monospace)
                     OutlinedButton(onClick = { tosVersion += 1 }) { Text("+") }
                 }
@@ -2046,7 +1961,7 @@ private fun ConfigTab(
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
                 label = { Text("ToS URL (optional)") },
-                placeholder = { Text("https://…") }
+                placeholder = { Text("https://â€¦") }
             )
 
             OutlinedTextField(
@@ -2130,7 +2045,7 @@ private fun shortId(s: String, head: Int = 10, tail: Int = 6): String {
     val t = s.trim()
     if (t.isBlank()) return "(blank)"
     if (t.length <= head + tail + 1) return t
-    return t.take(head) + "…" + t.takeLast(tail)
+    return t.take(head) + "â€¦" + t.takeLast(tail)
 }
 
 private fun relativeTime(ts: Timestamp?, nowMs: Long): String {
