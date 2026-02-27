@@ -158,36 +158,28 @@ class NowPlayingListenerService : NotificationListenerService() {
     private fun classifySpecial(pkg: String, title: String, artist: String): SpecialKind? {
         if (pkg != "com.spotify.music") return null
 
-        val tRaw = title.trim()
-        val aRaw = artist.trim()
-        val t = tRaw.lowercase()
-        val a = aRaw.lowercase()
+        val t = title.trim().lowercase()
+        val a = artist.trim().lowercase()
 
+        // Common Spotify ad / dj patterns.
         // Ads often show "Advertisement" (or similar) with blank/Spotify artist.
         val looksLikeAd =
-            t == "advertisement" ||
+            t.contains("advert") ||
                 t == "ad" ||
-                t.contains("advert") ||
-                t.contains("sponsored") ||
-                (t.contains("spotify") && t.contains("ad"))
+                t.contains("spotify") && t.contains("ad") ||
+                (t.contains("advertisement") || t.contains("sponsored"))
 
-        // Spotify DJ: be strict to avoid false positives (e.g. "DJ Khaled").
-        // Common patterns:
-        // - Title exactly "DJ"
-        // - Title contains "Spotify DJ"
-        // - Artist is Spotify / Spotify DJ and title is short/blankish
+        // Spotify DJ often shows "DJ" / "Spotify DJ" / voice segments.
         val looksLikeDj =
             t == "dj" ||
                 t.contains("spotify dj") ||
-                a == "spotify dj" ||
-                (a == "spotify" && t.length <= 6 && t.contains("dj"))
+                (t.startsWith("dj ") && (a.contains("spotify") || a.isBlank()))
 
         return when {
             looksLikeAd -> SpecialKind.AD
             looksLikeDj -> SpecialKind.DJ
             else -> null
         }
-    }
     }
 
     private fun pushSnapshot(
@@ -256,7 +248,7 @@ class NowPlayingListenerService : NotificationListenerService() {
         if (pollRunnablesByPackage.containsKey(pkg)) return
 
         val startAt = SystemClock.elapsedRealtime()
-        val maxMs = 30 * 60_000L // up to 30 minutes; DJ segments can be long
+        val maxMs = 30 * 60 * 1000L // up to 30 minutes: Spotify DJ/ads can stall callbacks for a while
 
         val r = object : Runnable {
             override fun run() {
@@ -287,12 +279,12 @@ class NowPlayingListenerService : NotificationListenerService() {
                     return
                 }
 
-                mainHandler.postDelayed(this, 2_000L)
+                mainHandler.postDelayed(this, 2000L)
             }
         }
 
         pollRunnablesByPackage[pkg] = r
-        mainHandler.postDelayed(r, 2_000L)
+        mainHandler.postDelayed(r, 2000L)
     }
 
     private fun stopPoll(pkg: String) {
