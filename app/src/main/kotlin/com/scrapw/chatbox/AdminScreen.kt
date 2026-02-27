@@ -304,6 +304,7 @@ fun AdminScreen() {
                             }
                         }
 
+
                         Text("deviceHash=${deviceHash.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
                         Text("uid=${myUid.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
                         Text("ownerUid=${ownerUid.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
@@ -341,7 +342,7 @@ fun AdminScreen() {
                 when (tabIndex) {
                     0 -> UsersTab(
                         db = db,
-                        clipboardCopy = { /* removed */ },
+                        clipboardCopy = { },
                         setGlobalLoading = { globalLoading = it },
                         setError = ::setErr,
                         onSendToModeration = { target ->
@@ -355,7 +356,7 @@ fun AdminScreen() {
                         myUid = myUid,
                         byDeviceHash = deviceHash,
                         byAppId = BuildConfig.APPLICATION_ID,
-                        clipboardCopy = { /* removed */ },
+                        clipboardCopy = { },
                         setGlobalLoading = { globalLoading = it },
                         setError = ::setErr,
                         initialTarget = moderationTarget,
@@ -663,8 +664,7 @@ private fun UsersTab(
 
                     Divider()
 
-                    }
-
+                    
                     Button(
                         onClick = {
                             onSendToModeration(
@@ -1255,8 +1255,7 @@ private fun ModerationTab(
                 Text("authUid=${t.authUid.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
                 Text("deviceHash=${t.deviceHash.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
 
-                }
-
+                
                 OutlinedButton(
                     onClick = { scope.launch { loadTarget(t) } },
                     modifier = Modifier.fillMaxWidth()
@@ -1924,6 +1923,29 @@ private fun ConfigTab(
         }
     }
 
+    suspend fun saveConfig(reloadAfter: Boolean = true) {
+        setGlobalLoading(true)
+        setError(null)
+
+        runCatching {
+            val data = hashMapOf(
+                "ownerUid" to ownerUid.trim(),
+                "tosVersion" to tosVersion,
+                "tosText" to tosText,
+                "tosUrl" to tosUrl,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            db.collection("config").document("app")
+                .set(data, SetOptions.merge())
+                .await()
+            if (reloadAfter) load() else setGlobalLoading(false)
+        }.onFailure { e ->
+            setGlobalLoading(false)
+            setError(e.message ?: "Failed to save config")
+        }
+    }
+
+
     LaunchedEffect(Unit) { load() }
 
     ElevatedCard {
@@ -1932,7 +1954,7 @@ private fun ConfigTab(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text("ToS / App Config", style = MaterialTheme.typography.titleMedium)
-            Text("loadedAt=${loadedAt ?: "?"}", fontFamily = FontFamily.Monospace)
+            Text("updatedAt=${loadedAt?.toDate() ?: "?"} (${relativeTime(loadedAt, System.currentTimeMillis())})", fontFamily = FontFamily.Monospace)
 
             OutlinedTextField(
                 value = ownerUid,
@@ -1949,9 +1971,9 @@ private fun ConfigTab(
             ) {
                 Text("ToS version", style = MaterialTheme.typography.labelLarge)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { tosVersion = (tosVersion - 1).coerceAtLeast(1) }) { Text("âˆ’") }
+                    OutlinedButton(onClick = { tosVersion = (tosVersion - 1).coerceAtLeast(1); scope.launch { saveConfig() } }) { Text("âˆ’") }
                     Text(tosVersion.toString(), fontFamily = FontFamily.Monospace)
-                    OutlinedButton(onClick = { tosVersion += 1 }) { Text("+") }
+                    OutlinedButton(onClick = { tosVersion += 1; scope.launch { saveConfig() } }) { Text("+") }
                 }
             }
 
@@ -1985,29 +2007,7 @@ private fun ConfigTab(
             }
 
             Button(
-                onClick = {
-                    scope.launch {
-                        setGlobalLoading(true)
-                        setError(null)
-
-                        runCatching {
-                            val data = hashMapOf(
-                                "ownerUid" to ownerUid.trim(),
-                                "tosVersion" to tosVersion,
-                                "tosText" to tosText,
-                                "tosUrl" to tosUrl,
-                                "updatedAt" to FieldValue.serverTimestamp()
-                            )
-                            db.collection("config").document("app")
-                                .set(data, SetOptions.merge())
-                                .await()
-                            load()
-                        }.onFailure { e ->
-                            setGlobalLoading(false)
-                            setError(e.message ?: "Failed to save config")
-                        }
-                    }
-                },
+                onClick = { scope.launch { saveConfig() } },
                 modifier = Modifier.fillMaxWidth()
             ) { Text("Save") }
 
