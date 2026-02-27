@@ -178,7 +178,7 @@ fun AdminScreen() {
                 Text("Admin", style = MaterialTheme.typography.titleLarge)
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     CircularProgressIndicator()
-                    Text("Checking accessâ€¦")
+                    Text("Checking access...")
                 }
                 if (error != null) ErrorCard(error!!)
             }
@@ -262,7 +262,7 @@ fun AdminScreen() {
                 Column(Modifier.weight(1f)) {
                     Text("Admin", style = MaterialTheme.typography.titleLarge)
                     Text(
-                        "Owner build â€¢ ${BuildConfig.APPLICATION_ID}",
+                        "Owner build - ${BuildConfig.APPLICATION_ID}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -692,7 +692,7 @@ private fun UsersTab(
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         CircularProgressIndicator()
-                        Text("Loading detailsâ€¦")
+                        Text("Loading details...")
                     }
                 }
             } else if (d != null) {
@@ -1566,13 +1566,13 @@ private fun ModerationTab(
                                     }
                                     if (e.targetDeviceHash.isNotBlank()) {
                                         Text(
-                                            "targetDevice=${e.targetDeviceHash.take(16)}â€¦",
+                                            "targetDevice=${e.targetDeviceHash.take(16)}...",
                                             fontFamily = FontFamily.Monospace,
                                             style = MaterialTheme.typography.bodySmall
                                         )
                                     }
                                     Text(
-                                        "byUid=${e.byUid.ifBlank { "?" }}  byDevice=${e.byDeviceHash.take(12).ifBlank { "?" }}â€¦",
+                                        "byUid=${e.byUid.ifBlank { "?" }}  byDevice=${e.byDeviceHash.take(12).ifBlank { "?" }}...",
                                         fontFamily = FontFamily.Monospace,
                                         style = MaterialTheme.typography.bodySmall
                                     )
@@ -1762,7 +1762,7 @@ private fun AnnouncementsTab(
                             Column(Modifier.weight(1f)) {
                                 Text(a.title.ifBlank { "(no title)" }, style = MaterialTheme.typography.titleSmall)
                                 Text(
-                                    "priority=${a.priority}  active=${a.active}  createdAt=${a.createdAt ?: "?"}",
+                                    "priority=${a.priority}  active=${a.active}  createdAt=${formatTimestamp(a.createdAt)}",
                                     fontFamily = FontFamily.Monospace,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1971,7 +1971,7 @@ private fun ConfigTab(
             ) {
                 Text("ToS version", style = MaterialTheme.typography.labelLarge)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { tosVersion = (tosVersion - 1).coerceAtLeast(1); scope.launch { saveConfig() } }) { Text("âˆ’") }
+                    OutlinedButton(onClick = { tosVersion = (tosVersion - 1).coerceAtLeast(1); scope.launch { saveConfig() } }) { Text("-") }
                     Text(tosVersion.toString(), fontFamily = FontFamily.Monospace)
                     OutlinedButton(onClick = { tosVersion += 1; scope.launch { saveConfig() } }) { Text("+") }
                 }
@@ -1983,7 +1983,7 @@ private fun ConfigTab(
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
                 label = { Text("ToS URL (optional)") },
-                placeholder = { Text("https://â€¦") }
+                placeholder = { Text("https://...") }
             )
 
             OutlinedTextField(
@@ -2045,7 +2045,7 @@ private fun shortId(s: String, head: Int = 10, tail: Int = 6): String {
     val t = s.trim()
     if (t.isBlank()) return "(blank)"
     if (t.length <= head + tail + 1) return t
-    return t.take(head) + "â€¦" + t.takeLast(tail)
+    return t.take(head) + "..." + t.takeLast(tail)
 }
 
 private fun relativeTime(ts: Timestamp?, nowMs: Long): String {
@@ -2082,4 +2082,32 @@ private fun writeCachedUid(ctx: Context, uid: String) {
         .edit()
         .putString("auth_uid", uid.trim())
         .apply()
+}
+
+private fun formatTimestamp(ts: com.google.firebase.Timestamp?): String {
+    if (ts == null) return "?"
+    val ms = ts.seconds * 1000L + (ts.nanoseconds / 1_000_000L)
+    if (ms <= 0L) return "?"
+    val now = System.currentTimeMillis()
+    val diff = now - ms
+
+    // Future timestamps or clock skew: just show a compact date.
+    if (diff < 0L) {
+        return java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US).format(java.util.Date(ms))
+    }
+
+    val sec = diff / 1000L
+    val min = sec / 60L
+    val hr = min / 60L
+    val day = hr / 24L
+
+    val rel = when {
+        sec < 60L -> "${sec}s ago"
+        min < 60L -> "${min}m ago"
+        hr < 48L -> "${hr}h ago"
+        else -> "${day}d ago"
+    }
+
+    val abs = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US).format(java.util.Date(ms))
+    return "$abs ($rel)"
 }
