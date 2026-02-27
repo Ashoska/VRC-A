@@ -1,4 +1,3 @@
-// app/src/main/kotlin/com/scrapw/chatbox/NowPlayingListenerService.kt
 package com.scrapw.chatbox
 
 import android.app.Notification
@@ -35,9 +34,18 @@ class NowPlayingListenerService : NotificationListenerService() {
 
     private val controllersByPackage = HashMap<String, ControllerEntry>()
 
-    // Polling only used as a fallback when Spotify DJ/Ads cause callbacks to stop updating.
+    /**
+     * Polling is used as a watchdog fallback when some players stop firing callbacks
+     * (Spotify DJ/ads is the worst offender, but OEM ROMs can also drop callbacks).
+     *
+     * We keep polling scoped and time-bounded to avoid permanent background churn.
+     */
     private val mainHandler = Handler(Looper.getMainLooper())
     private val pollRunnablesByPackage = HashMap<String, Runnable>()
+
+    // Watchdog state (per package)
+    private val lastPushElapsedByPackage = HashMap<String, Long>()
+    private val lastTitleArtistByPackage = HashMap<String, Pair<String, String>>()
 
     override fun onListenerConnected() {
         super.onListenerConnected()
@@ -82,7 +90,10 @@ class NowPlayingListenerService : NotificationListenerService() {
 
         teardownController(pkg)
         stopPoll(pkg)
-        NowPlayingState.clearIfActivePackage(pkg)
+
+        // IMPORTANT: don't blank the UI when a player hides its notification.
+        // Keep the last known track and mark it paused instead.
+        NowPlayingState.pauseIfActivePackage(pkg)
     }
 
     // ---- MediaController wiring ----
@@ -116,7 +127,8 @@ class NowPlayingListenerService : NotificationListenerService() {
                 override fun onSessionDestroyed() {
                     teardownController(pkg)
                     stopPoll(pkg)
-                    NowPlayingState.clearIfActivePackage(pkg)
+                    // Same rule as notification removal: pause but keep last known track.
+                    NowPlayingState.pauseIfActivePackage(pkg)
                 }
             }
 
@@ -151,25 +163,25 @@ class NowPlayingListenerService : NotificationListenerService() {
         return (a == b) || (a.toString() == b.toString() && a.hashCode() == b.hashCode())
     }
 
-    // ---- Snapshot + Spotify DJ/Ad fallback ----
+    // ---- Snapshot + watchdog fallback ----
 
     private enum class SpecialKind { DJ, AD }
 
-    private fun classifySpecial(pkg: String, title: String, artist: String): SpecialKind? {
-        if (pkg != "com.spotify.music") return null
-
+    /**
+     * Spotify-only heuristic labeling (optional).
+     * We still run the watchdog fallback even if we can't detect DJ/AD by text.
+     */
+    private fun classifySpotifySpecial(title: String, artist: String): SpecialKind? {
         val t = title.trim().lowercase()
         val a = artist.trim().lowercase()
 
-        // Common Spotify ad / dj patterns.
-        // Ads often show "Advertisement" (or similar) with blank/Spotify artist.
         val looksLikeAd =
             t.contains("advert") ||
                 t == "ad" ||
-                t.contains("spotify") && t.contains("ad") ||
-                (t.contains("advertisement") || t.contains("sponsored"))
+                (t.contains("spotify") && t.contains("ad")) ||
+                t.contains("advertisement") ||
+                t.contains("sponsored")
 
-        // Spotify DJ often shows "DJ" / "Spotify DJ" / voice segments.
         val looksLikeDj =
             t == "dj" ||
                 t.contains("spotify dj") ||
@@ -202,27 +214,27 @@ class NowPlayingListenerService : NotificationListenerService() {
         val snapshotUpdateTime =
             if (lastUpdate > 0L) lastUpdate else SystemClock.elapsedRealtime()
 
-        val special = classifySpecial(pkg, title, artist)
-        if (special != null) {
-            // Instead of freezing at the last real track, show a stable label.
-            // This is ONLY for Spotify and ONLY when it looks like DJ/AD.
-            when (special) {
-                SpecialKind.DJ -> {
-                    title = "DJ"
-                    artist = ""
-                }
-                SpecialKind.AD -> {
-                    title = "AD"
-                    artist = ""
-                }
-            }
+        // Remember last pushed state for watchdog decisions
+        lastPushElapsedByPackage[pkg] = SystemClock.elapsedRealtime()
+        lastTitleArtistByPackage[pkg] = title to artist
 
-            // IMPORTANT: when Spotify goes into DJ/AD, callbacks sometimes stop updating
-            // when it transitions back to a real track. Start a short poll to catch the next track.
-            if (controller != null) startPollForRealTrack(pkg, controller)
-        } else {
-            // If we got real metadata, stop any poll.
-            stopPoll(pkg)
+        // Optional Spotify label override during DJ/AD, to keep UI stable.
+        if (pkg == "com.spotify.music") {
+            val special = classifySpotifySpecial(title, artist)
+            if (special != null) {
+                when (special) {
+                    SpecialKind.DJ -> {
+                        title = "DJ"
+                        artist = ""
+                    }
+                    SpecialKind.AD -> {
+                        title = "AD"
+                        artist = ""
+                    }
+                }
+                // Start watchdog polling to catch the first real track after DJ/AD ends.
+                if (controller != null) startWatchdogPoll(pkg, controller)
+            }
         }
 
         val detected = title.isNotBlank() || artist.isNotBlank()
@@ -241,14 +253,28 @@ class NowPlayingListenerService : NotificationListenerService() {
                 isPlaying = isPlaying
             )
         )
+
+        // General-case watchdog: if we're "playing" we keep a time-bounded poll alive
+        // to recover from callback stalls on ANY media app.
+        if (controller != null && detected) {
+            startWatchdogPoll(pkg, controller)
+        } else {
+            stopPoll(pkg)
+        }
     }
 
-    private fun startPollForRealTrack(pkg: String, controller: MediaController) {
-        // If already polling, keep it (donâ€™t stack runnables).
+    /**
+     * Watchdog poll:
+     * - runs at 2s interval
+     * - stops automatically if the controller is replaced, no longer active, or max time reached
+     * - forces a metadata/state refresh if callbacks stop (common in Spotify DJ/ads)
+     */
+    private fun startWatchdogPoll(pkg: String, controller: MediaController) {
+        // If already polling, don't stack.
         if (pollRunnablesByPackage.containsKey(pkg)) return
 
         val startAt = SystemClock.elapsedRealtime()
-        val maxMs = 30 * 60 * 1000L // up to 30 minutes: Spotify DJ/ads can stall callbacks for a while
+        val maxMs = 10 * 60 * 1000L // 10 minutes max watchdog per activation
 
         val r = object : Runnable {
             override fun run() {
@@ -259,18 +285,28 @@ class NowPlayingListenerService : NotificationListenerService() {
                     return
                 }
 
+                // If this package isn't the active package anymore, stop polling.
+                val activePkg = NowPlayingState.state.value.activePackage
+                if (activePkg.isNotBlank() && activePkg != pkg) {
+                    stopPoll(pkg)
+                    return
+                }
+
                 val md = runCatching { controller.metadata }.getOrNull()
                 val pb = runCatching { controller.playbackState }.getOrNull()
 
                 val t = md?.getString(MediaMetadata.METADATA_KEY_TITLE).orEmpty()
                 val a = md?.getString(MediaMetadata.METADATA_KEY_ARTIST).orEmpty()
 
-                val special = classifySpecial(pkg, t, a)
-                if (special == null && (t.isNotBlank() || a.isNotBlank())) {
-                    // We found a real track again; push it and stop polling.
+                // If something changed OR we haven't pushed in a while, push a snapshot.
+                val last = lastTitleArtistByPackage[pkg]
+                val lastPush = lastPushElapsedByPackage[pkg] ?: 0L
+                val sincePush = SystemClock.elapsedRealtime() - lastPush
+
+                val changed = last == null || last.first != t || last.second != a
+
+                if (changed || sincePush >= 4000L) {
                     pushSnapshot(pkg, md, pb, controller)
-                    stopPoll(pkg)
-                    return
                 }
 
                 // Give up after maxMs to avoid background churn.
