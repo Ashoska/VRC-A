@@ -184,14 +184,27 @@ private object TosPrefs {
     private const val FILE = "vrca_tos"
     private const val KEY_ACCEPTED_VERSION = "accepted_version"
     private const val KEY_ACCEPTED_AT_MS = "accepted_at_ms"
+    private const val KEY_ACCEPTED_REMOTE_UPDATED_AT_MS = "accepted_remote_updated_at_ms"
 
     fun acceptedVersion(ctx: Context): Int =
         ctx.getSharedPreferences(FILE, MODE_PRIVATE).getInt(KEY_ACCEPTED_VERSION, 0)
 
-    fun accept(ctx: Context, version: Int) {
+    fun acceptedRemoteUpdatedAtMs(ctx: Context): Long =
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getLong(KEY_ACCEPTED_REMOTE_UPDATED_AT_MS, 0L)
+
+    fun isAccepted(ctx: Context, requiredVersion: Int, remoteUpdatedAtMs: Long?): Boolean {
+        val vOk = acceptedVersion(ctx) >= requiredVersion.coerceAtLeast(1)
+        val remoteMs = (remoteUpdatedAtMs ?: 0L).coerceAtLeast(0L)
+        // If server provides updatedAt, require the user to have accepted after that update.
+        val uOk = (remoteMs <= 0L) || (acceptedRemoteUpdatedAtMs(ctx) >= remoteMs)
+        return vOk && uOk
+    }
+
+    fun accept(ctx: Context, version: Int, remoteUpdatedAtMs: Long?) {
         ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit()
             .putInt(KEY_ACCEPTED_VERSION, version.coerceAtLeast(1))
             .putLong(KEY_ACCEPTED_AT_MS, System.currentTimeMillis())
+            .putLong(KEY_ACCEPTED_REMOTE_UPDATED_AT_MS, (remoteUpdatedAtMs ?: 0L).coerceAtLeast(0L))
             .apply()
     }
 }
@@ -392,11 +405,11 @@ fun ChatboxScreen(
     // --- ToS gate (remote) ---
     val requiredTosVersion = remoteTos.tosVersion.coerceAtLeast(1)
     var tosAccepted by rememberSaveable {
-        mutableStateOf(TosPrefs.acceptedVersion(ctx) >= requiredTosVersion)
+        mutableStateOf(TosPrefs.isAccepted(ctx, requiredTosVersion, remoteTos.updatedAt?.toDate()?.time))
     }
 
-    LaunchedEffect(requiredTosVersion) {
-        tosAccepted = TosPrefs.acceptedVersion(ctx) >= requiredTosVersion
+    LaunchedEffect(requiredTosVersion, remoteTos.updatedAt) {
+        tosAccepted = TosPrefs.isAccepted(ctx, requiredTosVersion, remoteTos.updatedAt?.toDate()?.time)
     }
 
     if (!tosAccepted) {
@@ -408,7 +421,7 @@ fun ChatboxScreen(
                 runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
             },
             onAccept = {
-                TosPrefs.accept(ctx, requiredTosVersion)
+                TosPrefs.accept(ctx, requiredTosVersion, remoteTos.updatedAt?.toDate()?.time)
                 tosAccepted = true
             }
         )
@@ -1150,10 +1163,10 @@ private fun HomePage(
                     TutorialStep(
                         number = 0,
                         title = "Enable OSC in VRChat",
-                        subtitle = "VRChat â†’ Settings â†’ OSC â†’ Enable OSC.",
+                        subtitle = "VRChat -> Settings -> OSC -> Enable OSC.",
                         icon = Icons.Filled.Bolt,
                         primary = "How"
-                    ) { scope.launch { snackbarHostState.showSnackbar("Open VRChat â†’ Settings â†’ OSC â†’ Enable OSC") } }
+                    ) { scope.launch { snackbarHostState.showSnackbar("Open VRChat -> Settings -> OSC -> Enable OSC") } }
 
                     TutorialStep(
                         number = 1,
@@ -1251,7 +1264,7 @@ private fun HomePage(
 
         SectionCard(
             title = "Manual Send",
-            subtitle = "One-off message (doesnâ€™t affect AFK/Cycle/Now Playing)."
+            subtitle = "One-off message (doesn't affect AFK/Cycle/Now Playing)."
         ) {
             Column(Modifier.bringIntoViewRequester(manualSendBring)) {
                 OutlinedTextField(
@@ -1988,9 +2001,9 @@ VRC-A (VRChat Assistant)
 HELP
 
 Nothing appears in VRChat:
-- VRChat â†’ Settings â†’ OSC â†’ Enable OSC
+- VRChat -> Settings -> OSC -> Enable OSC
 - Phone + headset on the same Wi-Fi
-- Set the correct headset IP (Home â†’ Connection)
+- Set the correct headset IP (Home -> Connection)
 - Try Manual Send
 
 Now Playing blank:
