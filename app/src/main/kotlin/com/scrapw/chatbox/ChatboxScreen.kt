@@ -184,27 +184,17 @@ private object TosPrefs {
     private const val FILE = "vrca_tos"
     private const val KEY_ACCEPTED_VERSION = "accepted_version"
     private const val KEY_ACCEPTED_AT_MS = "accepted_at_ms"
-    private const val KEY_ACCEPTED_REMOTE_UPDATED_AT_MS = "accepted_remote_updated_at_ms"
 
     fun acceptedVersion(ctx: Context): Int =
         ctx.getSharedPreferences(FILE, MODE_PRIVATE).getInt(KEY_ACCEPTED_VERSION, 0)
 
-    fun acceptedRemoteUpdatedAtMs(ctx: Context): Long =
-        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getLong(KEY_ACCEPTED_REMOTE_UPDATED_AT_MS, 0L)
+    fun acceptedAtMs(ctx: Context): Long =
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getLong(KEY_ACCEPTED_AT_MS, 0L)
 
-    fun isAccepted(ctx: Context, requiredVersion: Int, remoteUpdatedAtMs: Long?): Boolean {
-        val vOk = acceptedVersion(ctx) >= requiredVersion.coerceAtLeast(1)
-        val remoteMs = (remoteUpdatedAtMs ?: 0L).coerceAtLeast(0L)
-        // If server provides updatedAt, require the user to have accepted after that update.
-        val uOk = (remoteMs <= 0L) || (acceptedRemoteUpdatedAtMs(ctx) >= remoteMs)
-        return vOk && uOk
-    }
-
-    fun accept(ctx: Context, version: Int, remoteUpdatedAtMs: Long?) {
+    fun accept(ctx: Context, version: Int) {
         ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit()
             .putInt(KEY_ACCEPTED_VERSION, version.coerceAtLeast(1))
             .putLong(KEY_ACCEPTED_AT_MS, System.currentTimeMillis())
-            .putLong(KEY_ACCEPTED_REMOTE_UPDATED_AT_MS, (remoteUpdatedAtMs ?: 0L).coerceAtLeast(0L))
             .apply()
     }
 }
@@ -404,12 +394,19 @@ fun ChatboxScreen(
 
     // --- ToS gate (remote) ---
     val requiredTosVersion = remoteTos.tosVersion.coerceAtLeast(1)
+    val requiredUpdatedAtMs = remoteTos.updatedAt?.toDate()?.time ?: 0L
+
     var tosAccepted by rememberSaveable {
-        mutableStateOf(TosPrefs.isAccepted(ctx, requiredTosVersion, remoteTos.updatedAt?.toDate()?.time))
+        mutableStateOf(
+            TosPrefs.acceptedVersion(ctx) >= requiredTosVersion &&
+                TosPrefs.acceptedAtMs(ctx) >= requiredUpdatedAtMs
+        )
     }
 
-    LaunchedEffect(requiredTosVersion, remoteTos.updatedAt) {
-        tosAccepted = TosPrefs.isAccepted(ctx, requiredTosVersion, remoteTos.updatedAt?.toDate()?.time)
+    LaunchedEffect(requiredTosVersion, requiredUpdatedAtMs) {
+        tosAccepted =
+            TosPrefs.acceptedVersion(ctx) >= requiredTosVersion &&
+                TosPrefs.acceptedAtMs(ctx) >= requiredUpdatedAtMs
     }
 
     if (!tosAccepted) {
@@ -421,8 +418,22 @@ fun ChatboxScreen(
                 runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
             },
             onAccept = {
-                TosPrefs.accept(ctx, requiredTosVersion, remoteTos.updatedAt?.toDate()?.time)
+                TosPrefs.accept(ctx, requiredTosVersion)
                 tosAccepted = true
+
+                // Best-effort: persist acceptance to Firestore (requires rules allowing these keys).
+                scope.launch {
+                    runCatching {
+                        val data = hashMapOf(
+                            "tosAcceptedVersion" to requiredTosVersion,
+                            "tosAcceptedAt" to Timestamp.now(),
+                            "updatedAt" to Timestamp.now()
+                        )
+                        db.collection("users").document(deviceHash)
+                            .set(data, com.google.firebase.firestore.SetOptions.merge())
+                            .await()
+                    }
+                }
             }
         )
         return
