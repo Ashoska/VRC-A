@@ -97,7 +97,7 @@ object NowPlayingState {
         cur: NowPlayingSnapshot,
         samePkg: Boolean
     ): Boolean {
-        // If nothing detected, weâ€™re not playing.
+        // If nothing detected, we're not playing.
         if (!cur.detected) return false
 
         // If we don't have timing info, fall back to whatever the service reported.
