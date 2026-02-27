@@ -138,7 +138,7 @@ class NowPlayingListenerService : NotificationListenerService() {
             // Push an immediate snapshot so UI/OSC updates right away.
             pushSnapshot(pkg, controller.metadata, controller.playbackState, controller)
         } catch (_: Throwable) {
-            // If MediaController fails, do nothing (donâ€™t fall back to non-media notifications).
+            // If MediaController fails, do nothing (don't fall back to non-media notifications).
         }
     }
 
