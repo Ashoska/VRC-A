@@ -176,7 +176,7 @@ private object UiPrefs {
 }
 
 /**
- * âœ… ToS acceptance storage.
+ * OK ToS acceptance storage.
  * We store an "accepted_version" integer locally.
  * "version" is fetched remotely.
  */
@@ -1477,7 +1477,7 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel, isBanned
                                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                                             ) {
                                                 val preview = vm.getAfkPresetPreview(slot).ifBlank { "(empty)" }
-                                                Text("Preset $slot â€” $preview")
+                                                Text("Preset $slot -- $preview")
 
                                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                                     OutlinedButton(
@@ -1625,7 +1625,7 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel, isBanned
                                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                                             ) {
                                                 val preview = vm.getCyclePresetPreview(slot).ifBlank { "(empty)" }
-                                                Text("Preset $slot â€” $preview")
+                                                Text("Preset $slot -- $preview")
 
                                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                                     OutlinedButton(
