@@ -36,7 +36,7 @@ fun Context.getActivity(): ComponentActivity? = when (this) {
  * - Fallback: stored random (only used if ANDROID_ID is unavailable/blank).
  *
  * Notes:
- * - ANDROID_ID can change on factory reset; thatâ€™s expected.
+ * - ANDROID_ID can change on factory reset; that's expected.
  * - Some OEMs/work profiles can return blank ANDROID_ID; fallback covers it.
  */
 class MainActivity : ComponentActivity() {
