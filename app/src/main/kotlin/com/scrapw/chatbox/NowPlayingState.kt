@@ -53,6 +53,29 @@ object NowPlayingState {
         _state.value = _state.value.copy(listenerConnected = connected)
     }
 
+    /**
+     * When a media notification/session disappears, DON'T blank the UI.
+     * Keep the last known title/artist and simply mark it as paused.
+     * This prevents the UI/OSC text from randomly disappearing when players hide notifications.
+     */
+    fun pauseIfActivePackage(pkg: String) {
+        val cur = _state.value
+        if (cur.activePackage == pkg && (cur.title.isNotBlank() || cur.artist.isNotBlank())) {
+            _state.value = cur.copy(
+                detected = true,
+                // Keep title/artist/duration/position as the last known state
+                playbackSpeed = 0f,
+                isPlaying = false
+            )
+        } else if (cur.activePackage == pkg) {
+            // If we have nothing meaningful, clear like before.
+            clearIfActivePackage(pkg)
+        }
+    }
+
+    /**
+     * Hard clear (used when you really want to remove the "Now Playing" info).
+     */
     fun clearIfActivePackage(pkg: String) {
         val cur = _state.value
         if (cur.activePackage == pkg) {
@@ -74,7 +97,7 @@ object NowPlayingState {
         cur: NowPlayingSnapshot,
         samePkg: Boolean
     ): Boolean {
-        // If nothing detected, we’re not playing.
+        // If nothing detected, weâ€™re not playing.
         if (!cur.detected) return false
 
         // If we don't have timing info, fall back to whatever the service reported.
