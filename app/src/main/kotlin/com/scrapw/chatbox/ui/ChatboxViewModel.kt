@@ -664,6 +664,11 @@ class ChatboxViewModel(
     var spotifyPreset by mutableStateOf(1)
         private set
 
+    // True when the active media package is in a DJ/Ad/special-window state.
+    // When true we suppress metadata updates and force effectiveIsPlaying=true.
+    var nowPlayingSpecialActive by mutableStateOf(false)
+        private set
+
     // =========================
     // Time feature
     // =========================
@@ -735,6 +740,28 @@ class ChatboxViewModel(
     private var pendingDurationMs: Long = 0L
     private var pendingSinceMs: Long = 0L
     private var pendingStartPosMs: Long = 0L
+
+    // =========================
+    // Card output order (persisted)
+    // Valid component names: "NowPlaying", "AFK", "Cycle"
+    // Order = top-to-bottom in the chatbox output. Cut-off priority is unchanged.
+    // =========================
+    val DEFAULT_CARD_ORDER = listOf("NowPlaying", "AFK", "Cycle")
+
+    var cardOrder by mutableStateOf(listOf("NowPlaying", "AFK", "Cycle"))
+        private set
+
+    fun updateCardOrder(order: List<String>) {
+        if (isBanned) return
+        val valid = order.filter { it in DEFAULT_CARD_ORDER }
+            .distinct()
+        // Ensure all components present (append any missing to end)
+        val full = valid + DEFAULT_CARD_ORDER.filter { it !in valid }
+        cardOrder = full
+        viewModelScope.launch { userPreferencesRepository.saveCardOrder(full) }
+        rebuildCombinedPreviewOnly()
+        startSelfSyncLoopIfNeeded()
+    }
 
     // =========================
     // UI clutter controls (persisted)
@@ -866,6 +893,15 @@ class ChatboxViewModel(
         viewModelScope.launch { userPreferencesRepository.cyclePresetsCollapsed.collect { cyclePresetsCollapsed = it } }
 
         viewModelScope.launch {
+            userPreferencesRepository.cardOrder.collect { saved ->
+                val valid = saved.filter { it in DEFAULT_CARD_ORDER }.distinct()
+                val full = valid + DEFAULT_CARD_ORDER.filter { it !in valid }
+                cardOrder = full
+                rebuildCombinedPreviewOnly()
+            }
+        }
+
+        viewModelScope.launch {
             userPreferencesRepository.timeEnabled.collect {
                 timeEnabled = it
                 rebuildCombinedPreviewOnly()
@@ -916,14 +952,22 @@ class ChatboxViewModel(
                     lastEffectiveTickAtMs = System.currentTimeMillis()
                 }
 
-                stabilizeNowPlayingMetadata(
-                    rawTitle = s.title,
-                    rawArtist = s.artist,
-                    rawDurationMs = s.durationMs,
-                    positionMs = s.positionMs,
-                    reportedIsPlaying = s.isPlaying,
-                    inferredIsPlaying = inferredIsPlaying
-                )
+                nowPlayingSpecialActive = s.specialActive
+
+                if (s.specialActive) {
+                    // DJ/Ad window is active: keep confirmed track as-is, force playing.
+                    // Don't call stabilizeNowPlayingMetadata so "DJ"/"AD" never overwrites confirmed.
+                    nowPlayingReportedIsPlaying = true
+                } else {
+                    stabilizeNowPlayingMetadata(
+                        rawTitle = s.title,
+                        rawArtist = s.artist,
+                        rawDurationMs = s.durationMs,
+                        positionMs = s.positionMs,
+                        reportedIsPlaying = s.isPlaying,
+                        inferredIsPlaying = inferredIsPlaying
+                    )
+                }
 
                 nowPlayingIsPlaying = computeDisplayedPlaying()
                 rebuildCombinedPreviewOnly()
@@ -1415,11 +1459,19 @@ class ChatboxViewModel(
         debugLastCycleOsc = cycleLine
         debugLastMusicOsc = musicLines.joinToString("\n")
 
+        // Assemble lines in user-defined card order (top-to-bottom in chatbox output).
+        // Cut-off priority is separate and unchanged (Cycle drops first, then Music, then AFK).
         val rawLines = mutableListOf<LineWithPriority>()
-        if (afkLine.isNotBlank()) rawLines += LineWithPriority(text = afkLine, priority = Priority.AFK)
-        if (cycleLine.isNotBlank()) rawLines += LineWithPriority(text = cycleLine, priority = Priority.CYCLE)
-        for (m in musicLines) if (m.isNotBlank()) rawLines += LineWithPriority(text = m, priority = Priority.MUSIC)
-        if (standalonTimeLine.isNotBlank()) rawLines += LineWithPriority(text = standalonTimeLine, priority = Priority.MUSIC)
+        for (component in cardOrder) {
+            when (component) {
+                "AFK" -> if (afkLine.isNotBlank()) rawLines += LineWithPriority(text = afkLine, priority = Priority.AFK)
+                "Cycle" -> if (cycleLine.isNotBlank()) rawLines += LineWithPriority(text = cycleLine, priority = Priority.CYCLE)
+                "NowPlaying" -> {
+                    for (m in musicLines) if (m.isNotBlank()) rawLines += LineWithPriority(text = m, priority = Priority.MUSIC)
+                    if (standalonTimeLine.isNotBlank()) rawLines += LineWithPriority(text = standalonTimeLine, priority = Priority.MUSIC)
+                }
+            }
+        }
 
         val limited = limitWithPriority(rawLines, VRC_MAX_CHARS, VRC_MAX_LINES)
 
@@ -1455,11 +1507,13 @@ class ChatboxViewModel(
         // during DJ segments or ads. During these transitions we force isPlaying=true
         // so the chatbox does not flicker "Paused". Once real track metadata appears,
         // normal logic resumes.
+        // nowPlayingSpecialActive covers DJ/ads for any supported player.
+        // isSpotifyDj is a secondary check for blank-metadata edge cases.
         val isSpotifyDj = activePackage == "com.spotify.music" &&
             nowPlayingDetected &&
             (safeTitle.isBlank() || safeArtist.isBlank())
 
-        val effectiveIsPlaying = if (isSpotifyDj) true else nowPlayingIsPlaying
+        val effectiveIsPlaying = if (nowPlayingSpecialActive || isSpotifyDj) true else nowPlayingIsPlaying
 
         val maxLine = 42
         val twoLineBudget = maxLine * 2
@@ -1471,7 +1525,7 @@ class ChatboxViewModel(
         val line1 = when {
             primary.length <= maxLine -> primary
             safeTitle.length <= maxLine -> safeTitle
-            else -> safeTitle.take(maxLine - 1) + "\u2026"
+            else -> safeTitle.take(maxLine)  // hard cut
         }.trim()
 
         val dur = if (spotifyDemoEnabled && !nowPlayingDetected) 205_000L else nowPlayingDurationMs
@@ -1486,15 +1540,12 @@ class ChatboxViewModel(
         val bar = renderProgressBar(spotifyPreset, pos, max(1L, dur), effectiveIsPlaying)
         val time = "${fmtTime(pos)}/${fmtTime(max(1L, dur))}"
 
-        // Status slot: always show time when timeEnabled, merged with Paused if paused
-        val status = when {
-            timeEnabled && !effectiveIsPlaying -> "Paused|${currentTimeString()}"
-            timeEnabled && effectiveIsPlaying  -> currentTimeString()
-            !effectiveIsPlaying                -> "Paused"
-            else                               -> ""
-        }
+        // Status slot: time-only when enabled. Paused state is signalled by the bar dot (\u23F8).
+        // No "Paused" text needed since the dot change is visually clear.
+        val status = if (timeEnabled) currentTimeString() else ""
 
-        val line2 = listOf(bar, time).joinToString(" ").trim()
+        // No space between bar and time - saves 1 char and prevents double-digit minute overflow.
+        val line2 = bar + time
         val line3 = status.takeIf { it.isNotBlank() }
 
         return listOfNotNull(line1.takeIf { it.isNotBlank() }, line2.takeIf { it.isNotBlank() }, line3)
@@ -1537,7 +1588,7 @@ class ChatboxViewModel(
             val original = cleaned[index].text
             if (original.isEmpty()) return
             val newLen = (original.length - needToRemove).coerceAtLeast(1)
-            val trimmed = if (newLen >= 2) original.take(newLen - 1) + "\u2026" else "\u2026"
+            val trimmed = original.take(newLen)  // hard cut - no ellipsis wastes chars
             if (cleaned[index].priority == Priority.CYCLE) cycleModifiedForMusic = true
             cleaned[index] = cleaned[index].copy(text = trimmed)
         }
@@ -1575,30 +1626,35 @@ class ChatboxViewModel(
     // =========================
     // Progress bars
     // =========================
+
+    // Playing dot: \u25C9 (circled dot). Paused dot: \u23F8 (double vertical bar = pause symbol).
+    private fun posDot(isPlaying: Boolean): Char = if (isPlaying) '\u25C9' else '\u23F8'
+
     private fun renderProgressBar(preset: Int, posMs: Long, durMs: Long, isPlaying: Boolean): String {
         val duration = max(1L, durMs)
         val p = min(1f, max(0f, posMs.toFloat() / duration.toFloat()))
+        val dot = posDot(isPlaying)
 
         return when (preset.coerceIn(1, 5)) {
             1 -> {
                 val innerSlots = 8
                 val idx = (p * (innerSlots - 1)).toInt()
                 val inner = CharArray(innerSlots) { '\u2501' }
-                inner[idx] = '\u25C9'
+                inner[idx] = dot
                 "\u2661" + inner.concatToString() + "\u2661"
             }
             2 -> {
                 val slots = 10
                 val idx = (p * (slots - 1)).toInt()
                 val bg = CharArray(slots) { '\u2500' }
-                bg[idx] = '\u25C9'
+                bg[idx] = dot
                 bg.concatToString()
             }
             3 -> {
                 val slots = 10
                 val idx = (p * (slots - 1)).toInt()
                 val bg = CharArray(slots) { '\u27E1' }
-                bg[idx] = '\u25C9'
+                bg[idx] = dot
                 bg.concatToString()
             }
             4 -> renderSoundwaveBar(p, posMs, isPlaying)
@@ -1607,9 +1663,9 @@ class ChatboxViewModel(
                 val idx = (p * (slots - 1)).toInt()
                 val out = CharArray(slots) { i ->
                     when {
-                        i < idx -> '\u25A3'
-                        i == idx -> '\u25C9'
-                        else -> '\u25A2'
+                        i < idx  -> '\u25A3'
+                        i == idx -> dot
+                        else     -> '\u25A2'
                     }
                 }
                 out.concatToString()
@@ -1648,7 +1704,7 @@ class ChatboxViewModel(
         val out = StringBuilder(10)
         for (i in 0 until slots) {
             if (i == idx) {
-                out.append('[').append('\u25A3').append(']')
+                out.append('[').append(posDot(isPlaying)).append(']')
             } else out.append(chars[i])
         }
         return out.toString()
