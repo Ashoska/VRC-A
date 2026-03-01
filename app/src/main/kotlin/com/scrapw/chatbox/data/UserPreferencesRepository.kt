@@ -67,7 +67,11 @@ class UserPreferencesRepository(private val context: Context) {
         val AFK_PRESETS_COLLAPSED = booleanPreferencesKey("afk_presets_collapsed")
         val CYCLE_PRESETS_COLLAPSED = booleanPreferencesKey("cycle_presets_collapsed")
 
-        // ✅ ToS
+        // Time feature
+        val TIME_ENABLED = booleanPreferencesKey("time_enabled")
+        val TIME_MODE = stringPreferencesKey("time_mode")
+
+        // âœ… ToS
         val TOS_ACCEPTED_VERSION = intPreferencesKey("tos_accepted_version")
         val TOS_ACCEPTED_AT_EPOCH = longPreferencesKey("tos_accepted_at_epoch")
     }
@@ -128,6 +132,12 @@ class UserPreferencesRepository(private val context: Context) {
 
     val cyclePresetsCollapsed: Flow<Boolean> = context.dataStore.data
         .map { it[Keys.CYCLE_PRESETS_COLLAPSED] ?: true }
+
+    val timeEnabled: Flow<Boolean> = context.dataStore.data
+        .map { it[Keys.TIME_ENABLED] ?: false }
+
+    val timeMode: Flow<String> = context.dataStore.data
+        .map { it[Keys.TIME_MODE] ?: "LOCAL" }
 
     // =========================
     // Save functions used by ChatboxViewModel
@@ -223,8 +233,16 @@ class UserPreferencesRepository(private val context: Context) {
         context.dataStore.edit { it[Keys.CYCLE_PRESETS_COLLAPSED] = value }
     }
 
+    suspend fun saveTimeEnabled(value: Boolean) {
+        context.dataStore.edit { it[Keys.TIME_ENABLED] = value }
+    }
+
+    suspend fun saveTimeMode(value: String) {
+        context.dataStore.edit { it[Keys.TIME_MODE] = value }
+    }
+
     // =========================
-    // ✅ ToS
+    // âœ… ToS
     // =========================
     fun tosAcceptedStateFlow(currentVersion: Int): StateFlow<Boolean> {
         return context.dataStore.data
