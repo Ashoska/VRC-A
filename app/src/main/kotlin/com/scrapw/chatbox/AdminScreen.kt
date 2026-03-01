@@ -419,7 +419,10 @@ private data class UserDetail(
     val warnReason: String,
     val banReason: String,
     val afkPresets: List<String>,
-    val cyclePresets: List<String>
+    val cyclePresets: List<String>,
+    val versionName: String,
+    val versionCode: Long,
+    val appId: String
 )
 
 private data class ModerationTarget(
@@ -580,7 +583,10 @@ private fun UsersTab(
                     warnReason = s("warnReason"),
                     banReason = s("banReason"),
                     afkPresets = afkPresets,
-                    cyclePresets = cyclePresets
+                    cyclePresets = cyclePresets,
+                    versionName = s("versionName"),
+                    versionCode = l("versionCode"),
+                    appId = s("appId")
                 )
                 selectedDetailLoading = false
             }
@@ -888,6 +894,14 @@ private fun DetailBlock(d: UserDetail) {
             Mono("nowPlayingIsPlaying", d.nowPlayingIsPlaying.toString())
             Mono("nowPlayingTitle", d.nowPlayingTitle.ifBlank { "(blank)" })
             Mono("nowPlayingArtist", d.nowPlayingArtist.ifBlank { "(blank)" })
+
+            if (d.versionName.isNotBlank() || d.versionCode > 0L || d.appId.isNotBlank()) {
+                Spacer(Modifier.height(4.dp))
+                Text("App Build", style = MaterialTheme.typography.titleSmall)
+                if (d.versionName.isNotBlank()) Mono("versionName", d.versionName)
+                if (d.versionCode > 0L) Mono("versionCode", d.versionCode.toString())
+                if (d.appId.isNotBlank()) Mono("appId", d.appId)
+            }
 
             Spacer(Modifier.height(4.dp))
             Text("combinedPreviewText", style = MaterialTheme.typography.labelLarge)
@@ -1558,7 +1572,7 @@ private fun ModerationTab(
                                     verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
                                     Text(
-                                        "${e.action.ifBlank { "(no action)" }}  @  ${e.createdAt ?: "?"}",
+                                        "${e.action.ifBlank { "(no action)" }}  @  ${formatTimestamp(e.createdAt)}",
                                         fontFamily = FontFamily.Monospace
                                     )
                                     if (e.reason.isNotBlank()) {
@@ -1954,7 +1968,7 @@ private fun ConfigTab(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text("ToS / App Config", style = MaterialTheme.typography.titleMedium)
-            Text("updatedAt=${loadedAt?.toDate() ?: "?"} (${relativeTime(loadedAt, System.currentTimeMillis())})", fontFamily = FontFamily.Monospace)
+            Text("updatedAt=${formatTimestamp(loadedAt)} (${relativeTime(loadedAt, System.currentTimeMillis())})", fontFamily = FontFamily.Monospace)
 
             OutlinedTextField(
                 value = ownerUid,
