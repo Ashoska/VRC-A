@@ -129,14 +129,6 @@ class ChatboxViewModel(
             if (!::instance.isInitialized) throw Exception("ChatboxViewModel is not initialized!")
             return instance
         }
-
-        // All selectable timezone options shown in the dropdown
-        val TIME_ZONE_OPTIONS: List<String> = buildList {
-            add("Device")
-            add("UTC")
-            for (h in 1..14) add("UTC+$h")
-            for (h in 1..12) add("UTC-$h")
-        }
     }
 
     override fun onCleared() {
