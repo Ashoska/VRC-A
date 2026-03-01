@@ -1178,7 +1178,7 @@ private fun HomePage(
                                         DropdownMenuItem(
                                             text = { Text(mode) },
                                             onClick = {
-                                                vm.setTimeMode(mode)
+                                                vm.updateTimeMode(mode)
                                                 timeModeMenuOpen = false
                                             }
                                         )
@@ -1187,7 +1187,7 @@ private fun HomePage(
                             }
                             Switch(
                                 checked = vm.timeEnabled,
-                                onCheckedChange = { vm.setTimeEnabled(it) },
+                                onCheckedChange = { vm.updateTimeEnabled(it) },
                                 enabled = !isBanned
                             )
                         }
