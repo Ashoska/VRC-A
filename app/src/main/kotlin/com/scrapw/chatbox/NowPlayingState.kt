@@ -22,7 +22,11 @@ data class NowPlayingSnapshot(
 
     // This may be wrong during skips/seek on some players.
     // We may override it in NowPlayingState.update() based on motion.
-    val isPlaying: Boolean = false
+    val isPlaying: Boolean = false,
+
+    // True when the active package is in a known "special" state (e.g. Spotify DJ or Ad).
+    // Set by NowPlayingListenerService; used downstream to suppress flicker.
+    val specialActive: Boolean = false
 )
 
 object NowPlayingState {
