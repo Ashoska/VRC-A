@@ -1163,6 +1163,14 @@ private fun HomePage(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             var timeModeMenuOpen by remember { mutableStateOf(false) }
+                            val timeModeOptions: List<String> = remember {
+                                buildList {
+                                    add("Device")
+                                    add("UTC")
+                                    for (h in 1..14) add("UTC+$h")
+                                    for (h in 1..12) add("UTC-$h")
+                                }
+                            }
                             Box {
                                 OutlinedButton(
                                     onClick = { timeModeMenuOpen = true },
@@ -1176,7 +1184,7 @@ private fun HomePage(
                                     expanded = timeModeMenuOpen,
                                     onDismissRequest = { timeModeMenuOpen = false }
                                 ) {
-                                    ChatboxViewModel.TIME_ZONE_OPTIONS.forEach { mode ->
+                                    timeModeOptions.forEach { mode: String ->
                                         DropdownMenuItem(
                                             text = { Text(mode) },
                                             onClick = {
