@@ -71,6 +71,9 @@ class UserPreferencesRepository(private val context: Context) {
         val TIME_ENABLED = booleanPreferencesKey("time_enabled")
         val TIME_MODE = stringPreferencesKey("time_mode")
 
+        // Card output order (comma-separated component names)
+        val CARD_ORDER = stringPreferencesKey("card_order")
+
         // \u2705 ToS
         val TOS_ACCEPTED_VERSION = intPreferencesKey("tos_accepted_version")
         val TOS_ACCEPTED_AT_EPOCH = longPreferencesKey("tos_accepted_at_epoch")
@@ -136,8 +139,14 @@ class UserPreferencesRepository(private val context: Context) {
     val timeEnabled: Flow<Boolean> = context.dataStore.data
         .map { it[Keys.TIME_ENABLED] ?: false }
 
+    val cardOrder: Flow<List<String>> = context.dataStore.data
+        .map { prefs ->
+            val raw = prefs[Keys.CARD_ORDER] ?: "NowPlaying,AFK,Cycle"
+            raw.split(",").map { it.trim() }.filter { it.isNotBlank() }
+        }
+
     val timeMode: Flow<String> = context.dataStore.data
-        .map { it[Keys.TIME_MODE] ?: "LOCAL" }
+        .map { it[Keys.TIME_MODE] ?: "Device" }
 
     // =========================
     // Save functions used by ChatboxViewModel
@@ -239,6 +248,10 @@ class UserPreferencesRepository(private val context: Context) {
 
     suspend fun saveTimeMode(value: String) {
         context.dataStore.edit { it[Keys.TIME_MODE] = value }
+    }
+
+    suspend fun saveCardOrder(order: List<String>) {
+        context.dataStore.edit { it[Keys.CARD_ORDER] = order.joinToString(",") }
     }
 
     // =========================
