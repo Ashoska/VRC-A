@@ -71,7 +71,7 @@ class UserPreferencesRepository(private val context: Context) {
         val TIME_ENABLED = booleanPreferencesKey("time_enabled")
         val TIME_MODE = stringPreferencesKey("time_mode")
 
-        // âœ… ToS
+        // \u2705 ToS
         val TOS_ACCEPTED_VERSION = intPreferencesKey("tos_accepted_version")
         val TOS_ACCEPTED_AT_EPOCH = longPreferencesKey("tos_accepted_at_epoch")
     }
@@ -242,7 +242,7 @@ class UserPreferencesRepository(private val context: Context) {
     }
 
     // =========================
-    // âœ… ToS
+    // \u2705 ToS
     // =========================
     fun tosAcceptedStateFlow(currentVersion: Int): StateFlow<Boolean> {
         return context.dataStore.data
