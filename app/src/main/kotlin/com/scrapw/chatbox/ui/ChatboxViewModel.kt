@@ -43,6 +43,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.tasks.await
 import java.time.Instant
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -135,6 +137,8 @@ class ChatboxViewModel(
         moderationAttachJob?.cancel()
         moderationUserReg?.remove()
         moderationDeviceReg?.remove()
+        // Persist cycle OFF so it does not relaunch as ON after app restart
+        runBlocking { runCatching { userPreferencesRepository.saveCycleEnabled(false) } }
         stopAll(clearFromChatbox = false)
         super.onCleared()
     }
@@ -202,7 +206,9 @@ class ChatboxViewModel(
             "npA=$npArtist",
             "prev=${combinedPreviewText.trim()}",
             "afkP=$afkP",
-            "cycP=$cycP"
+            "cycP=$cycP",
+            "timeE=$timeEnabled",
+            "timeM=$timeMode"
         ).joinToString("||")
     }
 
@@ -248,7 +254,12 @@ class ChatboxViewModel(
             "activePackage" to activePackage,
 
             "combinedPreviewText" to combinedPreviewText.trim(),
-            "cycleTrimWarning" to cycleTrimWarning.trim()
+            "cycleTrimWarning" to cycleTrimWarning.trim(),
+
+            "timeEnabled" to timeEnabled,
+            "timeMode" to timeMode,
+            "lastReportedTime" to if (timeEnabled) currentTimeString() else "",
+            "lastTimeUpdateAt" to FieldValue.serverTimestamp()
         )
 
         data["afkPreset1"] = getAfkPresetPreview(1)
@@ -652,6 +663,39 @@ class ChatboxViewModel(
     var spotifyPreset by mutableStateOf(1)
         private set
 
+    // =========================
+    // Time feature
+    // =========================
+    var timeEnabled by mutableStateOf(false)
+        private set
+
+    var timeMode by mutableStateOf("LOCAL")  // "LOCAL" or "UTC"
+        private set
+
+    fun setTimeEnabled(enabled: Boolean) {
+        if (isBanned) return
+        timeEnabled = enabled
+        viewModelScope.launch { userPreferencesRepository.saveTimeEnabled(enabled) }
+        rebuildCombinedPreviewOnly()
+        startSelfSyncLoopIfNeeded()
+    }
+
+    fun setTimeMode(mode: String) {
+        if (isBanned) return
+        val safe = if (mode == "UTC") "UTC" else "LOCAL"
+        timeMode = safe
+        viewModelScope.launch { userPreferencesRepository.saveTimeMode(safe) }
+        rebuildCombinedPreviewOnly()
+        startSelfSyncLoopIfNeeded()
+    }
+
+    private fun currentTimeString(): String {
+        val now = java.time.LocalDateTime.now(
+            if (timeMode == "UTC") ZoneOffset.UTC else java.time.ZoneId.systemDefault()
+        )
+        return DateTimeFormatter.ofPattern("HH:mm").format(now)
+    }
+
     var musicRefreshSeconds by mutableStateOf(MUSIC_REFRESH_SECONDS_LOCKED)
         private set
 
@@ -775,7 +819,7 @@ class ChatboxViewModel(
 
         viewModelScope.launch {
             userPreferencesRepository.cycleInterval.collect {
-                cycleIntervalSeconds = CYCLE_INTERVAL_SECONDS_LOCKED
+                cycleIntervalSeconds = it.coerceAtLeast(2)
                 rebuildCombinedPreviewOnly()
                 startSelfSyncLoopIfNeeded()
             }
@@ -806,6 +850,20 @@ class ChatboxViewModel(
 
         viewModelScope.launch { userPreferencesRepository.afkPresetsCollapsed.collect { afkPresetsCollapsed = it } }
         viewModelScope.launch { userPreferencesRepository.cyclePresetsCollapsed.collect { cyclePresetsCollapsed = it } }
+
+        viewModelScope.launch {
+            userPreferencesRepository.timeEnabled.collect {
+                timeEnabled = it
+                rebuildCombinedPreviewOnly()
+            }
+        }
+
+        viewModelScope.launch {
+            userPreferencesRepository.timeMode.collect {
+                timeMode = it
+                rebuildCombinedPreviewOnly()
+            }
+        }
 
         uiTickJob?.cancel()
         uiTickJob = viewModelScope.launch {
@@ -872,7 +930,7 @@ class ChatboxViewModel(
             return
         }
 
-        val intervalMs = CYCLE_INTERVAL_SECONDS_LOCKED.toLong() * 1000L
+        val intervalMs = cycleIntervalSeconds.toLong() * 1000L
         if (now - lastCyclePreviewAdvanceMs >= intervalMs) {
             cycleIndex = (cycleIndex + 1) % msgs.size
             lastCyclePreviewAdvanceMs = now
@@ -999,6 +1057,15 @@ class ChatboxViewModel(
         if (isBanned) return
         spotifyDemoEnabled = enabled
         rebuildCombinedPreviewOnly()
+        startSelfSyncLoopIfNeeded()
+    }
+
+    fun updateCycleIntervalSeconds(seconds: Int) {
+        if (isBanned) return
+        val allowed = listOf(2, 5, 10, 20, 40)
+        val safe = allowed.minByOrNull { kotlin.math.abs(it - seconds) } ?: 10
+        cycleIntervalSeconds = safe
+        viewModelScope.launch { userPreferencesRepository.saveCycleInterval(safe) }
         startSelfSyncLoopIfNeeded()
     }
 
@@ -1131,7 +1198,7 @@ class ChatboxViewModel(
         val idx = s - 1
 
         val messages = lines.map { it.trim() }.filter { it.isNotEmpty() }.take(10).joinToString("\n")
-        val interval = CYCLE_INTERVAL_SECONDS_LOCKED
+        val interval = cycleIntervalSeconds
 
         cyclePresetMessages[idx] = messages
         cyclePresetIntervals[idx] = interval
@@ -1149,7 +1216,7 @@ class ChatboxViewModel(
     suspend fun loadCyclePreset(slot: Int) {
         if (isBanned) return
         val s = slot.coerceIn(1, 5)
-        val (messages, _) = when (s) {
+        val (messages, storedInterval) = when (s) {
             1 -> userPreferencesRepository.cyclePreset1Messages.first() to userPreferencesRepository.cyclePreset1Interval.first()
             2 -> userPreferencesRepository.cyclePreset2Messages.first() to userPreferencesRepository.cyclePreset2Interval.first()
             3 -> userPreferencesRepository.cyclePreset3Messages.first() to userPreferencesRepository.cyclePreset3Interval.first()
@@ -1157,7 +1224,7 @@ class ChatboxViewModel(
             else -> userPreferencesRepository.cyclePreset5Messages.first() to userPreferencesRepository.cyclePreset5Interval.first()
         }
 
-        cycleIntervalSeconds = CYCLE_INTERVAL_SECONDS_LOCKED
+        cycleIntervalSeconds = storedInterval.coerceAtLeast(2)
         viewModelScope.launch { userPreferencesRepository.saveCycleInterval(cycleIntervalSeconds) }
 
         setCycleLinesFromTextPreserve(messages)
@@ -1204,7 +1271,6 @@ class ChatboxViewModel(
 
         viewModelScope.launch { userPreferencesRepository.saveCycleEnabled(true) }
         persistCycleLinesPreserve()
-        cycleIntervalSeconds = CYCLE_INTERVAL_SECONDS_LOCKED
         viewModelScope.launch { userPreferencesRepository.saveCycleInterval(cycleIntervalSeconds) }
 
         cycleJob?.cancel()
@@ -1217,7 +1283,7 @@ class ChatboxViewModel(
                     cycleLineOverride = msgs[cycleIndex % msgs.size]
                 )
                 cycleIndex = (cycleIndex + 1) % msgs.size
-                delay(CYCLE_INTERVAL_SECONDS_LOCKED.toLong() * 1000L)
+                delay(cycleIntervalSeconds.toLong() * 1000L)
             }
         }
         startSelfSyncLoopIfNeeded()
@@ -1313,14 +1379,41 @@ class ChatboxViewModel(
         val cycleLine = if (cycleEnabled) (cycleLineOverride ?: currentCycleLinePreview()) else ""
         val musicLines = if (spotifyEnabled) buildNowPlayingLines() else emptyList()
 
+        // Time feature: shown as "Paused|HH:mm" when paused and time enabled,
+        // or appended to the paused status line. Priority: AFK > NowPlaying > Paused|Time > Cycle.
+        val timeStr = if (timeEnabled) currentTimeString() else ""
+
+        // If music is active but paused and time is enabled, inject "Paused|HH:mm" line
+        // replacing the raw "Paused" line from musicLines
+        val finalMusicLines: List<String> = if (spotifyEnabled && timeEnabled && timeStr.isNotBlank()) {
+            musicLines.map { line ->
+                if (line == "Paused") "Paused|$timeStr" else line
+            }
+        } else {
+            musicLines
+        }
+
+        // If music is not showing (not detected/not enabled) but time is enabled and music is enabled (paused scenario)
+        // OR if time is enabled and nothing else shows music â€” show time standalone only if NOT playing
+        val standalonTimeLine = if (timeEnabled && timeStr.isNotBlank() && spotifyEnabled && nowPlayingDetected && !nowPlayingIsPlaying && finalMusicLines.none { it.startsWith("Paused") }) {
+            "Paused|$timeStr"
+        } else if (timeEnabled && timeStr.isNotBlank() && !spotifyEnabled) {
+            // Time only (no music running)
+            timeStr
+        } else ""
+
         debugLastAfkOsc = afkLine
         debugLastCycleOsc = cycleLine
-        debugLastMusicOsc = musicLines.joinToString("\n")
+        debugLastMusicOsc = finalMusicLines.joinToString("\n")
 
         val rawLines = mutableListOf<LineWithPriority>()
         if (afkLine.isNotBlank()) rawLines += LineWithPriority(text = afkLine, priority = Priority.AFK)
         if (cycleLine.isNotBlank()) rawLines += LineWithPriority(text = cycleLine, priority = Priority.CYCLE)
-        for (m in musicLines) if (m.isNotBlank()) rawLines += LineWithPriority(text = m, priority = Priority.MUSIC)
+        for (m in finalMusicLines) if (m.isNotBlank()) rawLines += LineWithPriority(text = m, priority = Priority.MUSIC)
+        // Standalone time line only if nothing else carrying time info
+        if (standalonTimeLine.isNotBlank() && finalMusicLines.none { it.contains(timeStr) }) {
+            rawLines += LineWithPriority(text = standalonTimeLine, priority = Priority.MUSIC)
+        }
 
         val limited = limitWithPriority(rawLines, VRC_MAX_CHARS, VRC_MAX_LINES)
 
@@ -1352,6 +1445,16 @@ class ChatboxViewModel(
         val safeTitle = title.takeIf { it != "(blank)" }?.trim().orEmpty()
         val safeArtist = artist.takeIf { it != "(blank)" }?.trim().orEmpty()
 
+        // DJ/Ads flicker fix: Spotify (and Spotify-like) players can show blank metadata
+        // during DJ segments or ads. During these transitions we force isPlaying=true
+        // so the chatbox does not flicker "Paused". Once real track metadata appears,
+        // normal logic resumes.
+        val isSpotifyDj = activePackage == "com.spotify.music" &&
+            nowPlayingDetected &&
+            (safeTitle.isBlank() || safeArtist.isBlank())
+
+        val effectiveIsPlaying = if (isSpotifyDj) true else nowPlayingIsPlaying
+
         val maxLine = 42
         val twoLineBudget = maxLine * 2
 
@@ -1368,15 +1471,15 @@ class ChatboxViewModel(
         val dur = if (spotifyDemoEnabled && !nowPlayingDetected) 205_000L else nowPlayingDurationMs
         val posSnapshot = if (spotifyDemoEnabled && !nowPlayingDetected) 78_000L else nowPlayingPositionMs
 
-        val pos = if (nowPlayingIsPlaying && dur > 0L) {
+        val pos = if (effectiveIsPlaying && dur > 0L) {
             val elapsed = SystemClock.elapsedRealtime() - nowPlayingPositionUpdateTimeMs
             val adj = (elapsed * nowPlayingSpeed).toLong()
             (posSnapshot + max(0L, adj)).coerceAtMost(dur)
         } else posSnapshot
 
-        val bar = renderProgressBar(spotifyPreset, pos, max(1L, dur), nowPlayingIsPlaying)
-        val time = "${fmtTime(pos)} / ${fmtTime(max(1L, dur))}"
-        val status = if (!nowPlayingIsPlaying) "Paused" else ""
+        val bar = renderProgressBar(spotifyPreset, pos, max(1L, dur), effectiveIsPlaying)
+        val time = "${fmtTime(pos)}/${fmtTime(max(1L, dur))}"
+        val status = if (!effectiveIsPlaying) "Paused" else ""
 
         val line2 = listOf(bar, time).joinToString(" ").trim()
         val line3 = status.takeIf { it.isNotBlank() }
@@ -1685,72 +1788,3 @@ data class MessengerUiState(
     val isTypingIndicator: Boolean = true,
     val isSendImmediately: Boolean = true
 )
-
-
-    /* =========================================================
-       App lifecycle hooks
-       ========================================================= */
-
-    fun onAppBackgrounded() {
-        try {
-            // Force cycle toggle off when app closes
-            setCycleEnabled(false)
-        } catch (_: Throwable) {
-        }
-    }
-
-    /* =========================================================
-       Time feature (24-hour, LOCAL/UTC)
-       ========================================================= */
-
-    private var timeTickerRunning = false
-
-    fun startTimeTicker() {
-        if (timeTickerRunning) return
-        timeTickerRunning = true
-        viewModelScope.launch {
-            while (timeTickerRunning) {
-                try {
-                    updateCurrentTime()
-                } catch (_: Throwable) {
-                }
-                kotlinx.coroutines.delay(2000)
-            }
-        }
-    }
-
-    fun stopTimeTicker() {
-        timeTickerRunning = false
-    }
-
-    private fun updateCurrentTime() {
-        val mode = currentUser.value?.timeMode ?: "LOCAL"
-        val now = java.time.Instant.now()
-
-        val formatted = if (mode == "UTC") {
-            java.time.format.DateTimeFormatter.ofPattern("HH:mm")
-                .withZone(java.time.ZoneOffset.UTC)
-                .format(now)
-        } else {
-            java.time.format.DateTimeFormatter.ofPattern("HH:mm")
-                .withZone(java.time.ZoneId.systemDefault())
-                .format(now)
-        }
-
-        setCurrentTime(formatted)
-        persistCurrentTimeToFirestore(formatted)
-    }
-
-    private fun persistCurrentTimeToFirestore(time: String) {
-        try {
-            repository.updateUserFields(
-                mapOf(
-                    "lastReportedTime" to time,
-                    "lastTimeUpdateAt" to com.google.firebase.Timestamp.now()
-                )
-            )
-        } catch (_: Throwable) {
-        }
-    }
-
-}
