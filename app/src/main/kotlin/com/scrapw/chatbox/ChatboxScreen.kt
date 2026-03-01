@@ -1149,7 +1149,33 @@ private fun HomePage(
 
             ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("Quick Toggles", style = MaterialTheme.typography.titleSmall)
+
+                    // Quick Toggles title row with Edit/Done toggle and Reset button
+                    var cardReorderMode by remember { mutableStateOf(false) }
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Quick Toggles", style = MaterialTheme.typography.titleSmall)
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            if (cardReorderMode) {
+                                TextButton(
+                                    onClick = { vm.resetCardOrder() },
+                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                                ) { Text("Reset", style = MaterialTheme.typography.labelSmall) }
+                            }
+                            TextButton(
+                                onClick = { cardReorderMode = !cardReorderMode },
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    if (cardReorderMode) "Done" else "Edit",
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                        }
+                    }
 
                     // Reorderable component rows - order = top-to-bottom in chatbox output
                     vm.cardOrder.forEachIndexed { idx: Int, component: String ->
@@ -1158,87 +1184,73 @@ private fun HomePage(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            // Component toggle
+                            // Component toggle or time row
                             Box(Modifier.weight(1f)) {
                                 when (component) {
                                     "AFK" -> ToggleRow("AFK", vm.afkEnabled, enabled = !isBanned) { vm.setAfkEnabledFlag(it) }
                                     "Cycle" -> ToggleRow("Cycle", vm.cycleEnabled, enabled = !isBanned) { vm.setCycleEnabledFlag(it) }
                                     "NowPlaying" -> ToggleRow("Now Playing", vm.spotifyEnabled, enabled = !isBanned) { vm.setSpotifyEnabledFlag(it) }
-                                }
-                            }
-                            // Up / Down reorder buttons
-                            Row {
-                                IconButton(
-                                    onClick = {
-                                        val order = vm.cardOrder.toMutableList()
-                                        if (idx > 0) { val tmp = order[idx]; order[idx] = order[idx - 1]; order[idx - 1] = tmp; vm.updateCardOrder(order) }
-                                    },
-                                    enabled = idx > 0
-                                ) {
-                                    Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "Move up", modifier = Modifier.size(18.dp))
-                                }
-                                IconButton(
-                                    onClick = {
-                                        val order = vm.cardOrder.toMutableList()
-                                        if (idx < order.size - 1) { val tmp = order[idx]; order[idx] = order[idx + 1]; order[idx + 1] = tmp; vm.updateCardOrder(order) }
-                                    },
-                                    enabled = idx < vm.cardOrder.size - 1
-                                ) {
-                                    Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Move down", modifier = Modifier.size(18.dp))
-                                }
-                            }
-                        }
-                    }
-
-                    // Time toggle - not part of the output order hierarchy (embedded in NowPlaying slot)
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Time")
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            var timeModeMenuOpen by remember { mutableStateOf(false) }
-                            val timeModeOptions: List<String> = remember {
-                                buildList {
-                                    add("Device")
-                                    add("UTC")
-                                    for (h in 1..14) add("UTC+$h")
-                                    for (h in 1..12) add("UTC-$h")
-                                }
-                            }
-                            Box {
-                                OutlinedButton(
-                                    onClick = { timeModeMenuOpen = true },
-                                    enabled = !isBanned,
-                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-                                ) {
-                                    Text(vm.timeMode, style = MaterialTheme.typography.bodySmall)
-                                    Icon(Icons.Filled.ExpandMore, contentDescription = null, modifier = Modifier.size(16.dp))
-                                }
-                                DropdownMenu(
-                                    expanded = timeModeMenuOpen,
-                                    onDismissRequest = { timeModeMenuOpen = false }
-                                ) {
-                                    timeModeOptions.forEach { mode: String ->
-                                        DropdownMenuItem(
-                                            text = { Text(mode) },
-                                            onClick = {
-                                                vm.updateTimeMode(mode)
-                                                timeModeMenuOpen = false
+                                    "Time" -> Row(
+                                        Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text("Time")
+                                        Row(
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            var timeModeMenuOpen by remember { mutableStateOf(false) }
+                                            val timeModeOptions: List<String> = remember {
+                                                buildList {
+                                                    add("Device"); add("UTC")
+                                                    for (h in 1..14) add("UTC+$h")
+                                                    for (h in 1..12) add("UTC-$h")
+                                                }
                                             }
-                                        )
+                                            Box {
+                                                OutlinedButton(
+                                                    onClick = { timeModeMenuOpen = true },
+                                                    enabled = !isBanned,
+                                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                                ) {
+                                                    Text(vm.timeMode, style = MaterialTheme.typography.bodySmall)
+                                                    Icon(Icons.Filled.ExpandMore, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                }
+                                                DropdownMenu(expanded = timeModeMenuOpen, onDismissRequest = { timeModeMenuOpen = false }) {
+                                                    timeModeOptions.forEach { mode: String ->
+                                                        DropdownMenuItem(text = { Text(mode) }, onClick = { vm.updateTimeMode(mode); timeModeMenuOpen = false })
+                                                    }
+                                                }
+                                            }
+                                            Switch(checked = vm.timeEnabled, onCheckedChange = { vm.updateTimeEnabled(it) }, enabled = !isBanned)
+                                        }
                                     }
                                 }
                             }
-                            Switch(
-                                checked = vm.timeEnabled,
-                                onCheckedChange = { vm.updateTimeEnabled(it) },
-                                enabled = !isBanned
-                            )
+                            // Up / Down arrows - only shown when in reorder mode
+                            if (cardReorderMode) {
+                                Row {
+                                    IconButton(
+                                        onClick = {
+                                            val order = vm.cardOrder.toMutableList()
+                                            if (idx > 0) { val tmp = order[idx]; order[idx] = order[idx - 1]; order[idx - 1] = tmp; vm.updateCardOrder(order) }
+                                        },
+                                        enabled = idx > 0
+                                    ) {
+                                        Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "Move up", modifier = Modifier.size(18.dp))
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            val order = vm.cardOrder.toMutableList()
+                                            if (idx < order.size - 1) { val tmp = order[idx]; order[idx] = order[idx + 1]; order[idx + 1] = tmp; vm.updateCardOrder(order) }
+                                        },
+                                        enabled = idx < vm.cardOrder.size - 1
+                                    ) {
+                                        Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Move down", modifier = Modifier.size(18.dp))
+                                    }
+                                }
+                            }
                         }
                     }
                 }
