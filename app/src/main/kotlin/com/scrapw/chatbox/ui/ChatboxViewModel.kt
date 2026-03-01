@@ -672,7 +672,7 @@ class ChatboxViewModel(
     var timeMode by mutableStateOf("LOCAL")  // "LOCAL" or "UTC"
         private set
 
-    fun setTimeEnabled(enabled: Boolean) {
+    fun updateTimeEnabled(enabled: Boolean) {
         if (isBanned) return
         timeEnabled = enabled
         viewModelScope.launch { userPreferencesRepository.saveTimeEnabled(enabled) }
@@ -680,7 +680,7 @@ class ChatboxViewModel(
         startSelfSyncLoopIfNeeded()
     }
 
-    fun setTimeMode(mode: String) {
+    fun updateTimeMode(mode: String) {
         if (isBanned) return
         val safe = if (mode == "UTC") "UTC" else "LOCAL"
         timeMode = safe
