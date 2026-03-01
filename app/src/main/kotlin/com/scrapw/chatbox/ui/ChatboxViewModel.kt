@@ -50,12 +50,12 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * ChatboxViewModel (DEVICE-FIRST) â€” RESTORED + RULES-COMPAT
+ * ChatboxViewModel (DEVICE-FIRST) \u2014 RESTORED + RULES-COMPAT
  *
- * âœ… Canonical doc:
+ * \u2705 Canonical doc:
  *   users/{deviceHash}
  *
- * âœ… UID mapping (matches YOUR RULES file):
+ * \u2705 UID mapping (matches YOUR RULES file):
  *   usersById/{authUid} -> { deviceHash, authUid, appId, adminBuild, updatedAt }
  *
  * NOTE (important):
@@ -213,7 +213,7 @@ class ChatboxViewModel(
     }
 
     /**
-     * âœ… Full snapshot for users/{deviceHash}
+     * \u2705 Full snapshot for users/{deviceHash}
      * Must stay inside your Firestore rules' selfMutableKeys() list.
      */
     private fun buildUserSnapshot(authUid: String, deviceHash: String): Map<String, Any> {
@@ -276,7 +276,7 @@ class ChatboxViewModel(
     }
 
     /**
-     * âœ… UID mapping per YOUR RULES:
+     * \u2705 UID mapping per YOUR RULES:
      * usersById/{uid} keys must be ONLY:
      *   deviceHash, authUid, appId, adminBuild, updatedAt
      */
@@ -1306,7 +1306,7 @@ class ChatboxViewModel(
         nowPlayingJob?.cancel()
         nowPlayingJob = viewModelScope.launch {
             while (spotifyEnabled && !isBanned) {
-                // âœ… ONLY CHANGE: run on a 2s cadence so OSC updates match public behavior
+                // \u2705 ONLY CHANGE: run on a 2s cadence so OSC updates match public behavior
                 rebuildAndMaybeSendCombined(forceSend = true, local = local)
                 delay(SEND_FLOOR_MS)
             }
@@ -1394,7 +1394,7 @@ class ChatboxViewModel(
         }
 
         // If music is not showing (not detected/not enabled) but time is enabled and music is enabled (paused scenario)
-        // OR if time is enabled and nothing else shows music â€” show time standalone only if NOT playing
+        // OR if time is enabled and nothing else shows music \u2014 show time standalone only if NOT playing
         val standalonTimeLine = if (timeEnabled && timeStr.isNotBlank() && spotifyEnabled && nowPlayingDetected && !nowPlayingIsPlaying && finalMusicLines.none { it.startsWith("Paused") }) {
             "Paused|$timeStr"
         } else if (timeEnabled && timeStr.isNotBlank() && !spotifyEnabled) {
@@ -1458,14 +1458,14 @@ class ChatboxViewModel(
         val maxLine = 42
         val twoLineBudget = maxLine * 2
 
-        val combinedName = if (safeArtist.isNotBlank()) "$safeArtist â€” $safeTitle" else safeTitle
+        val combinedName = if (safeArtist.isNotBlank()) "$safeArtist \u2014 $safeTitle" else safeTitle
         val preferNoArtist = safeArtist.isNotBlank() && combinedName.length > twoLineBudget
 
         val primary = if (preferNoArtist) safeTitle else combinedName
         val line1 = when {
             primary.length <= maxLine -> primary
             safeTitle.length <= maxLine -> safeTitle
-            else -> safeTitle.take(maxLine - 1) + "â€¦"
+            else -> safeTitle.take(maxLine - 1) + "\u2026"
         }.trim()
 
         val dur = if (spotifyDemoEnabled && !nowPlayingDetected) 205_000L else nowPlayingDurationMs
@@ -1524,7 +1524,7 @@ class ChatboxViewModel(
             val original = cleaned[index].text
             if (original.isEmpty()) return
             val newLen = (original.length - needToRemove).coerceAtLeast(1)
-            val trimmed = if (newLen >= 2) original.take(newLen - 1) + "â€¦" else "â€¦"
+            val trimmed = if (newLen >= 2) original.take(newLen - 1) + "\u2026" else "\u2026"
             if (cleaned[index].priority == Priority.CYCLE) cycleModifiedForMusic = true
             cleaned[index] = cleaned[index].copy(text = trimmed)
         }
@@ -1570,22 +1570,22 @@ class ChatboxViewModel(
             1 -> {
                 val innerSlots = 8
                 val idx = (p * (innerSlots - 1)).toInt()
-                val inner = CharArray(innerSlots) { 'â”' }
-                inner[idx] = 'â—‰'
-                "â™¡" + inner.concatToString() + "â™¡"
+                val inner = CharArray(innerSlots) { '\u2501' }
+                inner[idx] = '\u25C9'
+                "\u2661" + inner.concatToString() + "\u2661"
             }
             2 -> {
                 val slots = 10
                 val idx = (p * (slots - 1)).toInt()
-                val bg = CharArray(slots) { 'â”€' }
-                bg[idx] = 'â—‰'
+                val bg = CharArray(slots) { '\u2500' }
+                bg[idx] = '\u25C9'
                 bg.concatToString()
             }
             3 -> {
                 val slots = 10
                 val idx = (p * (slots - 1)).toInt()
-                val bg = CharArray(slots) { 'âŸ¡' }
-                bg[idx] = 'â—‰'
+                val bg = CharArray(slots) { '\u27E1' }
+                bg[idx] = '\u25C9'
                 bg.concatToString()
             }
             4 -> renderSoundwaveBar(p, posMs, isPlaying)
@@ -1594,9 +1594,9 @@ class ChatboxViewModel(
                 val idx = (p * (slots - 1)).toInt()
                 val out = CharArray(slots) { i ->
                     when {
-                        i < idx -> 'â–£'
-                        i == idx -> 'â—‰'
-                        else -> 'â–¢'
+                        i < idx -> '\u25A3'
+                        i == idx -> '\u25C9'
+                        else -> '\u25A2'
                     }
                 }
                 out.concatToString()
@@ -1635,21 +1635,21 @@ class ChatboxViewModel(
         val out = StringBuilder(10)
         for (i in 0 until slots) {
             if (i == idx) {
-                out.append('[').append('â–£').append(']')
+                out.append('[').append('\u25A3').append(']')
             } else out.append(chars[i])
         }
         return out.toString()
     }
 
     private fun ampToChar(a: Int): Char = when (a.coerceIn(1, 8)) {
-        1 -> 'â–'
-        2 -> 'â–‚'
-        3 -> 'â–ƒ'
-        4 -> 'â–„'
-        5 -> 'â–…'
-        6 -> 'â–†'
-        7 -> 'â–‡'
-        else -> 'â–ˆ'
+        1 -> '\u2581'
+        2 -> '\u2582'
+        3 -> '\u2583'
+        4 -> '\u2584'
+        5 -> '\u2585'
+        6 -> '\u2586'
+        7 -> '\u2587'
+        else -> '\u2588'
     }
 
     private fun fmtTime(ms: Long): String {
