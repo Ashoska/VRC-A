@@ -22,7 +22,11 @@ data class NowPlayingSnapshot(
 
     // This may be wrong during skips/seek on some players.
     // We may override it in NowPlayingState.update() based on motion.
-    val isPlaying: Boolean = false
+    val isPlaying: Boolean = false,
+
+    // True when the service marks the current media as a special segment
+    // (e.g., Spotify DJ / Ads). While active, we suppress paused inference to avoid flicker.
+    val specialActive: Boolean = false
 )
 
 object NowPlayingState {
@@ -40,11 +44,16 @@ object NowPlayingState {
         // Reset motion history if app changed (prevents false "paused" on app switch)
         val samePkg = prev.activePackage == snapshot.activePackage && snapshot.activePackage.isNotBlank()
 
-        val inferredIsPlaying = inferIsPlayingFromMotion(
-            prev = prev,
-            cur = snapshot,
-            samePkg = samePkg
-        )
+        // If specialActive is true (DJ/ads), never show paused. This prevents flicker.
+        val inferredIsPlaying = if (snapshot.specialActive) {
+            true
+        } else {
+            inferIsPlayingFromMotion(
+                prev = prev,
+                cur = snapshot,
+                samePkg = samePkg
+            )
+        }
 
         _state.value = snapshot.copy(isPlaying = inferredIsPlaying)
     }
@@ -53,29 +62,20 @@ object NowPlayingState {
         _state.value = _state.value.copy(listenerConnected = connected)
     }
 
-    /**
-     * When a media notification/session disappears, DON'T blank the UI.
-     * Keep the last known title/artist and simply mark it as paused.
-     * This prevents the UI/OSC text from randomly disappearing when players hide notifications.
-     */
+    // When a media notification/session disappears, do NOT blank the UI.
+    // Keep the last known title/artist and simply mark it paused.
     fun pauseIfActivePackage(pkg: String) {
         val cur = _state.value
         if (cur.activePackage == pkg && (cur.title.isNotBlank() || cur.artist.isNotBlank())) {
             _state.value = cur.copy(
                 detected = true,
-                // Keep title/artist/duration/position as the last known state
                 playbackSpeed = 0f,
-                isPlaying = false
+                isPlaying = false,
+                specialActive = false
             )
-        } else if (cur.activePackage == pkg) {
-            // If we have nothing meaningful, clear like before.
-            clearIfActivePackage(pkg)
         }
     }
 
-    /**
-     * Hard clear (used when you really want to remove the "Now Playing" info).
-     */
     fun clearIfActivePackage(pkg: String) {
         val cur = _state.value
         if (cur.activePackage == pkg) {
@@ -87,7 +87,8 @@ object NowPlayingState {
                 positionMs = 0L,
                 positionUpdateTimeMs = 0L,
                 playbackSpeed = 1f,
-                isPlaying = false
+                isPlaying = false,
+                specialActive = false
             )
         }
     }
