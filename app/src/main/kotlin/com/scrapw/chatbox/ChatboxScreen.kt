@@ -50,6 +50,8 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Gavel
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
@@ -1148,10 +1150,47 @@ private fun HomePage(
             ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("Quick Toggles", style = MaterialTheme.typography.titleSmall)
-                    ToggleRow("AFK", vm.afkEnabled, enabled = !isBanned) { vm.setAfkEnabledFlag(it) }
-                    ToggleRow("Cycle", vm.cycleEnabled, enabled = !isBanned) { vm.setCycleEnabledFlag(it) }
-                    ToggleRow("Now Playing", vm.spotifyEnabled, enabled = !isBanned) { vm.setSpotifyEnabledFlag(it) }
-                    // Time feature toggle with LOCAL/UTC dropdown
+
+                    // Reorderable component rows - order = top-to-bottom in chatbox output
+                    vm.cardOrder.forEachIndexed { idx: Int, component: String ->
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // Component toggle
+                            Box(Modifier.weight(1f)) {
+                                when (component) {
+                                    "AFK" -> ToggleRow("AFK", vm.afkEnabled, enabled = !isBanned) { vm.setAfkEnabledFlag(it) }
+                                    "Cycle" -> ToggleRow("Cycle", vm.cycleEnabled, enabled = !isBanned) { vm.setCycleEnabledFlag(it) }
+                                    "NowPlaying" -> ToggleRow("Now Playing", vm.spotifyEnabled, enabled = !isBanned) { vm.setSpotifyEnabledFlag(it) }
+                                }
+                            }
+                            // Up / Down reorder buttons
+                            Row {
+                                IconButton(
+                                    onClick = {
+                                        val order = vm.cardOrder.toMutableList()
+                                        if (idx > 0) { val tmp = order[idx]; order[idx] = order[idx - 1]; order[idx - 1] = tmp; vm.updateCardOrder(order) }
+                                    },
+                                    enabled = idx > 0
+                                ) {
+                                    Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "Move up", modifier = Modifier.size(18.dp))
+                                }
+                                IconButton(
+                                    onClick = {
+                                        val order = vm.cardOrder.toMutableList()
+                                        if (idx < order.size - 1) { val tmp = order[idx]; order[idx] = order[idx + 1]; order[idx + 1] = tmp; vm.updateCardOrder(order) }
+                                    },
+                                    enabled = idx < vm.cardOrder.size - 1
+                                ) {
+                                    Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Move down", modifier = Modifier.size(18.dp))
+                                }
+                            }
+                        }
+                    }
+
+                    // Time toggle - not part of the output order hierarchy (embedded in NowPlaying slot)
                     Row(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
