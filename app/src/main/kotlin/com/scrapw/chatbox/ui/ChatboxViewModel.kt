@@ -746,21 +746,24 @@ class ChatboxViewModel(
     // Valid component names: "NowPlaying", "AFK", "Cycle"
     // Order = top-to-bottom in the chatbox output. Cut-off priority is unchanged.
     // =========================
-    val DEFAULT_CARD_ORDER = listOf("NowPlaying", "AFK", "Cycle")
+    val DEFAULT_CARD_ORDER = listOf("NowPlaying", "AFK", "Cycle", "Time")
 
-    var cardOrder by mutableStateOf(listOf("NowPlaying", "AFK", "Cycle"))
+    var cardOrder by mutableStateOf(listOf("NowPlaying", "AFK", "Cycle", "Time"))
         private set
 
     fun updateCardOrder(order: List<String>) {
         if (isBanned) return
-        val valid = order.filter { it in DEFAULT_CARD_ORDER }
-            .distinct()
+        val valid = order.filter { it in DEFAULT_CARD_ORDER }.distinct()
         // Ensure all components present (append any missing to end)
         val full = valid + DEFAULT_CARD_ORDER.filter { it !in valid }
         cardOrder = full
         viewModelScope.launch { userPreferencesRepository.saveCardOrder(full) }
         rebuildCombinedPreviewOnly()
         startSelfSyncLoopIfNeeded()
+    }
+
+    fun resetCardOrder() {
+        updateCardOrder(DEFAULT_CARD_ORDER)
     }
 
     // =========================
@@ -954,20 +957,21 @@ class ChatboxViewModel(
 
                 nowPlayingSpecialActive = s.specialActive
 
+                // Special window only gates playing-state (prevents Paused flicker during DJ/ads).
+                // Title updates always go through stabilize so real track shows immediately
+                // when the DJ/ad segment ends, even if the 30s special window is still active.
                 if (s.specialActive) {
-                    // DJ/Ad window is active: keep confirmed track as-is, force playing.
-                    // Don't call stabilizeNowPlayingMetadata so "DJ"/"AD" never overwrites confirmed.
                     nowPlayingReportedIsPlaying = true
-                } else {
-                    stabilizeNowPlayingMetadata(
-                        rawTitle = s.title,
-                        rawArtist = s.artist,
-                        rawDurationMs = s.durationMs,
-                        positionMs = s.positionMs,
-                        reportedIsPlaying = s.isPlaying,
-                        inferredIsPlaying = inferredIsPlaying
-                    )
                 }
+                stabilizeNowPlayingMetadata(
+                    rawTitle = s.title,
+                    rawArtist = s.artist,
+                    rawDurationMs = s.durationMs,
+                    positionMs = s.positionMs,
+                    reportedIsPlaying = s.isPlaying,
+                    inferredIsPlaying = inferredIsPlaying,
+                    forceConfirm = trackChanged  // skips pending, shows title immediately on skip
+                )
 
                 nowPlayingIsPlaying = computeDisplayedPlaying()
                 rebuildCombinedPreviewOnly()
@@ -1025,7 +1029,10 @@ class ChatboxViewModel(
 
         val moved = dp >= 150L || abs(dp) >= 1_000L
 
-        if (moved) {
+        // Only treat position advance as "playing evidence" when the service reports playing.
+        // If reported paused, extrapolated pos still advances (speed=1f jitter) - don't let that
+        // reset pauseCandidateSinceMs and prevent the pause dot from appearing.
+        if (moved && nowPlayingReportedIsPlaying) {
             lastMovementAtMs = nowMs
             pauseCandidateSinceMs = 0L
             inferredIsPlaying = true
@@ -1466,10 +1473,10 @@ class ChatboxViewModel(
             when (component) {
                 "AFK" -> if (afkLine.isNotBlank()) rawLines += LineWithPriority(text = afkLine, priority = Priority.AFK)
                 "Cycle" -> if (cycleLine.isNotBlank()) rawLines += LineWithPriority(text = cycleLine, priority = Priority.CYCLE)
-                "NowPlaying" -> {
-                    for (m in musicLines) if (m.isNotBlank()) rawLines += LineWithPriority(text = m, priority = Priority.MUSIC)
-                    if (standalonTimeLine.isNotBlank()) rawLines += LineWithPriority(text = standalonTimeLine, priority = Priority.MUSIC)
-                }
+                "NowPlaying" -> for (m in musicLines) if (m.isNotBlank()) rawLines += LineWithPriority(text = m, priority = Priority.MUSIC)
+                // Standalone time: shown at its ordered position only when music is not active.
+                // When music IS active, time is already embedded in the NowPlaying status line.
+                "Time" -> if (standalonTimeLine.isNotBlank()) rawLines += LineWithPriority(text = standalonTimeLine, priority = Priority.MUSIC)
             }
         }
 
@@ -1537,7 +1544,10 @@ class ChatboxViewModel(
             (posSnapshot + max(0L, adj)).coerceAtMost(dur)
         } else posSnapshot
 
-        val bar = renderProgressBar(spotifyPreset, pos, max(1L, dur), effectiveIsPlaying)
+        // dotIsPlaying: instant - uses reported state so dot flips immediately on pause/play.
+        // DJ/special window forces it true so dot never flickers during ads/transitions.
+        val dotIsPlaying = if (nowPlayingSpecialActive || isSpotifyDj) true else nowPlayingReportedIsPlaying
+        val bar = renderProgressBar(spotifyPreset, pos, max(1L, dur), effectiveIsPlaying, dotIsPlaying)
         val time = "${fmtTime(pos)}/${fmtTime(max(1L, dur))}"
 
         // Status slot: time-only when enabled. Paused state is signalled by the bar dot (\u23F8).
@@ -1627,13 +1637,19 @@ class ChatboxViewModel(
     // Progress bars
     // =========================
 
-    // Playing dot: \u25C9 (circled dot). Paused dot: \u23F8 (double vertical bar = pause symbol).
+    // \u25C9 = playing (circled dot). \u23F8 = paused (classic double-bar pause symbol).
     private fun posDot(isPlaying: Boolean): Char = if (isPlaying) '\u25C9' else '\u23F8'
 
-    private fun renderProgressBar(preset: Int, posMs: Long, durMs: Long, isPlaying: Boolean): String {
+    // isPlaying   = animation state (smoothed - suppress stall/DJ flicker on position advance)
+    // dotIsPlaying = dot char state (instant - reflects actual reported playing state)
+    private fun renderProgressBar(
+        preset: Int, posMs: Long, durMs: Long,
+        isPlaying: Boolean,
+        dotIsPlaying: Boolean = isPlaying
+    ): String {
         val duration = max(1L, durMs)
         val p = min(1f, max(0f, posMs.toFloat() / duration.toFloat()))
-        val dot = posDot(isPlaying)
+        val dot = posDot(dotIsPlaying)
 
         return when (preset.coerceIn(1, 5)) {
             1 -> {
@@ -1657,7 +1673,7 @@ class ChatboxViewModel(
                 bg[idx] = dot
                 bg.concatToString()
             }
-            4 -> renderSoundwaveBar(p, posMs, isPlaying)
+            4 -> renderSoundwaveBar(p, posMs, isPlaying, dotIsPlaying)
             else -> {
                 val slots = 10
                 val idx = (p * (slots - 1)).toInt()
@@ -1688,7 +1704,7 @@ class ChatboxViewModel(
 
     private val soundwavePaused: IntArray = intArrayOf(4, 5, 4, 6, 4, 5, 4, 6, 4, 5, 4, 6)
 
-    private fun renderSoundwaveBar(progress01: Float, posMs: Long, isPlaying: Boolean): String {
+    private fun renderSoundwaveBar(progress01: Float, posMs: Long, isPlaying: Boolean, dotIsPlaying: Boolean = isPlaying): String {
         val slots = 8
         val idx = (progress01 * (slots - 1)).toInt().coerceIn(0, slots - 1)
 
@@ -1704,7 +1720,7 @@ class ChatboxViewModel(
         val out = StringBuilder(10)
         for (i in 0 until slots) {
             if (i == idx) {
-                out.append('[').append(posDot(isPlaying)).append(']')
+                out.append('[').append(posDot(dotIsPlaying)).append(']')
             } else out.append(chars[i])
         }
         return out.toString()
@@ -1745,7 +1761,8 @@ class ChatboxViewModel(
         rawDurationMs: Long,
         positionMs: Long,
         reportedIsPlaying: Boolean,
-        inferredIsPlaying: Boolean
+        inferredIsPlaying: Boolean,
+        forceConfirm: Boolean = false
     ) {
         val now = System.currentTimeMillis()
 
@@ -1772,6 +1789,20 @@ class ChatboxViewModel(
         }
 
         val rawKey = "${t}|${a}|$rawDurationMs"
+
+        // Force-confirm: track changed signal from collect block - skip pending, show title immediately.
+        if (forceConfirm && rawKey != confirmedTrackKey) {
+            confirmedTrackKey = rawKey
+            confirmedTitle = t
+            confirmedArtist = a
+            confirmedDurationMs = rawDurationMs
+            pendingTrackKey = ""
+            pendingSinceMs = 0L
+            pendingStartPosMs = 0L
+            lastNowPlayingTitle = if (t.isBlank()) "(blank)" else t
+            lastNowPlayingArtist = if (a.isBlank()) "(blank)" else a
+            return
+        }
 
         if (confirmedTrackKey.isBlank()) {
             confirmedTrackKey = rawKey
