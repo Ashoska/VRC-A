@@ -22,11 +22,7 @@ data class NowPlayingSnapshot(
 
     // This may be wrong during skips/seek on some players.
     // We may override it in NowPlayingState.update() based on motion.
-    val isPlaying: Boolean = false,
-
-    // True when the service marks the current media as a special segment
-    // (e.g., Spotify DJ / Ads). While active, we suppress paused inference to avoid flicker.
-    val specialActive: Boolean = false
+    val isPlaying: Boolean = false
 )
 
 object NowPlayingState {
@@ -38,8 +34,18 @@ object NowPlayingState {
     private const val STALLED_POS_DELTA_MS = 60L     // treat <= this as "not moving"
     private const val STALLED_TIME_MS = 1400L        // if not moving for >= this, call it paused
 
-    // YouTube-specific stall tracking to fix false PLAYING state
-    private val youtubeStallCountByPackage = HashMap<String, Int>()
+    // YouTube-specific stall detection: 2 consecutive 2s cycles with no position movement
+    private val YOUTUBE_PACKAGES = setOf(
+        "com.google.android.youtube",
+        "com.google.android.apps.youtube.music"
+    )
+    private const val YOUTUBE_STALL_DELTA_MS = 50L   // position must NOT change more than this
+    private const val YOUTUBE_STALL_CYCLES_NEEDED = 2
+
+    // State for YouTube stall tracking (mutable object-level state)
+    private var ytLastMetaKey: String = ""
+    private var ytLastPosMs: Long = -1L
+    private var ytStallCycles: Int = 0
 
     fun update(snapshot: NowPlayingSnapshot) {
         val prev = _state.value
@@ -47,62 +53,73 @@ object NowPlayingState {
         // Reset motion history if app changed (prevents false "paused" on app switch)
         val samePkg = prev.activePackage == snapshot.activePackage && snapshot.activePackage.isNotBlank()
 
-        // If specialActive is true (DJ/ads), never show paused. This prevents flicker.
-        val inferredIsPlaying = if (snapshot.specialActive) {
-            true
-        } else {
-            inferIsPlayingFromMotion(
-                prev = prev,
-                cur = snapshot,
-                samePkg = samePkg
-            )
-        }
+        var inferredIsPlaying = inferIsPlayingFromMotion(
+            prev = prev,
+            cur = snapshot,
+            samePkg = samePkg
+        )
 
-        var finalIsPlaying = inferredIsPlaying
+        // YouTube-specific override: detect pause by checking 2 consecutive stall cycles.
+        // This must not affect other apps.
+        if (snapshot.activePackage in YOUTUBE_PACKAGES && snapshot.detected) {
+            val metaKey = "${snapshot.title.trim()}|${snapshot.artist.trim()}|${snapshot.durationMs}"
+            val metaChanged = metaKey != ytLastMetaKey
+            val posDelta = abs(snapshot.positionMs - ytLastPosMs)
 
-        // Hard override for YouTube pause detection
-        if (
-            snapshot.activePackage == "com.google.android.youtube" ||
-            snapshot.activePackage == "com.google.android.apps.youtube.music"
-        ) {
-            val sameMeta = prev.title == snapshot.title && prev.artist == snapshot.artist
-            val posDelta = abs(snapshot.positionMs - prev.positionMs)
-
-            if (sameMeta && posDelta < 50L) {
-                val count = (youtubeStallCountByPackage[snapshot.activePackage] ?: 0) + 1
-                youtubeStallCountByPackage[snapshot.activePackage] = count
-
-                if (count >= 2) {
-                    finalIsPlaying = false
-                }
+            if (metaChanged || !samePkg) {
+                // New track or new app: reset stall counter, treat as playing
+                ytLastMetaKey = metaKey
+                ytLastPosMs = snapshot.positionMs
+                ytStallCycles = 0
+            } else if (ytLastPosMs >= 0L && posDelta < YOUTUBE_STALL_DELTA_MS) {
+                ytStallCycles++
+                ytLastPosMs = snapshot.positionMs
             } else {
-                youtubeStallCountByPackage[snapshot.activePackage] = 0
+                // Position moved: clear stall, definitely playing
+                ytStallCycles = 0
+                ytLastPosMs = snapshot.positionMs
             }
-        } else {
-            youtubeStallCountByPackage.clear()
+
+            if (ytStallCycles >= YOUTUBE_STALL_CYCLES_NEEDED) {
+                inferredIsPlaying = false
+            }
+        } else if (snapshot.activePackage !in YOUTUBE_PACKAGES) {
+            // Reset YouTube state when not on a YouTube app
+            ytLastMetaKey = ""
+            ytLastPosMs = -1L
+            ytStallCycles = 0
         }
 
-        _state.value = snapshot.copy(isPlaying = finalIsPlaying)
+        _state.value = snapshot.copy(isPlaying = inferredIsPlaying)
     }
 
     fun setConnected(connected: Boolean) {
         _state.value = _state.value.copy(listenerConnected = connected)
     }
 
-    // When a media notification/session disappears, do NOT blank the UI.
-    // Keep the last known title/artist and simply mark it paused.
+    /**
+     * When a media notification/session disappears, DON'T blank the UI.
+     * Keep the last known title/artist and simply mark it as paused.
+     * This prevents the UI/OSC text from randomly disappearing when players hide notifications.
+     */
     fun pauseIfActivePackage(pkg: String) {
         val cur = _state.value
         if (cur.activePackage == pkg && (cur.title.isNotBlank() || cur.artist.isNotBlank())) {
             _state.value = cur.copy(
                 detected = true,
+                // Keep title/artist/duration/position as the last known state
                 playbackSpeed = 0f,
-                isPlaying = false,
-                specialActive = false
+                isPlaying = false
             )
+        } else if (cur.activePackage == pkg) {
+            // If we have nothing meaningful, clear like before.
+            clearIfActivePackage(pkg)
         }
     }
 
+    /**
+     * Hard clear (used when you really want to remove the "Now Playing" info).
+     */
     fun clearIfActivePackage(pkg: String) {
         val cur = _state.value
         if (cur.activePackage == pkg) {
@@ -114,8 +131,7 @@ object NowPlayingState {
                 positionMs = 0L,
                 positionUpdateTimeMs = 0L,
                 playbackSpeed = 1f,
-                isPlaying = false,
-                specialActive = false
+                isPlaying = false
             )
         }
     }
