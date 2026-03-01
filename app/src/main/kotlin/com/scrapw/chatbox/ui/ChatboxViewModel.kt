@@ -48,12 +48,12 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * ChatboxViewModel (DEVICE-FIRST) — RESTORED + RULES-COMPAT
+ * ChatboxViewModel (DEVICE-FIRST) â€” RESTORED + RULES-COMPAT
  *
- * ✅ Canonical doc:
+ * âœ… Canonical doc:
  *   users/{deviceHash}
  *
- * ✅ UID mapping (matches YOUR RULES file):
+ * âœ… UID mapping (matches YOUR RULES file):
  *   usersById/{authUid} -> { deviceHash, authUid, appId, adminBuild, updatedAt }
  *
  * NOTE (important):
@@ -207,7 +207,7 @@ class ChatboxViewModel(
     }
 
     /**
-     * ✅ Full snapshot for users/{deviceHash}
+     * âœ… Full snapshot for users/{deviceHash}
      * Must stay inside your Firestore rules' selfMutableKeys() list.
      */
     private fun buildUserSnapshot(authUid: String, deviceHash: String): Map<String, Any> {
@@ -265,7 +265,7 @@ class ChatboxViewModel(
     }
 
     /**
-     * ✅ UID mapping per YOUR RULES:
+     * âœ… UID mapping per YOUR RULES:
      * usersById/{uid} keys must be ONLY:
      *   deviceHash, authUid, appId, adminBuild, updatedAt
      */
@@ -1240,7 +1240,7 @@ class ChatboxViewModel(
         nowPlayingJob?.cancel()
         nowPlayingJob = viewModelScope.launch {
             while (spotifyEnabled && !isBanned) {
-                // ✅ ONLY CHANGE: run on a 2s cadence so OSC updates match public behavior
+                // âœ… ONLY CHANGE: run on a 2s cadence so OSC updates match public behavior
                 rebuildAndMaybeSendCombined(forceSend = true, local = local)
                 delay(SEND_FLOOR_MS)
             }
@@ -1355,14 +1355,14 @@ class ChatboxViewModel(
         val maxLine = 42
         val twoLineBudget = maxLine * 2
 
-        val combinedName = if (safeArtist.isNotBlank()) "$safeArtist — $safeTitle" else safeTitle
+        val combinedName = if (safeArtist.isNotBlank()) "$safeArtist â€” $safeTitle" else safeTitle
         val preferNoArtist = safeArtist.isNotBlank() && combinedName.length > twoLineBudget
 
         val primary = if (preferNoArtist) safeTitle else combinedName
         val line1 = when {
             primary.length <= maxLine -> primary
             safeTitle.length <= maxLine -> safeTitle
-            else -> safeTitle.take(maxLine - 1) + "…"
+            else -> safeTitle.take(maxLine - 1) + "â€¦"
         }.trim()
 
         val dur = if (spotifyDemoEnabled && !nowPlayingDetected) 205_000L else nowPlayingDurationMs
@@ -1421,7 +1421,7 @@ class ChatboxViewModel(
             val original = cleaned[index].text
             if (original.isEmpty()) return
             val newLen = (original.length - needToRemove).coerceAtLeast(1)
-            val trimmed = if (newLen >= 2) original.take(newLen - 1) + "…" else "…"
+            val trimmed = if (newLen >= 2) original.take(newLen - 1) + "â€¦" else "â€¦"
             if (cleaned[index].priority == Priority.CYCLE) cycleModifiedForMusic = true
             cleaned[index] = cleaned[index].copy(text = trimmed)
         }
@@ -1467,22 +1467,22 @@ class ChatboxViewModel(
             1 -> {
                 val innerSlots = 8
                 val idx = (p * (innerSlots - 1)).toInt()
-                val inner = CharArray(innerSlots) { '━' }
-                inner[idx] = '◉'
-                "♡" + inner.concatToString() + "♡"
+                val inner = CharArray(innerSlots) { 'â”' }
+                inner[idx] = 'â—‰'
+                "â™¡" + inner.concatToString() + "â™¡"
             }
             2 -> {
                 val slots = 10
                 val idx = (p * (slots - 1)).toInt()
-                val bg = CharArray(slots) { '─' }
-                bg[idx] = '◉'
+                val bg = CharArray(slots) { 'â”€' }
+                bg[idx] = 'â—‰'
                 bg.concatToString()
             }
             3 -> {
                 val slots = 10
                 val idx = (p * (slots - 1)).toInt()
-                val bg = CharArray(slots) { '⟡' }
-                bg[idx] = '◉'
+                val bg = CharArray(slots) { 'âŸ¡' }
+                bg[idx] = 'â—‰'
                 bg.concatToString()
             }
             4 -> renderSoundwaveBar(p, posMs, isPlaying)
@@ -1491,9 +1491,9 @@ class ChatboxViewModel(
                 val idx = (p * (slots - 1)).toInt()
                 val out = CharArray(slots) { i ->
                     when {
-                        i < idx -> '▣'
-                        i == idx -> '◉'
-                        else -> '▢'
+                        i < idx -> 'â–£'
+                        i == idx -> 'â—‰'
+                        else -> 'â–¢'
                     }
                 }
                 out.concatToString()
@@ -1532,21 +1532,21 @@ class ChatboxViewModel(
         val out = StringBuilder(10)
         for (i in 0 until slots) {
             if (i == idx) {
-                out.append('[').append('▣').append(']')
+                out.append('[').append('â–£').append(']')
             } else out.append(chars[i])
         }
         return out.toString()
     }
 
     private fun ampToChar(a: Int): Char = when (a.coerceIn(1, 8)) {
-        1 -> '▁'
-        2 -> '▂'
-        3 -> '▃'
-        4 -> '▄'
-        5 -> '▅'
-        6 -> '▆'
-        7 -> '▇'
-        else -> '█'
+        1 -> 'â–'
+        2 -> 'â–‚'
+        3 -> 'â–ƒ'
+        4 -> 'â–„'
+        5 -> 'â–…'
+        6 -> 'â–†'
+        7 -> 'â–‡'
+        else -> 'â–ˆ'
     }
 
     private fun fmtTime(ms: Long): String {
@@ -1685,3 +1685,72 @@ data class MessengerUiState(
     val isTypingIndicator: Boolean = true,
     val isSendImmediately: Boolean = true
 )
+
+
+    /* =========================================================
+       App lifecycle hooks
+       ========================================================= */
+
+    fun onAppBackgrounded() {
+        try {
+            // Force cycle toggle off when app closes
+            setCycleEnabled(false)
+        } catch (_: Throwable) {
+        }
+    }
+
+    /* =========================================================
+       Time feature (24-hour, LOCAL/UTC)
+       ========================================================= */
+
+    private var timeTickerRunning = false
+
+    fun startTimeTicker() {
+        if (timeTickerRunning) return
+        timeTickerRunning = true
+        viewModelScope.launch {
+            while (timeTickerRunning) {
+                try {
+                    updateCurrentTime()
+                } catch (_: Throwable) {
+                }
+                kotlinx.coroutines.delay(2000)
+            }
+        }
+    }
+
+    fun stopTimeTicker() {
+        timeTickerRunning = false
+    }
+
+    private fun updateCurrentTime() {
+        val mode = currentUser.value?.timeMode ?: "LOCAL"
+        val now = java.time.Instant.now()
+
+        val formatted = if (mode == "UTC") {
+            java.time.format.DateTimeFormatter.ofPattern("HH:mm")
+                .withZone(java.time.ZoneOffset.UTC)
+                .format(now)
+        } else {
+            java.time.format.DateTimeFormatter.ofPattern("HH:mm")
+                .withZone(java.time.ZoneId.systemDefault())
+                .format(now)
+        }
+
+        setCurrentTime(formatted)
+        persistCurrentTimeToFirestore(formatted)
+    }
+
+    private fun persistCurrentTimeToFirestore(time: String) {
+        try {
+            repository.updateUserFields(
+                mapOf(
+                    "lastReportedTime" to time,
+                    "lastTimeUpdateAt" to com.google.firebase.Timestamp.now()
+                )
+            )
+        } catch (_: Throwable) {
+        }
+    }
+
+}
