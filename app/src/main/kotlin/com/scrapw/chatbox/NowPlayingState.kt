@@ -38,6 +38,9 @@ object NowPlayingState {
     private const val STALLED_POS_DELTA_MS = 60L     // treat <= this as "not moving"
     private const val STALLED_TIME_MS = 1400L        // if not moving for >= this, call it paused
 
+    // YouTube-specific stall tracking to fix false PLAYING state
+    private val youtubeStallCountByPackage = HashMap<String, Int>()
+
     fun update(snapshot: NowPlayingSnapshot) {
         val prev = _state.value
 
@@ -55,7 +58,31 @@ object NowPlayingState {
             )
         }
 
-        _state.value = snapshot.copy(isPlaying = inferredIsPlaying)
+        var finalIsPlaying = inferredIsPlaying
+
+        // Hard override for YouTube pause detection
+        if (
+            snapshot.activePackage == "com.google.android.youtube" ||
+            snapshot.activePackage == "com.google.android.apps.youtube.music"
+        ) {
+            val sameMeta = prev.title == snapshot.title && prev.artist == snapshot.artist
+            val posDelta = abs(snapshot.positionMs - prev.positionMs)
+
+            if (sameMeta && posDelta < 50L) {
+                val count = (youtubeStallCountByPackage[snapshot.activePackage] ?: 0) + 1
+                youtubeStallCountByPackage[snapshot.activePackage] = count
+
+                if (count >= 2) {
+                    finalIsPlaying = false
+                }
+            } else {
+                youtubeStallCountByPackage[snapshot.activePackage] = 0
+            }
+        } else {
+            youtubeStallCountByPackage.clear()
+        }
+
+        _state.value = snapshot.copy(isPlaying = finalIsPlaying)
     }
 
     fun setConnected(connected: Boolean) {
