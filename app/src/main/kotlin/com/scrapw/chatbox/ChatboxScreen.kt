@@ -473,6 +473,9 @@ fun ChatboxScreen(
         UiPrefs.writeSpotifyEnabled(ctx, false)
         chatboxViewModel.setSpotifyEnabledFlag(false)
 
+        // Time toggle also resets on restart (timezone persists, toggle does not).
+        chatboxViewModel.updateTimeEnabled(false)
+
         // Keep demo + preset restore.
         chatboxViewModel.setSpotifyDemoFlag(UiPrefs.readSpotifyDemo(ctx))
         chatboxViewModel.updateSpotifyPreset(UiPrefs.readSpotifyPreset(ctx))
@@ -1160,7 +1163,6 @@ private fun HomePage(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             var timeModeMenuOpen by remember { mutableStateOf(false) }
-                            val timeModes = listOf("LOCAL", "UTC")
                             Box {
                                 OutlinedButton(
                                     onClick = { timeModeMenuOpen = true },
@@ -1174,7 +1176,7 @@ private fun HomePage(
                                     expanded = timeModeMenuOpen,
                                     onDismissRequest = { timeModeMenuOpen = false }
                                 ) {
-                                    timeModes.forEach { mode ->
+                                    ChatboxViewModel.TIME_ZONE_OPTIONS.forEach { mode ->
                                         DropdownMenuItem(
                                             text = { Text(mode) },
                                             onClick = {
