@@ -129,6 +129,14 @@ class ChatboxViewModel(
             if (!::instance.isInitialized) throw Exception("ChatboxViewModel is not initialized!")
             return instance
         }
+
+        // All selectable timezone options shown in the dropdown
+        val TIME_ZONE_OPTIONS: List<String> = buildList {
+            add("Device")
+            add("UTC")
+            for (h in 1..14) add("UTC+$h")
+            for (h in 1..12) add("UTC-$h")
+        }
     }
 
     override fun onCleared() {
@@ -137,8 +145,9 @@ class ChatboxViewModel(
         moderationAttachJob?.cancel()
         moderationUserReg?.remove()
         moderationDeviceReg?.remove()
-        // Persist cycle OFF so it does not relaunch as ON after app restart
+        // Persist cycle + time OFF so they do not relaunch as ON after app restart
         runBlocking { runCatching { userPreferencesRepository.saveCycleEnabled(false) } }
+        runBlocking { runCatching { userPreferencesRepository.saveTimeEnabled(false) } }
         stopAll(clearFromChatbox = false)
         super.onCleared()
     }
@@ -669,7 +678,8 @@ class ChatboxViewModel(
     var timeEnabled by mutableStateOf(false)
         private set
 
-    var timeMode by mutableStateOf("LOCAL")  // "LOCAL" or "UTC"
+    // Stored as: "Device", "UTC", "UTC+1".."UTC+14", "UTC-1".."UTC-12"
+    var timeMode by mutableStateOf("Device")
         private set
 
     fun updateTimeEnabled(enabled: Boolean) {
@@ -682,17 +692,29 @@ class ChatboxViewModel(
 
     fun updateTimeMode(mode: String) {
         if (isBanned) return
-        val safe = if (mode == "UTC") "UTC" else "LOCAL"
-        timeMode = safe
-        viewModelScope.launch { userPreferencesRepository.saveTimeMode(safe) }
+        timeMode = mode
+        viewModelScope.launch { userPreferencesRepository.saveTimeMode(mode) }
         rebuildCombinedPreviewOnly()
         startSelfSyncLoopIfNeeded()
     }
 
     private fun currentTimeString(): String {
-        val now = java.time.LocalDateTime.now(
-            if (timeMode == "UTC") ZoneOffset.UTC else java.time.ZoneId.systemDefault()
-        )
+        val zone: java.time.ZoneId = when {
+            timeMode == "Device" || timeMode == "LOCAL" ->
+                java.time.ZoneId.systemDefault()
+            timeMode == "UTC" ->
+                ZoneOffset.UTC
+            timeMode.startsWith("UTC+") -> {
+                val h = timeMode.removePrefix("UTC+").toIntOrNull() ?: 0
+                ZoneOffset.ofHours(h)
+            }
+            timeMode.startsWith("UTC-") -> {
+                val h = timeMode.removePrefix("UTC-").toIntOrNull() ?: 0
+                ZoneOffset.ofHours(-h)
+            }
+            else -> java.time.ZoneId.systemDefault()
+        }
+        val now = java.time.LocalDateTime.now(zone)
         return DateTimeFormatter.ofPattern("HH:mm").format(now)
     }
 
@@ -984,6 +1006,18 @@ class ChatboxViewModel(
     private fun computeDisplayedPlaying(): Boolean {
         val now = System.currentTimeMillis()
         val noMoveForMs = now - lastMovementAtMs
+
+        // YouTube-specific: NowPlayingState already ran stall detection and forced
+        // isPlaying=false. Trust it directly -- skip motion heuristics for YouTube
+        // because YouTube keeps reporting speed=1f and position advances via extrapolation
+        // even when truly paused, which fools the motion ticker.
+        val youtubePackages = setOf(
+            "com.google.android.youtube",
+            "com.google.android.apps.youtube.music"
+        )
+        if (activePackage in youtubePackages && !nowPlayingReportedIsPlaying) {
+            return false
+        }
 
         val hardPause =
             !nowPlayingReportedIsPlaying &&
@@ -1377,43 +1411,23 @@ class ChatboxViewModel(
         // If banned, preview can still show what WOULD be sent, but nothing will send.
         val afkLine = if (afkEnabled && afkMessage.trim().isNotEmpty()) afkMessage.trim() else ""
         val cycleLine = if (cycleEnabled) (cycleLineOverride ?: currentCycleLinePreview()) else ""
+        // buildNowPlayingLines() already embeds time into the status slot when timeEnabled
         val musicLines = if (spotifyEnabled) buildNowPlayingLines() else emptyList()
 
-        // Time feature: shown as "Paused|HH:mm" when paused and time enabled,
-        // or appended to the paused status line. Priority: AFK > NowPlaying > Paused|Time > Cycle.
-        val timeStr = if (timeEnabled) currentTimeString() else ""
-
-        // If music is active but paused and time is enabled, inject "Paused|HH:mm" line
-        // replacing the raw "Paused" line from musicLines
-        val finalMusicLines: List<String> = if (spotifyEnabled && timeEnabled && timeStr.isNotBlank()) {
-            musicLines.map { line ->
-                if (line == "Paused") "Paused|$timeStr" else line
-            }
-        } else {
-            musicLines
-        }
-
-        // If music is not showing (not detected/not enabled) but time is enabled and music is enabled (paused scenario)
-        // OR if time is enabled and nothing else shows music \u2014 show time standalone only if NOT playing
-        val standalonTimeLine = if (timeEnabled && timeStr.isNotBlank() && spotifyEnabled && nowPlayingDetected && !nowPlayingIsPlaying && finalMusicLines.none { it.startsWith("Paused") }) {
-            "Paused|$timeStr"
-        } else if (timeEnabled && timeStr.isNotBlank() && !spotifyEnabled) {
-            // Time only (no music running)
-            timeStr
-        } else ""
+        // Standalone time line: shown when time is enabled but music block is not active.
+        // This covers: music off, or music on but nothing detected yet.
+        // When music IS active, time is already embedded in the status slot by buildNowPlayingLines().
+        val standalonTimeLine = if (timeEnabled && musicLines.isEmpty()) currentTimeString() else ""
 
         debugLastAfkOsc = afkLine
         debugLastCycleOsc = cycleLine
-        debugLastMusicOsc = finalMusicLines.joinToString("\n")
+        debugLastMusicOsc = musicLines.joinToString("\n")
 
         val rawLines = mutableListOf<LineWithPriority>()
         if (afkLine.isNotBlank()) rawLines += LineWithPriority(text = afkLine, priority = Priority.AFK)
         if (cycleLine.isNotBlank()) rawLines += LineWithPriority(text = cycleLine, priority = Priority.CYCLE)
-        for (m in finalMusicLines) if (m.isNotBlank()) rawLines += LineWithPriority(text = m, priority = Priority.MUSIC)
-        // Standalone time line only if nothing else carrying time info
-        if (standalonTimeLine.isNotBlank() && finalMusicLines.none { it.contains(timeStr) }) {
-            rawLines += LineWithPriority(text = standalonTimeLine, priority = Priority.MUSIC)
-        }
+        for (m in musicLines) if (m.isNotBlank()) rawLines += LineWithPriority(text = m, priority = Priority.MUSIC)
+        if (standalonTimeLine.isNotBlank()) rawLines += LineWithPriority(text = standalonTimeLine, priority = Priority.MUSIC)
 
         val limited = limitWithPriority(rawLines, VRC_MAX_CHARS, VRC_MAX_LINES)
 
@@ -1479,7 +1493,14 @@ class ChatboxViewModel(
 
         val bar = renderProgressBar(spotifyPreset, pos, max(1L, dur), effectiveIsPlaying)
         val time = "${fmtTime(pos)}/${fmtTime(max(1L, dur))}"
-        val status = if (!effectiveIsPlaying) "Paused" else ""
+
+        // Status slot: always show time when timeEnabled, merged with Paused if paused
+        val status = when {
+            timeEnabled && !effectiveIsPlaying -> "Paused|${currentTimeString()}"
+            timeEnabled && effectiveIsPlaying  -> currentTimeString()
+            !effectiveIsPlaying                -> "Paused"
+            else                               -> ""
+        }
 
         val line2 = listOf(bar, time).joinToString(" ").trim()
         val line3 = status.takeIf { it.isNotBlank() }
