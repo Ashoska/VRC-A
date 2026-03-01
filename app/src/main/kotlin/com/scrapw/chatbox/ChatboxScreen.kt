@@ -66,6 +66,8 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.Divider
 import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -1146,6 +1148,50 @@ private fun HomePage(
                     ToggleRow("AFK", vm.afkEnabled, enabled = !isBanned) { vm.setAfkEnabledFlag(it) }
                     ToggleRow("Cycle", vm.cycleEnabled, enabled = !isBanned) { vm.setCycleEnabledFlag(it) }
                     ToggleRow("Now Playing", vm.spotifyEnabled, enabled = !isBanned) { vm.setSpotifyEnabledFlag(it) }
+                    // Time feature toggle with LOCAL/UTC dropdown
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Time")
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            var timeModeMenuOpen by remember { mutableStateOf(false) }
+                            val timeModes = listOf("LOCAL", "UTC")
+                            Box {
+                                OutlinedButton(
+                                    onClick = { timeModeMenuOpen = true },
+                                    enabled = !isBanned,
+                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                ) {
+                                    Text(vm.timeMode, style = MaterialTheme.typography.bodySmall)
+                                    Icon(Icons.Filled.ExpandMore, contentDescription = null, modifier = Modifier.size(16.dp))
+                                }
+                                DropdownMenu(
+                                    expanded = timeModeMenuOpen,
+                                    onDismissRequest = { timeModeMenuOpen = false }
+                                ) {
+                                    timeModes.forEach { mode ->
+                                        DropdownMenuItem(
+                                            text = { Text(mode) },
+                                            onClick = {
+                                                vm.setTimeMode(mode)
+                                                timeModeMenuOpen = false
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                            Switch(
+                                checked = vm.timeEnabled,
+                                onCheckedChange = { vm.setTimeEnabled(it) },
+                                enabled = !isBanned
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -1576,11 +1622,40 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel, isBanned
                         }
                     }
 
-                    Text(
-                        text = "Cycle speed: fixed at 10 seconds",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    // Cycle speed dropdown
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Cycle speed:", style = MaterialTheme.typography.bodySmall)
+                        var cycleSpeedMenuOpen by remember { mutableStateOf(false) }
+                        val cycleSpeedOptions = listOf(2, 5, 10, 20, 40)
+                        Box {
+                            OutlinedButton(
+                                onClick = { cycleSpeedMenuOpen = true },
+                                enabled = !isBanned,
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                            ) {
+                                Text("${vm.cycleIntervalSeconds}s", style = MaterialTheme.typography.bodySmall)
+                                Icon(Icons.Filled.ExpandMore, contentDescription = null, modifier = Modifier.size(16.dp))
+                            }
+                            DropdownMenu(
+                                expanded = cycleSpeedMenuOpen,
+                                onDismissRequest = { cycleSpeedMenuOpen = false }
+                            ) {
+                                cycleSpeedOptions.forEach { sec ->
+                                    DropdownMenuItem(
+                                        text = { Text("${sec} seconds") },
+                                        onClick = {
+                                            vm.updateCycleIntervalSeconds(sec)
+                                            cycleSpeedMenuOpen = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
 
                     ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                         Column(
@@ -1710,7 +1785,7 @@ private fun NowPlayingPage(
             ) { Text("Open Notification Access settings") }
 
             Text(
-                text = "Music refresh speed: fixed at 2 seconds",
+                text = "Music refresh: 2 seconds (fixed)",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
