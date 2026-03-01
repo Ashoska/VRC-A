@@ -140,7 +140,7 @@ class NowPlayingListenerService : NotificationListenerService() {
             // Push an immediate snapshot so UI/OSC updates right away.
             pushSnapshot(pkg, controller.metadata, controller.playbackState, controller)
         } catch (_: Throwable) {
-            // If MediaController fails, do nothing (donâ€™t fall back to non-media notifications).
+            // If MediaController fails, do nothing (don\u00E2\u20AC\u2122t fall back to non-media notifications).
         }
     }
 
@@ -250,8 +250,9 @@ class NowPlayingListenerService : NotificationListenerService() {
             // Start watchdog polling to catch the first real track after the segment ends.
             if (controller != null) startPollForRealTrack(pkg, controller)
         } else {
-            // If playback looks stalled and metadata is unchanged, briefly suppress paused.
-            if (metaSame && !isPlaying && (title.isNotBlank() || artist.isNotBlank())) {
+            // Suppress paused-flicker ONLY when truly stalled: speed > 0 means the player
+            // thinks it's still running but callbacks stopped. speed == 0 is a real user pause.
+            if (metaSame && !isPlaying && speed > 0.01f && (title.isNotBlank() || artist.isNotBlank())) {
                 val n = (stallCountByPackage[pkg] ?: 0) + 1
                 stallCountByPackage[pkg] = n
                 if (n >= 2) {
