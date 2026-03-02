@@ -1457,9 +1457,10 @@ class ChatboxViewModel(
         // buildNowPlayingLines() already embeds time into the status slot when timeEnabled
         val musicLines = if (spotifyEnabled) buildNowPlayingLines() else emptyList()
 
-        // Standalone time line: always shown when timeEnabled, at its position in cardOrder.
-        // Time is a fully independent movable component - not embedded inside NowPlaying.
-        val standalonTimeLine = if (timeEnabled) currentTimeString() else ""
+        // Standalone time line: shown when time is enabled but music block is not active.
+        // This covers: music off, or music on but nothing detected yet.
+        // When music IS active, time is already embedded in the status slot by buildNowPlayingLines().
+        val standalonTimeLine = if (timeEnabled && musicLines.isEmpty()) currentTimeString() else ""
 
         debugLastAfkOsc = afkLine
         debugLastCycleOsc = cycleLine
@@ -1551,11 +1552,13 @@ class ChatboxViewModel(
 
         // Status slot: time-only when enabled. Paused state is signalled by the bar dot (\u23F8).
         // No "Paused" text needed since the dot change is visually clear.
-        // Time is a separate movable card - not embedded here.
+        val status = if (timeEnabled) currentTimeString() else ""
+
         // No space between bar and time - saves 1 char and prevents double-digit minute overflow.
         val line2 = bar + time
+        val line3 = status.takeIf { it.isNotBlank() }
 
-        return listOfNotNull(line1.takeIf { it.isNotBlank() }, line2.takeIf { it.isNotBlank() })
+        return listOfNotNull(line1.takeIf { it.isNotBlank() }, line2.takeIf { it.isNotBlank() }, line3)
     }
 
     private enum class Priority { AFK, MUSIC, CYCLE }
