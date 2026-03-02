@@ -250,9 +250,12 @@ class NowPlayingListenerService : NotificationListenerService() {
             // Start watchdog polling to catch the first real track after the segment ends.
             if (controller != null) startPollForRealTrack(pkg, controller)
         } else {
-            // Suppress paused-flicker ONLY when truly stalled: speed > 0 means the player
-            // thinks it's still running but callbacks stopped. speed == 0 is a real user pause.
-            if (metaSame && !isPlaying && speed > 0.01f && (title.isNotBlank() || artist.isNotBlank())) {
+            // Suppress paused-flicker ONLY for genuine stalls.
+            // STATE_PAUSED = user explicitly paused \u2014 never suppress that.
+            // Other non-playing states (buffering, skipping) may be transient stalls.
+            val rawState = pb?.state ?: PlaybackState.STATE_NONE
+            val isPausedByUser = rawState == PlaybackState.STATE_PAUSED
+            if (metaSame && !isPlaying && !isPausedByUser && (title.isNotBlank() || artist.isNotBlank())) {
                 val n = (stallCountByPackage[pkg] ?: 0) + 1
                 stallCountByPackage[pkg] = n
                 if (n >= 2) {
