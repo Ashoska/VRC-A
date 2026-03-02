@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -720,149 +722,153 @@ private fun UsersTab(
         return
     }
 
-    // Normal Users list view
-    Column(
+    // Normal Users list view - LazyColumn so all users scroll properly
+    LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        ElevatedCard {
-            Column(
-                Modifier.padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+        // Controls header
+        item {
+            ElevatedCard {
+                Column(
+                    Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Text("Users", style = MaterialTheme.typography.titleMedium)
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Users", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "${filteredUsers.size} / ${users.size}",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    OutlinedTextField(
+                        value = search,
+                        onValueChange = { search = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("Search") },
+                        placeholder = { Text("name / docId / uid / device") }
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("Warned", style = MaterialTheme.typography.bodySmall)
+                            Switch(checked = filterWarned, onCheckedChange = { filterWarned = it })
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text("Banned", style = MaterialTheme.typography.bodySmall)
+                            Switch(checked = filterBanned, onCheckedChange = { filterBanned = it })
+                        }
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = { liveLimit = liveLimit.coerceAtLeast(1); setError(null) },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Live") }
+                        Button(
+                            onClick = { liveLimit = (liveLimit + 500).coerceAtMost(10000) },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Load more (+500)") }
+                    }
+
                     Text(
-                        "${filteredUsers.size}/${users.size}",
-                        style = MaterialTheme.typography.bodySmall,
+                        "Showing ${filteredUsers.size} of $liveLimit loaded",
                         fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+            }
+        }
 
-                OutlinedTextField(
-                    value = search,
-                    onValueChange = { search = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    label = { Text("Search") },
-                    placeholder = { Text("docId / authUid / deviceHash / displayName") }
-                )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("Warned")
-                        Switch(checked = filterWarned, onCheckedChange = { filterWarned = it })
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("Banned")
-                        Switch(checked = filterBanned, onCheckedChange = { filterBanned = it })
-                    }
-                }
-
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedButton(
-                        onClick = {
-                            liveLimit = liveLimit.coerceAtLeast(1)
-                            setError(null)
-                        },
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Live") }
-
-                    Button(
-                        onClick = { liveLimit = (liveLimit + 500).coerceAtMost(10000) },
-                        modifier = Modifier.weight(1f)
-                    ) { Text("More") }
-                }
-
+        // Empty state
+        if (filteredUsers.isEmpty()) {
+            item {
                 Text(
-                    "Live limit: $liveLimit",
-                    fontFamily = FontFamily.Monospace,
+                    "No users loaded / matching filters.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
 
-        Divider()
-
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            if (filteredUsers.isEmpty()) {
-                Text("No users loaded/matching filters yet.", style = MaterialTheme.typography.bodySmall)
-            } else {
-                filteredUsers.forEach { u ->
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { selectedDocId = u.docId }
+        // User rows (compact)
+        items(filteredUsers, key = { it.docId }) { u ->
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = when {
+                        u.banned  -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f)
+                        u.warned  -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f)
+                        else      -> MaterialTheme.colorScheme.surfaceVariant
+                    }
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { selectedDocId = u.docId }
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        // Name / fallback to short docId
+                        Text(
+                            u.displayName.ifBlank { shortId(u.docId) },
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            shortId(u.docId),
+                            fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1
+                        )
+                        Text(
+                            relativeTime(u.lastSeenAt, nowMs),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    // Status badges
+                    Column(
+                        horizontalAlignment = androidx.compose.ui.Alignment.End,
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        Column(
-                            Modifier.padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Column(Modifier.weight(1f)) {
-                                    Text("User", style = MaterialTheme.typography.titleSmall)
-                                    if (u.displayName.isNotBlank()) {
-                                        Text(
-                                            u.displayName,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-
-                                    Text(
-                                        "docId=${shortId(u.docId)}",
-                                        fontFamily = FontFamily.Monospace,
-                                        style = MaterialTheme.typography.bodySmall
-                                    )
-                                    Text(
-                                        "authUid=${shortId(u.authUid.ifBlank { "(blank)" })}",
-                                        fontFamily = FontFamily.Monospace,
-                                        style = MaterialTheme.typography.bodySmall
-                                    )
-                                    Text(
-                                        "device=${shortId(u.deviceHash.ifBlank { "(blank)" })}",
-                                        fontFamily = FontFamily.Monospace,
-                                        style = MaterialTheme.typography.bodySmall
-                                    )
-                                    Text(
-                                        "warned=${u.warned}  banned=${u.banned}",
-                                        fontFamily = FontFamily.Monospace,
-                                        style = MaterialTheme.typography.bodySmall
-                                    )
-                                }
-                                Icon(Icons.Filled.ExpandMore, contentDescription = null)
-                            }
-
-                            val lastSeenRel = relativeTime(u.lastSeenAt, nowMs)
-                            val updatedRel = relativeTime(u.updatedAt, nowMs)
-                            Text(
-                                "lastSeen=$lastSeenRel   updated=$updatedRel",
-                                fontFamily = FontFamily.Monospace,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                        if (u.banned) {
+                            androidx.compose.material3.Badge(
+                                containerColor = MaterialTheme.colorScheme.error
+                            ) { Text("BANNED", style = MaterialTheme.typography.labelSmall) }
                         }
+                        if (u.warned) {
+                            androidx.compose.material3.Badge(
+                                containerColor = MaterialTheme.colorScheme.tertiary
+                            ) { Text("WARNED", style = MaterialTheme.typography.labelSmall) }
+                        }
+                        Icon(
+                            Icons.Filled.ExpandMore,
+                            contentDescription = null,
+                            modifier = Modifier.padding(top = 2.dp)
+                        )
                     }
                 }
             }
         }
+
+        item { Spacer(Modifier.height(12.dp)) }
     }
 }
 
