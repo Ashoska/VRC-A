@@ -746,9 +746,9 @@ class ChatboxViewModel(
     // Valid component names: "NowPlaying", "AFK", "Cycle"
     // Order = top-to-bottom in the chatbox output. Cut-off priority is unchanged.
     // =========================
-    val DEFAULT_CARD_ORDER = listOf("NowPlaying", "AFK", "Cycle", "Time")
+    val DEFAULT_CARD_ORDER = listOf("Time", "AFK", "Cycle", "NowPlaying")
 
-    var cardOrder by mutableStateOf(listOf("NowPlaying", "AFK", "Cycle", "Time"))
+    var cardOrder by mutableStateOf(listOf("Time", "AFK", "Cycle", "NowPlaying"))
         private set
 
     fun updateCardOrder(order: List<String>) {
