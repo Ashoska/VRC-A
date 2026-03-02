@@ -141,7 +141,7 @@ class UserPreferencesRepository(private val context: Context) {
 
     val cardOrder: Flow<List<String>> = context.dataStore.data
         .map { prefs ->
-            val raw = prefs[Keys.CARD_ORDER] ?: "NowPlaying,AFK,Cycle,Time"
+            val raw = prefs[Keys.CARD_ORDER] ?: "Time,AFK,Cycle,NowPlaying"
             raw.split(",").map { it.trim() }.filter { it.isNotBlank() }
         }
 
