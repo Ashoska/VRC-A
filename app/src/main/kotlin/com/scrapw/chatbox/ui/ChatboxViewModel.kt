@@ -831,6 +831,15 @@ class ChatboxViewModel(
     )
 
     init {
+        // Reset transient toggles to OFF at startup before any collect reads DataStore.
+        // onCleared() is NOT called on process kill (swipe-to-dismiss, OOM), so we can't
+        // rely on it alone. Writing false here ensures the collect always loads false on
+        // a fresh launch, making the toggle state consistent regardless of how the app died.
+        runBlocking {
+            runCatching { userPreferencesRepository.saveCycleEnabled(false) }
+            runCatching { userPreferencesRepository.saveTimeEnabled(false) }
+        }
+
         // Public build: start periodic self sync (rules-compatible).
         // Admin build: startSelfSyncLoopIfNeeded() is a no-op (prevents UID tug-of-war).
         startSelfSyncLoopIfNeeded()
