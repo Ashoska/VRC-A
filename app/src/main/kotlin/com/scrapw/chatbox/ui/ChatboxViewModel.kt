@@ -137,9 +137,9 @@ class ChatboxViewModel(
         moderationAttachJob?.cancel()
         moderationUserReg?.remove()
         moderationDeviceReg?.remove()
-        // Persist cycle + time OFF so they do not relaunch as ON after app restart
-        runBlocking { runCatching { userPreferencesRepository.saveCycleEnabled(false) } }
-        runBlocking { runCatching { userPreferencesRepository.saveTimeEnabled(false) } }
+        // Do NOT reset cycle/time enabled here.
+        // onCleared is called on backgrounding too, not just app death,
+        // which caused the state to be wiped before the next DataStore read.
         stopAll(clearFromChatbox = false)
         super.onCleared()
     }
@@ -831,14 +831,11 @@ class ChatboxViewModel(
     )
 
     init {
-        // Reset transient toggles to OFF at startup before any collect reads DataStore.
-        // onCleared() is NOT called on process kill (swipe-to-dismiss, OOM), so we can't
-        // rely on it alone. Writing false here ensures the collect always loads false on
-        // a fresh launch, making the toggle state consistent regardless of how the app died.
-        runBlocking {
-            runCatching { userPreferencesRepository.saveCycleEnabled(false) }
-            runCatching { userPreferencesRepository.saveTimeEnabled(false) }
-        }
+        // Always reset cycle to off on app start.
+        // Done in init (not onCleared) because onCleared fires on backgrounding too,
+        // causing a race where false is written mid-session. init runs exactly once
+        // per ViewModel creation = exactly once per app start.
+        viewModelScope.launch { userPreferencesRepository.saveCycleEnabled(false) }
 
         // Public build: start periodic self sync (rules-compatible).
         // Admin build: startSelfSyncLoopIfNeeded() is a no-op (prevents UID tug-of-war).
@@ -1059,6 +1056,14 @@ class ChatboxViewModel(
         val now = System.currentTimeMillis()
         val noMoveForMs = now - lastMovementAtMs
 
+        // If the service reported NOT playing AND speed is 0, the player has
+        // explicitly signalled a user pause. Trust it immediately for all apps.
+        // speed == 0f is set by NowPlayingState when playbackSpeed == 0f
+        // (reliable on most players including Spotify, Apple Music, Deezer, etc.)
+        if (!nowPlayingReportedIsPlaying && nowPlayingSpeed == 0f) {
+            return false
+        }
+
         // YouTube-specific: NowPlayingState already ran stall detection and forced
         // isPlaying=false. Trust it directly -- skip motion heuristics for YouTube
         // because YouTube keeps reporting speed=1f and position advances via extrapolation
@@ -1071,10 +1076,12 @@ class ChatboxViewModel(
             return false
         }
 
+        // Generic hard-pause: reported not playing + no motion candidate for 300ms.
+        // 300ms (down from 1200ms) because STATE_PAUSED is already unambiguous.
         val hardPause =
             !nowPlayingReportedIsPlaying &&
                 pauseCandidateSinceMs > 0L &&
-                (now - pauseCandidateSinceMs) >= 1_200L
+                (now - pauseCandidateSinceMs) >= 300L
 
         if (hardPause) return false
         if (noMoveForMs >= NO_MOVE_PAUSE_MS) return false
