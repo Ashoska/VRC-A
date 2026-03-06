@@ -240,7 +240,7 @@ fun AdminScreen() {
     // ==========================================
     // MAIN UI
     // ==========================================
-    val tabs = remember { listOf("Users", "Mod", "Announce", "Config") }
+    val tabs = remember { listOf("Users", "Mod", "Announce", "Releases", "Config") }
     var tabIndex by rememberSaveable { mutableIntStateOf(0) }
 
     // ModerationTarget is NOT saveable
@@ -368,6 +368,12 @@ fun AdminScreen() {
                     2 -> AnnouncementsTab(
                         db = db,
                         createdByDevice = deviceHash,
+                        setGlobalLoading = { globalLoading = it },
+                        setError = ::setErr
+                    )
+
+                    3 -> ReleasesTab(
+                        db = db,
                         setGlobalLoading = { globalLoading = it },
                         setError = ::setErr
                     )
@@ -1888,6 +1894,247 @@ private fun AnnouncementsTab(
                         }
                     }
                 }
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+    }
+}
+
+/* =========================================================
+   RELEASES TAB (admin-only: push APK releases to public users)
+   =========================================================
+
+   Firestore doc: releases/latest
+   Fields:
+     versionCode (Long)     - build number of the release
+     versionName (String)   - display label e.g. "v1.4.2"
+     downloadUrl (String)   - direct APK download URL
+     requiredMinCode (Long) - users below this are force-updated
+     notes (String)         - optional changelog shown in dialog
+     publishedAt (Timestamp)
+     publishedByDevice (String)
+
+   Firestore rules needed:
+     allow read: if true;  // public can read
+     allow write: if request.auth != null && get(/databases/$(database)/documents/config/app).data.ownerUid == request.auth.uid;
+   ========================================================= */
+
+@Composable
+private fun ReleasesTab(
+    db: FirebaseFirestore,
+    setGlobalLoading: (Boolean) -> Unit,
+    setError: (String?) -> Unit
+) {
+    val scope = rememberCoroutineScope()
+
+    var liveVersionCode  by rememberSaveable { mutableLongStateOf(0L) }
+    var liveVersionName  by rememberSaveable { mutableStateOf("") }
+    var liveDownloadUrl  by rememberSaveable { mutableStateOf("") }
+    var liveRequiredMin  by rememberSaveable { mutableLongStateOf(0L) }
+    var liveNotes        by rememberSaveable { mutableStateOf("") }
+    var livePublishedAt  by remember { mutableStateOf<com.google.firebase.Timestamp?>(null) }
+
+    // Edit fields
+    var editVersionCode  by rememberSaveable { mutableStateOf("") }
+    var editVersionName  by rememberSaveable { mutableStateOf("") }
+    var editDownloadUrl  by rememberSaveable { mutableStateOf("") }
+    var editRequiredMin  by rememberSaveable { mutableStateOf("") }
+    var editNotes        by rememberSaveable { mutableStateOf("") }
+
+    var loaded by remember { mutableStateOf(false) }
+
+    suspend fun loadCurrent() {
+        setGlobalLoading(true)
+        setError(null)
+        runCatching {
+            val snap = db.collection("releases").document("latest").get().await()
+            if (snap.exists()) {
+                liveVersionCode = snap.getLong("versionCode") ?: 0L
+                liveVersionName = snap.getString("versionName").orEmpty()
+                liveDownloadUrl = snap.getString("downloadUrl").orEmpty()
+                liveRequiredMin = snap.getLong("requiredMinCode") ?: 0L
+                liveNotes       = snap.getString("notes").orEmpty()
+                livePublishedAt = snap.getTimestamp("publishedAt")
+
+                // Pre-fill edit fields with current values
+                editVersionCode = liveVersionCode.toString().takeIf { it != "0" } ?: ""
+                editVersionName = liveVersionName
+                editDownloadUrl = liveDownloadUrl
+                editRequiredMin = liveRequiredMin.toString().takeIf { it != "0" } ?: ""
+                editNotes       = liveNotes
+            }
+            loaded = true
+            setGlobalLoading(false)
+        }.onFailure { e ->
+            setGlobalLoading(false)
+            setError(e.message ?: "Failed to load release")
+        }
+    }
+
+    LaunchedEffect(Unit) { loadCurrent() }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        // Current live release
+        ElevatedCard {
+            Column(
+                Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Current Release", style = MaterialTheme.typography.titleMedium)
+                    IconButton(onClick = { scope.launch { loadCurrent() } }) {
+                        Icon(Icons.Filled.Refresh, contentDescription = "Reload")
+                    }
+                }
+
+                if (!loaded) {
+                    CircularProgressIndicator()
+                } else if (liveVersionCode == 0L && liveDownloadUrl.isBlank()) {
+                    Text(
+                        "No release published yet.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    Text(
+                        "versionCode=$liveVersionCode  name=${liveVersionName.ifBlank { "(blank)" }}",
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        "requiredMinCode=$liveRequiredMin",
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        "publishedAt=${formatTimestamp(livePublishedAt)}",
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (liveDownloadUrl.isNotBlank()) {
+                        Text(
+                            "url=${liveDownloadUrl.take(60)}${if (liveDownloadUrl.length > 60) "..." else ""}",
+                            fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (liveNotes.isNotBlank()) {
+                        Text(
+                            "notes: ${liveNotes.lines().firstOrNull().orEmpty().take(80)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+
+        // Publish new release
+        ElevatedCard {
+            Column(
+                Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text("Publish New Release", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Fills releases/latest. Public users will be prompted to update on next launch.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                OutlinedTextField(
+                    value = editVersionCode,
+                    onValueChange = { editVersionCode = it.filter { c -> c.isDigit() } },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("versionCode (integer build number)") },
+                    placeholder = { Text("e.g. 42") }
+                )
+
+                OutlinedTextField(
+                    value = editVersionName,
+                    onValueChange = { editVersionName = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("versionName (display label)") },
+                    placeholder = { Text("e.g. v1.4.2") }
+                )
+
+                OutlinedTextField(
+                    value = editDownloadUrl,
+                    onValueChange = { editDownloadUrl = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("APK download URL") },
+                    placeholder = { Text("https://...") }
+                )
+
+                OutlinedTextField(
+                    value = editRequiredMin,
+                    onValueChange = { editRequiredMin = it.filter { c -> c.isDigit() } },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("requiredMinCode (force-update below this, 0 = optional)") },
+                    placeholder = { Text("0") }
+                )
+
+                OutlinedTextField(
+                    value = editNotes,
+                    onValueChange = { editNotes = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 3,
+                    label = { Text("Release notes (shown in update dialog)") }
+                )
+
+                val canPublish = editVersionCode.isNotBlank() && editDownloadUrl.trim().startsWith("http")
+
+                Button(
+                    onClick = {
+                        scope.launch {
+                            setGlobalLoading(true)
+                            setError(null)
+                            runCatching {
+                                val data = hashMapOf<String, Any>(
+                                    "versionCode"    to (editVersionCode.toLongOrNull() ?: 0L),
+                                    "versionName"    to editVersionName.trim(),
+                                    "downloadUrl"    to editDownloadUrl.trim(),
+                                    "requiredMinCode" to (editRequiredMin.toLongOrNull() ?: 0L),
+                                    "notes"          to editNotes.trim(),
+                                    "publishedAt"    to com.google.firebase.firestore.FieldValue.serverTimestamp(),
+                                    "publishedByDevice" to com.scrapw.chatbox.BuildConfig.APPLICATION_ID
+                                )
+                                db.collection("releases").document("latest")
+                                    .set(data, com.google.firebase.firestore.SetOptions.merge())
+                                    .await()
+                                loadCurrent()
+                            }.onFailure { e ->
+                                setGlobalLoading(false)
+                                setError(e.message ?: "Failed to publish release")
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = canPublish
+                ) {
+                    Text("Publish Release")
+                }
+
+                Text(
+                    "Note: admin build users will not see the update prompt (IS_ADMIN_BUILD=true).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
 
