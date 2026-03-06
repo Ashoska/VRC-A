@@ -57,14 +57,32 @@ class NowPlayingListenerService : NotificationListenerService() {
         super.onListenerConnected()
         NowPlayingState.setConnected(true)
 
-        // Prime state from currently active notifications so the UI works immediately
+        // Prime state from currently active notifications so the UI works immediately.
         try {
-            activeNotifications?.forEach { sbn ->
-                onNotificationPosted(sbn)
+            activeNotifications?.forEach { sbn -> onNotificationPosted(sbn) }
+        } catch (_: Throwable) { }
+
+        // Also scan active MediaSessions directly. Apps that started playback
+        // before the listener connected (or after a listener rebind) may not
+        // re-post a notification, so the notification scan misses them.
+        scanActiveMediaSessions()
+    }
+
+    private fun scanActiveMediaSessions() {
+        try {
+            val msm = getSystemService(android.media.session.MediaSessionManager::class.java)
+                ?: return
+            val controllers = msm.getActiveSessions(
+                android.content.ComponentName(this, NowPlayingListenerService::class.java)
+            ) ?: return
+            for (controller in controllers) {
+                val pkg = controller.packageName ?: continue
+                if (allowedPackages.isNotEmpty() && pkg !in allowedPackages) continue
+                // Register a callback and push an immediate snapshot.
+                val token = controller.sessionToken ?: continue
+                ensureControllerForPackage(pkg, token)
             }
-        } catch (_: Throwable) {
-            // ignore
-        }
+        } catch (_: Throwable) { }
     }
 
     override fun onListenerDisconnected() {
