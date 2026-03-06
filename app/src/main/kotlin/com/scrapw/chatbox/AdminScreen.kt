@@ -73,6 +73,22 @@ import com.google.firebase.firestore.SetOptions
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
+import android.net.Uri
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.material3.LinearProgressIndicator
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import org.json.JSONObject
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import androidx.compose.foundation.layout.fillMaxHeight
 
 private fun fmtRelativeTime(nowMs: Long, thenMs: Long): String {
     val delta = kotlin.math.abs(nowMs - thenMs)
@@ -1902,23 +1918,152 @@ private fun AnnouncementsTab(
 }
 
 /* =========================================================
-   RELEASES TAB (admin-only: push APK releases to public users)
-   =========================================================
+   RELEASES TAB
+   Pick the public APK on-device. versionCode + versionName are
+   read automatically from the APK file. The APK is uploaded to
+   GitHub Releases (free, no storage subscription needed) via the
+   GitHub API. The resulting download URL + metadata is then
+   written to Firestore releases/latest so public clients pick it
+   up on next launch.
 
-   Firestore doc: releases/latest
-   Fields:
-     versionCode (Long)     - build number of the release
-     versionName (String)   - display label e.g. "v1.4.2"
-     downloadUrl (String)   - direct APK download URL
-     requiredMinCode (Long) - users below this are force-updated
-     notes (String)         - optional changelog shown in dialog
-     publishedAt (Timestamp)
-     publishedByDevice (String)
+   Public clients only prompt if releases/latest.versionCode
+   is strictly GREATER than BuildConfig.VERSION_CODE, so users
+   already on the pushed version or newer see nothing.
 
-   Firestore rules needed:
-     allow read: if true;  // public can read
-     allow write: if request.auth != null && get(/databases/$(database)/documents/config/app).data.ownerUid == request.auth.uid;
+   Setup (once):
+     Add to keystore.properties (already gitignored):
+       githubPat=ghp_xxxxxxxxxxxxxxxxxxxx   <- PAT with Contents write
+       githubOwner=your-username
+       githubRepo=your-repo-name
    ========================================================= */
+
+// ---- GitHub API helpers (no extra dependencies - uses HttpURLConnection) ----
+
+private data class GithubReleaseResult(
+    val releaseId: Long,
+    val uploadUrl: String,   // template like https://uploads.github.com/...{?name,label}
+    val htmlUrl: String
+)
+
+private suspend fun githubCreateRelease(
+    owner: String, repo: String, pat: String,
+    tagName: String, releaseName: String, body: String
+): GithubReleaseResult = withContext(Dispatchers.IO) {
+    val url = URL("https://api.github.com/repos/$owner/$repo/releases")
+    val payload = JSONObject().apply {
+        put("tag_name", tagName)
+        put("name", releaseName)
+        put("body", body)
+        put("draft", false)
+        put("prerelease", false)
+    }.toString()
+
+    val conn = url.openConnection() as HttpURLConnection
+    conn.requestMethod = "POST"
+    conn.setRequestProperty("Authorization", "Bearer $pat")
+    conn.setRequestProperty("Accept", "application/vnd.github+json")
+    conn.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
+    conn.setRequestProperty("Content-Type", "application/json")
+    conn.doOutput = true
+    conn.connectTimeout = 15_000
+    conn.readTimeout = 30_000
+
+    conn.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
+
+    val code = conn.responseCode
+    val responseBody = (if (code in 200..299) conn.inputStream else conn.errorStream)
+        ?.bufferedReader()?.readText().orEmpty()
+
+    if (code !in 200..299) {
+        throw Exception("GitHub create release failed ($code): $responseBody")
+    }
+
+    val json = JSONObject(responseBody)
+    GithubReleaseResult(
+        releaseId = json.getLong("id"),
+        uploadUrl = json.getString("upload_url"),
+        htmlUrl   = json.getString("html_url")
+    )
+}
+
+private suspend fun githubUploadAsset(
+    owner: String, repo: String, pat: String,
+    releaseId: Long, fileName: String, apkFile: File,
+    onProgress: (Float) -> Unit
+): String = withContext(Dispatchers.IO) {
+    val uploadUrl = URL(
+        "https://uploads.github.com/repos/$owner/$repo/releases/$releaseId/assets?name=${
+            java.net.URLEncoder.encode(fileName, "UTF-8")
+        }"
+    )
+
+    val conn = uploadUrl.openConnection() as HttpURLConnection
+    conn.requestMethod = "POST"
+    conn.setRequestProperty("Authorization", "Bearer $pat")
+    conn.setRequestProperty("Accept", "application/vnd.github+json")
+    conn.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
+    conn.setRequestProperty("Content-Type", "application/vnd.android.package-archive")
+    conn.setRequestProperty("Content-Length", apkFile.length().toString())
+    conn.doOutput = true
+    conn.connectTimeout = 15_000
+    conn.readTimeout = 300_000  // large file upload - 5 min
+
+    val totalBytes = apkFile.length().toFloat()
+    var writtenBytes = 0L
+    val buf = ByteArray(64 * 1024)
+
+    conn.outputStream.use { out ->
+        apkFile.inputStream().use { inp ->
+            var n: Int
+            while (inp.read(buf).also { n = it } != -1) {
+                out.write(buf, 0, n)
+                writtenBytes += n
+                if (totalBytes > 0f) onProgress(writtenBytes / totalBytes)
+            }
+            out.flush()
+        }
+    }
+
+    val code = conn.responseCode
+    val responseBody = (if (code in 200..299) conn.inputStream else conn.errorStream)
+        ?.bufferedReader()?.readText().orEmpty()
+
+    if (code !in 200..299) {
+        throw Exception("GitHub upload asset failed ($code): $responseBody")
+    }
+
+    JSONObject(responseBody).getString("browser_download_url")
+}
+
+// ---- Composable ----
+
+@Suppress("DEPRECATION")
+private fun parseApkInfo(ctx: Context, apkPath: String): Pair<Long, String>? {
+    return try {
+        val pm = ctx.packageManager
+        val pi = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            pm.getPackageArchiveInfo(
+                apkPath,
+                android.content.pm.PackageManager.PackageInfoFlags.of(0)
+            )
+        } else {
+            pm.getPackageArchiveInfo(apkPath, 0)
+        } ?: return null
+        val code = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P)
+            pi.longVersionCode else pi.versionCode.toLong()
+        code to (pi.versionName.orEmpty())
+    } catch (_: Throwable) { null }
+}
+
+private suspend fun copyUriToCache(ctx: Context, uri: android.net.Uri): File? {
+    return try {
+        val tmp = File(ctx.cacheDir, "upload_tmp.apk")
+        ctx.contentResolver.openInputStream(uri)?.use { inp ->
+            tmp.outputStream().use { out -> inp.copyTo(out) }
+        }
+        tmp
+    } catch (_: Throwable) { null }
+}
 
 @Composable
 private fun ReleasesTab(
@@ -1926,27 +2071,42 @@ private fun ReleasesTab(
     setGlobalLoading: (Boolean) -> Unit,
     setError: (String?) -> Unit
 ) {
+    val ctx   = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var liveVersionCode  by rememberSaveable { mutableLongStateOf(0L) }
-    var liveVersionName  by rememberSaveable { mutableStateOf("") }
-    var liveDownloadUrl  by rememberSaveable { mutableStateOf("") }
-    var liveRequiredMin  by rememberSaveable { mutableLongStateOf(0L) }
-    var liveNotes        by rememberSaveable { mutableStateOf("") }
-    var livePublishedAt  by remember { mutableStateOf<com.google.firebase.Timestamp?>(null) }
+    val githubPat   = BuildConfig.GITHUB_PAT
+    val githubOwner = BuildConfig.GITHUB_OWNER
+    val githubRepo  = BuildConfig.GITHUB_REPO
+    val credsMissing = githubPat.isBlank() || githubOwner.isBlank() || githubRepo.isBlank()
 
-    // Edit fields
-    var editVersionCode  by rememberSaveable { mutableStateOf("") }
-    var editVersionName  by rememberSaveable { mutableStateOf("") }
-    var editDownloadUrl  by rememberSaveable { mutableStateOf("") }
-    var editRequiredMin  by rememberSaveable { mutableStateOf("") }
-    var editNotes        by rememberSaveable { mutableStateOf("") }
+    // ---- current live release ----
+    var liveVersionCode by rememberSaveable { mutableLongStateOf(0L) }
+    var liveVersionName by rememberSaveable { mutableStateOf("") }
+    var liveDownloadUrl by rememberSaveable { mutableStateOf("") }
+    var liveRequiredMin by rememberSaveable { mutableLongStateOf(0L) }
+    var liveNotes       by rememberSaveable { mutableStateOf("") }
+    var livePublishedAt by remember { mutableStateOf<com.google.firebase.Timestamp?>(null) }
+    var loaded          by remember { mutableStateOf(false) }
 
-    var loaded by remember { mutableStateOf(false) }
+    // ---- picked APK ----
+    var pickedFileName  by rememberSaveable { mutableStateOf("") }
+    var parsedCode      by rememberSaveable { mutableLongStateOf(0L) }
+    var parsedName      by rememberSaveable { mutableStateOf("") }
+    var parseError      by rememberSaveable { mutableStateOf("") }
+    var cachedApkPath   by remember { mutableStateOf("") }
+
+    // ---- optional fields ----
+    var editRequiredMin by rememberSaveable { mutableStateOf("") }
+    var editNotes       by rememberSaveable { mutableStateOf("") }
+
+    // ---- upload state ----
+    var uploadPhase     by remember { mutableStateOf("") }
+    var uploadProgress  by remember { mutableFloatStateOf(0f) }
+    var uploading       by remember { mutableStateOf(false) }
+    var uploadDone      by remember { mutableStateOf(false) }
 
     suspend fun loadCurrent() {
         setGlobalLoading(true)
-        setError(null)
         runCatching {
             val snap = db.collection("releases").document("latest").get().await()
             if (snap.exists()) {
@@ -1956,23 +2116,111 @@ private fun ReleasesTab(
                 liveRequiredMin = snap.getLong("requiredMinCode") ?: 0L
                 liveNotes       = snap.getString("notes").orEmpty()
                 livePublishedAt = snap.getTimestamp("publishedAt")
-
-                // Pre-fill edit fields with current values
-                editVersionCode = liveVersionCode.toString().takeIf { it != "0" } ?: ""
-                editVersionName = liveVersionName
-                editDownloadUrl = liveDownloadUrl
-                editRequiredMin = liveRequiredMin.toString().takeIf { it != "0" } ?: ""
-                editNotes       = liveNotes
             }
             loaded = true
-            setGlobalLoading(false)
-        }.onFailure { e ->
-            setGlobalLoading(false)
-            setError(e.message ?: "Failed to load release")
-        }
+        }.onFailure { e -> setError(e.message ?: "Failed to load release") }
+        setGlobalLoading(false)
     }
 
     LaunchedEffect(Unit) { loadCurrent() }
+
+    val filePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri: android.net.Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        parseError = ""; parsedCode = 0L; parsedName = ""
+        pickedFileName = ""; cachedApkPath = ""; uploadDone = false
+
+        scope.launch {
+            val tmp = copyUriToCache(ctx, uri)
+            if (tmp == null) { parseError = "Could not read the selected file."; return@launch }
+            cachedApkPath = tmp.absolutePath
+
+            pickedFileName = runCatching {
+                ctx.contentResolver.query(uri, null, null, null, null)?.use { c ->
+                    c.moveToFirst()
+                    c.getString(c.getColumnIndexOrThrow(android.provider.OpenableColumns.DISPLAY_NAME))
+                }
+            }.getOrNull() ?: "release.apk"
+
+            val info = parseApkInfo(ctx, tmp.absolutePath)
+            if (info == null) {
+                parseError = "Could not read version info.\nMake sure this is a valid APK."
+                return@launch
+            }
+            parsedCode = info.first
+            parsedName = info.second
+        }
+    }
+
+    fun startUpload() {
+        val apkPath = cachedApkPath
+        if (apkPath.isBlank() || parsedCode == 0L) return
+
+        scope.launch {
+            uploading = true; uploadDone = false; uploadProgress = 0f; setError(null)
+
+            runCatching {
+                val apkFile = File(apkPath)
+                val tagName  = "v$parsedCode"
+                val relName  = "v${parsedName.ifBlank { parsedCode.toString() }}"
+                val fileName = "chatbox-vrc-a-${relName}.apk"
+                    .replace(Regex("[^a-zA-Z0-9._-]"), "_")
+
+                // Step 1: create GitHub release
+                uploadPhase = "Creating GitHub release..."
+                val release = githubCreateRelease(
+                    owner       = githubOwner,
+                    repo        = githubRepo,
+                    pat         = githubPat,
+                    tagName     = tagName,
+                    releaseName = relName,
+                    body        = editNotes.trim().ifBlank { "Release $relName" }
+                )
+
+                // Step 2: upload APK asset with progress
+                uploadPhase = "Uploading APK..."
+                val downloadUrl = githubUploadAsset(
+                    owner      = githubOwner,
+                    repo       = githubRepo,
+                    pat        = githubPat,
+                    releaseId  = release.releaseId,
+                    fileName   = fileName,
+                    apkFile    = apkFile,
+                    onProgress = { uploadProgress = it }
+                )
+
+                // Step 3: write Firestore releases/latest
+                uploadPhase = "Publishing release info..."
+                val data = hashMapOf<String, Any>(
+                    "versionCode"       to parsedCode,
+                    "versionName"       to parsedName,
+                    "downloadUrl"       to downloadUrl,
+                    "requiredMinCode"   to (editRequiredMin.toLongOrNull() ?: 0L),
+                    "notes"             to editNotes.trim(),
+                    "publishedAt"       to com.google.firebase.firestore.FieldValue.serverTimestamp(),
+                    "publishedByDevice" to BuildConfig.APPLICATION_ID
+                )
+                db.collection("releases").document("latest")
+                    .set(data, com.google.firebase.firestore.SetOptions.merge())
+                    .await()
+
+                loadCurrent()
+                uploadDone = true
+                uploadPhase = ""
+
+                // clean up temp file
+                runCatching { apkFile.delete() }
+                cachedApkPath = ""; pickedFileName = ""; parsedCode = 0L; parsedName = ""
+
+            }.onFailure { e ->
+                setError(e.message ?: "Upload failed")
+                uploadPhase = ""
+            }
+
+            uploading = false
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -1980,161 +2228,162 @@ private fun ReleasesTab(
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Current live release
+
+        // ---- Credentials warning ----
+        if (credsMissing) {
+            Card(colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.errorContainer
+            )) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("GitHub credentials not configured", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "Add to keystore.properties:\n" +
+                        "  githubPat=ghp_xxxxxxxxxxxxxxxxxxxx\n" +
+                        "  githubOwner=your-username\n" +
+                        "  githubRepo=your-repo-name\n\n" +
+                        "The PAT needs Contents: write permission on the repo.",
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+        }
+
+        // ---- Current live release ----
         ElevatedCard {
-            Column(
-                Modifier.padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("Current Release", style = MaterialTheme.typography.titleMedium)
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Current Live Release", style = MaterialTheme.typography.titleMedium)
                     IconButton(onClick = { scope.launch { loadCurrent() } }) {
                         Icon(Icons.Filled.Refresh, contentDescription = "Reload")
                     }
                 }
-
                 if (!loaded) {
                     CircularProgressIndicator()
                 } else if (liveVersionCode == 0L && liveDownloadUrl.isBlank()) {
-                    Text(
-                        "No release published yet.",
+                    Text("No release published yet.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                 } else {
-                    Text(
-                        "versionCode=$liveVersionCode  name=${liveVersionName.ifBlank { "(blank)" }}",
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    Text(
-                        "requiredMinCode=$liveRequiredMin",
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    Text(
-                        "publishedAt=${formatTimestamp(livePublishedAt)}",
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Text("versionCode=$liveVersionCode  name=${liveVersionName.ifBlank { "(blank)" }}",
+                        fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                    Text("requiredMinCode=$liveRequiredMin",
+                        fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                    Text("publishedAt=${formatTimestamp(livePublishedAt)}",
+                        fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                     if (liveDownloadUrl.isNotBlank()) {
-                        Text(
-                            "url=${liveDownloadUrl.take(60)}${if (liveDownloadUrl.length > 60) "..." else ""}",
-                            fontFamily = FontFamily.Monospace,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Text("url=${liveDownloadUrl.take(72)}${if (liveDownloadUrl.length > 72) "..." else ""}",
+                            fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     if (liveNotes.isNotBlank()) {
-                        Text(
-                            "notes: ${liveNotes.lines().firstOrNull().orEmpty().take(80)}",
+                        Text(liveNotes.lines().firstOrNull().orEmpty().take(100),
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
         }
 
-        // Publish new release
+        // ---- Publish new release ----
         ElevatedCard {
-            Column(
-                Modifier.padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("Publish New Release", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    "Fills releases/latest. Public users will be prompted to update on next launch.",
+                Text("Pick the public APK. Version info is read automatically, then the APK is uploaded to GitHub Releases.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
 
-                OutlinedTextField(
-                    value = editVersionCode,
-                    onValueChange = { editVersionCode = it.filter { c -> c.isDigit() } },
+                OutlinedButton(
+                    onClick = { filePicker.launch("*/*") },
                     modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    label = { Text("versionCode (integer build number)") },
-                    placeholder = { Text("e.g. 42") }
-                )
-
-                OutlinedTextField(
-                    value = editVersionName,
-                    onValueChange = { editVersionName = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    label = { Text("versionName (display label)") },
-                    placeholder = { Text("e.g. v1.4.2") }
-                )
-
-                OutlinedTextField(
-                    value = editDownloadUrl,
-                    onValueChange = { editDownloadUrl = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    label = { Text("APK download URL") },
-                    placeholder = { Text("https://...") }
-                )
-
-                OutlinedTextField(
-                    value = editRequiredMin,
-                    onValueChange = { editRequiredMin = it.filter { c -> c.isDigit() } },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    label = { Text("requiredMinCode (force-update below this, 0 = optional)") },
-                    placeholder = { Text("0") }
-                )
-
-                OutlinedTextField(
-                    value = editNotes,
-                    onValueChange = { editNotes = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    minLines = 3,
-                    label = { Text("Release notes (shown in update dialog)") }
-                )
-
-                val canPublish = editVersionCode.isNotBlank() && editDownloadUrl.trim().startsWith("http")
-
-                Button(
-                    onClick = {
-                        scope.launch {
-                            setGlobalLoading(true)
-                            setError(null)
-                            runCatching {
-                                val data = hashMapOf<String, Any>(
-                                    "versionCode"    to (editVersionCode.toLongOrNull() ?: 0L),
-                                    "versionName"    to editVersionName.trim(),
-                                    "downloadUrl"    to editDownloadUrl.trim(),
-                                    "requiredMinCode" to (editRequiredMin.toLongOrNull() ?: 0L),
-                                    "notes"          to editNotes.trim(),
-                                    "publishedAt"    to com.google.firebase.firestore.FieldValue.serverTimestamp(),
-                                    "publishedByDevice" to com.scrapw.chatbox.BuildConfig.APPLICATION_ID
-                                )
-                                db.collection("releases").document("latest")
-                                    .set(data, com.google.firebase.firestore.SetOptions.merge())
-                                    .await()
-                                loadCurrent()
-                            }.onFailure { e ->
-                                setGlobalLoading(false)
-                                setError(e.message ?: "Failed to publish release")
-                            }
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = canPublish
+                    enabled = !uploading && !credsMissing
                 ) {
-                    Text("Publish Release")
+                    Icon(Icons.Filled.AttachFile, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (pickedFileName.isBlank()) "Pick APK file" else pickedFileName)
                 }
 
-                Text(
-                    "Note: admin build users will not see the update prompt (IS_ADMIN_BUILD=true).",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                if (parseError.isNotBlank()) {
+                    Card(colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    )) {
+                        Text(parseError, modifier = Modifier.padding(10.dp),
+                            style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+
+                if (parsedCode > 0L) {
+                    Card(colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )) {
+                        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("Read from APK", style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("versionCode = $parsedCode",
+                                fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
+                            Text("versionName = ${parsedName.ifBlank { "(blank)" }}",
+                                fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = editRequiredMin,
+                        onValueChange = { editRequiredMin = it.filter { c -> c.isDigit() } },
+                        modifier = Modifier.fillMaxWidth(), singleLine = true,
+                        label = { Text("Force-update below this versionCode (0 = optional)") },
+                        placeholder = { Text("0") }, enabled = !uploading
+                    )
+
+                    OutlinedTextField(
+                        value = editNotes,
+                        onValueChange = { editNotes = it },
+                        modifier = Modifier.fillMaxWidth(), minLines = 3,
+                        label = { Text("Release notes (optional)") },
+                        enabled = !uploading
+                    )
+
+                    if (uploading) {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            LinearProgressIndicator(
+                                progress = { uploadProgress },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Text(uploadPhase.ifBlank { "Working..." },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+
+                    if (uploadDone) {
+                        Card(colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer
+                        )) {
+                            Row(Modifier.padding(10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Icon(Icons.Filled.CheckCircle, contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary)
+                                Text("Published! Users on older versions will be prompted to update.",
+                                    style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    }
+
+                    Button(
+                        onClick = { startUpload() },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !uploading && parsedCode > 0L && cachedApkPath.isNotBlank() && !credsMissing
+                    ) {
+                        Icon(Icons.Filled.CloudUpload, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Upload & Publish v$parsedName ($parsedCode)")
+                    }
+
+                    Text(
+                        "Users on versionCode >= $parsedCode will not be prompted.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
         }
 
