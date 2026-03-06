@@ -40,6 +40,10 @@ import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
 import com.scrapw.chatbox.ui.ChatboxViewModel
+import android.content.Intent
+import android.net.Uri
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 import kotlinx.coroutines.tasks.await
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -131,11 +135,83 @@ fun ChatboxApp() {
     }
 
     /* -------------------------
+       Update check (public build only)
+       ------------------------- */
+
+    var releaseCheckResult by remember { mutableStateOf<ReleaseCheckResult?>(null) }
+    var updateDismissed by remember { mutableStateOf(false) }
+
+    if (!BuildConfig.IS_ADMIN_BUILD) {
+        LaunchedEffect(Unit) {
+            releaseCheckResult = checkFirestoreRelease(BuildConfig.VERSION_CODE)
+        }
+    }
+
+    val updateToShow = releaseCheckResult
+    if (!BuildConfig.IS_ADMIN_BUILD &&
+        updateToShow is ReleaseCheckResult.UpdateAvailable &&
+        (!updateDismissed || updateToShow.forced)
+    ) {
+        UpdateDialog(
+            info = updateToShow.info,
+            forced = updateToShow.forced,
+            onDismiss = { updateDismissed = true },
+            onDownload = { url ->
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                ctx.startActivity(intent)
+            }
+        )
+    }
+
+    /* -------------------------
        Main app
        ------------------------- */
 
     val vm: ChatboxViewModel = viewModel(factory = ChatboxViewModel.Factory)
     ChatboxScreen(chatboxViewModel = vm)
+}
+
+@Composable
+private fun UpdateDialog(
+    info: ReleaseInfo,
+    forced: Boolean,
+    onDismiss: () -> Unit,
+    onDownload: (String) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = { if (!forced) onDismiss() },
+        title = {
+            Text(if (forced) "Update Required" else "Update Available")
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Version ${info.versionName} is available.")
+                if (info.notes.isNotBlank()) {
+                    Text(
+                        info.notes,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (forced) {
+                    Text(
+                        "This update is required to continue using the app.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onDownload(info.downloadUrl) }) {
+                Text("Download")
+            }
+        },
+        dismissButton = if (!forced) ({
+            TextButton(onClick = onDismiss) { Text("Later") }
+        }) else null
+    )
 }
 
 /* =========================================================
@@ -182,7 +258,7 @@ private suspend fun bootstrapFirebaseAndCache(ctx: Context) {
 
     val db = FirebaseFirestore.getInstance()
 
-    // ✅ SAFE public write to canonical self doc: users/{deviceHash}
+    // \u2705 SAFE public write to canonical self doc: users/{deviceHash}
     // Keep keys strictly within selfMutableKeys() and consistent with rules:
     // - uid/authUid/currentUid == request.auth.uid
     // - deviceHash/docId == document id (deviceHash)
@@ -206,7 +282,7 @@ private suspend fun bootstrapFirebaseAndCache(ctx: Context) {
         "versionCode" to BuildConfig.VERSION_CODE
     )
 
-    // ✅ SAFE public write to mapping doc: usersById/{uid}
+    // \u2705 SAFE public write to mapping doc: usersById/{uid}
     // Must match your rules: keys only [deviceHash, authUid, appId, adminBuild, updatedAt]
     val safeLink = hashMapOf<String, Any>(
         "deviceHash" to deviceHash,
@@ -341,7 +417,7 @@ private fun BootstrapScreen(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
-                "Starting VRC-A…",
+                "Starting VRC-A\u2026",
                 style = MaterialTheme.typography.headlineSmall,
                 textAlign = TextAlign.Center
             )
@@ -349,7 +425,7 @@ private fun BootstrapScreen(
             Spacer(Modifier.height(10.dp))
 
             Text(
-                "Preparing device session…",
+                "Preparing device session\u2026",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center
@@ -426,7 +502,7 @@ private fun CrashScreen(
             }
 
             Text(
-                "If this screen shows “no crash text saved”, the process may be dying before the handler can write the log.",
+                "If this screen shows \u201Cno crash text saved\u201D, the process may be dying before the handler can write the log.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
