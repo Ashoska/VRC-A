@@ -33,9 +33,9 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-          GITHUB_PAT_RELEASE: ${{ secrets.GITHUB_PAT_RELEASE }}
-          GITHUB_OWNER: ${{ secrets.GITHUB_OWNER }}
-          GITHUB_REPO: ${{ secrets.GITHUB_REPO }}
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
+          RELEASE_OWNER: ${{ secrets.RELEASE_OWNER }}
+          RELEASE_REPO: ${{ secrets.RELEASE_REPO }}
         run: |
           set -e
 
@@ -51,9 +51,9 @@ jobs:
           storePassword=$KEYSTORE_PASSWORD
           keyAlias=$KEY_ALIAS
           keyPassword=$KEY_PASSWORD
-          githubPat=${GITHUB_PAT_RELEASE}
-          githubOwner=${GITHUB_OWNER}
-          githubRepo=${GITHUB_REPO}
+          githubPat=${RELEASE_PAT}
+          githubOwner=${RELEASE_OWNER}
+          githubRepo=${RELEASE_REPO}
           EOF
 
           echo "Signing files created."
