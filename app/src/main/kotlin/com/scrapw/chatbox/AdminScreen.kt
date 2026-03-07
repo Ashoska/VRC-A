@@ -43,6 +43,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -341,7 +342,7 @@ fun AdminScreen() {
             }
 
             // Tabs
-            TabRow(selectedTabIndex = tabIndex) {
+            ScrollableTabRow(selectedTabIndex = tabIndex, edgePadding = 0.dp) {
                 tabs.forEachIndexed { i, label ->
                     Tab(
                         selected = tabIndex == i,
@@ -351,7 +352,7 @@ fun AdminScreen() {
                                 label,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
-                                style = MaterialTheme.typography.labelMedium
+                                style = MaterialTheme.typography.labelSmall
                             )
                         }
                     )
