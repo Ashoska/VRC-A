@@ -2101,7 +2101,7 @@ private fun ReleasesTab(
 
     // ---- upload state ----
     var uploadPhase     by remember { mutableStateOf("") }
-    var uploadProgress  by remember { mutableFloatStateOf(0f) }
+    var uploadProgress  by remember { mutableStateOf(0f) }
     var uploading       by remember { mutableStateOf(false) }
     var uploadDone      by remember { mutableStateOf(false) }
 
@@ -2346,7 +2346,7 @@ private fun ReleasesTab(
                     if (uploading) {
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             LinearProgressIndicator(
-                                progress = { uploadProgress },
+                                progress = uploadProgress,
                                 modifier = Modifier.fillMaxWidth()
                             )
                             Text(uploadPhase.ifBlank { "Working..." },
