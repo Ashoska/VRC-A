@@ -323,7 +323,7 @@ class NowPlayingListenerService : NotificationListenerService() {
 
         val startAt = SystemClock.elapsedRealtime()
         val maxMs = 10 * 60 * 1000L // 10 minutes max per activation
-        val intervalMs = 2000L
+        val intervalMs = 500L
 
         val r = object : Runnable {
             override fun run() {
