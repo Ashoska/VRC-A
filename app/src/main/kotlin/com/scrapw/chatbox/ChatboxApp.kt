@@ -40,7 +40,19 @@ import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
 import com.scrapw.chatbox.ui.ChatboxViewModel
+import android.app.DownloadManager
+import android.content.BroadcastReceiver
 import android.content.Intent
+import android.content.IntentFilter
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.core.content.FileProvider
+import java.io.File
 import android.net.Uri
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
@@ -139,11 +151,64 @@ fun ChatboxApp() {
        ------------------------- */
 
     var releaseCheckResult by remember { mutableStateOf<ReleaseCheckResult?>(null) }
-    var updateDismissed by remember { mutableStateOf(false) }
+    var updateDismissed    by remember { mutableStateOf(false) }
+    var downloadId         by remember { mutableLongStateOf(-1L) }
+    var downloadDone       by remember { mutableStateOf(false) }
 
     if (!BuildConfig.IS_ADMIN_BUILD) {
         LaunchedEffect(Unit) {
             releaseCheckResult = checkFirestoreRelease(BuildConfig.VERSION_CODE)
+        }
+    }
+
+    // Listen for DownloadManager completion
+    if (downloadId >= 0L && !downloadDone) {
+        DisposableEffect(downloadId) {
+            val dm = ctx.getSystemService(android.content.Context.DOWNLOAD_SERVICE) as DownloadManager
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(context: android.content.Context, intent: Intent) {
+                    val id = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L)
+                    if (id != downloadId) return
+                    val query = DownloadManager.Query().setFilterById(id)
+                    val cursor = dm.query(query)
+                    if (cursor.moveToFirst()) {
+                        val statusCol = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
+                        val localUriCol = cursor.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI)
+                        val status = cursor.getInt(statusCol)
+                        val localUri = cursor.getString(localUriCol)
+                        if (status == DownloadManager.STATUS_SUCCESSFUL && localUri != null) {
+                            val file = File(Uri.parse(localUri).path!!)
+                            val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                                FileProvider.getUriForFile(
+                                    context,
+                                    "${context.packageName}.fileprovider",
+                                    file
+                                )
+                            } else {
+                                Uri.fromFile(file)
+                            }
+                            val install = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
+                                setDataAndType(uri, "application/vnd.android.package-archive")
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            context.startActivity(install)
+                            downloadDone = true
+                        }
+                    }
+                    cursor.close()
+                }
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                ctx.registerReceiver(
+                    receiver,
+                    IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE),
+                    android.content.Context.RECEIVER_EXPORTED
+                )
+            } else {
+                ctx.registerReceiver(receiver, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE))
+            }
+            onDispose { ctx.unregisterReceiver(receiver) }
         }
     }
 
@@ -155,11 +220,22 @@ fun ChatboxApp() {
         UpdateDialog(
             info = updateToShow.info,
             forced = updateToShow.forced,
+            downloading = downloadId >= 0L && !downloadDone,
             onDismiss = { updateDismissed = true },
             onDownload = { url ->
-                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                ctx.startActivity(intent)
+                val dm = ctx.getSystemService(android.content.Context.DOWNLOAD_SERVICE) as DownloadManager
+                val fileName = "vrc-a-update.apk"
+                // Delete any previous partial download
+                val dest = File(ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), fileName)
+                if (dest.exists()) dest.delete()
+                val request = DownloadManager.Request(Uri.parse(url)).apply {
+                    setTitle("VRC-A Update")
+                    setDescription("Downloading update...")
+                    setDestinationInExternalFilesDir(ctx, Environment.DIRECTORY_DOWNLOADS, fileName)
+                    setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
+                }
+                downloadId = dm.enqueue(request)
+                downloadDone = false
             }
         )
     }
@@ -176,6 +252,7 @@ fun ChatboxApp() {
 private fun UpdateDialog(
     info: ReleaseInfo,
     forced: Boolean,
+    downloading: Boolean = false,
     onDismiss: () -> Unit,
     onDownload: (String) -> Unit
 ) {
@@ -204,8 +281,11 @@ private fun UpdateDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { onDownload(info.downloadUrl) }) {
-                Text("Download")
+            TextButton(
+                onClick = { if (!downloading) onDownload(info.downloadUrl) },
+                enabled = !downloading
+            ) {
+                Text(if (downloading) "Downloading..." else "Download")
             }
         },
         dismissButton = if (!forced) ({
