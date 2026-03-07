@@ -45,10 +45,10 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -343,15 +343,19 @@ fun AdminScreen() {
             }
 
             // Tabs
-            ScrollableTabRow(
-                selectedTabIndex = tabIndex,
-                edgePadding = 0.dp
-            ) {
+            TabRow(selectedTabIndex = tabIndex) {
                 tabs.forEachIndexed { i, label ->
                     Tab(
                         selected = tabIndex == i,
                         onClick = { tabIndex = i },
-                        text = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                        text = {
+                            Text(
+                                label,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
                     )
                 }
             }
@@ -475,7 +479,7 @@ private fun UsersTab(
     var filterWarned by rememberSaveable { mutableStateOf(false) }
     var filterBanned by rememberSaveable { mutableStateOf(false) }
     var selectedDocId by rememberSaveable { mutableStateOf<String?>(null) }
-    var liveLimit    by rememberSaveable { mutableIntStateOf(75) }
+    var liveLimit    by rememberSaveable { mutableIntStateOf(500) }
 
     var selectedDetail        by remember { mutableStateOf<UserDetail?>(null) }
     var selectedDetailLoading by remember { mutableStateOf(false) }
@@ -740,7 +744,7 @@ private fun UsersTab(
                         )
                         Spacer(Modifier.weight(1f))
                         Text(
-                            "of $liveLimit loaded",
+                            "${filteredUsers.size} of $liveLimit loaded",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.align(androidx.compose.ui.Alignment.CenterVertically)
