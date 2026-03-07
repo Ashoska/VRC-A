@@ -114,7 +114,7 @@ fun SettingsScreen(
         // About + FAQ removed on purpose (you asked to remove them).
         Spacer(Modifier.height(6.dp))
         Text(
-            text = "VRC-A (VRChat Assistant)",
+            text = "VRC-A (made by Ashoska Mitsu Sisko)",
             style = MaterialTheme.typography.bodySmall
         )
     }
