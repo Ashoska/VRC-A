@@ -25,8 +25,7 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
-      # Create signing files ONLY if secrets exist
-      - name: Create signing files (if secrets set)
+      - name: Create keystore.properties
         shell: bash
         env:
           KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
@@ -39,31 +38,23 @@ jobs:
         run: |
           set -e
 
-          # Always write GitHub release credentials so admin build can push releases
-          cat > keystore.properties <<EOF
-githubPat=${RELEASE_PAT}
-githubOwner=${RELEASE_OWNER}
-githubRepo=${RELEASE_REPO}
-EOF
+          printf 'githubPat=%s\ngithubOwner=%s\ngithubRepo=%s\n' \
+            "$RELEASE_PAT" "$RELEASE_OWNER" "$RELEASE_REPO" \
+            > keystore.properties
 
           if [ -z "$KEYSTORE_B64" ]; then
-            echo "No signing secrets found. Release will be unsigned."
+            echo "No signing secrets - release will be unsigned."
             exit 0
           fi
 
           echo "$KEYSTORE_B64" | base64 -d > release.keystore
 
-          # Append signing keys to the same file
-          cat >> keystore.properties <<EOF
-storeFile=release.keystore
-storePassword=$KEYSTORE_PASSWORD
-keyAlias=$KEY_ALIAS
-keyPassword=$KEY_PASSWORD
-EOF
+          printf 'storeFile=release.keystore\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+            "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" \
+            >> keystore.properties
 
           echo "Signing files created."
 
-      # âœ… Build ONLY the variants we care about (separately)
       - name: Build Public Debug APK
         run: ./gradlew :app:assemblePublicAppDebug
 
@@ -76,7 +67,6 @@ EOF
       - name: Build Admin Release APK
         run: ./gradlew :app:assembleAdminAppRelease
 
-      # âœ… Upload each APK as its own artifact so you can't install the wrong one
       - name: Upload Public Debug APK
         uses: actions/upload-artifact@v4
         with:
