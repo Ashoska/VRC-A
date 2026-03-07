@@ -43,6 +43,7 @@ class NowPlayingListenerService : NotificationListenerService() {
     private val lastPushElapsedByPackage = HashMap<String, Long>()
     private val stallCountByPackage = HashMap<String, Int>()
     private val specialUntilElapsedByPackage = HashMap<String, Long>()
+    private val lastPlayingStateByPackage = HashMap<String, Boolean>()
 
     private fun markSpecialWindow(pkg: String, windowMs: Long) {
         specialUntilElapsedByPackage[pkg] = SystemClock.elapsedRealtime() + windowMs
@@ -155,8 +156,12 @@ class NowPlayingListenerService : NotificationListenerService() {
             controller.registerCallback(cb)
             controllersByPackage[pkg] = ControllerEntry(controller, cb, token)
 
+            // Seed the playing state so the poll can detect the first pause/resume.
+            val initState = controller.playbackState
+            lastPlayingStateByPackage[pkg] = initState?.state == PlaybackState.STATE_PLAYING
+
             // Push an immediate snapshot so UI/OSC updates right away.
-            pushSnapshot(pkg, controller.metadata, controller.playbackState, controller)
+            pushSnapshot(pkg, controller.metadata, initState, controller)
         } catch (_: Throwable) {
             // If MediaController fails, do nothing (don\u00E2\u20AC\u2122t fall back to non-media notifications).
         }
@@ -169,6 +174,7 @@ class NowPlayingListenerService : NotificationListenerService() {
         } catch (_: Throwable) {
             // ignore
         }
+        lastPlayingStateByPackage.remove(pkg)
     }
 
     private fun teardownAllControllers() {
@@ -340,10 +346,16 @@ class NowPlayingListenerService : NotificationListenerService() {
                 val lastPush = lastPushElapsedByPackage[pkg] ?: 0L
                 val sincePush = SystemClock.elapsedRealtime() - lastPush
 
-                // Push if metadata changed, or if we have not pushed in a while (callback stall recovery).
-                if (changed || sincePush >= 4000L) {
+                // Also detect playback state changes (pause/resume) that callbacks missed.
+                val nowPlaying = pb?.state == PlaybackState.STATE_PLAYING
+                val statePrev = lastPlayingStateByPackage[pkg]
+                val stateChanged = statePrev != null && statePrev != nowPlaying
+
+                // Push if metadata changed, state changed, or stall recovery fallback.
+                if (changed || stateChanged || sincePush >= 4000L) {
                     pushSnapshot(pkg, md, pb, controller)
                 }
+                lastPlayingStateByPackage[pkg] = nowPlaying
 
                 // Give up after maxMs to avoid background churn.
                 if (SystemClock.elapsedRealtime() - startAt >= maxMs) {
