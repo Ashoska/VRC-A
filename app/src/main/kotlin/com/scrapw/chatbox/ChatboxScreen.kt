@@ -2135,7 +2135,7 @@ private fun InfoSheet(onDismiss: () -> Unit) {
 
                     val overview = remember {
                         """
-VRC-A (VRChat Assistant)
+VRC-A (made by Ashoska Mitsu Sisko)
 
 - Sends OSC chatbox text to your Quest/PC target
 - Includes: AFK, Cycle, Now Playing, Manual Send
