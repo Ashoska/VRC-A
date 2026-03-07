@@ -39,6 +39,13 @@ jobs:
         run: |
           set -e
 
+          # Always write GitHub release credentials so admin build can push releases
+          cat > keystore.properties <<EOF
+githubPat=${RELEASE_PAT}
+githubOwner=${RELEASE_OWNER}
+githubRepo=${RELEASE_REPO}
+EOF
+
           if [ -z "$KEYSTORE_B64" ]; then
             echo "No signing secrets found. Release will be unsigned."
             exit 0
@@ -46,19 +53,17 @@ jobs:
 
           echo "$KEYSTORE_B64" | base64 -d > release.keystore
 
-          cat > keystore.properties <<EOF
-          storeFile=release.keystore
-          storePassword=$KEYSTORE_PASSWORD
-          keyAlias=$KEY_ALIAS
-          keyPassword=$KEY_PASSWORD
-          githubPat=${RELEASE_PAT}
-          githubOwner=${RELEASE_OWNER}
-          githubRepo=${RELEASE_REPO}
-          EOF
+          # Append signing keys to the same file
+          cat >> keystore.properties <<EOF
+storeFile=release.keystore
+storePassword=$KEYSTORE_PASSWORD
+keyAlias=$KEY_ALIAS
+keyPassword=$KEY_PASSWORD
+EOF
 
           echo "Signing files created."
 
-      # âœ… Admin flavor builds
+      # Ã¢Å“â€¦ Admin flavor builds
       - name: Build Admin Debug APK
         run: ./gradlew :app:assembleAdminAppDebug
 
