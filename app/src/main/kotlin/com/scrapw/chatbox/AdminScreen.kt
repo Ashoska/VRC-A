@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -29,6 +30,8 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -40,7 +43,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.ScrollableTabRow
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
@@ -338,15 +341,19 @@ fun AdminScreen() {
             }
 
             // Tabs
-            ScrollableTabRow(
-                selectedTabIndex = tabIndex,
-                edgePadding = 0.dp
-            ) {
+            TabRow(selectedTabIndex = tabIndex) {
                 tabs.forEachIndexed { i, label ->
                     Tab(
                         selected = tabIndex == i,
                         onClick = { tabIndex = i },
-                        text = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                        text = {
+                            Text(
+                                label,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
                     )
                 }
             }
@@ -466,36 +473,25 @@ private fun UsersTab(
 ) {
     val users = remember { mutableStateListOf<UserRow>() }
 
-    var search by rememberSaveable { mutableStateOf("") }
+    var search       by rememberSaveable { mutableStateOf("") }
     var filterWarned by rememberSaveable { mutableStateOf(false) }
     var filterBanned by rememberSaveable { mutableStateOf(false) }
-
-    // Selected user takes over whole Users tab until unselected
     var selectedDocId by rememberSaveable { mutableStateOf<String?>(null) }
+    var liveLimit    by rememberSaveable { mutableIntStateOf(500) }
 
-    // "More" just increases live query limit (still realtime)
-    var liveLimit by rememberSaveable { mutableIntStateOf(75) }
-
-    // Selected details live doc listener
-    var selectedDetail by remember { mutableStateOf<UserDetail?>(null) }
+    var selectedDetail        by remember { mutableStateOf<UserDetail?>(null) }
     var selectedDetailLoading by remember { mutableStateOf(false) }
 
-    // ticker for relative times
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) {
-        while (true) {
-            nowMs = System.currentTimeMillis()
-            delay(1000L)
-        }
+        while (true) { nowMs = System.currentTimeMillis(); delay(1000L) }
     }
 
     fun rowMatches(u: UserRow, q: String): Boolean {
         if (q.isBlank()) return true
         val t = q.trim()
-        return u.docId.contains(t, true) ||
-            u.authUid.contains(t, true) ||
-            u.deviceHash.contains(t, true) ||
-            u.displayName.contains(t, true)
+        return u.docId.contains(t, true) || u.authUid.contains(t, true) ||
+            u.deviceHash.contains(t, true) || u.displayName.contains(t, true)
     }
 
     val filteredUsers by remember(search, filterWarned, filterBanned, users.size) {
@@ -509,31 +505,19 @@ private fun UsersTab(
         }
     }
 
-    // Live users list
     DisposableEffect(liveLimit) {
-        setError(null)
-        setGlobalLoading(true)
-
+        setError(null); setGlobalLoading(true)
         val reg: ListenerRegistration = db.collection("users")
             .orderBy("lastSeenAt", Query.Direction.DESCENDING)
             .limit(liveLimit.toLong())
             .addSnapshotListener { snap, e ->
-                if (e != null) {
-                    setGlobalLoading(false)
-                    setError(e.message ?: "Users live update failed")
-                    return@addSnapshotListener
-                }
-                if (snap == null) {
-                    setGlobalLoading(false)
-                    return@addSnapshotListener
-                }
-
+                if (e != null) { setGlobalLoading(false); setError(e.message ?: "Users live update failed"); return@addSnapshotListener }
+                if (snap == null) { setGlobalLoading(false); return@addSnapshotListener }
                 val next = snap.documents.map { d ->
                     val docId = d.id
                     val authUid = (d.getString("authUid") ?: d.getString("uid") ?: "").trim()
                     UserRow(
-                        docId = docId,
-                        authUid = authUid,
+                        docId = docId, authUid = authUid,
                         displayName = (d.getString("displayName") ?: "").trim(),
                         deviceHash = (d.getString("deviceHash") ?: "").trim(),
                         warned = d.getBoolean("warned") ?: false,
@@ -542,79 +526,40 @@ private fun UsersTab(
                         updatedAt = d.getTimestamp("updatedAt")
                     )
                 }
-
-                users.clear()
-                users.addAll(next)
-                setGlobalLoading(false)
+                users.clear(); users.addAll(next); setGlobalLoading(false)
             }
-
         onDispose { reg.remove() }
     }
 
-    // Live selected doc details
     DisposableEffect(selectedDocId) {
         val docId = selectedDocId
         if (docId.isNullOrBlank()) {
-            selectedDetail = null
-            selectedDetailLoading = false
+            selectedDetail = null; selectedDetailLoading = false
             return@DisposableEffect onDispose { }
         }
-
-        selectedDetailLoading = true
-        setError(null)
-
-        val reg = db.collection("users")
-            .document(docId)
+        selectedDetailLoading = true; setError(null)
+        val reg = db.collection("users").document(docId)
             .addSnapshotListener { snap, e ->
-                if (e != null) {
-                    selectedDetailLoading = false
-                    setError(e.message ?: "User detail live update failed")
-                    return@addSnapshotListener
-                }
-                if (snap == null || !snap.exists()) {
-                    selectedDetailLoading = false
-                    selectedDetail = null
-                    return@addSnapshotListener
-                }
-
+                if (e != null) { selectedDetailLoading = false; setError(e.message ?: "User detail live update failed"); return@addSnapshotListener }
+                if (snap == null || !snap.exists()) { selectedDetailLoading = false; selectedDetail = null; return@addSnapshotListener }
                 fun s(key: String) = (snap.getString(key) ?: "").trim()
                 fun b(key: String) = snap.getBoolean(key) ?: false
                 fun l(key: String) = snap.getLong(key) ?: 0L
-
-                val afkPresets = listOf(s("afkPreset1"), s("afkPreset2"), s("afkPreset3"))
-                val cyclePresets = listOf(
-                    s("cyclePreset1"),
-                    s("cyclePreset2"),
-                    s("cyclePreset3"),
-                    s("cyclePreset4"),
-                    s("cyclePreset5")
-                )
-
                 selectedDetail = UserDetail(
-                    afkEnabled = b("afkEnabled"),
-                    afkMessage = s("afkMessage"),
-                    cycleEnabled = b("cycleEnabled"),
-                    cycleIntervalSeconds = l("cycleIntervalSeconds"),
-                    cycleLinesText = s("cycleLinesText"),
-                    spotifyEnabled = b("spotifyEnabled"),
-                    spotifyDemoEnabled = b("spotifyDemoEnabled"),
-                    spotifyPreset = l("spotifyPreset"),
-                    nowPlayingDetected = b("nowPlayingDetected"),
-                    nowPlayingIsPlaying = b("nowPlayingIsPlaying"),
-                    nowPlayingTitle = s("nowPlayingTitle"),
-                    nowPlayingArtist = s("nowPlayingArtist"),
-                    combinedPreviewText = s("combinedPreviewText"),
-                    warnReason = s("warnReason"),
+                    afkEnabled = b("afkEnabled"), afkMessage = s("afkMessage"),
+                    cycleEnabled = b("cycleEnabled"), cycleIntervalSeconds = l("cycleIntervalSeconds"),
+                    cycleLinesText = s("cycleLinesText"), spotifyEnabled = b("spotifyEnabled"),
+                    spotifyDemoEnabled = b("spotifyDemoEnabled"), spotifyPreset = l("spotifyPreset"),
+                    nowPlayingDetected = b("nowPlayingDetected"), nowPlayingIsPlaying = b("nowPlayingIsPlaying"),
+                    nowPlayingTitle = s("nowPlayingTitle"), nowPlayingArtist = s("nowPlayingArtist"),
+                    combinedPreviewText = s("combinedPreviewText"), warnReason = s("warnReason"),
                     banReason = s("banReason"),
-                    afkPresets = afkPresets,
-                    cyclePresets = cyclePresets,
-                    versionName = s("versionName"),
-                    versionCode = l("versionCode"),
-                    appId = s("appId")
+                    afkPresets = listOf(s("afkPreset1"), s("afkPreset2"), s("afkPreset3")),
+                    cyclePresets = listOf(s("cyclePreset1"), s("cyclePreset2"), s("cyclePreset3"), s("cyclePreset4"), s("cyclePreset5")),
+                    versionName = s("versionName"), versionCode = l("versionCode"), appId = s("appId")
                 )
                 selectedDetailLoading = false
             }
-
         onDispose { reg.remove() }
     }
 
@@ -622,89 +567,79 @@ private fun UsersTab(
         selectedDocId?.let { id -> users.firstOrNull { it.docId == id } }
     }
 
-    // Detail view
+    // ---- Detail view ----
     if (selectedRow != null) {
         val d = selectedDetail
-
         Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .verticalScroll(rememberScrollState()),
+            modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             ElevatedCard {
-                Column(
-                    Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f)) {
                             IconButton(onClick = { selectedDocId = null }) {
                                 Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
                             }
-                            Column {
-                                Text("User", style = MaterialTheme.typography.titleMedium)
-                                if (selectedRow.displayName.isNotBlank()) {
-                                    Text(
-                                        selectedRow.displayName,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
+                            Column(Modifier.weight(1f)) {
                                 Text(
-                                    "docId=${shortId(selectedRow.docId)}",
+                                    selectedRow.displayName.ifBlank { shortId(selectedRow.docId) },
+                                    style = MaterialTheme.typography.titleMedium,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    shortId(selectedRow.docId),
                                     fontFamily = FontFamily.Monospace,
-                                    style = MaterialTheme.typography.bodySmall
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
                         }
-
-                        IconButton(onClick = { /* live already */ }) {
-                            Icon(Icons.Filled.Refresh, contentDescription = "Live")
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            if (selectedRow.banned) {
+                                androidx.compose.material3.Badge(
+                                    containerColor = MaterialTheme.colorScheme.error
+                                ) { Text("BANNED", style = MaterialTheme.typography.labelSmall) }
+                            }
+                            if (selectedRow.warned) {
+                                androidx.compose.material3.Badge(
+                                    containerColor = MaterialTheme.colorScheme.tertiary
+                                ) { Text("WARNED", style = MaterialTheme.typography.labelSmall) }
+                            }
                         }
                     }
 
-                    Text(
-                        "authUid=${shortId(selectedRow.authUid.ifBlank { "(blank)" })}",
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    Text(
-                        "device=${shortId(selectedRow.deviceHash.ifBlank { "(blank)" })}",
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    Text(
-                        "warned=${selectedRow.warned}  banned=${selectedRow.banned}",
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall
-                    )
+                    Divider()
 
-                    val lastSeenRel = relativeTime(selectedRow.lastSeenAt, nowMs)
-                    val updatedRel = relativeTime(selectedRow.updatedAt, nowMs)
-                    Text(
-                        "lastSeen=$lastSeenRel   updated=$updatedRel",
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    @Composable
+                    fun InfoRow(label: String, value: String) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(label,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.width(72.dp))
+                            Text(value,
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f))
+                        }
+                    }
+
+                    InfoRow("authUid", shortId(selectedRow.authUid.ifBlank { "(blank)" }))
+                    InfoRow("device",  shortId(selectedRow.deviceHash.ifBlank { "(blank)" }))
+                    InfoRow("lastSeen", relativeTime(selectedRow.lastSeenAt, nowMs))
+                    InfoRow("updated",  relativeTime(selectedRow.updatedAt, nowMs))
 
                     Divider()
 
-                    
                     Button(
                         onClick = {
-                            onSendToModeration(
-                                ModerationTarget(
-                                    docId = selectedRow.docId,
-                                    authUid = selectedRow.authUid,
-                                    deviceHash = selectedRow.deviceHash,
-                                    displayName = selectedRow.displayName
-                                )
-                            )
+                            onSendToModeration(ModerationTarget(
+                                docId = selectedRow.docId, authUid = selectedRow.authUid,
+                                deviceHash = selectedRow.deviceHash, displayName = selectedRow.displayName
+                            ))
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
@@ -717,12 +652,8 @@ private fun UsersTab(
 
             if (selectedDetailLoading) {
                 ElevatedCard {
-                    Row(
-                        modifier = Modifier.padding(12.dp),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        CircularProgressIndicator()
-                        Text("Loading details...")
+                    Row(Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        CircularProgressIndicator(); Text("Loading details...")
                     }
                 }
             } else if (d != null) {
@@ -731,42 +662,42 @@ private fun UsersTab(
                 ElevatedCard {
                     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text("Details", style = MaterialTheme.typography.titleSmall)
-                        Text(
-                            "No detail loaded (doc missing or not yet written).",
-                            style = MaterialTheme.typography.bodySmall
-                        )
+                        Text("No detail loaded (doc missing or not yet written).",
+                            style = MaterialTheme.typography.bodySmall)
                     }
                 }
             }
-
             Spacer(Modifier.height(12.dp))
         }
         return
     }
 
-    // Normal Users list view - LazyColumn so all users scroll properly
+    // ---- List view ----
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        // Controls header
         item {
             ElevatedCard {
-                Column(
-                    Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
+                Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)) {
+
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                         Text("Users", style = MaterialTheme.typography.titleMedium)
-                        Text(
-                            "${filteredUsers.size} / ${users.size}",
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                            Text(
+                                "${filteredUsers.size} / ${users.size}",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            OutlinedButton(
+                                onClick = { liveLimit = (liveLimit + 500).coerceAtMost(10000) },
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                            ) { Text("+500", style = MaterialTheme.typography.labelSmall) }
+                        }
                     }
 
                     OutlinedTextField(
@@ -774,116 +705,104 @@ private fun UsersTab(
                         onValueChange = { search = it },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
-                        label = { Text("Search") },
-                        placeholder = { Text("name / docId / uid / device") }
+                        placeholder = { Text("Search name / id / uid / device") },
+                        leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null,
+                            modifier = Modifier.size(18.dp)) },
+                        trailingIcon = if (search.isNotBlank()) ({
+                            IconButton(onClick = { search = "" },
+                                modifier = Modifier.size(32.dp)) {
+                                Icon(Icons.Filled.Remove, contentDescription = "Clear",
+                                    modifier = Modifier.size(16.dp))
+                            }
+                        }) else null
                     )
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text("Warned", style = MaterialTheme.typography.bodySmall)
-                            Switch(checked = filterWarned, onCheckedChange = { filterWarned = it })
-                        }
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text("Banned", style = MaterialTheme.typography.bodySmall)
-                            Switch(checked = filterBanned, onCheckedChange = { filterBanned = it })
-                        }
-                    }
 
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(
-                            onClick = { liveLimit = liveLimit.coerceAtLeast(1); setError(null) },
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Live") }
-                        Button(
-                            onClick = { liveLimit = (liveLimit + 500).coerceAtMost(10000) },
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Load more (+500)") }
+                        androidx.compose.material3.FilterChip(
+                            selected = filterWarned,
+                            onClick = { filterWarned = !filterWarned },
+                            label = { Text("Warned", style = MaterialTheme.typography.labelSmall) }
+                        )
+                        androidx.compose.material3.FilterChip(
+                            selected = filterBanned,
+                            onClick = { filterBanned = !filterBanned },
+                            label = { Text("Banned", style = MaterialTheme.typography.labelSmall) }
+                        )
+                        Spacer(Modifier.weight(1f))
+                        Text(
+                            "${filteredUsers.size} of $liveLimit loaded",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.align(androidx.compose.ui.Alignment.CenterVertically)
+                        )
                     }
-
-                    Text(
-                        "Showing ${filteredUsers.size} of $liveLimit loaded",
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
                 }
             }
         }
 
-        // Empty state
         if (filteredUsers.isEmpty()) {
             item {
-                Text(
-                    "No users loaded / matching filters.",
+                Text("No users matching current filters.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 4.dp))
             }
         }
 
-        // User rows (compact)
         items(filteredUsers, key = { it.docId }) { u ->
             Card(
                 colors = CardDefaults.cardColors(
                     containerColor = when {
-                        u.banned  -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f)
-                        u.warned  -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f)
-                        else      -> MaterialTheme.colorScheme.surfaceVariant
+                        u.banned -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f)
+                        u.warned -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f)
+                        else     -> MaterialTheme.colorScheme.surfaceVariant
                     }
                 ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { selectedDocId = u.docId }
+                modifier = Modifier.fillMaxWidth().clickable { selectedDocId = u.docId }
             ) {
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                 ) {
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        // Name / fallback to short docId
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
                         Text(
                             u.displayName.ifBlank { shortId(u.docId) },
                             style = MaterialTheme.typography.bodyMedium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            maxLines = 1, overflow = TextOverflow.Ellipsis
                         )
-                        Text(
-                            shortId(u.docId),
-                            fontFamily = FontFamily.Monospace,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1
-                        )
+                        if (u.displayName.isNotBlank()) {
+                            Text(
+                                shortId(u.docId),
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1
+                            )
+                        }
                         Text(
                             relativeTime(u.lastSeenAt, nowMs),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                    // Status badges
-                    Column(
-                        horizontalAlignment = androidx.compose.ui.Alignment.End,
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                         if (u.banned) {
                             androidx.compose.material3.Badge(
                                 containerColor = MaterialTheme.colorScheme.error
-                            ) { Text("BANNED", style = MaterialTheme.typography.labelSmall) }
+                            ) { Text("BAN", style = MaterialTheme.typography.labelSmall) }
                         }
                         if (u.warned) {
                             androidx.compose.material3.Badge(
                                 containerColor = MaterialTheme.colorScheme.tertiary
-                            ) { Text("WARNED", style = MaterialTheme.typography.labelSmall) }
+                            ) { Text("WARN", style = MaterialTheme.typography.labelSmall) }
                         }
                         Icon(
-                            Icons.Filled.ExpandMore,
+                            Icons.Filled.ChevronRight,
                             contentDescription = null,
-                            modifier = Modifier.padding(top = 2.dp)
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
                         )
                     }
                 }
