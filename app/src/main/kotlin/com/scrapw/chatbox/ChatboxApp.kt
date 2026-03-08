@@ -372,17 +372,19 @@ private suspend fun bootstrapFirebaseAndCache(ctx: Context) {
         "updatedAt" to FieldValue.serverTimestamp()
     )
 
-    // If rules deny, still let app continue (VM will keep trying later).
-    runCatching {
-        db.collection("users").document(deviceHash)
-            .set(safeUser, SetOptions.merge())
-            .await()
-    }
+    // Admin build must not appear in the public user directory.
+    if (!BuildConfig.IS_ADMIN_BUILD) {
+        runCatching {
+            db.collection("users").document(deviceHash)
+                .set(safeUser, SetOptions.merge())
+                .await()
+        }
 
-    runCatching {
-        db.collection("usersById").document(uid)
-            .set(safeLink, SetOptions.merge())
-            .await()
+        runCatching {
+            db.collection("usersById").document(uid)
+                .set(safeLink, SetOptions.merge())
+                .await()
+        }
     }
 }
 
