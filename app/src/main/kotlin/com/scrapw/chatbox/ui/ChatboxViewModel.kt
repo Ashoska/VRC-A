@@ -94,7 +94,7 @@ class ChatboxViewModel(
 
         // Firestore sync throttles
         private const val SELF_SYNC_MIN_INTERVAL_MS = 12_000L
-        private const val SELF_SYNC_FORCE_INTERVAL_MS = 90_000L
+        private const val SELF_SYNC_FORCE_INTERVAL_MS = 10_000L
 
         // Moderation attach retry
         private const val MOD_ATTACH_RETRY_MS = 1_250L
