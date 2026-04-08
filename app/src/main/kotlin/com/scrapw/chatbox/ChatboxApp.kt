@@ -40,6 +40,11 @@ import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
 import com.scrapw.chatbox.ui.ChatboxViewModel
+import com.scrapw.chatbox.vrchat.VrchatAuthManager
+import com.scrapw.chatbox.vrchat.VrchatBanChecker
+import com.scrapw.chatbox.vrchat.VrchatLoginScreen
+import com.scrapw.chatbox.vrchat.VrchatPipelineService
+import androidx.core.content.ContextCompat
 import android.app.DownloadManager
 import android.content.BroadcastReceiver
 import android.content.Intent
@@ -139,6 +144,80 @@ fun ChatboxApp() {
                 bootWorking = false
             }
         }
+        return
+    }
+
+    /* -------------------------
+       Phase 1 ban check (device hash + auth UID)
+       Runs immediately after bootstrap. Does NOT show ban screen yet â€”
+       waits for VRChat login so we can capture the alt VRChat ID first.
+       ------------------------- */
+
+    var phase1BanId   by remember { mutableStateOf<String?>(null) }
+    var phase1Checked by remember { mutableStateOf(false) }
+
+    LaunchedEffect(bootOk) {
+        if (!bootOk) return@LaunchedEffect
+        val prefs = ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
+        val deviceHash = prefs.getString("device_id_hash", "") ?: ""
+        val authUid    = prefs.getString("auth_uid", "") ?: ""
+        if (deviceHash.isNotBlank()) {
+            val result = VrchatBanChecker.checkPhase1(deviceHash, authUid)
+            phase1BanId = result.banId  // null if clean
+        }
+        phase1Checked = true
+    }
+
+    if (bootOk && !phase1Checked) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator()
+        }
+        return
+    }
+
+    /* -------------------------
+       VRChat login gate (required for all users)
+       Shows VrchatLoginScreen if not yet logged in.
+       After login: runs Phase 2 ban check, starts pipeline service.
+       ------------------------- */
+
+    var vrcLoginDone    by remember { mutableStateOf(VrchatAuthManager.isLoggedIn(ctx)) }
+    var isBannedPhase2  by remember { mutableStateOf(false) }
+    var banPhase2Reason by remember { mutableStateOf("") }
+    var phase2Checking  by remember { mutableStateOf(false) }
+
+    if (!vrcLoginDone) {
+        VrchatLoginScreen(pendingBanId = phase1BanId) { userId, displayName ->
+            phase2Checking = true
+            androidx.lifecycle.lifecycleScope.let { _ ->
+                // Run Phase 2 ban check inline via coroutine
+            }
+        }
+        // Phase 2 is run via LaunchedEffect watching vrcLoginDone
+        LaunchedEffect(vrcLoginDone) {
+            if (!vrcLoginDone) return@LaunchedEffect
+            runPhase2AndStartPipeline(
+                ctx, phase1BanId,
+                onBanned = { reason -> isBannedPhase2 = true; banPhase2Reason = reason },
+                onClean = { phase2Checking = false }
+            )
+        }
+        return
+    }
+
+    // If VRC login succeeded but Phase 2 hasn't run yet (first run after login)
+    LaunchedEffect(vrcLoginDone) {
+        if (!vrcLoginDone || phase2Checking) return@LaunchedEffect
+        phase2Checking = true
+        runPhase2AndStartPipeline(
+            ctx, phase1BanId,
+            onBanned = { reason -> isBannedPhase2 = true; banPhase2Reason = reason },
+            onClean  = { phase2Checking = false }
+        )
+    }
+
+    if (isBannedPhase2) {
+        BannedScreen(reason = banPhase2Reason)
         return
     }
 
