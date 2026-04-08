@@ -260,7 +260,7 @@ fun AdminScreen() {
     // ==========================================
     // MAIN UI
     // ==========================================
-    val tabs = remember { listOf("Users", "Mod", "Announce", "Releases", "Config") }
+    val tabs = remember { listOf("Dashboard", "Users", "Mod", "Announce", "Releases", "Config", "Log") }
     var tabIndex by rememberSaveable { mutableIntStateOf(0) }
 
     // ModerationTarget is NOT saveable
@@ -366,18 +366,20 @@ fun AdminScreen() {
                     .weight(1f)
             ) {
                 when (tabIndex) {
-                    0 -> UsersTab(
+                    0 -> DashboardTab(db = db, setError = ::setErr)
+
+                    1 -> UsersTab(
                         db = db,
-                        clipboardCopy = { },
+                        myDeviceHash = deviceHash,
                         setGlobalLoading = { globalLoading = it },
                         setError = ::setErr,
                         onSendToModeration = { target ->
                             moderationTarget = target
-                            tabIndex = 1
+                            tabIndex = 2
                         }
                     )
 
-                    1 -> ModerationTab(
+                    2 -> ModerationTab(
                         db = db,
                         myUid = myUid,
                         byDeviceHash = deviceHash,
@@ -389,24 +391,26 @@ fun AdminScreen() {
                         onClearInitialTarget = { moderationTarget = null }
                     )
 
-                    2 -> AnnouncementsTab(
+                    3 -> AnnouncementsTab(
                         db = db,
                         createdByDevice = deviceHash,
                         setGlobalLoading = { globalLoading = it },
                         setError = ::setErr
                     )
 
-                    3 -> ReleasesTab(
+                    4 -> ReleasesTab(
                         db = db,
                         setGlobalLoading = { globalLoading = it },
                         setError = ::setErr
                     )
 
-                    else -> ConfigTab(
+                    5 -> ConfigTab(
                         db = db,
                         setGlobalLoading = { globalLoading = it },
                         setError = ::setErr
                     )
+
+                    else -> ModLogTab(db = db, setError = ::setErr)
                 }
             }
 
@@ -431,15 +435,31 @@ private data class UserRow(
     val warned: Boolean,
     val banned: Boolean,
     val lastSeenAt: Timestamp?,
-    val updatedAt: Timestamp?
+    val updatedAt: Timestamp?,
+    // VRChat
+    val vrchatUserId: String = "",
+    val vrchatDisplayName: String = "",
+    val vrchatStatus: String = "",
+    val vrchatWorld: String = "",
+    val vrchatPlayerCount: Int = 0,
+    val vrchatCapacity: Int = 0,
+    val vrchatPlatform: String = "",
+    val vrchatLastSyncAt: Timestamp? = null
 )
 
 private data class UserDetail(
-    val afkEnabled: Boolean,
-    val afkMessage: String,
+    // Pinned message (was AFK)
+    val pinnedEnabled: Boolean,
+    val pinnedMessage: String,
+    val pinnedPresets: List<String>,
+    val pinnedPresetNames: List<String>,
+    // Cycle
     val cycleEnabled: Boolean,
     val cycleIntervalSeconds: Long,
     val cycleLinesText: String,
+    val cyclePresets: List<String>,
+    val cyclePresetNames: List<String>,
+    // Now Playing
     val spotifyEnabled: Boolean,
     val spotifyDemoEnabled: Boolean,
     val spotifyPreset: Long,
@@ -447,27 +467,50 @@ private data class UserDetail(
     val nowPlayingIsPlaying: Boolean,
     val nowPlayingTitle: String,
     val nowPlayingArtist: String,
+    // Output
     val combinedPreviewText: String,
+    // Moderation
     val warnReason: String,
     val banReason: String,
-    val afkPresets: List<String>,
-    val cyclePresets: List<String>,
+    // Network
+    val ip1Name: String, val ip1Address: String,
+    val ip2Name: String, val ip2Address: String,
+    val ip3Name: String, val ip3Address: String,
+    val activeIpSlot: Long,
+    // App info
     val versionName: String,
     val versionCode: Long,
-    val appId: String
+    val appId: String,
+    val adminBuild: Boolean,
+    // VRChat
+    val vrchatUserId: String,
+    val vrchatDisplayName: String,
+    val vrchatStatus: String,
+    val vrchatStatusDescription: String,
+    val vrchatWorld: String,
+    val vrchatLocation: String,
+    val vrchatPlayerCount: Long,
+    val vrchatCapacity: Long,
+    val vrchatPlatform: String,
+    val vrchatLastSyncAt: Timestamp?
 )
 
 private data class ModerationTarget(
     val docId: String,
     val authUid: String,
     val deviceHash: String,
-    val displayName: String
+    val displayName: String,
+    val vrchatUserId: String = "",
+    val banReason: String = "",
+    val warnReason: String = "",
+    val banned: Boolean = false,
+    val warned: Boolean = false
 )
 
 @Composable
 private fun UsersTab(
     db: FirebaseFirestore,
-    clipboardCopy: (String) -> Unit,
+    myDeviceHash: String,
     setGlobalLoading: (Boolean) -> Unit,
     setError: (String?) -> Unit,
     onSendToModeration: (ModerationTarget) -> Unit
@@ -492,7 +535,9 @@ private fun UsersTab(
         if (q.isBlank()) return true
         val t = q.trim()
         return u.docId.contains(t, true) || u.authUid.contains(t, true) ||
-            u.deviceHash.contains(t, true) || u.displayName.contains(t, true)
+            u.deviceHash.contains(t, true) || u.displayName.contains(t, true) ||
+            u.vrchatUserId.contains(t, true) || u.vrchatDisplayName.contains(t, true) ||
+            u.vrchatWorld.contains(t, true)
     }
 
     val filteredUsers by remember(search, filterWarned, filterBanned, users.size) {
@@ -524,7 +569,15 @@ private fun UsersTab(
                         warned = d.getBoolean("warned") ?: false,
                         banned = d.getBoolean("banned") ?: false,
                         lastSeenAt = d.getTimestamp("lastSeenAt"),
-                        updatedAt = d.getTimestamp("updatedAt")
+                        updatedAt = d.getTimestamp("updatedAt"),
+                        vrchatUserId = (d.getString("vrchatUserId") ?: "").trim(),
+                        vrchatDisplayName = (d.getString("vrchatDisplayName") ?: "").trim(),
+                        vrchatStatus = (d.getString("vrchatStatus") ?: "").trim(),
+                        vrchatWorld = (d.getString("vrchatWorld") ?: "").trim(),
+                        vrchatPlayerCount = (d.getLong("vrchatInstancePlayerCount") ?: 0).toInt(),
+                        vrchatCapacity = (d.getLong("vrchatInstanceCapacity") ?: 0).toInt(),
+                        vrchatPlatform = (d.getString("vrchatPlatform") ?: "").trim(),
+                        vrchatLastSyncAt = d.getTimestamp("vrchatLastSyncAt")
                     )
                 }
                 users.clear(); users.addAll(next); setGlobalLoading(false)
@@ -547,17 +600,31 @@ private fun UsersTab(
                 fun b(key: String) = snap.getBoolean(key) ?: false
                 fun l(key: String) = snap.getLong(key) ?: 0L
                 selectedDetail = UserDetail(
-                    afkEnabled = b("afkEnabled"), afkMessage = s("afkMessage"),
-                    cycleEnabled = b("cycleEnabled"), cycleIntervalSeconds = l("cycleIntervalSeconds"),
-                    cycleLinesText = s("cycleLinesText"), spotifyEnabled = b("spotifyEnabled"),
-                    spotifyDemoEnabled = b("spotifyDemoEnabled"), spotifyPreset = l("spotifyPreset"),
+                    pinnedEnabled  = b("afkEnabled"), pinnedMessage = s("afkMessage"),
+                    pinnedPresets  = listOf(s("afkPreset1"), s("afkPreset2"), s("afkPreset3")),
+                    pinnedPresetNames = listOf(s("afkPreset1Name").ifBlank { "Preset 1" }, s("afkPreset2Name").ifBlank { "Preset 2" }, s("afkPreset3Name").ifBlank { "Preset 3" }),
+                    cycleEnabled   = b("cycleEnabled"), cycleIntervalSeconds = l("cycleIntervalSeconds"),
+                    cycleLinesText = s("cycleLinesText"),
+                    cyclePresets   = listOf(s("cyclePreset1"), s("cyclePreset2"), s("cyclePreset3"), s("cyclePreset4"), s("cyclePreset5")),
+                    cyclePresetNames = listOf(s("cyclePreset1Name").ifBlank { "Preset 1" }, s("cyclePreset2Name").ifBlank { "Preset 2" }, s("cyclePreset3Name").ifBlank { "Preset 3" }, s("cyclePreset4Name").ifBlank { "Preset 4" }, s("cyclePreset5Name").ifBlank { "Preset 5" }),
+                    spotifyEnabled = b("spotifyEnabled"), spotifyDemoEnabled = b("spotifyDemoEnabled"),
+                    spotifyPreset  = l("spotifyPreset"),
                     nowPlayingDetected = b("nowPlayingDetected"), nowPlayingIsPlaying = b("nowPlayingIsPlaying"),
                     nowPlayingTitle = s("nowPlayingTitle"), nowPlayingArtist = s("nowPlayingArtist"),
-                    combinedPreviewText = s("combinedPreviewText"), warnReason = s("warnReason"),
-                    banReason = s("banReason"),
-                    afkPresets = listOf(s("afkPreset1"), s("afkPreset2"), s("afkPreset3")),
-                    cyclePresets = listOf(s("cyclePreset1"), s("cyclePreset2"), s("cyclePreset3"), s("cyclePreset4"), s("cyclePreset5")),
-                    versionName = s("versionName"), versionCode = l("versionCode"), appId = s("appId")
+                    combinedPreviewText = s("combinedPreviewText"),
+                    warnReason = s("warnReason"), banReason = s("banReason"),
+                    ip1Name = s("ip1Name").ifBlank { "Home" }, ip1Address = s("ip1Address"),
+                    ip2Name = s("ip2Name").ifBlank { "Hotspot" }, ip2Address = s("ip2Address"),
+                    ip3Name = s("ip3Name").ifBlank { "Other" }, ip3Address = s("ip3Address"),
+                    activeIpSlot = l("activeIpSlot").let { if (it == 0L) 1L else it },
+                    versionName = s("versionName"), versionCode = l("versionCode"), appId = s("appId"),
+                    adminBuild = b("adminBuild"),
+                    vrchatUserId = s("vrchatUserId"), vrchatDisplayName = s("vrchatDisplayName"),
+                    vrchatStatus = s("vrchatStatus"), vrchatStatusDescription = s("vrchatStatusDescription"),
+                    vrchatWorld = s("vrchatWorld"), vrchatLocation = s("vrchatLocation"),
+                    vrchatPlayerCount = l("vrchatInstancePlayerCount"), vrchatCapacity = l("vrchatInstanceCapacity"),
+                    vrchatPlatform = s("vrchatPlatform"),
+                    vrchatLastSyncAt = snap.getTimestamp("vrchatLastSyncAt")
                 )
                 selectedDetailLoading = false
             }
@@ -584,11 +651,22 @@ private fun UsersTab(
                                 Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
                             }
                             Column(Modifier.weight(1f)) {
+                                val primaryLabel = selectedRow.vrchatDisplayName.ifBlank {
+                                    selectedRow.displayName.ifBlank { shortId(selectedRow.docId) }
+                                }
                                 Text(
-                                    selectedRow.displayName.ifBlank { shortId(selectedRow.docId) },
+                                    primaryLabel,
                                     style = MaterialTheme.typography.titleMedium,
                                     maxLines = 1, overflow = TextOverflow.Ellipsis
                                 )
+                                if (selectedRow.vrchatUserId.isNotBlank()) {
+                                    Text(
+                                        selectedRow.vrchatUserId,
+                                        fontFamily = FontFamily.Monospace,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
                                 Text(
                                     shortId(selectedRow.docId),
                                     fontFamily = FontFamily.Monospace,
@@ -639,7 +717,12 @@ private fun UsersTab(
                         onClick = {
                             onSendToModeration(ModerationTarget(
                                 docId = selectedRow.docId, authUid = selectedRow.authUid,
-                                deviceHash = selectedRow.deviceHash, displayName = selectedRow.displayName
+                                deviceHash = selectedRow.deviceHash,
+                                displayName = selectedRow.vrchatDisplayName.ifBlank { selectedRow.displayName },
+                                vrchatUserId = selectedRow.vrchatUserId,
+                                banned = selectedRow.banned, warned = selectedRow.warned,
+                                banReason = selectedDetail?.banReason ?: "",
+                                warnReason = selectedDetail?.warnReason ?: ""
                             ))
                         },
                         modifier = Modifier.fillMaxWidth()
@@ -767,19 +850,25 @@ private fun UsersTab(
                     verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
                 ) {
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                        // VRChat display name is primary identifier; fall back to displayName then docId
+                        val primaryName = u.vrchatDisplayName.ifBlank { u.displayName.ifBlank { shortId(u.docId) } }
+                        val secondaryName = if (u.vrchatDisplayName.isNotBlank() && u.displayName.isNotBlank() && u.vrchatDisplayName != u.displayName) u.displayName else null
                         Text(
-                            u.displayName.ifBlank { shortId(u.docId) },
+                            primaryName,
                             style = MaterialTheme.typography.bodyMedium,
                             maxLines = 1, overflow = TextOverflow.Ellipsis
                         )
-                        if (u.displayName.isNotBlank()) {
-                            Text(
-                                shortId(u.docId),
-                                fontFamily = FontFamily.Monospace,
+                        if (secondaryName != null) {
+                            Text(secondaryName,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1
-                            )
+                                maxLines = 1)
+                        }
+                        if (u.vrchatWorld.isNotBlank()) {
+                            Text("ðŸ“ ${u.vrchatWorld}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                         Text(
                             relativeTime(u.lastSeenAt, nowMs),
@@ -816,83 +905,168 @@ private fun UsersTab(
 
 @Composable
 private fun DetailBlock(d: UserDetail) {
-    @Composable
-    fun Mono(label: String, value: String) {
-        Text(
-            "$label=$value",
-            fontFamily = FontFamily.Monospace,
-            style = MaterialTheme.typography.bodySmall
-        )
+
+    // â”€â”€ VRChat Presence â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    ElevatedCard {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("VRChat", style = MaterialTheme.typography.titleSmall)
+            if (d.vrchatUserId.isBlank()) {
+                Text("Not linked", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                val statusIcon = when (d.vrchatStatus) {
+                    "active", "join me" -> "ðŸŸ¢"
+                    "ask me"            -> "ðŸŸ "
+                    "busy"              -> "ðŸ”´"
+                    else                -> "âš«"
+                }
+                Text("$statusIcon ${d.vrchatDisplayName.ifBlank { d.vrchatUserId }}",
+                    style = MaterialTheme.typography.bodyMedium)
+                if (d.vrchatStatusDescription.isNotBlank())
+                    Text(d.vrchatStatusDescription, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (d.vrchatWorld.isNotBlank()) {
+                    val countStr = if (d.vrchatCapacity > 0) "${d.vrchatPlayerCount}/${d.vrchatCapacity}" else "${d.vrchatPlayerCount}"
+                    Text("ðŸ“ ${d.vrchatWorld}  Â·  $countStr", style = MaterialTheme.typography.bodySmall)
+                }
+                val platformLabel = when (d.vrchatPlatform) {
+                    "standalonewindows" -> "ðŸ–¥ PC"
+                    "android"           -> "ðŸ“± Android/Quest"
+                    "ios"               -> "ðŸ“± iOS"
+                    else -> d.vrchatPlatform.ifBlank { "Unknown" }
+                }
+                Text(platformLabel, style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("ID: ${d.vrchatUserId}", fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (d.vrchatLastSyncAt != null)
+                    Text("Synced ${relativeTime(d.vrchatLastSyncAt, System.currentTimeMillis())}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
     }
 
+    // â”€â”€ Live Output â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     ElevatedCard {
-        Column(
-            Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Text("Live State", style = MaterialTheme.typography.titleSmall)
-            Mono("afkEnabled", d.afkEnabled.toString())
-            Mono("afkMessage", d.afkMessage.ifBlank { "(blank)" })
-            Mono("cycleEnabled", d.cycleEnabled.toString())
-            Mono("cycleIntervalSeconds", d.cycleIntervalSeconds.toString())
-            Mono("spotifyEnabled", d.spotifyEnabled.toString())
-            Mono("spotifyDemoEnabled", d.spotifyDemoEnabled.toString())
-            Mono("spotifyPreset", d.spotifyPreset.toString())
-            Mono("nowPlayingDetected", d.nowPlayingDetected.toString())
-            Mono("nowPlayingIsPlaying", d.nowPlayingIsPlaying.toString())
-            Mono("nowPlayingTitle", d.nowPlayingTitle.ifBlank { "(blank)" })
-            Mono("nowPlayingArtist", d.nowPlayingArtist.ifBlank { "(blank)" })
-
-            if (d.versionName.isNotBlank() || d.versionCode > 0L || d.appId.isNotBlank()) {
-                Spacer(Modifier.height(4.dp))
-                Text("App Build", style = MaterialTheme.typography.titleSmall)
-                if (d.versionName.isNotBlank()) Mono("versionName", d.versionName)
-                if (d.versionCode > 0L) Mono("versionCode", d.versionCode.toString())
-                if (d.appId.isNotBlank()) Mono("appId", d.appId)
-            }
-
-            Spacer(Modifier.height(4.dp))
-            Text("combinedPreviewText", style = MaterialTheme.typography.labelLarge)
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Live Chatbox Output", style = MaterialTheme.typography.titleSmall)
+            Card(colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Text(
-                    d.combinedPreviewText.ifBlank { "(blank)" },
+                    d.combinedPreviewText.ifBlank { "(nothing sending)" },
                     modifier = Modifier.padding(10.dp),
                     fontFamily = FontFamily.Monospace,
                     style = MaterialTheme.typography.bodySmall
                 )
             }
-
-            if (d.warnReason.isNotBlank() || d.banReason.isNotBlank()) {
-                Spacer(Modifier.height(4.dp))
-                Text("Moderation Flags", style = MaterialTheme.typography.titleSmall)
-                if (d.warnReason.isNotBlank()) Mono("warnReason", d.warnReason)
-                if (d.banReason.isNotBlank()) Mono("banReason", d.banReason)
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                Text("Pinned: ${if (d.pinnedEnabled) "ON" else "off"}",
+                    style = MaterialTheme.typography.labelSmall)
+                Text("Cycle: ${if (d.cycleEnabled) "ON  (${d.cycleIntervalSeconds}s)" else "off"}",
+                    style = MaterialTheme.typography.labelSmall)
+                Text("Music: ${if (d.spotifyEnabled) "ON" else "off"}",
+                    style = MaterialTheme.typography.labelSmall)
             }
-
-            Spacer(Modifier.height(4.dp))
-            Text("AFK Presets", style = MaterialTheme.typography.titleSmall)
-            d.afkPresets.forEachIndexed { i, p ->
-                Mono("afkPreset${i + 1}", p.ifBlank { "(blank)" })
+            if (d.nowPlayingDetected) {
+                Text("ðŸŽµ ${d.nowPlayingTitle.ifBlank { "?" }}  â€”  ${d.nowPlayingArtist.ifBlank { "?" }}  " +
+                    if (d.nowPlayingIsPlaying) "â–¶" else "â¸",
+                    style = MaterialTheme.typography.bodySmall)
             }
+        }
+    }
 
-            Spacer(Modifier.height(4.dp))
-            Text("Cycle Presets", style = MaterialTheme.typography.titleSmall)
-            d.cyclePresets.forEachIndexed { i, p ->
-                val oneLine = p.lines().firstOrNull()?.trim().orEmpty()
-                Mono("cyclePreset${i + 1}", oneLine.ifBlank { "(blank)" })
+    // â”€â”€ Pinned Message â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    ElevatedCard {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Pinned Message", style = MaterialTheme.typography.titleSmall)
+            Text(d.pinnedMessage.ifBlank { "(blank)" },
+                fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+            Divider()
+            d.pinnedPresets.forEachIndexed { i, p ->
+                val name = d.pinnedPresetNames.getOrElse(i) { "Preset ${i+1}" }
+                Text("[$name] ${p.ifBlank { "(blank)" }}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (p.isBlank()) MaterialTheme.colorScheme.onSurfaceVariant
+                            else MaterialTheme.colorScheme.onSurface)
             }
+        }
+    }
 
+    // â”€â”€ Cycle Presets â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    ElevatedCard {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Cycle  Â·  ${d.cycleIntervalSeconds}s interval", style = MaterialTheme.typography.titleSmall)
             if (d.cycleLinesText.isNotBlank()) {
-                Spacer(Modifier.height(4.dp))
-                Text("cycleLinesText", style = MaterialTheme.typography.labelLarge)
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                    Text(
-                        d.cycleLinesText,
-                        modifier = Modifier.padding(10.dp),
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall
-                    )
+                Card(colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                    Text(d.cycleLinesText, modifier = Modifier.padding(10.dp),
+                        fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
                 }
+            }
+            Divider()
+            d.cyclePresets.forEachIndexed { i, p ->
+                val name = d.cyclePresetNames.getOrElse(i) { "Preset ${i+1}" }
+                val first = p.lines().firstOrNull { it.isNotBlank() }?.trim() ?: ""
+                Text("[$name] ${first.ifBlank { "(blank)" }}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (first.isBlank()) MaterialTheme.colorScheme.onSurfaceVariant
+                            else MaterialTheme.colorScheme.onSurface)
+            }
+        }
+    }
+
+    // â”€â”€ Network / IP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    ElevatedCard {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("Network", style = MaterialTheme.typography.titleSmall)
+            listOf(
+                Triple(1L, d.ip1Name, d.ip1Address),
+                Triple(2L, d.ip2Name, d.ip2Address),
+                Triple(3L, d.ip3Name, d.ip3Address)
+            ).forEach { (slot, name, addr) ->
+                val active = slot == d.activeIpSlot
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(if (active) "â–¶" else "  ",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary)
+                    Text("[$name]  ${addr.ifBlank { "(not set)" }}",
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+    }
+
+    // â”€â”€ App Info â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    ElevatedCard {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("App", style = MaterialTheme.typography.titleSmall)
+            Text("${d.versionName} (${d.versionCode})",
+                fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+            Text(d.appId, fontFamily = FontFamily.Monospace,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (d.adminBuild)
+                Text("âš  Admin build", style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.tertiary)
+        }
+    }
+
+    // â”€â”€ Moderation flags â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if (d.warnReason.isNotBlank() || d.banReason.isNotBlank()) {
+        Card(colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.errorContainer)) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("Moderation Flags", style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer)
+                if (d.warnReason.isNotBlank())
+                    Text("Warn: ${d.warnReason}", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer)
+                if (d.banReason.isNotBlank())
+                    Text("Ban: ${d.banReason}", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer)
             }
         }
     }
@@ -2453,6 +2627,238 @@ private fun ConfigTab(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+    }
+}
+
+/* =========================================================
+   DASHBOARD TAB
+   ========================================================= */
+
+@Composable
+private fun DashboardTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
+    val scope = rememberCoroutineScope()
+
+    var totalUsers  by remember { mutableIntStateOf(0) }
+    var bannedCount by remember { mutableIntStateOf(0) }
+    var warnedCount by remember { mutableIntStateOf(0) }
+    var onlineCount by remember { mutableIntStateOf(0) } // seen in last 5 min
+    var loading by remember { mutableStateOf(true) }
+    var evasionCount by remember { mutableIntStateOf(0) }
+
+    val nowMs = System.currentTimeMillis()
+    val fiveMinAgo = com.google.firebase.Timestamp(
+        (nowMs - 5 * 60 * 1000L) / 1000, 0)
+
+    DisposableEffect(Unit) {
+        setError(null)
+        loading = true
+        val reg = db.collection("users")
+            .addSnapshotListener { snap, e ->
+                if (e != null) { setError(e.message); loading = false; return@addSnapshotListener }
+                if (snap == null) { loading = false; return@addSnapshotListener }
+                totalUsers  = snap.size()
+                bannedCount = snap.documents.count { it.getBoolean("banned") == true }
+                warnedCount = snap.documents.count { it.getBoolean("warned") == true }
+                onlineCount = snap.documents.count {
+                    val ts = it.getTimestamp("lastSeenAt") ?: return@count false
+                    ts.seconds > fiveMinAgo.seconds
+                }
+                loading = false
+            }
+        onDispose { reg.remove() }
+    }
+
+    DisposableEffect(Unit) {
+        val reg = db.collection("moderationEvents")
+            .whereEqualTo("action", "ban_evasion_detected")
+            .addSnapshotListener { snap, _ ->
+                evasionCount = snap?.size() ?: 0
+            }
+        onDispose { reg.remove() }
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        item {
+            if (loading) {
+                Row(Modifier.padding(8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                    Text("Loadingâ€¦")
+                }
+            }
+        }
+
+        item {
+            ElevatedCard {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("Overview", style = MaterialTheme.typography.titleMedium)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        StatChip(Modifier.weight(1f), "Users", totalUsers.toString())
+                        StatChip(Modifier.weight(1f), "Online", onlineCount.toString(),
+                            highlight = onlineCount > 0)
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        StatChip(Modifier.weight(1f), "Warned", warnedCount.toString(),
+                            warn = warnedCount > 0)
+                        StatChip(Modifier.weight(1f), "Banned", bannedCount.toString(),
+                            error = bannedCount > 0)
+                    }
+                    if (evasionCount > 0) {
+                        Card(colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                            Row(Modifier.fillMaxWidth().padding(12.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text("âš ", style = MaterialTheme.typography.bodyMedium)
+                                Column {
+                                    Text("Ban evasion attempts detected: $evasionCount",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onErrorContainer)
+                                    Text("Check the Log tab for details.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onErrorContainer)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        item { Spacer(Modifier.height(12.dp)) }
+    }
+}
+
+@Composable
+private fun StatChip(
+    modifier: Modifier = Modifier,
+    label: String,
+    value: String,
+    highlight: Boolean = false,
+    warn: Boolean = false,
+    error: Boolean = false
+) {
+    val containerColor = when {
+        error     -> MaterialTheme.colorScheme.errorContainer
+        warn      -> MaterialTheme.colorScheme.tertiaryContainer
+        highlight -> MaterialTheme.colorScheme.primaryContainer
+        else      -> MaterialTheme.colorScheme.surfaceVariant
+    }
+    Card(modifier = modifier,
+        colors = CardDefaults.cardColors(containerColor = containerColor)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(value, style = MaterialTheme.typography.headlineSmall)
+            Text(label, style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+/* =========================================================
+   MOD LOG TAB
+   ========================================================= */
+
+@Composable
+private fun ModLogTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
+    data class LogRow(
+        val id: String,
+        val action: String,
+        val displayName: String,
+        val vrchatId: String,
+        val deviceHash: String,
+        val reason: String,
+        val method: String,
+        val createdAt: Timestamp?
+    )
+
+    val rows = remember { mutableStateListOf<LogRow>() }
+    var loading by remember { mutableStateOf(true) }
+    val nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+
+    DisposableEffect(Unit) {
+        setError(null); loading = true
+        val reg = db.collection("moderationEvents")
+            .orderBy("createdAt", Query.Direction.DESCENDING)
+            .limit(200)
+            .addSnapshotListener { snap, e ->
+                if (e != null) { setError(e.message); loading = false; return@addSnapshotListener }
+                if (snap == null) { loading = false; return@addSnapshotListener }
+                val next = snap.documents.map { d ->
+                    fun s(k: String) = (d.getString(k) ?: "").trim()
+                    LogRow(
+                        id = d.id,
+                        action = s("action"),
+                        displayName = s("newDisplayName").ifBlank { s("targetUid") },
+                        vrchatId = s("newVrchatId").ifBlank { s("targetAuthUid") },
+                        deviceHash = s("newDeviceHash").ifBlank { s("targetDeviceHash") },
+                        reason = s("reason"),
+                        method = s("method"),
+                        createdAt = d.getTimestamp("createdAt")
+                    )
+                }
+                rows.clear(); rows.addAll(next); loading = false
+            }
+        onDispose { reg.remove() }
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        item {
+            Row(Modifier.fillMaxWidth().padding(bottom = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Moderation Log", style = MaterialTheme.typography.titleMedium)
+                if (loading) CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+            }
+        }
+
+        if (rows.isEmpty() && !loading) {
+            item {
+                Text("No moderation events yet.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+
+        items(rows, key = { it.id }) { row ->
+            val isEvasion = row.action == "ban_evasion_detected"
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = if (isEvasion)
+                        MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f)
+                    else MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Row(Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(
+                            row.action.replace("_", " ").replaceFirstChar { it.uppercase() },
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (isEvasion) MaterialTheme.colorScheme.error
+                                    else MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(relativeTime(row.createdAt, nowMs),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    if (row.displayName.isNotBlank())
+                        Text(row.displayName, style = MaterialTheme.typography.bodySmall)
+                    if (row.vrchatId.isNotBlank())
+                        Text(row.vrchatId, fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (row.method.isNotBlank())
+                        Text("Method: ${row.method}", style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (row.reason.isNotBlank())
+                        Text("Reason: ${row.reason}", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+        item { Spacer(Modifier.height(12.dp)) }
     }
 }
 
