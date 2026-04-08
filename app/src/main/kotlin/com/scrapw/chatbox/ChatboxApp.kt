@@ -149,7 +149,7 @@ fun ChatboxApp() {
 
     /* -------------------------
        Phase 1 ban check (device hash + auth UID)
-       Runs immediately after bootstrap. Does NOT show ban screen yet â€”
+       Runs immediately after bootstrap. Does NOT show ban screen yet Ã¢â‚¬â€
        waits for VRChat login so we can capture the alt VRChat ID first.
        ------------------------- */
 
@@ -187,19 +187,17 @@ fun ChatboxApp() {
     var phase2Checking  by remember { mutableStateOf(false) }
 
     if (!vrcLoginDone) {
-        VrchatLoginScreen(pendingBanId = phase1BanId) { userId, displayName ->
-            phase2Checking = true
-            androidx.lifecycle.lifecycleScope.let { _ ->
-                // Run Phase 2 ban check inline via coroutine
-            }
+        VrchatLoginScreen(pendingBanId = phase1BanId) { _, _ ->
+            // Login succeeded â€” mark done, LaunchedEffect below will run Phase 2
+            vrcLoginDone = true
         }
-        // Phase 2 is run via LaunchedEffect watching vrcLoginDone
         LaunchedEffect(vrcLoginDone) {
             if (!vrcLoginDone) return@LaunchedEffect
+            phase2Checking = true
             runPhase2AndStartPipeline(
                 ctx, phase1BanId,
                 onBanned = { reason -> isBannedPhase2 = true; banPhase2Reason = reason },
-                onClean = { phase2Checking = false }
+                onClean  = { phase2Checking = false }
             )
         }
         return
@@ -663,6 +661,106 @@ private fun CrashScreen(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+        }
+    }
+}
+
+/* =========================================================
+   VRChat Phase-2 ban check + pipeline start
+   Runs after VRChat login succeeds.
+   ========================================================= */
+
+private suspend fun runPhase2AndStartPipeline(
+    ctx: Context,
+    pendingBanId: String?,
+    onBanned: (reason: String) -> Unit,
+    onClean: () -> Unit
+) {
+    val prefs      = ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
+    val deviceHash = prefs.getString("device_id_hash", "") ?: ""
+    val authUid    = prefs.getString("auth_uid", "")       ?: ""
+    val vrchatId   = VrchatAuthManager.getStoredUserId(ctx) ?: ""
+    val vrcName    = VrchatAuthManager.getStoredDisplayName(ctx) ?: ""
+
+    if (vrchatId.isNotBlank()) {
+        val result = VrchatBanChecker.checkPhase2(
+            vrchatId       = vrchatId,
+            vrchatDisplayName = vrcName,
+            deviceHash     = deviceHash,
+            authUid        = authUid,
+            pendingBanId   = pendingBanId
+        )
+        if (result.isBanned) {
+            onBanned(result.banReason)
+            return
+        }
+
+        // Write VRChat identity to Firestore user doc
+        if (deviceHash.isNotBlank()) {
+            runCatching {
+                FirebaseFirestore.getInstance()
+                    .collection("users").document(deviceHash)
+                    .set(
+                        mapOf(
+                            "vrchatUserId"      to vrchatId,
+                            "vrchatDisplayName" to vrcName,
+                            "updatedAt"         to FieldValue.serverTimestamp()
+                        ),
+                        SetOptions.merge()
+                    ).await()
+            }
+        }
+    }
+
+    // Start pipeline service
+    val serviceIntent = Intent(ctx, VrchatPipelineService::class.java).apply {
+        action = VrchatPipelineService.ACTION_START
+        putExtra(VrchatPipelineService.EXTRA_DEVICE_HASH, deviceHash)
+    }
+    ContextCompat.startForegroundService(ctx, serviceIntent)
+
+    onClean()
+}
+
+/* =========================================================
+   Ban screen
+   ========================================================= */
+
+@Composable
+private fun BannedScreen(reason: String) {
+    Surface(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(28.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                "Access Denied",
+                style = MaterialTheme.typography.headlineMedium,
+                color = MaterialTheme.colorScheme.error,
+                textAlign = TextAlign.Center
+            )
+            Spacer(Modifier.height(16.dp))
+            ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Your account has been banned from VRC-A.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (reason.isNotBlank()) {
+                        Divider()
+                        Text(
+                            "Reason: $reason",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
         }
     }
 }
