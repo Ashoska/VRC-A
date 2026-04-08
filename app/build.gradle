@@ -24,7 +24,7 @@ def githubOwner = keystoreProperties['githubOwner'] ?: ""
 def githubRepo  = keystoreProperties['githubRepo']  ?: ""
 
 // =========================
-// âœ… Auto versioning (GitHub Actions)
+// Ã¢Å“â€¦ Auto versioning (GitHub Actions)
 // Goal:
 //  - versionCode: always increasing (use GITHUB_RUN_NUMBER when available)
 //  - versionName: vMAJOR.MINOR.PATCH where:
@@ -79,7 +79,7 @@ android {
         vectorDrawables { useSupportLibrary true }
     }
 
-    // âœ… REQUIRED: flavors so Gradle creates adminApp/publicApp tasks
+    // Ã¢Å“â€¦ REQUIRED: flavors so Gradle creates adminApp/publicApp tasks
     flavorDimensions += "app"
     productFlavors {
         publicApp {
@@ -176,7 +176,7 @@ dependencies {
     implementation 'androidx.compose.material3:material3'
     implementation "androidx.compose.material:material-icons-extended:1.6.1"
 
-    // âœ… DataStore
+    // Ã¢Å“â€¦ DataStore
     implementation "androidx.datastore:datastore-preferences:1.1.1"
 
     // Lifecycle + Navigation
@@ -191,6 +191,12 @@ dependencies {
     implementation 'com.github.alorma:compose-settings-storage-base:1.0.3'
     implementation 'com.github.alorma:compose-settings-storage-datastore:0.27.0'
 
+    // OkHttp â€” WebSocket for VRChat pipeline
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+
+    // EncryptedSharedPreferences for VRChat auth cookie storage
+    implementation 'androidx.security:security-crypto:1.1.0-alpha06'
+
     // Retrofit
     implementation 'com.squareup.retrofit2:retrofit:2.9.0'
     implementation "com.squareup.retrofit2:converter-gson:2.9.0"
@@ -199,7 +205,7 @@ dependencies {
     implementation "com.mikepenz:aboutlibraries-core:${latestAboutLibsRelease}"
     implementation "com.mikepenz:aboutlibraries-compose-m3:${latestAboutLibsRelease}"
 
-    // âœ… Firebase
+    // Ã¢Å“â€¦ Firebase
     implementation platform("com.google.firebase:firebase-bom:33.1.2")
     implementation "com.google.firebase:firebase-auth-ktx"
     implementation "com.google.firebase:firebase-firestore-ktx"
