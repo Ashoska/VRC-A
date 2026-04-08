@@ -9,6 +9,7 @@ import android.provider.Settings
 import android.util.Log
 import androidx.annotation.MainThread
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -667,6 +668,11 @@ class ChatboxViewModel(
     // True when the active media package is in a DJ/Ad/special-window state.
     // When true we suppress metadata updates and force effectiveIsPlaying=true.
     var nowPlayingSpecialActive by mutableStateOf(false)
+
+    // Tracks how many ad segments have been detected this session so the
+    // chatbox can show "Ad 1", "Ad 2" etc. without leaking ad brand names.
+    private var adSegmentCount by mutableIntStateOf(0)
+    private var lastSpecialWasAd = false
         private set
 
     // =========================
@@ -962,6 +968,14 @@ class ChatboxViewModel(
                 }
 
                 nowPlayingSpecialActive = s.specialActive
+
+                // Track ad segment count: increment only when transitioning INTO an ad,
+                // not on every tick. Reset when ad ends so next ad gets a fresh count.
+                val isAdNow = s.specialActive && s.title.trim().lowercase().let { t ->
+                    t.contains("advert") || t == "ad" || t.contains("advertisement") || t.contains("sponsored")
+                } || (s.specialActive && s.activePackage == "com.spotify.music" && s.title.trim() == "AD")
+                if (isAdNow && !lastSpecialWasAd) adSegmentCount++
+                lastSpecialWasAd = isAdNow
 
                 // Special window only gates playing-state (prevents Paused flicker during DJ/ads).
                 // Title updates always go through stabilize so real track shows immediately
@@ -1534,6 +1548,17 @@ class ChatboxViewModel(
             nowPlayingDetected &&
             (safeTitle.isBlank() || safeArtist.isBlank())
 
+        // Ad suppression: never show brand name, title, progress bar, or timestamps.
+        // Only show "Ad N" where N is how many ad segments have played this session.
+        // This prevents leaking brand/location info from targeted ads.
+        val isAdSegment = nowPlayingSpecialActive && !isSpotifyDj &&
+            (safeTitle.lowercase().let { t ->
+                t == "ad" || t.contains("advert") || t.contains("advertisement") || t.contains("sponsored")
+            } || (activePackage == "com.spotify.music" && safeTitle == "AD"))
+        if (isAdSegment) {
+            return listOf("Ad $adSegmentCount")
+        }
+
         val effectiveIsPlaying = if (nowPlayingSpecialActive || isSpotifyDj) true else nowPlayingIsPlaying
 
         val maxLine = 42
@@ -1679,7 +1704,9 @@ class ChatboxViewModel(
             3 -> {
                 val slots = 10
                 val idx = (p * (slots - 1)).toInt()
-                val bg = CharArray(slots) { '\u27E1' }
+                // U+25C7 (◇ White Diamond) — in basic geometric shapes block,
+                // renders correctly in VRChat. U+27E1 (⟡) is not in VRChat's font.
+                val bg = CharArray(slots) { '\u25C7' }
                 bg[idx] = dot
                 bg.concatToString()
             }
