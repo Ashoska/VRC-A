@@ -547,7 +547,7 @@ fun ChatboxScreen(
                     }
                 )
             },
-            // Bottom navigation bar Ã¢â‚¬â€ always visible, labelled
+            // Bottom navigation bar ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â always visible, labelled
             bottomBar = {
                 if (!isBannedEffective) {
                     NavigationBar {
@@ -586,7 +586,7 @@ fun ChatboxScreen(
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                // Persistent setup banner Ã¢â‚¬â€ shows until both steps complete
+                // Persistent setup banner ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â shows until both steps complete
                 if (showSetupBanner && !isBannedEffective) {
                     SetupIncompleteBanner(
                         vrcLinked = vrcLinked,
@@ -1206,6 +1206,34 @@ private fun HomePage(
                 }
             }
 
+            // Warning chips under the preview
+            if (vm.cycleTrimWarning.isNotBlank()) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        "âš  ${vm.cycleTrimWarning}",
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                    )
+                }
+            }
+            if (vm.dividerRemovedWarning) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        "âš  A divider was removed â€” character or line limit reached.",
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                    )
+                }
+            }
+
             ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
 
@@ -1223,6 +1251,10 @@ private fun HomePage(
                                     onClick = { vm.resetCardOrder() },
                                     contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 4.dp)
                                 ) { Text("Reset", style = MaterialTheme.typography.labelSmall) }
+                                TextButton(
+                                    onClick = { vm.addDivider(vm.cardOrder.size - 1) },
+                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                                ) { Text("+ Divider", style = MaterialTheme.typography.labelSmall) }
                             }
                             TextButton(
                                 onClick = { cardReorderMode = !cardReorderMode },
@@ -1245,11 +1277,11 @@ private fun HomePage(
                         ) {
                             // Component toggle or time row
                             Box(Modifier.weight(1f)) {
-                                when (component) {
-                                    "Pinned" -> ToggleRow("Pinned", vm.afkEnabled, enabled = !isBanned) { vm.setAfkEnabledFlag(it) }
-                                    "Cycle" -> ToggleRow("Cycle", vm.cycleEnabled, enabled = !isBanned) { vm.setCycleEnabledFlag(it) }
-                                    "NowPlaying" -> ToggleRow("Now Playing", vm.spotifyEnabled, enabled = !isBanned) { vm.setSpotifyEnabledFlag(it) }
-                                    "Time" -> Row(
+                                when {
+                                    component == "Pinned" -> ToggleRow("Pinned", vm.afkEnabled, enabled = !isBanned) { vm.setAfkEnabledFlag(it) }
+                                    component == "Cycle" -> ToggleRow("Cycle", vm.cycleEnabled, enabled = !isBanned) { vm.setCycleEnabledFlag(it) }
+                                    component == "NowPlaying" -> ToggleRow("Now Playing", vm.spotifyEnabled, enabled = !isBanned) { vm.setSpotifyEnabledFlag(it) }
+                                    component == "Time" -> Row(
                                         Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.SpaceBetween,
                                         verticalAlignment = Alignment.CenterVertically
@@ -1285,10 +1317,47 @@ private fun HomePage(
                                             Switch(checked = vm.timeEnabled, onCheckedChange = { vm.updateTimeEnabled(it) }, enabled = !isBanned)
                                         }
                                     }
+                                    component.startsWith("Divider_") -> {
+                                        val currentText = vm.dividerTexts[component] ?: "â”€â”€â”€â”€â”€"
+                                        if (cardReorderMode) {
+                                            var divEdit by remember(currentText) { mutableStateOf(currentText) }
+                                            Row(
+                                                Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                OutlinedTextField(
+                                                    value = divEdit,
+                                                    onValueChange = { divEdit = it },
+                                                    modifier = Modifier.weight(1f),
+                                                    singleLine = true,
+                                                    label = { Text("Divider") },
+                                                    textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+                                                )
+                                                IconButton(
+                                                    onClick = { vm.updateDividerText(component, divEdit.trim().ifBlank { "â”€â”€â”€â”€â”€" }) },
+                                                    enabled = divEdit.trim() != currentText
+                                                ) { Icon(Icons.Filled.Check, contentDescription = "Save", modifier = Modifier.size(18.dp)) }
+                                                IconButton(onClick = { vm.removeDivider(component) }) {
+                                                    Icon(Icons.Filled.Delete, contentDescription = "Remove divider",
+                                                        modifier = Modifier.size(18.dp),
+                                                        tint = MaterialTheme.colorScheme.error)
+                                                }
+                                            }
+                                        } else {
+                                            Text(
+                                                currentText,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                fontFamily = FontFamily.Monospace,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                                            )
+                                        }
+                                    }
                                 }
                             }
-                            // Up / Down arrows - only shown when in reorder mode
-                            if (cardReorderMode) {
+                            // Up / Down arrows - only shown when in reorder mode (not for dividers in non-reorder)
+                            if (cardReorderMode && !component.startsWith("Divider_")) {
                                 Row {
                                     IconButton(
                                         onClick = {
@@ -1308,6 +1377,24 @@ private fun HomePage(
                                     ) {
                                         Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Move down", modifier = Modifier.size(18.dp))
                                     }
+                                }
+                            } else if (cardReorderMode && component.startsWith("Divider_")) {
+                                // Divider gets up/down too
+                                Row {
+                                    IconButton(
+                                        onClick = {
+                                            val order = vm.cardOrder.toMutableList()
+                                            if (idx > 0) { val tmp = order[idx]; order[idx] = order[idx - 1]; order[idx - 1] = tmp; vm.updateCardOrder(order) }
+                                        },
+                                        enabled = idx > 0
+                                    ) { Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "Move up", modifier = Modifier.size(18.dp)) }
+                                    IconButton(
+                                        onClick = {
+                                            val order = vm.cardOrder.toMutableList()
+                                            if (idx < order.size - 1) { val tmp = order[idx]; order[idx] = order[idx + 1]; order[idx + 1] = tmp; vm.updateCardOrder(order) }
+                                        },
+                                        enabled = idx < vm.cardOrder.size - 1
+                                    ) { Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Move down", modifier = Modifier.size(18.dp)) }
                                 }
                             }
                         }
@@ -2352,7 +2439,7 @@ private fun SetupIncompleteBanner(
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Text(
-                "Ã¢Å¡  Setup incomplete",
+                "ÃƒÂ¢Ã…Â¡  Setup incomplete",
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onTertiaryContainer
             )
@@ -2424,8 +2511,8 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
                         style = MaterialTheme.typography.titleMedium
                     )
                     Text(
-                        if (isConnected) "Ã°Å¸Å¸Â¢ Live connection active"
-                        else if (isLinked.value) "Ã°Å¸â€Â´ ConnectingÃ¢â‚¬Â¦"
+                        if (isConnected) "ÃƒÂ°Ã…Â¸Ã…Â¸Ã‚Â¢ Live connection active"
+                        else if (isLinked.value) "ÃƒÂ°Ã…Â¸Ã¢â‚¬ÂÃ‚Â´ ConnectingÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦"
                         else "Sign in to enable notifications and presence",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -2442,10 +2529,10 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
         // Presence card (mirrors what Discord shows)
         if (presence != null && isLinked.value) {
             val statusIcon = when (presence.status) {
-                "active", "join me" -> "Ã°Å¸Å¸Â¢"
-                "ask me"            -> "Ã°Å¸Å¸ "
-                "busy"              -> "Ã°Å¸â€Â´"
-                else                -> "Ã¢Å¡Â«"
+                "active", "join me" -> "ÃƒÂ°Ã…Â¸Ã…Â¸Ã‚Â¢"
+                "ask me"            -> "ÃƒÂ°Ã…Â¸Ã…Â¸ "
+                "busy"              -> "ÃƒÂ°Ã…Â¸Ã¢â‚¬ÂÃ‚Â´"
+                else                -> "ÃƒÂ¢Ã…Â¡Ã‚Â«"
             }
             ElevatedCard {
                 Column(
@@ -2472,7 +2559,7 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
                     Divider()
                     if (presence.worldName.isNotBlank()) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("Ã°Å¸â€œÂ", style = MaterialTheme.typography.bodySmall)
+                            Text("ÃƒÂ°Ã…Â¸Ã¢â‚¬Å“Ã‚Â", style = MaterialTheme.typography.bodySmall)
                             Column {
                                 Text(presence.worldName, style = MaterialTheme.typography.bodyMedium)
                                 val count = if (presence.instanceCapacity > 0)
@@ -2487,7 +2574,7 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
                             when (presence.location) {
                                 "offline"   -> "Offline"
                                 "private"   -> "In a private world"
-                                "traveling" -> "Traveling between worldsÃ¢â‚¬Â¦"
+                                "traveling" -> "Traveling between worldsÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦"
                                 else        -> "In a world"
                             },
                             style = MaterialTheme.typography.bodySmall,
@@ -2495,9 +2582,9 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
                         )
                     }
                     val platform = when (presence.platform) {
-                        "standalonewindows" -> "Ã°Å¸â€“Â¥ Desktop"
-                        "android"           -> "Ã°Å¸â€œÂ± Android/Quest"
-                        "ios"               -> "Ã°Å¸â€œÂ± iOS"
+                        "standalonewindows" -> "ÃƒÂ°Ã…Â¸Ã¢â‚¬â€œÃ‚Â¥ Desktop"
+                        "android"           -> "ÃƒÂ°Ã…Â¸Ã¢â‚¬Å“Ã‚Â± Android/Quest"
+                        "ios"               -> "ÃƒÂ°Ã…Â¸Ã¢â‚¬Å“Ã‚Â± iOS"
                         else                -> ""
                     }
                     if (platform.isNotBlank())
@@ -2509,7 +2596,7 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
             ElevatedCard {
                 Row(Modifier.padding(14.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                    Text("Fetching presenceÃ¢â‚¬Â¦", style = MaterialTheme.typography.bodySmall)
+                    Text("Fetching presenceÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦", style = MaterialTheme.typography.bodySmall)
                 }
             }
         }
@@ -2519,7 +2606,7 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("About VRChat integration", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    "VRC-A connects to VRChat's web API to show your status, detect notifications (friend requests, invites, unfriends, group events), and identify you in the moderation system.\n\nYour password is only used to get a session cookie from VRChat's servers Ã¢â‚¬â€ it is never stored.",
+                    "VRC-A connects to VRChat's web API to show your status, detect notifications (friend requests, invites, unfriends, group events), and identify you in the moderation system.\n\nYour password is only used to get a session cookie from VRChat's servers ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â it is never stored.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
