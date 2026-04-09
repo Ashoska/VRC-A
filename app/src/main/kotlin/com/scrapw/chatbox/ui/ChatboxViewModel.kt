@@ -11,6 +11,7 @@ import androidx.annotation.MainThread
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.text.TextRange
@@ -786,7 +787,7 @@ class ChatboxViewModel(
     }
 
     /** Add a new divider at the given position in cardOrder (after the component at insertAfterIdx) */
-    fun addDivider(insertAfterIdx: Int, text: String = "â”€â”€â”€â”€â”€") {
+    fun addDivider(insertAfterIdx: Int, text: String = "Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬") {
         if (isBanned) return
         // Find a unique divider ID
         val existingIds = cardOrder.filter { it.startsWith("Divider_") }.map {
@@ -822,8 +823,10 @@ class ChatboxViewModel(
 
     private fun saveDividerConfig() {
         val arr = org.json.JSONArray()
-        dividerTexts.forEach { (id, text) ->
-            arr.put(org.json.JSONObject().put("id", id).put("text", text))
+        dividerTexts.entries.forEach { entry ->
+            arr.put(org.json.JSONObject()
+                .put("id", entry.key as String)
+                .put("text", entry.value as String))
         }
         viewModelScope.launch { userPreferencesRepository.saveDividerConfig(arr.toString()) }
     }
@@ -884,10 +887,8 @@ class ChatboxViewModel(
     var dividerRemovedWarning by mutableStateOf(false)
 
     // Divider configs: map of "Divider_N" -> display text, loaded from DataStore
-    // e.g. {"Divider_1": "â”€â”€â”€â”€â”€", "Divider_2": "â€¢ â€¢ â€¢"}
+    // e.g. {"Divider_1": "Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬", "Divider_2": "Ã¢â‚¬Â¢ Ã¢â‚¬Â¢ Ã¢â‚¬Â¢"}
     val dividerTexts = mutableStateMapOf<String, String>()
-        private set
-
     private val afkPresetTexts = mutableStateListOf("", "", "")
     val pinnedPresetNames = mutableStateListOf("Preset 1", "Preset 2", "Preset 3")
     val cyclePresetNames  = mutableStateListOf("Preset 1", "Preset 2", "Preset 3", "Preset 4", "Preset 5")
@@ -992,15 +993,15 @@ class ChatboxViewModel(
 
         viewModelScope.launch {
             userPreferencesRepository.dividerConfig.collect { json ->
-                // Parse JSON array: [{"id":"Divider_1","text":"â”€â”€â”€â”€â”€"}, ...]
+                // Parse JSON array: [{"id":"Divider_1","text":"Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬"}, ...]
                 try {
                     val arr = org.json.JSONArray(json)
                     dividerTexts.clear()
                     for (i in 0 until arr.length()) {
                         val obj = arr.getJSONObject(i)
-                        dividerTexts[obj.getString("id")] = obj.optString("text", "â”€â”€â”€â”€â”€")
+                        dividerTexts[obj.getString("id")] = obj.optString("text", "Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬")
                     }
-                } catch (_: Exception) { /* malformed â€” keep empty */ }
+                } catch (_: Exception) { /* malformed Ã¢â‚¬â€ keep empty */ }
                 rebuildCombinedPreviewOnly()
             }
         }
@@ -1624,7 +1625,7 @@ class ChatboxViewModel(
                 component == "NowPlaying" -> for (m in musicLines) if (m.isNotBlank()) rawLines += LineWithPriority(text = m, priority = Priority.MUSIC)
                 component == "Time" -> if (standalonTimeLine.isNotBlank()) rawLines += LineWithPriority(text = standalonTimeLine, priority = Priority.MUSIC)
                 component.startsWith("Divider_") -> {
-                    val divText = dividerTexts[component]?.trim() ?: "â”€â”€â”€â”€â”€"
+                    val divText = dividerTexts[component]?.trim() ?: "Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬"
                     // Only insert divider if there's content on both sides (don't add leading/trailing dividers)
                     if (rawLines.isNotEmpty()) {
                         rawLines += LineWithPriority(text = divText, priority = Priority.DIVIDER, isDivider = true)
@@ -1739,7 +1740,7 @@ class ChatboxViewModel(
         var cycleModifiedForMusic = false
 
         while (cleaned.size > maxLines) {
-            // Dividers are always dropped first â€” they are cosmetic
+            // Dividers are always dropped first Ã¢â‚¬â€ they are cosmetic
             val divIdx = cleaned.indexOfLast { it.isDivider }
             if (divIdx >= 0) {
                 cleaned.removeAt(divIdx)
@@ -1779,7 +1780,7 @@ class ChatboxViewModel(
         while (len > maxChars && cleaned.isNotEmpty()) {
             val excess = len - maxChars
 
-            // Drop dividers first â€” cosmetic, never truncate
+            // Drop dividers first Ã¢â‚¬â€ cosmetic, never truncate
             val divIdx = cleaned.indexOfLast { it.isDivider }
             if (divIdx >= 0) {
                 cleaned.removeAt(divIdx)
@@ -1850,8 +1851,8 @@ class ChatboxViewModel(
             3 -> {
                 val slots = 10
                 val idx = (p * (slots - 1)).toInt()
-                // U+25C7 (ÃƒÂ¢Ã¢â‚¬â€Ã¢â‚¬Â¡ White Diamond) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â in basic geometric shapes block,
-                // renders correctly in VRChat. U+27E1 (ÃƒÂ¢Ã…Â¸Ã‚Â¡) is not in VRChat's font.
+                // U+25C7 (ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ White Diamond) ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â in basic geometric shapes block,
+                // renders correctly in VRChat. U+27E1 (ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¸Ãƒâ€šÃ‚Â¡) is not in VRChat's font.
                 val bg = CharArray(slots) { '\u25C7' }
                 bg[idx] = dot
                 bg.concatToString()
