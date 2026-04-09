@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -51,6 +50,9 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.net.Uri
 import android.os.Environment
+import androidx.compose.foundation.layout.Box
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Divider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.core.content.FileProvider
@@ -149,7 +151,7 @@ fun ChatboxApp() {
 
     /* -------------------------
        Phase 1 ban check (device hash + auth UID)
-       Runs immediately after bootstrap. Does NOT show ban screen yet Ã¢â‚¬â€
+       Runs immediately after bootstrap. Does NOT show ban screen yet ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â
        waits for VRChat login so we can capture the alt VRChat ID first.
        ------------------------- */
 
@@ -188,7 +190,7 @@ fun ChatboxApp() {
 
     if (!vrcLoginDone) {
         VrchatLoginScreen(pendingBanId = phase1BanId) { _, _ ->
-            // Login succeeded â€” mark done, LaunchedEffect below will run Phase 2
+            // Login succeeded Ã¢â‚¬â€ mark done, LaunchedEffect below will run Phase 2
             vrcLoginDone = true
         }
         LaunchedEffect(vrcLoginDone) {
