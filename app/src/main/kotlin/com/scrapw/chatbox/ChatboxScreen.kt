@@ -45,6 +45,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.ChevronRight
@@ -546,7 +547,7 @@ fun ChatboxScreen(
                     }
                 )
             },
-            // Bottom navigation bar â€” always visible, labelled
+            // Bottom navigation bar Ã¢â‚¬â€ always visible, labelled
             bottomBar = {
                 if (!isBannedEffective) {
                     NavigationBar {
@@ -585,7 +586,7 @@ fun ChatboxScreen(
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                // Persistent setup banner â€” shows until both steps complete
+                // Persistent setup banner Ã¢â‚¬â€ shows until both steps complete
                 if (showSetupBanner && !isBannedEffective) {
                     SetupIncompleteBanner(
                         vrcLinked = vrcLinked,
@@ -1642,7 +1643,35 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel, isBanned
                                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                                             ) {
                                                 val preview = vm.getAfkPresetPreview(slot).ifBlank { "(empty)" }
-                                                Text("Preset $slot -- $preview")
+                                                val currentName = vm.pinnedPresetNames.getOrElse(slot - 1) { "Preset $slot" }
+                                                var nameEdit by remember(currentName) { mutableStateOf(currentName) }
+
+                                                Row(
+                                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    OutlinedTextField(
+                                                        value = nameEdit,
+                                                        onValueChange = { nameEdit = it },
+                                                        modifier = Modifier.weight(1f),
+                                                        singleLine = true,
+                                                        label = { Text("Name") },
+                                                        enabled = !isBanned
+                                                    )
+                                                    IconButton(
+                                                        onClick = { scope.launch { vm.saveAfkPresetName(slot, nameEdit.trim().ifBlank { "Preset $slot" }) } },
+                                                        enabled = !isBanned && nameEdit.trim() != currentName
+                                                    ) {
+                                                        Icon(Icons.Filled.Check, contentDescription = "Save name",
+                                                            modifier = Modifier.size(18.dp))
+                                                    }
+                                                }
+
+                                                Text(
+                                                    preview,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
 
                                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                                     OutlinedButton(
@@ -1819,7 +1848,35 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel, isBanned
                                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                                             ) {
                                                 val preview = vm.getCyclePresetPreview(slot).ifBlank { "(empty)" }
-                                                Text("Preset $slot -- $preview")
+                                                val currentName = vm.cyclePresetNames.getOrElse(slot - 1) { "Preset $slot" }
+                                                var nameEdit by remember(currentName) { mutableStateOf(currentName) }
+
+                                                Row(
+                                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    OutlinedTextField(
+                                                        value = nameEdit,
+                                                        onValueChange = { nameEdit = it },
+                                                        modifier = Modifier.weight(1f),
+                                                        singleLine = true,
+                                                        label = { Text("Name") },
+                                                        enabled = !isBanned
+                                                    )
+                                                    IconButton(
+                                                        onClick = { scope.launch { vm.saveCyclePresetName(slot, nameEdit.trim().ifBlank { "Preset $slot" }) } },
+                                                        enabled = !isBanned && nameEdit.trim() != currentName
+                                                    ) {
+                                                        Icon(Icons.Filled.Check, contentDescription = "Save name",
+                                                            modifier = Modifier.size(18.dp))
+                                                    }
+                                                }
+
+                                                Text(
+                                                    preview,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
 
                                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                                     OutlinedButton(
@@ -2295,7 +2352,7 @@ private fun SetupIncompleteBanner(
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Text(
-                "âš  Setup incomplete",
+                "Ã¢Å¡  Setup incomplete",
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onTertiaryContainer
             )
@@ -2367,8 +2424,8 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
                         style = MaterialTheme.typography.titleMedium
                     )
                     Text(
-                        if (isConnected) "ðŸŸ¢ Live connection active"
-                        else if (isLinked.value) "ðŸ”´ Connectingâ€¦"
+                        if (isConnected) "Ã°Å¸Å¸Â¢ Live connection active"
+                        else if (isLinked.value) "Ã°Å¸â€Â´ ConnectingÃ¢â‚¬Â¦"
                         else "Sign in to enable notifications and presence",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -2385,10 +2442,10 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
         // Presence card (mirrors what Discord shows)
         if (presence != null && isLinked.value) {
             val statusIcon = when (presence.status) {
-                "active", "join me" -> "ðŸŸ¢"
-                "ask me"            -> "ðŸŸ "
-                "busy"              -> "ðŸ”´"
-                else                -> "âš«"
+                "active", "join me" -> "Ã°Å¸Å¸Â¢"
+                "ask me"            -> "Ã°Å¸Å¸ "
+                "busy"              -> "Ã°Å¸â€Â´"
+                else                -> "Ã¢Å¡Â«"
             }
             ElevatedCard {
                 Column(
@@ -2415,7 +2472,7 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
                     Divider()
                     if (presence.worldName.isNotBlank()) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("ðŸ“", style = MaterialTheme.typography.bodySmall)
+                            Text("Ã°Å¸â€œÂ", style = MaterialTheme.typography.bodySmall)
                             Column {
                                 Text(presence.worldName, style = MaterialTheme.typography.bodyMedium)
                                 val count = if (presence.instanceCapacity > 0)
@@ -2430,7 +2487,7 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
                             when (presence.location) {
                                 "offline"   -> "Offline"
                                 "private"   -> "In a private world"
-                                "traveling" -> "Traveling between worldsâ€¦"
+                                "traveling" -> "Traveling between worldsÃ¢â‚¬Â¦"
                                 else        -> "In a world"
                             },
                             style = MaterialTheme.typography.bodySmall,
@@ -2438,9 +2495,9 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
                         )
                     }
                     val platform = when (presence.platform) {
-                        "standalonewindows" -> "ðŸ–¥ Desktop"
-                        "android"           -> "ðŸ“± Android/Quest"
-                        "ios"               -> "ðŸ“± iOS"
+                        "standalonewindows" -> "Ã°Å¸â€“Â¥ Desktop"
+                        "android"           -> "Ã°Å¸â€œÂ± Android/Quest"
+                        "ios"               -> "Ã°Å¸â€œÂ± iOS"
                         else                -> ""
                     }
                     if (platform.isNotBlank())
@@ -2452,7 +2509,7 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
             ElevatedCard {
                 Row(Modifier.padding(14.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                    Text("Fetching presenceâ€¦", style = MaterialTheme.typography.bodySmall)
+                    Text("Fetching presenceÃ¢â‚¬Â¦", style = MaterialTheme.typography.bodySmall)
                 }
             }
         }
@@ -2462,7 +2519,7 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("About VRChat integration", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    "VRC-A connects to VRChat's web API to show your status, detect notifications (friend requests, invites, unfriends, group events), and identify you in the moderation system.\n\nYour password is only used to get a session cookie from VRChat's servers â€” it is never stored.",
+                    "VRC-A connects to VRChat's web API to show your status, detect notifications (friend requests, invites, unfriends, group events), and identify you in the moderation system.\n\nYour password is only used to get a session cookie from VRChat's servers Ã¢â‚¬â€ it is never stored.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
