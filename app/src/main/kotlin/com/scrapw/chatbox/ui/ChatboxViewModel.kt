@@ -71,7 +71,7 @@ import kotlin.math.min
  */
 class ChatboxViewModel(
     private val app: ChatboxApplication,
-    private val userPreferencesRepository: UserPreferencesRepository
+    val userPreferencesRepository: UserPreferencesRepository
 ) : ViewModel() {
 
     companion object {
@@ -1704,8 +1704,8 @@ class ChatboxViewModel(
             3 -> {
                 val slots = 10
                 val idx = (p * (slots - 1)).toInt()
-                // U+25C7 (◇ White Diamond) — in basic geometric shapes block,
-                // renders correctly in VRChat. U+27E1 (⟡) is not in VRChat's font.
+                // U+25C7 (â—‡ White Diamond) â€” in basic geometric shapes block,
+                // renders correctly in VRChat. U+27E1 (âŸ¡) is not in VRChat's font.
                 val bg = CharArray(slots) { '\u25C7' }
                 bg[idx] = dot
                 bg.concatToString()
