@@ -267,12 +267,26 @@ class ChatboxViewModel(
         data["afkPreset1"] = getAfkPresetPreview(1)
         data["afkPreset2"] = getAfkPresetPreview(2)
         data["afkPreset3"] = getAfkPresetPreview(3)
+        data["afkPreset1Name"] = pinnedPresetNames.getOrElse(0) { "Preset 1" }
+        data["afkPreset2Name"] = pinnedPresetNames.getOrElse(1) { "Preset 2" }
+        data["afkPreset3Name"] = pinnedPresetNames.getOrElse(2) { "Preset 3" }
 
         data["cyclePreset1"] = cyclePresetMessages.getOrNull(0)?.trim().orEmpty()
         data["cyclePreset2"] = cyclePresetMessages.getOrNull(1)?.trim().orEmpty()
         data["cyclePreset3"] = cyclePresetMessages.getOrNull(2)?.trim().orEmpty()
         data["cyclePreset4"] = cyclePresetMessages.getOrNull(3)?.trim().orEmpty()
         data["cyclePreset5"] = cyclePresetMessages.getOrNull(4)?.trim().orEmpty()
+        data["cyclePreset1Name"] = cyclePresetNames.getOrElse(0) { "Preset 1" }
+        data["cyclePreset2Name"] = cyclePresetNames.getOrElse(1) { "Preset 2" }
+        data["cyclePreset3Name"] = cyclePresetNames.getOrElse(2) { "Preset 3" }
+        data["cyclePreset4Name"] = cyclePresetNames.getOrElse(3) { "Preset 4" }
+        data["cyclePreset5Name"] = cyclePresetNames.getOrElse(4) { "Preset 5" }
+
+        // Multi-IP slots
+        val activeSlot = runCatching {
+            kotlinx.coroutines.runBlocking { userPreferencesRepository.activeIpSlot.first() }
+        }.getOrDefault(1)
+        data["activeIpSlot"] = activeSlot
 
         return data
     }
@@ -759,8 +773,7 @@ class ChatboxViewModel(
 
     fun updateCardOrder(order: List<String>) {
         if (isBanned) return
-        val valid = order.filter { it in DEFAULT_CARD_ORDER }.distinct()
-        // Ensure all components present (append any missing to end)
+        val valid = order.filter { it in DEFAULT_CARD_ORDER || it.startsWith("Divider_") }.distinct()
         val full = valid + DEFAULT_CARD_ORDER.filter { it !in valid }
         cardOrder = full
         viewModelScope.launch { userPreferencesRepository.saveCardOrder(full) }
@@ -770,6 +783,49 @@ class ChatboxViewModel(
 
     fun resetCardOrder() {
         updateCardOrder(DEFAULT_CARD_ORDER)
+    }
+
+    /** Add a new divider at the given position in cardOrder (after the component at insertAfterIdx) */
+    fun addDivider(insertAfterIdx: Int, text: String = "â”€â”€â”€â”€â”€") {
+        if (isBanned) return
+        // Find a unique divider ID
+        val existingIds = cardOrder.filter { it.startsWith("Divider_") }.map {
+            it.removePrefix("Divider_").toIntOrNull() ?: 0
+        }.toSet()
+        val newId = (1..99).first { it !in existingIds }
+        val divId = "Divider_$newId"
+
+        // Save text config
+        dividerTexts[divId] = text
+        saveDividerConfig()
+
+        // Insert into order
+        val newOrder = cardOrder.toMutableList()
+        val insertAt = (insertAfterIdx + 1).coerceAtMost(newOrder.size)
+        newOrder.add(insertAt, divId)
+        updateCardOrder(newOrder)
+    }
+
+    fun removeDivider(divId: String) {
+        if (isBanned) return
+        dividerTexts.remove(divId)
+        saveDividerConfig()
+        updateCardOrder(cardOrder.filter { it != divId })
+    }
+
+    fun updateDividerText(divId: String, text: String) {
+        if (isBanned) return
+        dividerTexts[divId] = text
+        saveDividerConfig()
+        rebuildCombinedPreviewOnly()
+    }
+
+    private fun saveDividerConfig() {
+        val arr = org.json.JSONArray()
+        dividerTexts.forEach { (id, text) ->
+            arr.put(org.json.JSONObject().put("id", id).put("text", text))
+        }
+        viewModelScope.launch { userPreferencesRepository.saveDividerConfig(arr.toString()) }
     }
 
     // =========================
@@ -824,6 +880,12 @@ class ChatboxViewModel(
         private set
 
     var cycleTrimWarning by mutableStateOf("")
+    /** Set when a divider line was auto-removed to fit the char limit */
+    var dividerRemovedWarning by mutableStateOf(false)
+
+    // Divider configs: map of "Divider_N" -> display text, loaded from DataStore
+    // e.g. {"Divider_1": "â”€â”€â”€â”€â”€", "Divider_2": "â€¢ â€¢ â€¢"}
+    val dividerTexts = mutableStateMapOf<String, String>()
         private set
 
     private val afkPresetTexts = mutableStateListOf("", "", "")
@@ -919,9 +981,26 @@ class ChatboxViewModel(
 
         viewModelScope.launch {
             userPreferencesRepository.cardOrder.collect { saved ->
-                val valid = saved.filter { it in DEFAULT_CARD_ORDER }.distinct()
+                // Allow Divider_N entries alongside standard components
+                val validComponents = DEFAULT_CARD_ORDER.toSet()
+                val valid = saved.filter { it in validComponents || it.startsWith("Divider_") }.distinct()
                 val full = valid + DEFAULT_CARD_ORDER.filter { it !in valid }
                 cardOrder = full
+                rebuildCombinedPreviewOnly()
+            }
+        }
+
+        viewModelScope.launch {
+            userPreferencesRepository.dividerConfig.collect { json ->
+                // Parse JSON array: [{"id":"Divider_1","text":"â”€â”€â”€â”€â”€"}, ...]
+                try {
+                    val arr = org.json.JSONArray(json)
+                    dividerTexts.clear()
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.getJSONObject(i)
+                        dividerTexts[obj.getString("id")] = obj.optString("text", "â”€â”€â”€â”€â”€")
+                    }
+                } catch (_: Exception) { /* malformed â€” keep empty */ }
                 rebuildCombinedPreviewOnly()
             }
         }
@@ -1520,6 +1599,7 @@ class ChatboxViewModel(
 
     private fun buildCombinedText(cycleLineOverride: String?): String {
         cycleTrimWarning = ""
+        dividerRemovedWarning = false
 
         // If banned, preview can still show what WOULD be sent, but nothing will send.
         val afkLine = if (afkEnabled && afkMessage.trim().isNotEmpty()) afkMessage.trim() else ""
@@ -1538,20 +1618,30 @@ class ChatboxViewModel(
         // Cut-off priority is separate and unchanged (Cycle drops first, then Music, then AFK).
         val rawLines = mutableListOf<LineWithPriority>()
         for (component in cardOrder) {
-            when (component) {
-                "AFK" -> if (afkLine.isNotBlank()) rawLines += LineWithPriority(text = afkLine, priority = Priority.AFK)
-                "Cycle" -> if (cycleLine.isNotBlank()) rawLines += LineWithPriority(text = cycleLine, priority = Priority.CYCLE)
-                "NowPlaying" -> for (m in musicLines) if (m.isNotBlank()) rawLines += LineWithPriority(text = m, priority = Priority.MUSIC)
-                // Standalone time: shown at its ordered position only when music is not active.
-                // When music IS active, time is already embedded in the NowPlaying status line.
-                "Time" -> if (standalonTimeLine.isNotBlank()) rawLines += LineWithPriority(text = standalonTimeLine, priority = Priority.MUSIC)
+            when {
+                component == "AFK" -> if (afkLine.isNotBlank()) rawLines += LineWithPriority(text = afkLine, priority = Priority.AFK)
+                component == "Cycle" -> if (cycleLine.isNotBlank()) rawLines += LineWithPriority(text = cycleLine, priority = Priority.CYCLE)
+                component == "NowPlaying" -> for (m in musicLines) if (m.isNotBlank()) rawLines += LineWithPriority(text = m, priority = Priority.MUSIC)
+                component == "Time" -> if (standalonTimeLine.isNotBlank()) rawLines += LineWithPriority(text = standalonTimeLine, priority = Priority.MUSIC)
+                component.startsWith("Divider_") -> {
+                    val divText = dividerTexts[component]?.trim() ?: "â”€â”€â”€â”€â”€"
+                    // Only insert divider if there's content on both sides (don't add leading/trailing dividers)
+                    if (rawLines.isNotEmpty()) {
+                        rawLines += LineWithPriority(text = divText, priority = Priority.DIVIDER, isDivider = true)
+                    }
+                }
             }
         }
+        // Remove trailing divider if it ended up last
+        while (rawLines.isNotEmpty() && rawLines.last().isDivider) rawLines.removeAt(rawLines.lastIndex)
 
         val limited = limitWithPriority(rawLines, VRC_MAX_CHARS, VRC_MAX_LINES)
 
         if (limited.cycleWasModifiedToPreserveMusic) {
             cycleTrimWarning = "Cycle was trimmed to preserve Now Playing (VRChat limits)."
+        }
+        if (limited.dividerWasRemoved || dividerRemovedWarning) {
+            dividerRemovedWarning = true
         }
 
         val combined = limited.text
@@ -1636,9 +1726,9 @@ class ChatboxViewModel(
         return listOfNotNull(line1.takeIf { it.isNotBlank() }, line2.takeIf { it.isNotBlank() })
     }
 
-    private enum class Priority { AFK, MUSIC, CYCLE }
-    private data class LineWithPriority(val text: String, val priority: Priority)
-    private data class LimitedResult(val text: String, val cycleWasModifiedToPreserveMusic: Boolean)
+    private enum class Priority { AFK, MUSIC, CYCLE, DIVIDER }
+    private data class LineWithPriority(val text: String, val priority: Priority, val isDivider: Boolean = false)
+    private data class LimitedResult(val text: String, val cycleWasModifiedToPreserveMusic: Boolean, val dividerWasRemoved: Boolean = false)
 
     private fun limitWithPriority(lines: List<LineWithPriority>, maxChars: Int, maxLines: Int): LimitedResult {
         if (lines.isEmpty()) return LimitedResult("", false)
@@ -1649,6 +1739,13 @@ class ChatboxViewModel(
         var cycleModifiedForMusic = false
 
         while (cleaned.size > maxLines) {
+            // Dividers are always dropped first â€” they are cosmetic
+            val divIdx = cleaned.indexOfLast { it.isDivider }
+            if (divIdx >= 0) {
+                cleaned.removeAt(divIdx)
+                dividerRemovedWarning = true
+                continue
+            }
             val idxToRemove = cleaned.indexOfLast { it.priority == Priority.CYCLE }
                 .takeIf { it >= 0 }
                 ?: cleaned.indexOfLast { it.priority == Priority.MUSIC }.takeIf { it >= 0 }
@@ -1682,9 +1779,18 @@ class ChatboxViewModel(
         while (len > maxChars && cleaned.isNotEmpty()) {
             val excess = len - maxChars
 
+            // Drop dividers first â€” cosmetic, never truncate
+            val divIdx = cleaned.indexOfLast { it.isDivider }
+            if (divIdx >= 0) {
+                cleaned.removeAt(divIdx)
+                dividerRemovedWarning = true
+                len = totalLen(cleaned)
+                continue
+            }
+
             val cycleIdx = cleaned.indexOfLast { it.priority == Priority.CYCLE }
             val musicIdx = cleaned.indexOfLast { it.priority == Priority.MUSIC }
-            val afkIdx = cleaned.indexOfLast { it.priority == Priority.AFK }
+            val afkIdx   = cleaned.indexOfLast { it.priority == Priority.AFK }
 
             when {
                 cycleIdx >= 0 -> trimLineAt(cycleIdx, excess + 1)
@@ -1744,8 +1850,8 @@ class ChatboxViewModel(
             3 -> {
                 val slots = 10
                 val idx = (p * (slots - 1)).toInt()
-                // U+25C7 (Ã¢â€”â€¡ White Diamond) Ã¢â‚¬â€ in basic geometric shapes block,
-                // renders correctly in VRChat. U+27E1 (Ã¢Å¸Â¡) is not in VRChat's font.
+                // U+25C7 (ÃƒÂ¢Ã¢â‚¬â€Ã¢â‚¬Â¡ White Diamond) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â in basic geometric shapes block,
+                // renders correctly in VRChat. U+27E1 (ÃƒÂ¢Ã…Â¸Ã‚Â¡) is not in VRChat's font.
                 val bg = CharArray(slots) { '\u25C7' }
                 bg[idx] = dot
                 bg.concatToString()
