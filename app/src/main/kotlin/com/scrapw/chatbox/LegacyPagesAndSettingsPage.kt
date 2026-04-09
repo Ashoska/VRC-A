@@ -378,7 +378,7 @@ private fun HomePage(vm: ChatboxViewModel) {
 
         SectionCard(
             title = "Manual Send",
-            subtitle = "One-off message (doesn’t affect AFK/Cycle/Now Playing)."
+            subtitle = "One-off message (doesnâ€™t affect AFK/Cycle/Now Playing)."
         ) {
             OutlinedTextField(
                 value = vm.messageText.value,
@@ -489,7 +489,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
             val p = vm.getAfkPresetPreview(slot).ifBlank { "empty" }
             "${slot}:${p}"
         }
-        return parts.joinToString("  •  ").let { if (it.length > 80) it.take(79) + "…" else it }
+        return parts.joinToString("  â€¢  ").let { if (it.length > 80) it.take(79) + "â€¦" else it }
     }
 
     fun cyclePresetsPreview(): String {
@@ -497,7 +497,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
             val p = vm.getCyclePresetPreview(slot).ifBlank { "empty" }
             "${slot}:${p}"
         }
-        return parts.joinToString("  •  ").let { if (it.length > 80) it.take(79) + "…" else it }
+        return parts.joinToString("  â€¢  ").let { if (it.length > 80) it.take(79) + "â€¦" else it }
     }
 
     PageContainer {
@@ -570,7 +570,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
                                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                                             ) {
                                                 val preview = vm.getAfkPresetPreview(slot).ifBlank { "(empty)" }
-                                                Text("Preset $slot — $preview")
+                                                Text("Preset $slot â€” $preview")
 
                                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                                     OutlinedButton(
@@ -710,7 +710,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
                                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                                             ) {
                                                 val preview = vm.getCyclePresetPreview(slot).ifBlank { "(empty)" }
-                                                Text("Preset $slot — $preview")
+                                                Text("Preset $slot â€” $preview")
 
                                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                                     OutlinedButton(
@@ -913,6 +913,7 @@ private enum class SettingsSection(val title: String) {
     General("General"),
     Interface("Interface"),
     Osc("OSC"),
+    Notifications("Notifications"),
     About("About")
 }
 
@@ -1036,6 +1037,10 @@ fun SettingsPage(
                 }
             }
 
+            SettingsSection.Notifications -> {
+                NotificationToggleSection(vm = vm)
+            }
+
             SettingsSection.About -> {
                 SectionCard(
                     title = "About",
@@ -1098,5 +1103,65 @@ private fun vrChatSafePreview(input: String): String {
 
     return input.lines().joinToString("\n") { line ->
         line.split(" ").joinToString(" ") { breakLongToken(it) }
+    }
+}
+
+/* =========================
+   Notification toggle section
+   ========================= */
+
+@Composable
+private fun NotificationToggleSection(vm: ChatboxViewModel) {
+    val scope = rememberCoroutineScope()
+    val repo = vm.userPreferencesRepository
+
+    // Collect all notif prefs
+    val friendRequest by repo.notifFriendRequest.collectAsState(initial = true)
+    val invite by repo.notifInvite.collectAsState(initial = true)
+    val friendOnline by repo.notifFriendOnline.collectAsState(initial = true)
+    val friendOffline by repo.notifFriendOffline.collectAsState(initial = false)
+    val unfriend by repo.notifUnfriend.collectAsState(initial = true)
+    val groupEvent by repo.notifGroupEvent.collectAsState(initial = true)
+    val groupAnnouncement by repo.notifGroupAnnouncement.collectAsState(initial = true)
+    val appUpdate by repo.notifAppUpdate.collectAsState(initial = true)
+    val announcements by repo.notifAnnouncements.collectAsState(initial = true)
+
+    SectionCard(
+        title = "VRChat Notifications",
+        subtitle = "Choose which events send a phone notification."
+    ) {
+        ToggleRow("Friend requests", friendRequest) {
+            scope.launch { repo.saveNotifFriendRequest(it) }
+        }
+        ToggleRow("Invites received", invite) {
+            scope.launch { repo.saveNotifInvite(it) }
+        }
+        ToggleRow("Friend came online", friendOnline) {
+            scope.launch { repo.saveNotifFriendOnline(it) }
+        }
+        ToggleRow("Friend went offline", friendOffline) {
+            scope.launch { repo.saveNotifFriendOffline(it) }
+        }
+        ToggleRow("Someone unfriended you", unfriend) {
+            scope.launch { repo.saveNotifUnfriend(it) }
+        }
+        ToggleRow("Group events", groupEvent) {
+            scope.launch { repo.saveNotifGroupEvent(it) }
+        }
+        ToggleRow("Group announcements", groupAnnouncement) {
+            scope.launch { repo.saveNotifGroupAnnouncement(it) }
+        }
+    }
+
+    SectionCard(
+        title = "App Notifications",
+        subtitle = "VRC-A system alerts."
+    ) {
+        ToggleRow("New app version available", appUpdate) {
+            scope.launch { repo.saveNotifAppUpdate(it) }
+        }
+        ToggleRow("Admin announcements", announcements) {
+            scope.launch { repo.saveNotifAnnouncements(it) }
+        }
     }
 }
