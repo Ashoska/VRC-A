@@ -43,6 +43,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.BugReport
@@ -77,6 +78,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.NavigationDrawerItemDefaults
 import androidx.compose.material3.OutlinedButton
@@ -119,6 +122,8 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.Query
+import com.scrapw.chatbox.vrchat.VrchatAuthManager
+import com.scrapw.chatbox.vrchat.VrchatPipelineState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
@@ -128,12 +133,13 @@ private enum class AppPage(val title: String) {
     Home("Home"),
     Automations("Automations"),
     Music("Music"),
+    VrchatStatus("VRChat"),
     Debug("Debug"),
     Admin("Admin")
 }
 
 private enum class ChatboxAutomationsTab(val title: String) {
-    AFK("AFK"),
+    Pinned("Pinned"),
     Cycle("Cycle")
 }
 
@@ -488,6 +494,17 @@ fun ChatboxScreen(
         if (isBannedEffective) page = AppPage.Home
     }
 
+    // Setup wizard: check if VRChat linked and IP set
+    val vrcLinked = VrchatAuthManager.isLoggedIn(ctx) &&
+        VrchatAuthManager.getStoredUserId(ctx)?.isNotBlank() == true
+    val ipSet = remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        chatboxViewModel.userPreferencesRepository.ipAddress.collect { ip ->
+            ipSet.value = ip.isNotBlank() && ip != "127.0.0.1"
+        }
+    }
+    val showSetupBanner = !vrcLinked || !ipSet.value
+
     ModalNavigationDrawer(
         drawerState = drawerState,
         gesturesEnabled = true,
@@ -499,7 +516,6 @@ fun ChatboxScreen(
                         if (isBannedEffective) AppPage.Home
                         else if (!BuildConfig.IS_ADMIN_BUILD && chosen == AppPage.Admin) AppPage.Home
                         else chosen
-
                     page = safeChosen
                     scope.launch { drawerState.close() }
                 },
@@ -530,17 +546,55 @@ fun ChatboxScreen(
                     }
                 )
             },
+            // Bottom navigation bar â€” always visible, labelled
+            bottomBar = {
+                if (!isBannedEffective) {
+                    NavigationBar {
+                        NavigationBarItem(
+                            selected = page == AppPage.Home,
+                            onClick = { page = AppPage.Home },
+                            icon = { Icon(Icons.Filled.Home, contentDescription = null) },
+                            label = { Text("Home") }
+                        )
+                        NavigationBarItem(
+                            selected = page == AppPage.Automations,
+                            onClick = { page = AppPage.Automations },
+                            icon = { Icon(Icons.Filled.Sync, contentDescription = null) },
+                            label = { Text("Automations") }
+                        )
+                        NavigationBarItem(
+                            selected = page == AppPage.Music,
+                            onClick = { page = AppPage.Music },
+                            icon = { Icon(Icons.Filled.MusicNote, contentDescription = null) },
+                            label = { Text("Music") }
+                        )
+                        NavigationBarItem(
+                            selected = page == AppPage.VrchatStatus,
+                            onClick = { page = AppPage.VrchatStatus },
+                            icon = { Icon(Icons.Filled.AccountCircle, contentDescription = null) },
+                            label = { Text("VRChat") }
+                        )
+                    }
+                }
+            },
             snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
             contentWindowInsets = WindowInsets(0)
         ) { padding ->
-            // Use Column so banners are NOT drawn on top of content.
             Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                // Warning banner only (ban shows full screen)
-                
+                // Persistent setup banner â€” shows until both steps complete
+                if (showSetupBanner && !isBannedEffective) {
+                    SetupIncompleteBanner(
+                        vrcLinked = vrcLinked,
+                        ipSet = ipSet.value,
+                        onFixVrc = { page = AppPage.VrchatStatus },
+                        onFixIp = { showSettingsSheet = true }
+                    )
+                }
+
                 Crossfade(targetState = page, label = "page_crossfade") { p ->
                     when (p) {
                         AppPage.Home -> {
@@ -573,6 +627,10 @@ fun ChatboxScreen(
                             onPersistSpotifyEnabled = { UiPrefs.writeSpotifyEnabled(ctx, it) },
                             onPersistSpotifyDemo = { UiPrefs.writeSpotifyDemo(ctx, it) },
                             onPersistSpotifyPreset = { UiPrefs.writeSpotifyPreset(ctx, it) }
+                        )
+
+                        AppPage.VrchatStatus -> VrchatStatusPage(
+                            onOpenLogin = { /* navigate to login within page */ }
                         )
 
                         AppPage.Debug -> DebugPage(
@@ -1187,7 +1245,7 @@ private fun HomePage(
                             // Component toggle or time row
                             Box(Modifier.weight(1f)) {
                                 when (component) {
-                                    "AFK" -> ToggleRow("AFK", vm.afkEnabled, enabled = !isBanned) { vm.setAfkEnabledFlag(it) }
+                                    "Pinned" -> ToggleRow("Pinned", vm.afkEnabled, enabled = !isBanned) { vm.setAfkEnabledFlag(it) }
                                     "Cycle" -> ToggleRow("Cycle", vm.cycleEnabled, enabled = !isBanned) { vm.setCycleEnabledFlag(it) }
                                     "NowPlaying" -> ToggleRow("Now Playing", vm.spotifyEnabled, enabled = !isBanned) { vm.setSpotifyEnabledFlag(it) }
                                     "Time" -> Row(
@@ -1525,19 +1583,19 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel, isBanned
         }
 
         when (tab) {
-            ChatboxAutomationsTab.AFK -> {
+            ChatboxAutomationsTab.Pinned -> {
                 SectionCard(
-                    title = "AFK",
-                    subtitle = "AFK always appears above Cycle + Music."
+                    title = "Pinned Message",
+                    subtitle = "Always shown above Cycle and Now Playing."
                 ) {
-                    ToggleRow("AFK enabled", vm.afkEnabled, enabled = !isBanned) { vm.setAfkEnabledFlag(it) }
+                    ToggleRow("Pinned enabled", vm.afkEnabled, enabled = !isBanned) { vm.setAfkEnabledFlag(it) }
 
                     OutlinedTextField(
                         value = vm.afkMessage,
                         onValueChange = { s: String -> vm.updateAfkText(s) },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
-                        label = { Text("AFK text") },
+                        label = { Text("Pinned text") },
                         enabled = !isBanned
                     )
 
@@ -1556,7 +1614,7 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel, isBanned
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Column(Modifier.weight(1f)) {
-                                    Text("AFK Presets (3)", style = MaterialTheme.typography.titleSmall)
+                                    Text("Pinned Presets (3)", style = MaterialTheme.typography.titleSmall)
                                     if (vm.afkPresetsCollapsed) {
                                         Text(
                                             afkPresetsPreview(),
@@ -1612,13 +1670,13 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel, isBanned
                             onClick = { vm.startAfkSender() },
                             modifier = Modifier.weight(1f),
                             enabled = !isBanned && vm.afkEnabled
-                        ) { Text("Start") }
+                        ) { Text("Pin") }
 
                         OutlinedButton(
                             onClick = { vm.stopAfkSender(clearFromChatbox = true) },
                             modifier = Modifier.weight(1f),
                             enabled = !isBanned
-                        ) { Text("Stop") }
+                        ) { Text("Unpin") }
                     }
 
                     OutlinedButton(
@@ -2209,5 +2267,233 @@ private fun vrChatSafePreview(input: String): String {
 
     return input.lines().joinToString("\n") { line ->
         line.split(" ").joinToString(" ") { breakLongToken(it) }
+    }
+}
+
+/* =========================
+   Setup incomplete banner
+   Shown persistently until VRChat is linked AND IP is set.
+   ========================= */
+
+@Composable
+private fun SetupIncompleteBanner(
+    vrcLinked: Boolean,
+    ipSet: Boolean,
+    onFixVrc: () -> Unit,
+    onFixIp: () -> Unit
+) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.tertiaryContainer
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+    ) {
+        Column(
+            Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(
+                "âš  Setup incomplete",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onTertiaryContainer
+            )
+            if (!vrcLinked) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "VRChat account not linked",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = onFixVrc) { Text("Fix") }
+                }
+            }
+            if (!ipSet) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "PC/Quest IP not configured",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = onFixIp) { Text("Fix") }
+                }
+            }
+        }
+    }
+}
+
+/* =========================
+   VRChat status page
+   Shows presence card + login/logout controls
+   ========================= */
+
+@Composable
+private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    val isLinked = remember { mutableStateOf(VrchatAuthManager.isLoggedIn(ctx)) }
+    val displayName = remember { mutableStateOf(VrchatAuthManager.getStoredDisplayName(ctx) ?: "") }
+    val presence = VrchatPipelineState.presence
+    val isConnected = VrchatPipelineState.isConnected
+
+    var showLogoutDialog by remember { mutableStateOf(false) }
+
+    PageContainer {
+        // Connection status header
+        ElevatedCard {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(14.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        if (isLinked.value) displayName.value.ifBlank { "VRChat account" }
+                        else "Not signed in",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Text(
+                        if (isConnected) "ðŸŸ¢ Live connection active"
+                        else if (isLinked.value) "ðŸ”´ Connectingâ€¦"
+                        else "Sign in to enable notifications and presence",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (isLinked.value) {
+                    OutlinedButton(onClick = { showLogoutDialog = true }) { Text("Sign out") }
+                } else {
+                    Button(onClick = onOpenLogin) { Text("Sign in") }
+                }
+            }
+        }
+
+        // Presence card (mirrors what Discord shows)
+        if (presence != null && isLinked.value) {
+            val statusIcon = when (presence.status) {
+                "active", "join me" -> "ðŸŸ¢"
+                "ask me"            -> "ðŸŸ "
+                "busy"              -> "ðŸ”´"
+                else                -> "âš«"
+            }
+            ElevatedCard {
+                Column(
+                    Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("Presence", style = MaterialTheme.typography.titleSmall)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Text(statusIcon)
+                        Column {
+                            Text(
+                                presence.displayName,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            if (presence.statusDescription.isNotBlank())
+                                Text(
+                                    presence.statusDescription,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                        }
+                    }
+                    Divider()
+                    if (presence.worldName.isNotBlank()) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("ðŸ“", style = MaterialTheme.typography.bodySmall)
+                            Column {
+                                Text(presence.worldName, style = MaterialTheme.typography.bodyMedium)
+                                val count = if (presence.instanceCapacity > 0)
+                                    "${presence.instancePlayerCount} / ${presence.instanceCapacity}"
+                                else "${presence.instancePlayerCount} players"
+                                Text(count, style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    } else {
+                        Text(
+                            when (presence.location) {
+                                "offline"   -> "Offline"
+                                "private"   -> "In a private world"
+                                "traveling" -> "Traveling between worldsâ€¦"
+                                else        -> "In a world"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    val platform = when (presence.platform) {
+                        "standalonewindows" -> "ðŸ–¥ Desktop"
+                        "android"           -> "ðŸ“± Android/Quest"
+                        "ios"               -> "ðŸ“± iOS"
+                        else                -> ""
+                    }
+                    if (platform.isNotBlank())
+                        Text(platform, style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        } else if (isLinked.value) {
+            ElevatedCard {
+                Row(Modifier.padding(14.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Text("Fetching presenceâ€¦", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+
+        // Info card
+        ElevatedCard {
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("About VRChat integration", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "VRC-A connects to VRChat's web API to show your status, detect notifications (friend requests, invites, unfriends, group events), and identify you in the moderation system.\n\nYour password is only used to get a session cookie from VRChat's servers â€” it is never stored.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+
+    // Sign out confirmation
+    if (showLogoutDialog) {
+        AlertDialog(
+            onDismissRequest = { showLogoutDialog = false },
+            title = { Text("Sign out of VRChat?") },
+            text = {
+                Text("Notifications and presence will stop until you sign back in. The app will require you to sign in again before you can use it.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showLogoutDialog = false
+                    VrchatAuthManager.logout(ctx)
+                    isLinked.value = false
+                    displayName.value = ""
+                    // Stop pipeline service
+                    ctx.stopService(
+                        android.content.Intent(ctx,
+                            com.scrapw.chatbox.vrchat.VrchatPipelineService::class.java)
+                    )
+                }) { Text("Sign out", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showLogoutDialog = false }) { Text("Cancel") }
+            }
+        )
     }
 }
