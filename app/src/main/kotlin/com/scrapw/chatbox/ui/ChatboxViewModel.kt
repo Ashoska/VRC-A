@@ -827,6 +827,8 @@ class ChatboxViewModel(
         private set
 
     private val afkPresetTexts = mutableStateListOf("", "", "")
+    val pinnedPresetNames = mutableStateListOf("Preset 1", "Preset 2", "Preset 3")
+    val cyclePresetNames  = mutableStateListOf("Preset 1", "Preset 2", "Preset 3", "Preset 4", "Preset 5")
     private val cyclePresetMessages = mutableStateListOf("", "", "", "", "")
     private val cyclePresetIntervals = mutableStateListOf(
         CYCLE_INTERVAL_SECONDS_LOCKED,
@@ -884,6 +886,14 @@ class ChatboxViewModel(
         viewModelScope.launch { userPreferencesRepository.afkPreset1.collect { afkPresetTexts[0] = it; startSelfSyncLoopIfNeeded() } }
         viewModelScope.launch { userPreferencesRepository.afkPreset2.collect { afkPresetTexts[1] = it; startSelfSyncLoopIfNeeded() } }
         viewModelScope.launch { userPreferencesRepository.afkPreset3.collect { afkPresetTexts[2] = it; startSelfSyncLoopIfNeeded() } }
+        viewModelScope.launch { userPreferencesRepository.pinnedPreset1Name.collect { pinnedPresetNames[0] = it } }
+        viewModelScope.launch { userPreferencesRepository.pinnedPreset2Name.collect { pinnedPresetNames[1] = it } }
+        viewModelScope.launch { userPreferencesRepository.pinnedPreset3Name.collect { pinnedPresetNames[2] = it } }
+        viewModelScope.launch { userPreferencesRepository.cyclePreset1Name.collect { cyclePresetNames[0] = it } }
+        viewModelScope.launch { userPreferencesRepository.cyclePreset2Name.collect { cyclePresetNames[1] = it } }
+        viewModelScope.launch { userPreferencesRepository.cyclePreset3Name.collect { cyclePresetNames[2] = it } }
+        viewModelScope.launch { userPreferencesRepository.cyclePreset4Name.collect { cyclePresetNames[3] = it } }
+        viewModelScope.launch { userPreferencesRepository.cyclePreset5Name.collect { cyclePresetNames[4] = it } }
 
         viewModelScope.launch { userPreferencesRepository.cyclePreset1Messages.collect { cyclePresetMessages[0] = it; startSelfSyncLoopIfNeeded() } }
         viewModelScope.launch { userPreferencesRepository.cyclePreset1Interval.collect { cyclePresetIntervals[0] = CYCLE_INTERVAL_SECONDS_LOCKED } }
@@ -1286,6 +1296,36 @@ class ChatboxViewModel(
             else -> userPreferencesRepository.saveAfkPreset3(text)
         }
         startSelfSyncLoopIfNeeded()
+    }
+
+    suspend fun saveAfkPresetName(slot: Int, name: String) {
+        if (isBanned) return
+        when (slot.coerceIn(1, 3)) {
+            1 -> userPreferencesRepository.savePinnedPreset1Name(name)
+            2 -> userPreferencesRepository.savePinnedPreset2Name(name)
+            else -> userPreferencesRepository.savePinnedPreset3Name(name)
+        }
+    }
+
+    suspend fun saveCyclePresetName(slot: Int, name: String) {
+        if (isBanned) return
+        when (slot.coerceIn(1, 5)) {
+            1 -> userPreferencesRepository.saveCyclePreset1(
+                userPreferencesRepository.cyclePreset1Messages.first(),
+                userPreferencesRepository.cyclePreset1Interval.first(), name)
+            2 -> userPreferencesRepository.saveCyclePreset2(
+                userPreferencesRepository.cyclePreset2Messages.first(),
+                userPreferencesRepository.cyclePreset2Interval.first(), name)
+            3 -> userPreferencesRepository.saveCyclePreset3(
+                userPreferencesRepository.cyclePreset3Messages.first(),
+                userPreferencesRepository.cyclePreset3Interval.first(), name)
+            4 -> userPreferencesRepository.saveCyclePreset4(
+                userPreferencesRepository.cyclePreset4Messages.first(),
+                userPreferencesRepository.cyclePreset4Interval.first(), name)
+            else -> userPreferencesRepository.saveCyclePreset5(
+                userPreferencesRepository.cyclePreset5Messages.first(),
+                userPreferencesRepository.cyclePreset5Interval.first(), name)
+        }
     }
 
     suspend fun loadAfkPreset(slot: Int) {
@@ -1704,8 +1744,8 @@ class ChatboxViewModel(
             3 -> {
                 val slots = 10
                 val idx = (p * (slots - 1)).toInt()
-                // U+25C7 (â—‡ White Diamond) â€” in basic geometric shapes block,
-                // renders correctly in VRChat. U+27E1 (âŸ¡) is not in VRChat's font.
+                // U+25C7 (Ã¢â€”â€¡ White Diamond) Ã¢â‚¬â€ in basic geometric shapes block,
+                // renders correctly in VRChat. U+27E1 (Ã¢Å¸Â¡) is not in VRChat's font.
                 val bg = CharArray(slots) { '\u25C7' }
                 bg[idx] = dot
                 bg.concatToString()
