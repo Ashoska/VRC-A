@@ -741,7 +741,7 @@ private fun UsersTab(
                     }
                 }
             } else if (d != null) {
-                DetailBlock(d)
+                DetailBlock(d = d, docId = selectedDocId ?: "", db = db, setError = setError)
             } else {
                 ElevatedCard {
                     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -865,7 +865,7 @@ private fun UsersTab(
                                 maxLines = 1)
                         }
                         if (u.vrchatWorld.isNotBlank()) {
-                            Text("ðŸ“ ${u.vrchatWorld}",
+                            Text("Ã°Å¸â€œÂ ${u.vrchatWorld}",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.primary,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -904,9 +904,18 @@ private fun UsersTab(
 }
 
 @Composable
-private fun DetailBlock(d: UserDetail) {
+@Composable
+private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, setError: (String?) -> Unit) {
+    val scope = rememberCoroutineScope()
 
-    // â”€â”€ VRChat Presence â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    fun writeField(key: String, value: Any) {
+        if (docId.isBlank()) return
+        db.collection("users").document(docId)
+            .update(key, value)
+            .addOnFailureListener { e -> setError("Write failed: ${e.message}") }
+    }
+
+    // â”€â”€ VRChat â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     ElevatedCard {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("VRChat", style = MaterialTheme.typography.titleSmall)
@@ -914,29 +923,19 @@ private fun DetailBlock(d: UserDetail) {
                 Text("Not linked", style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             } else {
-                val statusIcon = when (d.vrchatStatus) {
-                    "active", "join me" -> "ðŸŸ¢"
-                    "ask me"            -> "ðŸŸ "
-                    "busy"              -> "ðŸ”´"
-                    else                -> "âš«"
+                val dot = when (d.vrchatStatus) {
+                    "active", "join me" -> "ðŸŸ¢"; "ask me" -> "ðŸŸ "; "busy" -> "ðŸ”´"; else -> "âš«"
                 }
-                Text("$statusIcon ${d.vrchatDisplayName.ifBlank { d.vrchatUserId }}",
+                Text("$dot ${d.vrchatDisplayName.ifBlank { d.vrchatUserId }}",
                     style = MaterialTheme.typography.bodyMedium)
                 if (d.vrchatStatusDescription.isNotBlank())
                     Text(d.vrchatStatusDescription, style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (d.vrchatWorld.isNotBlank()) {
-                    val countStr = if (d.vrchatCapacity > 0) "${d.vrchatPlayerCount}/${d.vrchatCapacity}" else "${d.vrchatPlayerCount}"
-                    Text("ðŸ“ ${d.vrchatWorld}  Â·  $countStr", style = MaterialTheme.typography.bodySmall)
+                    val cnt = if (d.vrchatCapacity > 0) "${d.vrchatPlayerCount}/${d.vrchatCapacity}"
+                              else "${d.vrchatPlayerCount}"
+                    Text("ðŸ“ ${d.vrchatWorld} ($cnt)", style = MaterialTheme.typography.bodySmall)
                 }
-                val platformLabel = when (d.vrchatPlatform) {
-                    "standalonewindows" -> "ðŸ–¥ PC"
-                    "android"           -> "ðŸ“± Android/Quest"
-                    "ios"               -> "ðŸ“± iOS"
-                    else -> d.vrchatPlatform.ifBlank { "Unknown" }
-                }
-                Text(platformLabel, style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text("ID: ${d.vrchatUserId}", fontFamily = FontFamily.Monospace,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -948,29 +947,29 @@ private fun DetailBlock(d: UserDetail) {
         }
     }
 
-    // â”€â”€ Live Output â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â”€â”€ Live Output + Feature Toggles â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     ElevatedCard {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Live Chatbox Output", style = MaterialTheme.typography.titleSmall)
-            Card(colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                Text(
-                    d.combinedPreviewText.ifBlank { "(nothing sending)" },
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                Text(d.combinedPreviewText.ifBlank { "(nothing sending)" },
                     modifier = Modifier.padding(10.dp),
                     fontFamily = FontFamily.Monospace,
-                    style = MaterialTheme.typography.bodySmall
-                )
+                    style = MaterialTheme.typography.bodySmall)
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                Text("Pinned: ${if (d.pinnedEnabled) "ON" else "off"}",
-                    style = MaterialTheme.typography.labelSmall)
-                Text("Cycle: ${if (d.cycleEnabled) "ON  (${d.cycleIntervalSeconds}s)" else "off"}",
-                    style = MaterialTheme.typography.labelSmall)
-                Text("Music: ${if (d.spotifyEnabled) "ON" else "off"}",
-                    style = MaterialTheme.typography.labelSmall)
+            // Remote toggle chips
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(selected = d.pinnedEnabled, onClick = { writeField("afkEnabled", !d.pinnedEnabled) },
+                    label = { Text("Pinned", style = MaterialTheme.typography.labelSmall) })
+                FilterChip(selected = d.cycleEnabled, onClick = { writeField("cycleEnabled", !d.cycleEnabled) },
+                    label = { Text("Cycle", style = MaterialTheme.typography.labelSmall) })
+                FilterChip(selected = d.spotifyEnabled, onClick = { writeField("spotifyEnabled", !d.spotifyEnabled) },
+                    label = { Text("Music", style = MaterialTheme.typography.labelSmall) })
+                FilterChip(selected = d.timeEnabled, onClick = { writeField("timeEnabled", !d.timeEnabled) },
+                    label = { Text("Time", style = MaterialTheme.typography.labelSmall) })
             }
             if (d.nowPlayingDetected) {
-                Text("ðŸŽµ ${d.nowPlayingTitle.ifBlank { "?" }}  â€”  ${d.nowPlayingArtist.ifBlank { "?" }}  " +
+                Text("ðŸŽµ ${d.nowPlayingTitle.ifBlank { "?" }} â€” ${d.nowPlayingArtist.ifBlank { "?" }} " +
                     if (d.nowPlayingIsPlaying) "â–¶" else "â¸",
                     style = MaterialTheme.typography.bodySmall)
             }
@@ -979,61 +978,126 @@ private fun DetailBlock(d: UserDetail) {
 
     // â”€â”€ Pinned Message â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     ElevatedCard {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Pinned Message", style = MaterialTheme.typography.titleSmall)
-            Text(d.pinnedMessage.ifBlank { "(blank)" },
-                fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+            var pinnedEdit by remember(d.pinnedMessage) { mutableStateOf(d.pinnedMessage) }
+            OutlinedTextField(
+                value = pinnedEdit,
+                onValueChange = { pinnedEdit = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("Pinned text") },
+                trailingIcon = {
+                    if (pinnedEdit != d.pinnedMessage)
+                        IconButton(onClick = { writeField("afkMessage", pinnedEdit) }) {
+                            Icon(Icons.Filled.Check, "Save", modifier = Modifier.size(18.dp))
+                        }
+                }
+            )
             Divider()
-            d.pinnedPresets.forEachIndexed { i, p ->
+            Text("Presets", style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            d.pinnedPresets.forEachIndexed { i, preset ->
                 val name = d.pinnedPresetNames.getOrElse(i) { "Preset ${i+1}" }
-                Text("[$name] ${p.ifBlank { "(blank)" }}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (p.isBlank()) MaterialTheme.colorScheme.onSurfaceVariant
-                            else MaterialTheme.colorScheme.onSurface)
-            }
-        }
-    }
-
-    // â”€â”€ Cycle Presets â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    ElevatedCard {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("Cycle  Â·  ${d.cycleIntervalSeconds}s interval", style = MaterialTheme.typography.titleSmall)
-            if (d.cycleLinesText.isNotBlank()) {
-                Card(colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                    Text(d.cycleLinesText, modifier = Modifier.padding(10.dp),
-                        fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                var pe by remember(preset) { mutableStateOf(preset) }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(value = pe, onValueChange = { pe = it },
+                        modifier = Modifier.weight(1f), singleLine = true, label = { Text(name) })
+                    if (pe != preset)
+                        IconButton(onClick = { writeField("afkPreset${i+1}", pe) }) {
+                            Icon(Icons.Filled.Check, "Save", modifier = Modifier.size(18.dp))
+                        }
+                    OutlinedButton(onClick = { writeField("afkMessage", pe) },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
+                        Text("Load", style = MaterialTheme.typography.labelSmall)
+                    }
                 }
             }
+        }
+    }
+
+    // â”€â”€ Cycle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    ElevatedCard {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically) {
+                Text("Cycle", style = MaterialTheme.typography.titleSmall)
+                Row(verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    var intEdit by remember(d.cycleIntervalSeconds) { mutableStateOf(d.cycleIntervalSeconds.toString()) }
+                    OutlinedTextField(value = intEdit, onValueChange = { intEdit = it.filter { c -> c.isDigit() } },
+                        modifier = Modifier.width(72.dp), singleLine = true, label = { Text("Sec") },
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                            keyboardType = androidx.compose.ui.text.input.KeyboardType.Number))
+                    if (intEdit.isNotBlank() && intEdit.toLongOrNull() != d.cycleIntervalSeconds)
+                        IconButton(onClick = { intEdit.toLongOrNull()?.let { writeField("cycleIntervalSeconds", it) } }) {
+                            Icon(Icons.Filled.Check, "Save", modifier = Modifier.size(18.dp))
+                        }
+                }
+            }
+            if (d.cycleLinesText.isNotBlank()) {
+                var cycleEdit by remember(d.cycleLinesText) { mutableStateOf(d.cycleLinesText) }
+                OutlinedTextField(value = cycleEdit, onValueChange = { cycleEdit = it },
+                    modifier = Modifier.fillMaxWidth(), label = { Text("Cycle lines") },
+                    minLines = 2, maxLines = 6,
+                    trailingIcon = {
+                        if (cycleEdit != d.cycleLinesText)
+                            IconButton(onClick = { writeField("cycleLinesText", cycleEdit) }) {
+                                Icon(Icons.Filled.Check, "Save", modifier = Modifier.size(18.dp))
+                            }
+                    })
+            }
             Divider()
-            d.cyclePresets.forEachIndexed { i, p ->
+            Text("Cycle Presets", style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            d.cyclePresets.forEachIndexed { i, preset ->
                 val name = d.cyclePresetNames.getOrElse(i) { "Preset ${i+1}" }
-                val first = p.lines().firstOrNull { it.isNotBlank() }?.trim() ?: ""
-                Text("[$name] ${first.ifBlank { "(blank)" }}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (first.isBlank()) MaterialTheme.colorScheme.onSurfaceVariant
-                            else MaterialTheme.colorScheme.onSurface)
+                val firstLine = preset.lines().firstOrNull { it.isNotBlank() }?.trim() ?: ""
+                var pe by remember(firstLine) { mutableStateOf(firstLine) }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(value = pe, onValueChange = { pe = it },
+                        modifier = Modifier.weight(1f), singleLine = true, label = { Text(name) })
+                    if (pe != firstLine)
+                        IconButton(onClick = { writeField("cyclePreset${i+1}", pe) }) {
+                            Icon(Icons.Filled.Check, "Save", modifier = Modifier.size(18.dp))
+                        }
+                    OutlinedButton(onClick = { writeField("cycleLinesText", preset) },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
+                        Text("Load", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
             }
         }
     }
 
-    // â”€â”€ Network / IP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â”€â”€ Network â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     ElevatedCard {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("Network", style = MaterialTheme.typography.titleSmall)
-            listOf(
-                Triple(1L, d.ip1Name, d.ip1Address),
-                Triple(2L, d.ip2Name, d.ip2Address),
-                Triple(3L, d.ip3Name, d.ip3Address)
-            ).forEach { (slot, name, addr) ->
-                val active = slot == d.activeIpSlot
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(if (active) "â–¶" else "  ",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary)
-                    Text("[$name]  ${addr.ifBlank { "(not set)" }}",
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall)
+            listOf(Triple(1L, d.ip1Name, d.ip1Address),
+                   Triple(2L, d.ip2Name, d.ip2Address),
+                   Triple(3L, d.ip3Name, d.ip3Address)).forEach { (slot, name, addr) ->
+                var addrEdit by remember(addr) { mutableStateOf(addr) }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text(if (slot == d.activeIpSlot) "â–¶" else "  ",
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.width(16.dp))
+                    Text("[$name]", style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.width(72.dp))
+                    OutlinedTextField(value = addrEdit, onValueChange = { addrEdit = it },
+                        modifier = Modifier.weight(1f), singleLine = true, label = { Text("IP") })
+                    if (addrEdit.trim() != addr)
+                        IconButton(onClick = { writeField("ip${slot}Address", addrEdit.trim()) }) {
+                            Icon(Icons.Filled.Check, "Save", modifier = Modifier.size(18.dp))
+                        }
+                    if (slot != d.activeIpSlot)
+                        OutlinedButton(onClick = { writeField("activeIpSlot", slot.toInt()) },
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)) {
+                            Text("Set", style = MaterialTheme.typography.labelSmall)
+                        }
                 }
             }
         }
@@ -1043,21 +1107,20 @@ private fun DetailBlock(d: UserDetail) {
     ElevatedCard {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("App", style = MaterialTheme.typography.titleSmall)
-            Text("${d.versionName} (${d.versionCode})",
-                fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+            Text("${d.versionName} (${d.versionCode})", fontFamily = FontFamily.Monospace,
+                style = MaterialTheme.typography.bodySmall)
             Text(d.appId, fontFamily = FontFamily.Monospace,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (d.adminBuild)
-                Text("âš  Admin build", style = MaterialTheme.typography.labelSmall,
+                Text("Admin build", style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.tertiary)
         }
     }
 
     // â”€â”€ Moderation flags â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if (d.warnReason.isNotBlank() || d.banReason.isNotBlank()) {
-        Card(colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.errorContainer)) {
+        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("Moderation Flags", style = MaterialTheme.typography.titleSmall,
                     color = MaterialTheme.colorScheme.onErrorContainer)
@@ -2685,7 +2748,7 @@ private fun DashboardTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
             if (loading) {
                 Row(Modifier.padding(8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                    Text("Loadingâ€¦")
+                    Text("LoadingÃ¢â‚¬Â¦")
                 }
             }
         }
@@ -2710,7 +2773,7 @@ private fun DashboardTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
                             containerColor = MaterialTheme.colorScheme.errorContainer)) {
                             Row(Modifier.fillMaxWidth().padding(12.dp),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Text("âš ", style = MaterialTheme.typography.bodyMedium)
+                                Text("Ã¢Å¡ ", style = MaterialTheme.typography.bodyMedium)
                                 Column {
                                     Text("Ban evasion attempts detected: $evasionCount",
                                         style = MaterialTheme.typography.bodyMedium,
