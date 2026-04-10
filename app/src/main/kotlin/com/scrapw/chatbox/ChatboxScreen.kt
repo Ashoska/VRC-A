@@ -508,38 +508,15 @@ fun ChatboxScreen(
     }
     val showSetupBanner = !vrcLinked || !ipSet.value
 
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        gesturesEnabled = true,
-        drawerContent = {
-            DrawerContent(
-                current = page,
-                onSelect = { chosen ->
-                    val safeChosen =
-                        if (isBannedEffective) AppPage.Home
-                        else if (!BuildConfig.IS_ADMIN_BUILD && chosen == AppPage.Admin) AppPage.Home
-                        else chosen
-                    page = safeChosen
-                    scope.launch { drawerState.close() }
-                },
-                onOpenSettings = {
-                    showSettingsSheet = true
-                    scope.launch { drawerState.close() }
-                },
-                onOpenInfo = {
-                    showInfoSheet = true
-                    scope.launch { drawerState.close() }
-                }
-            )
-        }
-    ) {
-        Scaffold(
+    Scaffold(
             topBar = {
                 CenterAlignedTopAppBar(
                     title = { Text(if (BuildConfig.IS_ADMIN_BUILD) "VRC-A (ADMIN)" else "VRC-A") },
                     navigationIcon = {
-                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                            Icon(Icons.Filled.Menu, contentDescription = "Menu")
+                        if (BuildConfig.IS_ADMIN_BUILD) {
+                            IconButton(onClick = { page = AppPage.Admin }) {
+                                Icon(Icons.Filled.Gavel, contentDescription = "Admin")
+                            }
                         }
                     },
                     actions = {
@@ -549,7 +526,7 @@ fun ChatboxScreen(
                     }
                 )
             },
-            // Bottom navigation bar ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â always visible, labelled
+            // Bottom navigation bar ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â always visible, labelled
             bottomBar = {
                 if (!isBannedEffective) {
                     NavigationBar {
@@ -588,7 +565,7 @@ fun ChatboxScreen(
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                // Persistent setup banner ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â shows until both steps complete
+                // Persistent setup banner ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â shows until both steps complete
                 if (showSetupBanner && !isBannedEffective) {
                     SetupIncompleteBanner(
                         vrcLinked = vrcLinked,
@@ -671,7 +648,6 @@ fun ChatboxScreen(
                 }
             }
         }
-    }
 }
 
 /* =========================
@@ -1215,7 +1191,7 @@ private fun HomePage(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        "Ã¢Å¡  ${vm.cycleTrimWarning}",
+                        "ÃƒÂ¢Ã…Â¡  ${vm.cycleTrimWarning}",
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onTertiaryContainer
@@ -1228,7 +1204,7 @@ private fun HomePage(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        "Ã¢Å¡  A divider was removed Ã¢â‚¬â€ character or line limit reached.",
+                        "ÃƒÂ¢Ã…Â¡  A divider was removed ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â character or line limit reached.",
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onTertiaryContainer
@@ -1320,7 +1296,7 @@ private fun HomePage(
                                         }
                                     }
                                     component.startsWith("Divider_") -> {
-                                        val currentText = vm.dividerTexts[component] ?: "Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬"
+                                        val currentText = vm.dividerTexts[component] ?: "ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬"
                                         if (cardReorderMode) {
                                             var divEdit by remember(currentText) { mutableStateOf(currentText) }
                                             Row(
@@ -1337,7 +1313,7 @@ private fun HomePage(
                                                     textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
                                                 )
                                                 IconButton(
-                                                    onClick = { vm.updateDividerText(component, divEdit.trim().ifBlank { "Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬" }) },
+                                                    onClick = { vm.updateDividerText(component, divEdit.trim().ifBlank { "ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬" }) },
                                                     enabled = divEdit.trim() != currentText
                                                 ) { Icon(Icons.Filled.Check, contentDescription = "Save", modifier = Modifier.size(18.dp)) }
                                                 IconButton(onClick = { vm.removeDivider(component) }) {
@@ -2441,7 +2417,7 @@ private fun SetupIncompleteBanner(
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Text(
-                "ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡  Setup incomplete",
+                "ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡  Setup incomplete",
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onTertiaryContainer
             )
@@ -2513,8 +2489,8 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
                         style = MaterialTheme.typography.titleMedium
                     )
                     Text(
-                        if (isConnected) "ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸Ãƒâ€¦Ã‚Â¸Ãƒâ€šÃ‚Â¢ Live connection active"
-                        else if (isLinked.value) "ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒâ€šÃ‚Â´ ConnectingÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦"
+                        if (isConnected) "ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ Live connection active"
+                        else if (isLinked.value) "ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â´ ConnectingÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¦"
                         else "Sign in to enable notifications and presence",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -2531,10 +2507,10 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
         // Presence card (mirrors what Discord shows)
         if (presence != null && isLinked.value) {
             val statusIcon = when (presence.status) {
-                "active", "join me" -> "ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸Ãƒâ€¦Ã‚Â¸Ãƒâ€šÃ‚Â¢"
-                "ask me"            -> "ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸Ãƒâ€¦Ã‚Â¸ "
-                "busy"              -> "ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒâ€šÃ‚Â´"
-                else                -> "ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¡Ãƒâ€šÃ‚Â«"
+                "active", "join me" -> "ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢"
+                "ask me"            -> "ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ "
+                "busy"              -> "ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â´"
+                else                -> "ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â«"
             }
             ElevatedCard {
                 Column(
@@ -2561,7 +2537,7 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
                     Divider()
                     if (presence.worldName.isNotBlank()) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œÃƒâ€šÃ‚Â", style = MaterialTheme.typography.bodySmall)
+                            Text("ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã¢â‚¬Å“ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â", style = MaterialTheme.typography.bodySmall)
                             Column {
                                 Text(presence.worldName, style = MaterialTheme.typography.bodyMedium)
                                 val count = if (presence.instanceCapacity > 0)
@@ -2576,7 +2552,7 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
                             when (presence.location) {
                                 "offline"   -> "Offline"
                                 "private"   -> "In a private world"
-                                "traveling" -> "Traveling between worldsÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦"
+                                "traveling" -> "Traveling between worldsÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¦"
                                 else        -> "In a world"
                             },
                             style = MaterialTheme.typography.bodySmall,
@@ -2584,9 +2560,9 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
                         )
                     }
                     val platform = when (presence.platform) {
-                        "standalonewindows" -> "ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Å“Ãƒâ€šÃ‚Â¥ Desktop"
-                        "android"           -> "ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œÃƒâ€šÃ‚Â± Android/Quest"
-                        "ios"               -> "ÃƒÆ’Ã‚Â°Ãƒâ€¦Ã‚Â¸ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œÃƒâ€šÃ‚Â± iOS"
+                        "standalonewindows" -> "ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¥ Desktop"
+                        "android"           -> "ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã¢â‚¬Å“ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â± Android/Quest"
+                        "ios"               -> "ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã¢â‚¬Å“ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â± iOS"
                         else                -> ""
                     }
                     if (platform.isNotBlank())
@@ -2598,7 +2574,7 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
             ElevatedCard {
                 Row(Modifier.padding(14.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                    Text("Fetching presenceÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦", style = MaterialTheme.typography.bodySmall)
+                    Text("Fetching presenceÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¦", style = MaterialTheme.typography.bodySmall)
                 }
             }
         }
@@ -2608,7 +2584,7 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("About VRChat integration", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    "VRC-A connects to VRChat's web API to show your status, detect notifications (friend requests, invites, unfriends, group events), and identify you in the moderation system.\n\nYour password is only used to get a session cookie from VRChat's servers ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â it is never stored.",
+                    "VRC-A connects to VRChat's web API to show your status, detect notifications (friend requests, invites, unfriends, group events), and identify you in the moderation system.\n\nYour password is only used to get a session cookie from VRChat's servers ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â it is never stored.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
