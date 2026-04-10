@@ -11,7 +11,6 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalFocusManager
@@ -23,10 +22,8 @@ import kotlinx.coroutines.launch
 
 /**
  * Multi-slot IP field.
- *
- * Users can save up to 3 named IP addresses (Home, Hotspot, Other by default).
- * The active slot is shown collapsed with a one-tap switch between saved slots.
- * The IP field always shows the current value â€” it never goes blank.
+ * 3 named slots (Home / Hotspot / Other). Tap a chip to switch.
+ * The active slot's address always shows in the text field on first open.
  */
 @Composable
 fun IpField(
@@ -37,69 +34,85 @@ fun IpField(
     val repo = chatboxViewModel.userPreferencesRepository
     val focusManager = LocalFocusManager.current
 
-    val activeSlot by repo.activeIpSlot.collectAsState(initial = 1)
-    val ip1Name    by repo.ip1Name.collectAsState(initial = "Home")
-    val ip1Address by repo.ip1Address.collectAsState(initial = "")
-    val ip2Name    by repo.ip2Name.collectAsState(initial = "Hotspot")
-    val ip2Address by repo.ip2Address.collectAsState(initial = "")
-    val ip3Name    by repo.ip3Name.collectAsState(initial = "Other")
-    val ip3Address by repo.ip3Address.collectAsState(initial = "")
+    // Collect all slot data from DataStore
+    val activeSlot  by repo.activeIpSlot.collectAsState(initial = 1)
+    val ip1Name     by repo.ip1Name.collectAsState(initial = "Home")
+    val ip1Address  by repo.ip1Address.collectAsState(initial = "")
+    val ip2Name     by repo.ip2Name.collectAsState(initial = "Hotspot")
+    val ip2Address  by repo.ip2Address.collectAsState(initial = "")
+    val ip3Name     by repo.ip3Name.collectAsState(initial = "Other")
+    val ip3Address  by repo.ip3Address.collectAsState(initial = "")
 
-    // Names and addresses as parallel lists for easy iteration
-    val names    = listOf(ip1Name, ip2Name, ip3Name)
+    val names     = listOf(ip1Name, ip2Name, ip3Name)
     val addresses = listOf(ip1Address, ip2Address, ip3Address)
 
-    // Active address (never blank â€” falls back to 127.0.0.1 only when all slots empty)
-    val activeAddress = addresses.getOrElse(activeSlot - 1) { "" }.ifBlank { "127.0.0.1" }
+    // Derived active address â€” falls back through legacy single key via the repo flow
+    val activeAddress = addresses.getOrElse(activeSlot - 1) { "" }.let { slotAddr ->
+        slotAddr.ifBlank { addresses.firstOrNull { it.isNotBlank() } ?: "127.0.0.1" }
+    }
 
-    // Local edit buffer for the active slot's address â€” always pre-filled
-    var editBuffer by rememberSaveable(activeSlot, activeAddress) { mutableStateOf(activeAddress) }
+    // Edit buffer â€” initialised empty, synced via LaunchedEffect so first-open works
+    var editBuffer by remember { mutableStateOf("") }
+    var hasInitialised by remember { mutableStateOf(false) }
 
-    // Keep buffer in sync when slot switches or external save happens
+    // Sync buffer when slot changes or address loads for the first time
+    LaunchedEffect(activeSlot, activeAddress) {
+        if (!hasInitialised || editBuffer.isBlank()) {
+            editBuffer = activeAddress
+            hasInitialised = true
+        }
+    }
+    // Also sync when the user navigates away and back (recomposition with new address)
     LaunchedEffect(activeAddress) {
-        if (editBuffer.isBlank()) editBuffer = activeAddress
+        if (editBuffer.isBlank() || editBuffer == "127.0.0.1" && activeAddress != "127.0.0.1") {
+            editBuffer = activeAddress
+        }
     }
 
-    var expanded by rememberSaveable { mutableStateOf(false) }
+    var expanded by remember { mutableStateOf(false) }
 
-    // Per-slot edit state for the expanded view
-    val slotNameBuffers = remember(ip1Name, ip2Name, ip3Name) {
-        mutableStateListOf(ip1Name, ip2Name, ip3Name)
-    }
-    val slotAddrBuffers = remember(ip1Address, ip2Address, ip3Address) {
-        mutableStateListOf(
-            ip1Address.ifBlank { "" },
-            ip2Address.ifBlank { "" },
-            ip3Address.ifBlank { "" }
-        )
-    }
+    // Per-slot edit buffers for the expanded slot editor
+    var nameEdit1 by remember(ip1Name) { mutableStateOf(ip1Name) }
+    var addrEdit1 by remember(ip1Address) { mutableStateOf(ip1Address) }
+    var nameEdit2 by remember(ip2Name) { mutableStateOf(ip2Name) }
+    var addrEdit2 by remember(ip2Address) { mutableStateOf(ip2Address) }
+    var nameEdit3 by remember(ip3Name) { mutableStateOf(ip3Name) }
+    var addrEdit3 by remember(ip3Address) { mutableStateOf(ip3Address) }
 
-    fun applySlot(slot: Int) {
-        val addr = slotAddrBuffers.getOrElse(slot - 1) { "" }.trim()
-        if (addr.isBlank()) return
-        scope.launch { repo.saveActiveIpSlot(slot) }
-        chatboxViewModel.ipAddressApply(addr)
+    fun applyActiveSlot(addr: String) {
+        val trimmed = addr.trim()
+        if (trimmed.isBlank()) return
+        scope.launch {
+            repo.saveIpSlot(activeSlot, names.getOrElse(activeSlot - 1) { "Slot $activeSlot" }, trimmed)
+        }
+        chatboxViewModel.ipAddressApply(trimmed)
         focusManager.clearFocus()
     }
 
-    fun saveSlot(slot: Int) {
-        val idx = slot - 1
-        val name = slotNameBuffers.getOrElse(idx) { "Slot $slot" }.trim().ifBlank { "Slot $slot" }
-        val addr = slotAddrBuffers.getOrElse(idx) { "" }.trim()
-        scope.launch { repo.saveIpSlot(slot, name, addr) }
-        if (slot == activeSlot && addr.isNotBlank()) {
-            chatboxViewModel.ipAddressApply(addr)
+    fun switchToSlot(slot: Int) {
+        val addr = addresses.getOrElse(slot - 1) { "" }
+        if (addr.isBlank()) return
+        scope.launch { repo.saveActiveIpSlot(slot) }
+        chatboxViewModel.ipAddressApply(addr)
+        editBuffer = addr
+    }
+
+    fun saveSlot(slot: Int, name: String, addr: String) {
+        val n = name.trim().ifBlank { "Slot $slot" }
+        val a = addr.trim()
+        scope.launch { repo.saveIpSlot(slot, n, a) }
+        if (slot == activeSlot && a.isNotBlank()) {
+            chatboxViewModel.ipAddressApply(a)
+            editBuffer = a
         }
     }
 
     ElevatedCard(modifier = modifier.fillMaxWidth()) {
         Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
+            modifier = Modifier.fillMaxWidth().padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // Header row with collapse toggle
+            // Header
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -108,7 +121,7 @@ fun IpField(
                 Column {
                     Text("OSC Host", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        "${names.getOrElse(activeSlot - 1) { "Slot $activeSlot" }}  Â·  $activeAddress",
+                        "${names.getOrElse(activeSlot - 1) { "Slot $activeSlot" }}  \u00b7  ${activeAddress.ifBlank { "not set" }}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -116,12 +129,12 @@ fun IpField(
                 IconButton(onClick = { expanded = !expanded }) {
                     Icon(
                         if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                        contentDescription = if (expanded) "Collapse" else "Expand slots"
+                        contentDescription = if (expanded) "Collapse" else "Manage slots"
                     )
                 }
             }
 
-            // Active slot quick-edit (always shown)
+            // Active slot quick-edit (always shown, always pre-filled)
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -140,85 +153,63 @@ fun IpField(
                     ),
                     keyboardActions = KeyboardActions(onDone = {
                         focusManager.clearFocus()
-                        val trimmed = editBuffer.trim()
-                        if (trimmed.isNotBlank()) {
-                            scope.launch { repo.saveIpSlot(activeSlot, names.getOrElse(activeSlot - 1) { "Slot $activeSlot" }, trimmed) }
-                            chatboxViewModel.ipAddressApply(trimmed)
-                        }
+                        applyActiveSlot(editBuffer)
                     })
                 )
                 Button(
-                    onClick = {
-                        focusManager.clearFocus()
-                        val trimmed = editBuffer.trim()
-                        if (trimmed.isNotBlank()) {
-                            scope.launch { repo.saveIpSlot(activeSlot, names.getOrElse(activeSlot - 1) { "Slot $activeSlot" }, trimmed) }
-                            chatboxViewModel.ipAddressApply(trimmed)
-                        }
-                    },
+                    onClick = { focusManager.clearFocus(); applyActiveSlot(editBuffer) },
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
                 ) { Text("Apply") }
             }
 
-            // Slot switcher chips (always shown)
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
+            // Slot switcher chips
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 (1..3).forEach { slot ->
                     val addr = addresses.getOrElse(slot - 1) { "" }
-                    val isActive = slot == activeSlot
-                    val hasAddr = addr.isNotBlank()
                     FilterChip(
-                        selected = isActive,
-                        onClick = {
-                            if (hasAddr && !isActive) {
-                                scope.launch { repo.saveActiveIpSlot(slot) }
-                                chatboxViewModel.ipAddressApply(addr)
-                            }
-                        },
+                        selected = slot == activeSlot,
+                        onClick = { if (slot != activeSlot) switchToSlot(slot) },
                         label = {
                             Text(
                                 names.getOrElse(slot - 1) { "Slot $slot" },
                                 style = MaterialTheme.typography.labelSmall
                             )
                         },
-                        enabled = hasAddr || isActive,
+                        enabled = addr.isNotBlank() || slot == activeSlot,
                         modifier = Modifier.weight(1f)
                     )
                 }
             }
 
-            // Expanded: edit all 3 slots
+            // Expanded slot editor
             AnimatedVisibility(visible = expanded) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Divider()
-                    Text(
-                        "Saved slots",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    (1..3).forEach { slot ->
-                        val idx = slot - 1
+                    Text("Saved slots", style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+                    listOf(
+                        Triple(1, nameEdit1, addrEdit1),
+                        Triple(2, nameEdit2, addrEdit2),
+                        Triple(3, nameEdit3, addrEdit3)
+                    ).forEach { (slot, nameVal, addrVal) ->
                         ElevatedCard {
-                            Column(
-                                Modifier.padding(10.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Row(
-                                    Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
+                            Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     OutlinedTextField(
-                                        value = slotNameBuffers.getOrElse(idx) { "Slot $slot" },
-                                        onValueChange = { slotNameBuffers[idx] = it },
+                                        value = nameVal,
+                                        onValueChange = { v ->
+                                            when (slot) { 1 -> nameEdit1 = v; 2 -> nameEdit2 = v; 3 -> nameEdit3 = v }
+                                        },
                                         modifier = Modifier.weight(1f),
                                         singleLine = true,
                                         label = { Text("Name") }
                                     )
                                     OutlinedTextField(
-                                        value = slotAddrBuffers.getOrElse(idx) { "" },
-                                        onValueChange = { slotAddrBuffers[idx] = it },
+                                        value = addrVal,
+                                        onValueChange = { v ->
+                                            when (slot) { 1 -> addrEdit1 = v; 2 -> addrEdit2 = v; 3 -> addrEdit3 = v }
+                                        },
                                         modifier = Modifier.weight(2f),
                                         singleLine = true,
                                         label = { Text("IP Address") },
@@ -226,26 +217,24 @@ fun IpField(
                                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
                                     )
                                 }
-                                Row(
-                                    Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                                ) {
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     OutlinedButton(
-                                        onClick = { saveSlot(slot) },
+                                        onClick = { saveSlot(slot, nameVal, addrVal) },
                                         modifier = Modifier.weight(1f)
                                     ) {
-                                        Icon(Icons.Filled.Edit, contentDescription = null,
-                                            modifier = Modifier.size(16.dp))
+                                        Icon(Icons.Filled.Edit, null, modifier = Modifier.size(16.dp))
                                         Spacer(Modifier.width(4.dp))
                                         Text("Save", style = MaterialTheme.typography.labelMedium)
                                     }
                                     Button(
-                                        onClick = { applySlot(slot) },
+                                        onClick = {
+                                            saveSlot(slot, nameVal, addrVal)
+                                            if (addrVal.trim().isNotBlank()) switchToSlot(slot)
+                                        },
                                         modifier = Modifier.weight(1f),
-                                        enabled = slotAddrBuffers.getOrElse(idx) { "" }.isNotBlank()
+                                        enabled = addrVal.trim().isNotBlank()
                                     ) {
-                                        Icon(Icons.Filled.Check, contentDescription = null,
-                                            modifier = Modifier.size(16.dp))
+                                        Icon(Icons.Filled.Check, null, modifier = Modifier.size(16.dp))
                                         Spacer(Modifier.width(4.dp))
                                         Text("Use", style = MaterialTheme.typography.labelMedium)
                                     }
