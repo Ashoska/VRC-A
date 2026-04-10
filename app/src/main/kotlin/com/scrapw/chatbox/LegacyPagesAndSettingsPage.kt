@@ -378,7 +378,7 @@ private fun HomePage(vm: ChatboxViewModel) {
 
         SectionCard(
             title = "Manual Send",
-            subtitle = "One-off message (doesnâ€™t affect AFK/Cycle/Now Playing)."
+            subtitle = "One-off message (doesn't affect AFK/Cycle/Now Playing)."
         ) {
             OutlinedTextField(
                 value = vm.messageText.value,
@@ -489,7 +489,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
             val p = vm.getAfkPresetPreview(slot).ifBlank { "empty" }
             "${slot}:${p}"
         }
-        return parts.joinToString("  â€¢  ").let { if (it.length > 80) it.take(79) + "â€¦" else it }
+        return parts.joinToString("  *  ").let { if (it.length > 80) it.take(79) + "..." else it }
     }
 
     fun cyclePresetsPreview(): String {
@@ -497,7 +497,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
             val p = vm.getCyclePresetPreview(slot).ifBlank { "empty" }
             "${slot}:${p}"
         }
-        return parts.joinToString("  â€¢  ").let { if (it.length > 80) it.take(79) + "â€¦" else it }
+        return parts.joinToString("  *  ").let { if (it.length > 80) it.take(79) + "..." else it }
     }
 
     PageContainer {
@@ -570,7 +570,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
                                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                                             ) {
                                                 val preview = vm.getAfkPresetPreview(slot).ifBlank { "(empty)" }
-                                                Text("Preset $slot â€” $preview")
+                                                Text("Preset $slot Ã¢â‚¬â€ $preview")
 
                                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                                     OutlinedButton(
@@ -710,7 +710,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
                                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                                             ) {
                                                 val preview = vm.getCyclePresetPreview(slot).ifBlank { "(empty)" }
-                                                Text("Preset $slot â€” $preview")
+                                                Text("Preset $slot Ã¢â‚¬â€ $preview")
 
                                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                                     OutlinedButton(
