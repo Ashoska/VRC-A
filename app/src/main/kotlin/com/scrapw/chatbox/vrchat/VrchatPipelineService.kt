@@ -83,7 +83,7 @@ class VrchatPipelineService : Service() {
     private var reconnectAttempt = 0
 
     // Local friends cache for unfriend detection.
-    // Keyed by userId â†’ displayName (snapshot at connect time).
+    // Keyed by userId Ã¢â€ ' displayName (snapshot at connect time).
     private val friendsCache = mutableMapOf<String, String>()
     private var friendsCacheLoaded = false
 
@@ -112,7 +112,7 @@ class VrchatPipelineService : Service() {
             }
             else -> {
                 deviceHash = intent?.getStringExtra(EXTRA_DEVICE_HASH) ?: ""
-                startForeground(NOTIF_ID_PERSISTENT, buildPersistentNotification("Connectingâ€¦"))
+                startForeground(NOTIF_ID_PERSISTENT, buildPersistentNotification("Connecting..."))
                 startPipeline()
             }
         }
@@ -138,7 +138,7 @@ class VrchatPipelineService : Service() {
             // First validate/refresh session
             val valid = VrchatAuthManager.validateSession(this@VrchatPipelineService)
             if (!valid) {
-                updatePersistentNotif("Not logged in to VRChat â€” tap to sign in")
+                updatePersistentNotif("Not logged in to VRChat Ã¢â‚¬â€ tap to sign in")
                 VrchatPipelineState.isConnected = false
                 fireNotLoggedInNotification()
                 return@launch
@@ -207,7 +207,7 @@ class VrchatPipelineService : Service() {
         wsJob = serviceScope.launch {
             val backoffMs = (minOf(reconnectAttempt, 6) * 10_000L).coerceAtLeast(5_000L)
             reconnectAttempt++
-            updatePersistentNotif("Reconnecting in ${backoffMs / 1000}sâ€¦")
+            updatePersistentNotif("Reconnecting in ${backoffMs / 1000}s...")
             delay(backoffMs)
             if (VrchatAuthManager.isLoggedIn(this@VrchatPipelineService)) {
                 connectWebSocket()
@@ -249,7 +249,7 @@ class VrchatPipelineService : Service() {
 
                 "friend-delete" -> {
                     val userId = content?.optString("userId") ?: return
-                    // Look up cached display name â€” after deletion the API won't return them
+                    // Look up cached display name Ã¢â‚¬â€ after deletion the API won't return them
                     val displayName = friendsCache.remove(userId) ?: "Someone"
                     fireEventNotification(
                         id = "unfriend_$userId".hashCode(),
@@ -298,7 +298,7 @@ class VrchatPipelineService : Service() {
                 }
 
                 "friend-location" -> {
-                    // Friend moved to a new world â€” update cache but no notification by default
+                    // Friend moved to a new world Ã¢â‚¬â€ update cache but no notification by default
                     val userId = content?.optString("userId") ?: return
                     val user = content.optJSONObject("user")
                     val displayName = user?.optString("displayName")
@@ -310,7 +310,7 @@ class VrchatPipelineService : Service() {
                 }
 
                 "user-update" -> {
-                    // The logged-in user's profile changed â€” re-sync presence
+                    // The logged-in user's profile changed Ã¢â‚¬â€ re-sync presence
                     syncPresenceToFirestore()
                 }
             }
@@ -392,7 +392,7 @@ class VrchatPipelineService : Service() {
     }
 
     private fun persistFriendsCache() {
-        // Store as JSON string in SharedPreferences (not encrypted â€” just display names)
+        // Store as JSON string in SharedPreferences (not encrypted Ã¢â‚¬â€ just display names)
         val prefs = getSharedPreferences("vrca_friends_cache", Context.MODE_PRIVATE)
         val json = JSONObject()
         friendsCache.forEach { (id, name) -> json.put(id, name) }
@@ -558,7 +558,7 @@ class VrchatPipelineService : Service() {
 }
 
 /**
- * Shared in-memory state for the pipeline â€” lets the UI read connection
+ * Shared in-memory state for the pipeline Ã¢â‚¬â€ lets the UI read connection
  * status and presence data without needing to bind to the service.
  */
 object VrchatPipelineState {
