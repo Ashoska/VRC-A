@@ -27,10 +27,10 @@ import kotlinx.coroutines.launch
 /**
  * VrchatLoginScreen
  *
- * Three inline states (no dialogs â€” avoids UX confusion):
+ * Three inline states (no dialogs Ã¢â‚¬â€ avoids UX confusion):
  *   1. Credentials entry (username + password)
- *   2. Code entry â€” email OTP (VRChat sends a 6-digit code, expires in 15 min)
- *   3. Code entry â€” authenticator TOTP (from auth app, no expiry shown)
+ *   2. Code entry Ã¢â‚¬â€ email OTP (VRChat sends a 6-digit code, expires in 15 min)
+ *   3. Code entry Ã¢â‚¬â€ authenticator TOTP (from auth app, no expiry shown)
  *
  * On success, calls onLoginSuccess(userId, displayName).
  */
@@ -50,7 +50,7 @@ fun VrchatLoginScreen(
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
-    // Step 2 state â€” inline code entry (replaces the form when needed)
+    // Step 2 state Ã¢â‚¬â€ inline code entry (replaces the form when needed)
     var awaitingCode by remember { mutableStateOf(false) }
     var isEmailCode by remember { mutableStateOf(false) }  // true = email OTP, false = auth app TOTP
     var codeInput by remember { mutableStateOf("") }
@@ -124,14 +124,14 @@ fun VrchatLoginScreen(
         ) {
 
             if (!awaitingCode) {
-                // â”€â”€ Step 1: Credentials â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                // Ã¢â€â‚¬Ã¢â€â‚¬ Step 1: Credentials Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
                 Text(
                     "Sign in to VRChat",
                     style = MaterialTheme.typography.headlineMedium,
                     textAlign = TextAlign.Center
                 )
                 Text(
-                    "VRC-A uses your VRChat account to show your status, detect notifications, and identify you in the moderation system. Your credentials are only used to obtain a session cookie from VRChat's servers â€” they are never stored elsewhere.",
+                    "VRC-A uses your VRChat account to show your status, detect notifications, and identify you in the moderation system. Your credentials are only used to obtain a session cookie from VRChat's servers - they are never stored elsewhere.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center
@@ -213,7 +213,7 @@ fun VrchatLoginScreen(
                 }
 
             } else {
-                // â”€â”€ Step 2: Code entry â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                // Ã¢â€â‚¬Ã¢â€â‚¬ Step 2: Code entry Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
                 Text(
                     if (isEmailCode) "Check your email" else "Authenticator code",
                     style = MaterialTheme.typography.headlineMedium,
@@ -221,7 +221,7 @@ fun VrchatLoginScreen(
                 )
 
                 if (isEmailCode) {
-                    // Email OTP â€” explain it was sent + warn about 15 min expiry
+                    // Email OTP Ã¢â‚¬â€ explain it was sent + warn about 15 min expiry
                     Card(
                         colors = CardDefaults.cardColors(
                             containerColor = MaterialTheme.colorScheme.primaryContainer)
@@ -236,7 +236,7 @@ fun VrchatLoginScreen(
                                 color = MaterialTheme.colorScheme.onPrimaryContainer
                             )
                             Text(
-                                "â± This code expires in 15 minutes.",
+                                "Ã¢ÂÂ± This code expires in 15 minutes.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onPrimaryContainer
                             )
@@ -294,7 +294,7 @@ fun VrchatLoginScreen(
                     }
                 }
 
-                // Back â€” let them re-enter credentials if code expired
+                // Back Ã¢â‚¬â€ let them re-enter credentials if code expired
                 TextButton(
                     onClick = {
                         awaitingCode = false
@@ -305,7 +305,7 @@ fun VrchatLoginScreen(
                         else null
                     }
                 ) {
-                    Text("â† Back to sign in")
+                    Text("Ã¢â€ Â Back to sign in")
                 }
             }
 
