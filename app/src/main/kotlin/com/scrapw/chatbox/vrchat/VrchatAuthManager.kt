@@ -15,44 +15,36 @@ import java.util.Base64
 /**
  * VrchatAuthManager
  *
- * Handles VRChat web API authentication for the companion app.
- * This uses the unofficial VRChat API (same one the website uses) purely
- * for reading the user's own status, friends list, and notifications.
+ * VRChat API auth flow (GET /api/1/auth/user with Basic auth):
+ *  - HTTP 200 + body has "requiresTwoFactorAuth" array -> 2FA needed
+ *    (auth cookie is still in Set-Cookie at this point)
+ *  - HTTP 200 + body has "id" field -> fully logged in
+ *  - HTTP 401 -> wrong credentials
  *
- * Auth cookies are stored in EncryptedSharedPreferences and survive app restarts.
- * The pipeline service uses these cookies to maintain a persistent WebSocket connection.
- *
- * VRChat API usage policy: do not poll more than once per 60 seconds.
- * We use the WebSocket pipeline for real-time events to minimise REST calls.
- *
- * Auth flow:
- *  1. POST credentials → receive auth cookie
- *  2. If 2FA required → POST 2FA code → receive twoFactorAuth cookie
- *  3. Both cookies stored encrypted, used on all subsequent requests
- *  4. On cookie expiry (~2 weeks) → re-auth silently if credentials cached,
- *     otherwise show login screen notification
+ * Cookie handling:
+ *  Set-Cookie headers look like: "auth=authcookie_xxx; Path=/; HttpOnly; Secure"
+ *  We extract only the "name=value" part (before first semicolon) for storage
+ *  and for sending in Cookie headers.
  */
 object VrchatAuthManager {
 
     private const val TAG = "VrchatAuth"
     private const val BASE = "https://api.vrchat.cloud/api/1"
-    // VRChat requires a descriptive User-Agent identifying your app.
     private const val USER_AGENT = "VRC-A-Companion/1.0 (Android; companion app)"
 
     private const val PREFS_FILE = "vrca_vrchat_auth"
-    private const val KEY_AUTH_COOKIE = "auth_cookie"
-    private const val KEY_2FA_COOKIE = "twofa_cookie"
-    private const val KEY_USER_ID = "vrchat_user_id"
+    private const val KEY_AUTH_COOKIE  = "auth_cookie"
+    private const val KEY_2FA_COOKIE   = "twofa_cookie"
+    private const val KEY_USER_ID      = "vrchat_user_id"
     private const val KEY_DISPLAY_NAME = "vrchat_display_name"
     private const val KEY_COOKIE_STORED_AT = "cookie_stored_at_ms"
 
-    // Cookies are valid ~2 weeks. We proactively refresh after 12 days.
     private const val COOKIE_REFRESH_MS = 12L * 24 * 60 * 60 * 1000
 
     sealed class AuthResult {
         data class Success(val userId: String, val displayName: String) : AuthResult()
-        object Requires2FA : AuthResult()
-        object RequiresEmail2FA : AuthResult()
+        object Requires2FA : AuthResult()          // authenticator app TOTP
+        object RequiresEmail2FA : AuthResult()     // email OTP (expires 15 min)
         data class Error(val message: String) : AuthResult()
     }
 
@@ -95,7 +87,7 @@ object VrchatAuthManager {
 
     fun getCookieHeader(context: Context): String? {
         val prefs = getPrefs(context) ?: return null
-        val auth = prefs.getString(KEY_AUTH_COOKIE, null) ?: return null
+        val auth  = prefs.getString(KEY_AUTH_COOKIE, null) ?: return null
         val twoFa = prefs.getString(KEY_2FA_COOKIE, null)
         return if (twoFa != null) "$auth; $twoFa" else auth
     }
@@ -120,56 +112,68 @@ object VrchatAuthManager {
                 val credentials = Base64.getEncoder()
                     .encodeToString("$username:$password".toByteArray())
 
-                val (responseCode, body, cookies) = get(
+                val (responseCode, body, rawCookies) = get(
                     url = "$BASE/auth/user",
                     authHeader = "Basic $credentials",
                     cookieHeader = null
                 )
 
+                Log.d(TAG, "login response=$responseCode cookies=${rawCookies.size}")
+
+                // Extract clean "name=value" part from each Set-Cookie header
+                val authCookieValue = rawCookies
+                    .mapNotNull { extractCookieValue(it, "auth") }
+                    .firstOrNull()
+
                 when (responseCode) {
                     200 -> {
-                        // Logged in — may or may not have 2FA cookie yet
                         val json = JSONObject(body)
+
+                        // 200 + requiresTwoFactorAuth = 2FA needed (auth cookie still present)
+                        val requires2FA = json.optJSONArray("requiresTwoFactorAuth")
+                        if (requires2FA != null && requires2FA.length() > 0) {
+                            // Save partial auth cookie for the 2FA verify step
+                            if (authCookieValue != null) {
+                                getPrefs(context)?.edit()
+                                    ?.putString(KEY_AUTH_COOKIE, authCookieValue)
+                                    ?.apply()
+                            }
+                            val types = (0 until requires2FA.length())
+                                .map { requires2FA.getString(it) }
+                            Log.d(TAG, "2FA required: $types")
+                            return@withContext if (types.any { it.contains("email", ignoreCase = true) })
+                                AuthResult.RequiresEmail2FA
+                            else
+                                AuthResult.Requires2FA
+                        }
+
+                        // 200 + "id" field = fully logged in
                         val userId = json.optString("id")
                         val displayName = json.optString("displayName")
-                        val authCookie = cookies.firstOrNull { it.startsWith("auth=") }
 
-                        if (authCookie != null && userId.isNotBlank()) {
-                            saveSession(context, authCookie, null, userId, displayName)
+                        if (authCookieValue != null && userId.isNotBlank()) {
+                            saveSession(context, authCookieValue, null, userId, displayName)
                             AuthResult.Success(userId, displayName)
                         } else {
-                            AuthResult.Error("No auth cookie in response")
+                            // Unusual: 200 but no id or cookie - log the body for diagnosis
+                            Log.w(TAG, "200 but no id/cookie. body=${body.take(300)}")
+                            AuthResult.Error("Login response missing user data. Try again.")
                         }
                     }
+
                     401 -> {
-                        // Need 2FA
-                        val json = JSONObject(body)
-                        val requires = json.optJSONArray("requiresTwoFactorAuth")
-                        val authCookie = cookies.firstOrNull { it.startsWith("auth=") }
-
-                        // Store partial auth cookie so 2FA POST can use it
-                        if (authCookie != null) {
-                            getPrefs(context)?.edit()
-                                ?.putString(KEY_AUTH_COOKIE, authCookie)
-                                ?.apply()
-                        }
-
-                        if (requires != null) {
-                            val types = (0 until requires.length()).map { requires.getString(it) }
-                            if (types.any { it.contains("email", ignoreCase = true) }) {
-                                AuthResult.RequiresEmail2FA
-                            } else {
-                                AuthResult.Requires2FA
-                            }
-                        } else {
-                            AuthResult.Error("Authentication failed")
-                        }
+                        // Wrong credentials
+                        AuthResult.Error("Incorrect username or password.")
                     }
-                    else -> AuthResult.Error("HTTP $responseCode: ${body.take(200)}")
+
+                    else -> {
+                        Log.w(TAG, "Unexpected response $responseCode: ${body.take(200)}")
+                        AuthResult.Error("HTTP $responseCode - please try again.")
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Login failed", e)
-                AuthResult.Error(e.message ?: "Network error")
+                AuthResult.Error(e.message ?: "Network error - check your connection.")
             }
         }
 
@@ -181,24 +185,30 @@ object VrchatAuthManager {
         withContext(Dispatchers.IO) {
             try {
                 val partialCookie = getPrefs(context)?.getString(KEY_AUTH_COOKIE, null)
-                    ?: return@withContext TwoFaResult.Error("No partial auth cookie")
+                    ?: return@withContext TwoFaResult.Error("Session expired - please sign in again.")
 
                 val endpoint = if (isEmail) "auth/twofactorauth/emailotp/verify"
                                else "auth/twofactorauth/totp/verify"
 
                 val body = "{\"code\":\"${code.trim()}\"}"
-                val (responseCode, responseBody, cookies) = post(
+                val (responseCode, responseBody, rawCookies) = post(
                     url = "$BASE/$endpoint",
                     body = body,
                     cookieHeader = partialCookie
                 )
 
-                if (responseCode == 200) {
-                    val twoFaCookie = cookies.firstOrNull { it.startsWith("twoFactorAuth=") }
-                    // Now fetch user info with both cookies
-                    val cookieHeader = if (twoFaCookie != null) "$partialCookie; $twoFaCookie"
-                                       else partialCookie
+                Log.d(TAG, "verify2FA response=$responseCode")
 
+                if (responseCode == 200) {
+                    val twoFaCookieValue = rawCookies
+                        .mapNotNull { extractCookieValue(it, "twoFactorAuth") }
+                        .firstOrNull()
+
+                    val cookieHeader = if (twoFaCookieValue != null)
+                        "$partialCookie; twoFactorAuth=$twoFaCookieValue"
+                    else partialCookie
+
+                    // Fetch user info with full cookie set
                     val (userCode, userBody, _) = get(
                         url = "$BASE/auth/user",
                         authHeader = null,
@@ -209,28 +219,37 @@ object VrchatAuthManager {
                         val json = JSONObject(userBody)
                         val userId = json.optString("id")
                         val displayName = json.optString("displayName")
-                        saveSession(context, partialCookie, twoFaCookie, userId, displayName)
-                        TwoFaResult.Success(userId, displayName)
+
+                        if (userId.isNotBlank()) {
+                            saveSession(context, partialCookie,
+                                twoFaCookieValue?.let { "twoFactorAuth=$it" },
+                                userId, displayName)
+                            TwoFaResult.Success(userId, displayName)
+                        } else {
+                            TwoFaResult.Error("Could not retrieve user after verification.")
+                        }
                     } else {
-                        TwoFaResult.Error("Could not fetch user after 2FA: HTTP $userCode")
+                        TwoFaResult.Error("Session error after verification (HTTP $userCode).")
                     }
                 } else {
-                    TwoFaResult.Error("Invalid 2FA code (HTTP $responseCode)")
+                    val msg = try {
+                        JSONObject(responseBody).optString("error", "")
+                    } catch (_: Exception) { "" }
+                    TwoFaResult.Error(
+                        if (msg.isNotBlank()) "Invalid code: $msg"
+                        else "Invalid code. Please check and try again."
+                    )
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "2FA verification failed", e)
-                TwoFaResult.Error(e.message ?: "Network error")
+                TwoFaResult.Error(e.message ?: "Network error.")
             }
         }
 
     // ------------------------------------------------------------------
-    // Cookie refresh / validate
+    // Session validation
     // ------------------------------------------------------------------
 
-    /**
-     * Silently validates the stored session. Returns true if still valid.
-     * Call this on service start before opening the WebSocket.
-     */
     suspend fun validateSession(context: Context): Boolean = withContext(Dispatchers.IO) {
         val cookieHeader = getCookieHeader(context) ?: return@withContext false
         try {
@@ -243,16 +262,16 @@ object VrchatAuthManager {
     }
 
     // ------------------------------------------------------------------
-    // Fetch current user presence data (REST, called sparingly)
+    // Presence fetch
     // ------------------------------------------------------------------
 
     data class VrcUserPresence(
         val userId: String,
         val displayName: String,
-        val status: String,          // "active", "join me", "ask me", "busy", "offline"
+        val status: String,
         val statusDescription: String,
-        val location: String,        // instance location string or "private" / "offline"
-        val platform: String,        // "standalonewindows", "android", "ios"
+        val location: String,
+        val platform: String,
         val worldName: String,
         val instancePlayerCount: Int,
         val instanceCapacity: Int,
@@ -267,22 +286,18 @@ object VrchatAuthManager {
             val json = JSONObject(body)
             val location = json.optString("location", "offline")
 
-            // Fetch instance details if in a world
             var worldName = ""
             var playerCount = 0
             var capacity = 0
             if (location.isNotBlank() && location != "offline" && location != "private" &&
                 location != "traveling" && location.contains(":")) {
-                val worldId = location.substringBefore(":")
                 try {
-                    val instanceId = location.substringAfter(":")
-                    val (wCode, wBody, _) = get("$BASE/instances/$worldId:$instanceId", null, cookieHeader)
+                    val (wCode, wBody, _) = get("$BASE/instances/$location", null, cookieHeader)
                     if (wCode == 200) {
                         val inst = JSONObject(wBody)
                         playerCount = inst.optInt("n_users", 0)
                         capacity = inst.optInt("capacity", 0)
-                        val world = inst.optJSONObject("world")
-                        worldName = world?.optString("name", "") ?: ""
+                        worldName = inst.optJSONObject("world")?.optString("name", "") ?: ""
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "Could not fetch instance info", e)
@@ -308,7 +323,7 @@ object VrchatAuthManager {
     }
 
     // ------------------------------------------------------------------
-    // Friends list (used for unfriend diffing)
+    // Friends list
     // ------------------------------------------------------------------
 
     data class VrcFriend(val userId: String, val displayName: String)
@@ -318,7 +333,6 @@ object VrchatAuthManager {
         val friends = mutableListOf<VrcFriend>()
         var offset = 0
         val pageSize = 100
-
         try {
             while (true) {
                 val (code, body, _) = get(
@@ -330,10 +344,7 @@ object VrchatAuthManager {
                 if (arr.length() == 0) break
                 for (i in 0 until arr.length()) {
                     val obj = arr.getJSONObject(i)
-                    friends += VrcFriend(
-                        userId = obj.optString("id"),
-                        displayName = obj.optString("displayName")
-                    )
+                    friends += VrcFriend(obj.optString("id"), obj.optString("displayName"))
                 }
                 if (arr.length() < pageSize) break
                 offset += pageSize
@@ -348,10 +359,24 @@ object VrchatAuthManager {
     // Private helpers
     // ------------------------------------------------------------------
 
+    /**
+     * Extracts the value of a named cookie from a raw Set-Cookie header string.
+     * e.g. extractCookieValue("auth=authcookie_xxx; Path=/; HttpOnly", "auth")
+     *      returns "authcookie_xxx"
+     * Returns the full "name=value" string ready for a Cookie header,
+     * e.g. "auth=authcookie_xxx"
+     */
+    private fun extractCookieValue(setCookieHeader: String, name: String): String? {
+        // Split on ";" to get individual attributes, first segment is "name=value"
+        val nameValue = setCookieHeader.split(";").firstOrNull()?.trim() ?: return null
+        if (!nameValue.startsWith("$name=", ignoreCase = true)) return null
+        return nameValue // returns "auth=authcookie_xxx" or "twoFactorAuth=xxx"
+    }
+
     private fun saveSession(
         context: Context,
-        authCookie: String,
-        twoFaCookie: String?,
+        authCookie: String,  // full "auth=authcookie_xxx"
+        twoFaCookie: String?, // full "twoFactorAuth=xxx" or null
         userId: String,
         displayName: String
     ) {
@@ -364,7 +389,6 @@ object VrchatAuthManager {
             ?.apply()
     }
 
-    /** Simple GET returning (responseCode, body, Set-Cookie list) */
     private fun get(
         url: String,
         authHeader: String?,
@@ -388,7 +412,6 @@ object VrchatAuthManager {
         return Triple(code, body, cookies)
     }
 
-    /** Simple POST returning (responseCode, body, Set-Cookie list) */
     private fun post(
         url: String,
         body: String,
