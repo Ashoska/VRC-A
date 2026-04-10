@@ -159,13 +159,13 @@ class UserPreferencesRepository(private val context: Context) {
         raw.split(",").map { it.trim() }.filter { it.isNotBlank() }
     }
 
-    val notifFriendRequest:     Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_REQUEST]     ?: true }
-    val notifInvite:            Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_INVITE]             ?: true }
-    val notifFriendOnline:      Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_ONLINE]      ?: true }
+    val notifFriendRequest:     Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_REQUEST]     ?: false }
+    val notifInvite:            Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_INVITE]             ?: false }
+    val notifFriendOnline:      Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_ONLINE]      ?: false }
     val notifFriendOffline:     Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_OFFLINE]     ?: false }
-    val notifUnfriend:          Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_UNFRIEND]           ?: true }
-    val notifGroupEvent:        Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_EVENT]        ?: true }
-    val notifGroupAnnouncement: Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_ANNOUNCEMENT] ?: true }
+    val notifUnfriend:          Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_UNFRIEND]           ?: false }
+    val notifGroupEvent:        Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_EVENT]        ?: false }
+    val notifGroupAnnouncement: Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_ANNOUNCEMENT] ?: false }
     val notifAppUpdate:         Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_APP_UPDATE]         ?: true }
     val notifAnnouncements:     Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_ANNOUNCEMENTS]      ?: true }
 
@@ -259,7 +259,7 @@ class UserPreferencesRepository(private val context: Context) {
         }
     }
 
-    // Backwards-compat aliases (AFK â†’ Pinned rename, ViewModel doesn't need changes)
+    // Backwards-compat aliases (AFK Ã¢â€ â€™ Pinned rename, ViewModel doesn't need changes)
     val afkMessage: Flow<String>  get() = pinnedMessage
     val afkEnabled: Flow<Boolean> get() = pinnedMessageEnabled
     val afkPreset1: Flow<String>  get() = pinnedPreset1
