@@ -151,7 +151,7 @@ fun ChatboxApp() {
 
     /* -------------------------
        Phase 1 ban check (device hash + auth UID)
-       Runs immediately after bootstrap. Does NOT show ban screen yet ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â
+       Runs immediately after bootstrap. Does NOT show ban screen yet ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â
        waits for VRChat login so we can capture the alt VRChat ID first.
        ------------------------- */
 
@@ -178,6 +178,61 @@ fun ChatboxApp() {
     }
 
     /* -------------------------
+       ToS gate
+       Must be accepted before the VRChat login is shown.
+       Uses local SharedPreferences â€” no Firestore needed at this stage.
+       Re-shows if ToS version bumped (checked in ChatboxScreen too for
+       returning users who already logged in).
+       ------------------------- */
+
+    val tosPrefs = remember { ctx.getSharedPreferences("vrca_tos", Context.MODE_PRIVATE) }
+    // Version 1 = baseline. Increment in Firestore config/app.tosVersion to force re-acceptance.
+    // At this stage we only check local prefs; ChatboxScreen does the remote version check.
+    val localTosAccepted = remember { tosPrefs.getInt("accepted_version", 0) >= 1 }
+    var tosGatePassed by remember { mutableStateOf(localTosAccepted) }
+
+    if (!tosGatePassed) {
+        Surface(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(androidx.compose.foundation.rememberScrollState())
+                    .padding(24.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Text("Terms of Use", style = MaterialTheme.typography.headlineMedium)
+                Text(
+                    "Before using VRC-A, please read and accept the Terms of Use.\n\n" +
+                    "â€¢ VRC-A sends OSC messages to VRChat on your behalf.\n" +
+                    "â€¢ VRC-A connects to VRChat's web API to read your status and notifications.\n" +
+                    "â€¢ You are responsible for how you use this app within VRChat's community guidelines.\n" +
+                    "â€¢ VRC-A is not affiliated with or endorsed by VRChat Inc.\n" +
+                    "â€¢ Your session cookie is stored locally on your device only.\n" +
+                    "â€¢ This app may collect device identifiers for moderation purposes.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Spacer(Modifier.weight(1f))
+                Button(
+                    onClick = {
+                        tosPrefs.edit().putInt("accepted_version", 1)
+                            .putLong("accepted_at_ms", System.currentTimeMillis()).apply()
+                        tosGatePassed = true
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("I Accept") }
+                OutlinedButton(
+                    onClick = {
+                        // Gracefully exit if they decline
+                        (ctx as? android.app.Activity)?.finish()
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Decline") }
+            }
+        }
+        return
+    }
+
+    /* -------------------------
        VRChat login gate (required for all users)
        Shows VrchatLoginScreen if not yet logged in.
        After login: runs Phase 2 ban check, starts pipeline service.
@@ -190,7 +245,7 @@ fun ChatboxApp() {
 
     if (!vrcLoginDone) {
         VrchatLoginScreen(pendingBanId = phase1BanId) { _, _ ->
-            // Login succeeded Ã¢â‚¬â€ mark done, LaunchedEffect below will run Phase 2
+            // Login succeeded ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â mark done, LaunchedEffect below will run Phase 2
             vrcLoginDone = true
         }
         LaunchedEffect(vrcLoginDone) {
