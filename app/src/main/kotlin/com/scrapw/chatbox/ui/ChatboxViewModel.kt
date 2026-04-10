@@ -787,7 +787,7 @@ class ChatboxViewModel(
     }
 
     /** Add a new divider at the given position in cardOrder (after the component at insertAfterIdx) */
-    fun addDivider(insertAfterIdx: Int, text: String = "Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬") {
+    fun addDivider(insertAfterIdx: Int, text: String = "-----") {
         if (isBanned) return
         // Find a unique divider ID
         val existingIds = cardOrder.filter { it.startsWith("Divider_") }.map {
@@ -887,7 +887,7 @@ class ChatboxViewModel(
     var dividerRemovedWarning by mutableStateOf(false)
 
     // Divider configs: map of "Divider_N" -> display text, loaded from DataStore
-    // e.g. {"Divider_1": "Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬", "Divider_2": "Ã¢â‚¬Â¢ Ã¢â‚¬Â¢ Ã¢â‚¬Â¢"}
+    // e.g. {"Divider_1": "-----", "Divider_2": "- - -"}
     val dividerTexts = mutableStateMapOf<String, String>()
     private val afkPresetTexts = mutableStateListOf("", "", "")
     val pinnedPresetNames = mutableStateListOf("Preset 1", "Preset 2", "Preset 3")
@@ -993,15 +993,15 @@ class ChatboxViewModel(
 
         viewModelScope.launch {
             userPreferencesRepository.dividerConfig.collect { json ->
-                // Parse JSON array: [{"id":"Divider_1","text":"Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬"}, ...]
+                // Parse JSON array: [{"id":"Divider_1","text":"ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬"}, ...]
                 try {
                     val arr = org.json.JSONArray(json)
                     dividerTexts.clear()
                     for (i in 0 until arr.length()) {
                         val obj = arr.getJSONObject(i)
-                        dividerTexts[obj.getString("id")] = obj.optString("text", "Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬")
+                        dividerTexts[obj.getString("id")] = obj.optString("text", "-----")
                     }
-                } catch (_: Exception) { /* malformed Ã¢â‚¬â€ keep empty */ }
+                } catch (_: Exception) { /* malformed ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â keep empty */ }
                 rebuildCombinedPreviewOnly()
             }
         }
@@ -1625,7 +1625,7 @@ class ChatboxViewModel(
                 component == "NowPlaying" -> for (m in musicLines) if (m.isNotBlank()) rawLines += LineWithPriority(text = m, priority = Priority.MUSIC)
                 component == "Time" -> if (standalonTimeLine.isNotBlank()) rawLines += LineWithPriority(text = standalonTimeLine, priority = Priority.MUSIC)
                 component.startsWith("Divider_") -> {
-                    val divText = dividerTexts[component]?.trim() ?: "Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬"
+                    val divText = dividerTexts[component]?.trim() ?: "-----"
                     // Only insert divider if there's content on both sides (don't add leading/trailing dividers)
                     if (rawLines.isNotEmpty()) {
                         rawLines += LineWithPriority(text = divText, priority = Priority.DIVIDER, isDivider = true)
@@ -1679,14 +1679,10 @@ class ChatboxViewModel(
             nowPlayingDetected &&
             (safeTitle.isBlank() || safeArtist.isBlank())
 
-        // Ad suppression: never show brand name, title, progress bar, or timestamps.
-        // Only show "Ad N" where N is how many ad segments have played this session.
-        // This prevents leaking brand/location info from targeted ads.
-        val isAdSegment = nowPlayingSpecialActive && !isSpotifyDj &&
-            (safeTitle.lowercase().let { t ->
-                t == "ad" || t.contains("advert") || t.contains("advertisement") || t.contains("sponsored")
-            } || (activePackage == "com.spotify.music" && safeTitle == "AD"))
-        if (isAdSegment) {
+        // Ad suppression: if the special window is active and it's not a DJ segment,
+        // always suppress all content â€” title, artist, progress bar, timestamps.
+        // This catches every Spotify ad variant regardless of the title text.
+        if (nowPlayingSpecialActive && !isSpotifyDj) {
             return listOf("Ad $adSegmentCount")
         }
 
@@ -1740,7 +1736,7 @@ class ChatboxViewModel(
         var cycleModifiedForMusic = false
 
         while (cleaned.size > maxLines) {
-            // Dividers are always dropped first Ã¢â‚¬â€ they are cosmetic
+            // Dividers are always dropped first ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â they are cosmetic
             val divIdx = cleaned.indexOfLast { it.isDivider }
             if (divIdx >= 0) {
                 cleaned.removeAt(divIdx)
@@ -1780,7 +1776,7 @@ class ChatboxViewModel(
         while (len > maxChars && cleaned.isNotEmpty()) {
             val excess = len - maxChars
 
-            // Drop dividers first Ã¢â‚¬â€ cosmetic, never truncate
+            // Drop dividers first ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â cosmetic, never truncate
             val divIdx = cleaned.indexOfLast { it.isDivider }
             if (divIdx >= 0) {
                 cleaned.removeAt(divIdx)
@@ -1851,8 +1847,8 @@ class ChatboxViewModel(
             3 -> {
                 val slots = 10
                 val idx = (p * (slots - 1)).toInt()
-                // U+25C7 (ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ White Diamond) ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â in basic geometric shapes block,
-                // renders correctly in VRChat. U+27E1 (ÃƒÆ’Ã‚Â¢Ãƒâ€¦Ã‚Â¸Ãƒâ€šÃ‚Â¡) is not in VRChat's font.
+                // U+25C7 (ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¡ White Diamond) ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â in basic geometric shapes block,
+                // renders correctly in VRChat. U+27E1 (ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡) is not in VRChat's font.
                 val bg = CharArray(slots) { '\u25C7' }
                 bg[idx] = dot
                 bg.concatToString()
