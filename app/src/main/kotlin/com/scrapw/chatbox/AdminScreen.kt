@@ -93,6 +93,10 @@ import org.json.JSONObject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.material3.FilterChip
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.ui.Alignment
+import androidx.compose.material.icons.filled.Check
 
 private fun fmtRelativeTime(nowMs: Long, thenMs: Long): String {
     val delta = kotlin.math.abs(nowMs - thenMs)
@@ -492,6 +496,7 @@ private data class UserDetail(
     val vrchatPlayerCount: Long,
     val vrchatCapacity: Long,
     val vrchatPlatform: String,
+    val timeEnabled: Boolean = false,
     val vrchatLastSyncAt: Timestamp?
 )
 
@@ -624,6 +629,7 @@ private fun UsersTab(
                     vrchatWorld = s("vrchatWorld"), vrchatLocation = s("vrchatLocation"),
                     vrchatPlayerCount = l("vrchatInstancePlayerCount"), vrchatCapacity = l("vrchatInstanceCapacity"),
                     vrchatPlatform = s("vrchatPlatform"),
+                    timeEnabled = b("timeEnabled"),
                     vrchatLastSyncAt = snap.getTimestamp("vrchatLastSyncAt")
                 )
                 selectedDetailLoading = false
@@ -903,7 +909,6 @@ private fun UsersTab(
     }
 }
 
-@Composable
 @Composable
 private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, setError: (String?) -> Unit) {
     val scope = rememberCoroutineScope()
