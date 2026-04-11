@@ -85,6 +85,10 @@ class VrchatPipelineService : Service() {
     // Local friends cache for unfriend detection.
     // Keyed by userId -> displayName (snapshot at connect time).
     private val friendsCache = mutableMapOf<String, String>()
+    // Pending offline notifications â€” userId -> time they went offline
+    // We wait 10 minutes before notifying in case they're just hopping worlds
+    private val pendingOffline = mutableMapOf<String, Long>()
+    private val OFFLINE_COOLDOWN_MS = 10 * 60 * 1000L  // 10 minutes
     private var friendsCacheLoaded = false
 
     private val okClient by lazy {
@@ -291,6 +295,8 @@ class VrchatPipelineService : Service() {
                         location == "traveling" -> "traveling between worlds"
                         else -> "VRChat"
                     }
+                    // Cancel any pending offline notification â€” they hopped worlds
+                    pendingOffline.remove(userId)
                     fireEventNotification(
                         id = "online_$userId".hashCode(),
                         title = "Friend online",
@@ -302,14 +308,25 @@ class VrchatPipelineService : Service() {
 
                 "friend-offline" -> {
                     val userId = content?.optString("userId") ?: return
-                    val displayName = friendsCache[userId] ?: "A friend"
-                    fireEventNotification(
-                        id = "offline_$userId".hashCode(),
-                        title = "Friend offline",
-                        text = "$displayName went offline",
-                        profileUrl = null,
-                        channelKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_OFFLINE
-                    )
+                    // Start a 10-minute cooldown â€” if they come back online within that
+                    // window (world hop) we cancel the notification. Only fire if they
+                    // stay offline for the full cooldown period.
+                    pendingOffline[userId] = System.currentTimeMillis()
+                    serviceScope.launch {
+                        delay(OFFLINE_COOLDOWN_MS)
+                        // Still pending? They didn't come back online â€” fire now
+                        if (pendingOffline.containsKey(userId)) {
+                            pendingOffline.remove(userId)
+                            val displayName = friendsCache[userId] ?: "A friend"
+                            fireEventNotification(
+                                id = "offline_$userId".hashCode(),
+                                title = "Friend offline",
+                                text = "$displayName went offline",
+                                profileUrl = null,
+                                channelKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_OFFLINE
+                            )
+                        }
+                    }
                 }
 
                 "notification", "notification-v2" -> {
