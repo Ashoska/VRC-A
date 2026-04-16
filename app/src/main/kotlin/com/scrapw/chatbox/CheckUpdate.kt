@@ -46,14 +46,12 @@ data class UpdateInfo(
 )
 
 suspend fun checkUpdate(owner: String, repo: String): UpdateInfo {
-
-//    if (BuildConfig.DEBUG) {
-//        return UpdateInfo(
-//            UpdateStatus.AVAILABLE,
-//            "v1.0.0 (Example version for debug)",
-//            "https://example.com"
-//        )
-//    }
+    // NOTE: The active update system for the public build is checkFirestoreRelease() in InAppUpdate.kt.
+    // This function is used for the admin build's self-update check via the GitHub Releases API.
+    //
+    // Tag name format published by ReleasesTab: "v{versionCode}" (e.g. "v279").
+    // BuildConfig.VERSION_NAME is "v1.2.79" — these never match, so we parse the versionCode
+    // integer from the tag instead of doing a string equality check.
 
     val retrofit = Retrofit.Builder()
         .baseUrl("https://api.github.com")
@@ -73,31 +71,25 @@ suspend fun checkUpdate(owner: String, repo: String): UpdateInfo {
             val data = response.body()
 
             if (data != null && data.assets.isNotEmpty()) {
-                if (BuildConfig.VERSION_NAME == data.tagName) {
-                    Log.d("Update", "Up to date.")
-                    return UpdateInfo(
-                        UpdateStatus.UP_TO_DATE,
-                        data.tagName,
-                        data.assets[0].browserDownloadUrl
-                    )
+                // Tag is "v{versionCode}" — strip the leading "v" and parse as int.
+                val remoteCode = data.tagName.trimStart('v', 'V').toIntOrNull() ?: -1
+                val localCode  = BuildConfig.VERSION_CODE
+
+                return if (remoteCode <= localCode) {
+                    Log.d("Update", "Up to date. local=$localCode remote=$remoteCode")
+                    UpdateInfo(UpdateStatus.UP_TO_DATE, data.tagName, data.assets[0].browserDownloadUrl)
                 } else {
-                    Log.d("Update", "New version: ${data.tagName}")
-                    return UpdateInfo(
-                        UpdateStatus.AVAILABLE,
-                        data.tagName,
-                        data.assets[0].browserDownloadUrl
-                    )
+                    Log.d("Update", "New version available: ${data.tagName} (remote=$remoteCode > local=$localCode)")
+                    UpdateInfo(UpdateStatus.AVAILABLE, data.tagName, data.assets[0].browserDownloadUrl)
                 }
             }
         } else {
-            Log.d("Update", "Response failed.")
+            Log.d("Update", "Response failed: ${response.code()}")
         }
     } catch (e: Exception) {
         Log.d("Update", "Failed with exception.")
         e.printStackTrace()
     }
 
-    return UpdateInfo(
-        UpdateStatus.FAILED
-    )
+    return UpdateInfo(UpdateStatus.FAILED)
 }

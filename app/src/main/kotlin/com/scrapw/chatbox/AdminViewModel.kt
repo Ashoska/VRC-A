@@ -20,8 +20,8 @@ import kotlinx.coroutines.tasks.await
 data class AdminUserRow(
     val userId: String,
     val displayName: String,
-    val status: String, // "OK", "WARNED", "BANNED"
-    val notes: String
+    val warned: Boolean,
+    val banned: Boolean
 )
 
 data class AdminAnnouncement(
@@ -134,8 +134,8 @@ class AdminViewModel(
     }
 
     private suspend fun loadUsers() {
-        // Expect users/{uid} documents with:
-        // displayName (String), status ("OK"/"WARNED"/"BANNED"), notes (String), updatedAt (Timestamp)
+        // users/{deviceHash} documents use boolean flags: warned, banned (+ warnReason, banReason).
+        // There is no "status" string field — the public app reads banned/warned booleans.
         val snap = db.collection(AdminSchema.COL_USERS)
             .orderBy("updatedAt", com.google.firebase.firestore.Query.Direction.DESCENDING)
             .limit(200)
@@ -144,14 +144,14 @@ class AdminViewModel(
 
         val list = snap.documents.map { d ->
             val uid = d.id
-            val name = d.getString("displayName") ?: uid
-            val status = d.getString("status") ?: "OK"
-            val notes = d.getString("notes") ?: ""
+            val name = (d.getString("displayName") ?: d.getString("vrchatDisplayName") ?: uid).trim()
+            val warned = d.getBoolean("warned") ?: false
+            val banned = d.getBoolean("banned") ?: false
             AdminUserRow(
                 userId = uid,
                 displayName = name,
-                status = status,
-                notes = notes
+                warned = warned,
+                banned = banned
             )
         }
 
@@ -196,23 +196,13 @@ class AdminViewModel(
     // Admin actions (used by Admin UI later)
     // -------------------------
 
-    fun setUserNotes(userId: String, notes: String) = runAction {
-        val ref = db.collection(AdminSchema.COL_USERS).document(userId)
-        ref.set(
-            mapOf(
-                "notes" to notes,
-                "updatedAt" to FieldValue.serverTimestamp()
-            ),
-            com.google.firebase.firestore.SetOptions.merge()
-        ).await()
-        audit("set_notes", userId, mapOf("notes" to notes))
-    }
-
     fun warnUser(userId: String, reason: String) = runAction {
+        // Write warned=true + warnReason. These are in ownerOnlyUserKeys() so Firestore rules allow it.
+        // The public app reads `warned: Boolean` — do NOT write a "status" string; it's not in the rules.
         val ref = db.collection(AdminSchema.COL_USERS).document(userId)
         ref.set(
             mapOf(
-                "status" to "WARNED",
+                "warned" to true,
                 "warnReason" to reason,
                 "warnedAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
@@ -223,10 +213,12 @@ class AdminViewModel(
     }
 
     fun banUser(userId: String, reason: String) = runAction {
+        // Write banned=true + banReason. These are in ownerOnlyUserKeys() so Firestore rules allow it.
+        // The public app reads `banned: Boolean` — do NOT write a "status" string; it's not in the rules.
         val ref = db.collection(AdminSchema.COL_USERS).document(userId)
         ref.set(
             mapOf(
-                "status" to "BANNED",
+                "banned" to true,
                 "banReason" to reason,
                 "bannedAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
@@ -237,10 +229,12 @@ class AdminViewModel(
     }
 
     fun clearPunishment(userId: String) = runAction {
+        // Clear both warned and banned flags. ownerOnlyUserKeys() allows writing these fields.
         val ref = db.collection(AdminSchema.COL_USERS).document(userId)
         ref.set(
             mapOf(
-                "status" to "OK",
+                "warned" to false,
+                "banned" to false,
                 "warnReason" to FieldValue.delete(),
                 "banReason" to FieldValue.delete(),
                 "warnedAt" to FieldValue.delete(),
