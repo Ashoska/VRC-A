@@ -42,6 +42,31 @@ Display name embedded in UI strings: "Ashoska Mitsu Sisko".
 - Admin UI: Users tab, Releases tab, tab bar navigation
 - APK distribution: GitHub Releases
 
+### VRChat Integration
+- **VrchatAuthManager**: Singleton handling VRChat API auth (Basic auth + 2FA), cookie storage via EncryptedSharedPreferences, presence fetching, and friends list retrieval
+- **VrchatPipelineService**: Foreground service with OkHttp WebSocket to `wss://pipeline.vrchat.cloud`. Handles real-time events (friend online/offline, unfriend, invites, group events), syncs VRChat presence to Firestore, and manages friends cache
+- **Friends cache**: Persisted to Firestore (`users/{deviceHash}` fields: `savedFriendIds`, `savedFriendNames`) for cross-session unfriend detection. Includes half-list guard to prevent mass false notifications on API pagination errors or first install
+- **VrchatPipelineState**: Shared in-memory singleton for cross-component state (connection status, presence data)
+
+### Firestore Schema (users/{deviceHash})
+Key fields written by the app:
+- `isOnlineInApp` (bool): Set to `true` by self-sync loop, `false` on ViewModel cleanup
+- `lastSeenAt` (timestamp): Updated every ~10s by self-sync as a heartbeat
+- `savedFriendIds` / `savedFriendNames` (string arrays): Friends cache for unfriend detection
+- `afkEnabled`, `cycleEnabled`, `spotifyEnabled`, `timeEnabled`: Feature toggles (admin-editable)
+- `warned`, `banned`, `warnReason`, `banReason`: Moderation flags (read by public app via snapshot listener)
+- VRChat presence fields: `vrchatUserId`, `vrchatDisplayName`, `vrchatStatus`, `vrchatLocation`, etc.
+
+**Firestore rules must include** `savedFriendIds`, `savedFriendNames`, `isOnlineInApp` in the `selfMutableKeys()` allowlist.
+
+### Navigation
+- Bottom nav: Home, Automations, Music, VRChat (4 items)
+- Settings: Full page accessed via gear icon in top app bar. Contains Permissions, About, Help, and collapsible Debug section
+- Admin: Full page accessed via gavel icon in top app bar (admin build only)
+
+### Remote Config (Admin Edits)
+The public app's moderation snapshot listener on `users/{deviceHash}` also picks up admin-editable fields (feature toggles, messages, intervals) and applies them in real-time via DataStore flow collectors.
+
 ## Coding Conventions
 - Use Jetpack Compose for all new UI — no XML layouts
 - Follow existing file/package structure when adding new screens or components

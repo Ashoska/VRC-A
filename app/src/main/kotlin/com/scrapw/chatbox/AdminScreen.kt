@@ -448,7 +448,8 @@ private data class UserRow(
     val vrchatPlayerCount: Int = 0,
     val vrchatCapacity: Int = 0,
     val vrchatPlatform: String = "",
-    val vrchatLastSyncAt: Timestamp? = null
+    val vrchatLastSyncAt: Timestamp? = null,
+    val isOnlineInApp: Boolean = false
 )
 
 private data class UserDetail(
@@ -582,7 +583,8 @@ private fun UsersTab(
                         vrchatPlayerCount = (d.getLong("vrchatInstancePlayerCount") ?: 0).toInt(),
                         vrchatCapacity = (d.getLong("vrchatInstanceCapacity") ?: 0).toInt(),
                         vrchatPlatform = (d.getString("vrchatPlatform") ?: "").trim(),
-                        vrchatLastSyncAt = d.getTimestamp("vrchatLastSyncAt")
+                        vrchatLastSyncAt = d.getTimestamp("vrchatLastSyncAt"),
+                        isOnlineInApp = d.getBoolean("isOnlineInApp") ?: false
                     )
                 }
                 users.clear(); users.addAll(next); setGlobalLoading(false)
@@ -884,6 +886,11 @@ private fun UsersTab(
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                        if (u.isOnlineInApp) {
+                            androidx.compose.material3.Badge(
+                                containerColor = MaterialTheme.colorScheme.primary
+                            ) { Text("ONLINE", style = MaterialTheme.typography.labelSmall) }
+                        }
                         if (u.banned) {
                             androidx.compose.material3.Badge(
                                 containerColor = MaterialTheme.colorScheme.error
@@ -2728,8 +2735,7 @@ private fun DashboardTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
                 bannedCount = snap.documents.count { it.getBoolean("banned") == true }
                 warnedCount = snap.documents.count { it.getBoolean("warned") == true }
                 onlineCount = snap.documents.count {
-                    val ts = it.getTimestamp("lastSeenAt") ?: return@count false
-                    ts.seconds > fiveMinAgo.seconds
+                    it.getBoolean("isOnlineInApp") == true
                 }
                 loading = false
             }
@@ -2753,7 +2759,7 @@ private fun DashboardTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
             if (loading) {
                 Row(Modifier.padding(8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                    Text("LoadingÃ¢â‚¬Â¦")
+                    Text("Loading...")
                 }
             }
         }
@@ -2778,7 +2784,7 @@ private fun DashboardTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
                             containerColor = MaterialTheme.colorScheme.errorContainer)) {
                             Row(Modifier.fillMaxWidth().padding(12.dp),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Text("Ã¢Å¡ ", style = MaterialTheme.typography.bodyMedium)
+                                Text("(!) ", style = MaterialTheme.typography.bodyMedium)
                                 Column {
                                     Text("Ban evasion attempts detected: $evasionCount",
                                         style = MaterialTheme.typography.bodyMedium,

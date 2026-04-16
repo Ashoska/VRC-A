@@ -46,25 +46,26 @@ fun IpField(
     val names     = listOf(ip1Name, ip2Name, ip3Name)
     val addresses = listOf(ip1Address, ip2Address, ip3Address)
 
-    // Derived active address â€” falls back through legacy single key via the repo flow
-    val activeAddress = addresses.getOrElse(activeSlot - 1) { "" }.let { slotAddr ->
-        slotAddr.ifBlank { addresses.firstOrNull { it.isNotBlank() } ?: "127.0.0.1" }
+    // Derived active address - use “” as fallback (not 127.0.0.1) so field starts empty
+    // and fills in correctly when DataStore emits. 127.0.0.1 is shown as placeholder only.
+    val activeAddress = addresses.getOrElse(activeSlot - 1) { “” }.let { slotAddr ->
+        slotAddr.ifBlank { addresses.firstOrNull { it.isNotBlank() } ?: “” }
     }
 
-    // Edit buffer â€” initialised empty, synced via LaunchedEffect so first-open works
-    var editBuffer by remember { mutableStateOf("") }
+    // Edit buffer - initialised empty, synced via LaunchedEffect so first-open works
+    var editBuffer by remember { mutableStateOf(“”) }
     var hasInitialised by remember { mutableStateOf(false) }
 
     // Sync buffer when slot changes or address loads for the first time
     LaunchedEffect(activeSlot, activeAddress) {
-        if (!hasInitialised || editBuffer.isBlank()) {
+        if (!hasInitialised || (editBuffer.isBlank() && activeAddress.isNotBlank())) {
             editBuffer = activeAddress
             hasInitialised = true
         }
     }
     // Also sync when the user navigates away and back (recomposition with new address)
     LaunchedEffect(activeAddress) {
-        if (editBuffer.isBlank() || editBuffer == "127.0.0.1" && activeAddress != "127.0.0.1") {
+        if (editBuffer.isBlank() && activeAddress.isNotBlank()) {
             editBuffer = activeAddress
         }
     }

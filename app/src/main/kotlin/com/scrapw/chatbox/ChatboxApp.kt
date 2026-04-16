@@ -151,7 +151,7 @@ fun ChatboxApp() {
 
     /* -------------------------
        Phase 1 ban check (device hash + auth UID)
-       Runs immediately after bootstrap. Does NOT show ban screen yet ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â
+       Runs immediately after bootstrap. Does NOT show ban screen yet -
        waits for VRChat login so we can capture the alt VRChat ID first.
        ------------------------- */
 
@@ -245,7 +245,7 @@ fun ChatboxApp() {
 
     if (!vrcLoginDone) {
         VrchatLoginScreen(pendingBanId = phase1BanId) { _, _ ->
-            // Login succeeded ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â mark done, LaunchedEffect below will run Phase 2
+            // Login succeeded - mark done, LaunchedEffect below will run Phase 2
             vrcLoginDone = true
         }
         LaunchedEffect(vrcLoginDone) {

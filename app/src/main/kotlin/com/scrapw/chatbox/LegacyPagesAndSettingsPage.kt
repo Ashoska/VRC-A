@@ -570,7 +570,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
                                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                                             ) {
                                                 val preview = vm.getAfkPresetPreview(slot).ifBlank { "(empty)" }
-                                                Text("Preset $slot Ã¢â‚¬â€ $preview")
+                                                Text("Preset $slot - $preview")
 
                                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                                     OutlinedButton(
@@ -710,7 +710,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
                                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                                             ) {
                                                 val preview = vm.getCyclePresetPreview(slot).ifBlank { "(empty)" }
-                                                Text("Preset $slot Ã¢â‚¬â€ $preview")
+                                                Text("Preset $slot - $preview")
 
                                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                                     OutlinedButton(

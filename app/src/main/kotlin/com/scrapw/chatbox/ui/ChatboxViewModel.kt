@@ -143,6 +143,16 @@ class ChatboxViewModel(
         // onCleared is called on backgrounding too, not just app death,
         // which caused the state to be wiped before the next DataStore read.
         stopAll(clearFromChatbox = false)
+
+        // Best-effort: mark user as offline in Firestore
+        val deviceHash = runCatching { readDeviceHashFromPrefs() }.getOrDefault("")
+        if (deviceHash.isNotBlank()) {
+            runCatching {
+                db.collection(COL_USERS).document(deviceHash)
+                    .set(mapOf("isOnlineInApp" to false, "lastSeenAt" to FieldValue.serverTimestamp()), SetOptions.merge())
+            }
+        }
+
         super.onCleared()
     }
 
@@ -235,6 +245,7 @@ class ChatboxViewModel(
             "versionName" to BuildConfig.VERSION_NAME,
             "versionCode" to BuildConfig.VERSION_CODE,
 
+            "isOnlineInApp" to true,
             "lastSeenAt" to FieldValue.serverTimestamp(),
             "updatedAt" to FieldValue.serverTimestamp(),
 
@@ -458,6 +469,9 @@ class ChatboxViewModel(
                             moderationConnected = true
                             moderationLastError = ""
                             enforceIfBannedChanged()
+
+                            // Apply admin-editable config changes from Firestore
+                            applyRemoteConfig(snap)
                         }
                 }
 
@@ -487,6 +501,69 @@ class ChatboxViewModel(
                 // Once both are attached, stop retry loop.
                 moderationAttachJob = null
                 return@launch
+            }
+        }
+    }
+
+    // =========================
+    // Remote config (admin edits applied in real-time)
+    // =========================
+
+    /**
+     * Called from the moderation snapshot listener whenever the user document changes.
+     * Picks up admin-editable fields and writes them to DataStore (which triggers
+     * existing flow collectors to update ViewModel state). Fields without DataStore
+     * backing are set directly on the ViewModel.
+     */
+    private fun applyRemoteConfig(snap: com.google.firebase.firestore.DocumentSnapshot) {
+        viewModelScope.launch {
+            // Pinned (AFK) enabled -- no DataStore save, set directly
+            snap.getBoolean("afkEnabled")?.let { remote ->
+                if (remote != afkEnabled) {
+                    afkEnabled = remote
+                    if (!remote) stopAfkSender(clearFromChatbox = true)
+                    rebuildCombinedPreviewOnly()
+                }
+            }
+            // Pinned (AFK) message
+            snap.getString("afkMessage")?.let { remote ->
+                if (remote.trim() != afkMessage.trim()) {
+                    userPreferencesRepository.saveAfkMessage(remote.trim())
+                }
+            }
+            // Cycle enabled
+            snap.getBoolean("cycleEnabled")?.let { remote ->
+                if (remote != cycleEnabled) {
+                    userPreferencesRepository.saveCycleEnabled(remote)
+                }
+            }
+            // Cycle interval
+            snap.getLong("cycleIntervalSeconds")?.let { remote ->
+                val intVal = remote.toInt().coerceAtLeast(2)
+                if (intVal != cycleIntervalSeconds) {
+                    userPreferencesRepository.saveCycleInterval(intVal)
+                }
+            }
+            // Cycle lines text
+            snap.getString("cycleLinesText")?.let { remote ->
+                val currentText = cycleLines.joinToString("\n")
+                if (remote.trim() != currentText.trim()) {
+                    userPreferencesRepository.saveCycleMessages(remote.trim())
+                }
+            }
+            // Spotify (Music) enabled -- no DataStore save, set directly
+            snap.getBoolean("spotifyEnabled")?.let { remote ->
+                if (remote != spotifyEnabled) {
+                    spotifyEnabled = remote
+                    if (!remote) stopNowPlayingSender(clearFromChatbox = true)
+                    rebuildCombinedPreviewOnly()
+                }
+            }
+            // Time enabled
+            snap.getBoolean("timeEnabled")?.let { remote ->
+                if (remote != timeEnabled) {
+                    userPreferencesRepository.saveTimeEnabled(remote)
+                }
             }
         }
     }
@@ -764,12 +841,12 @@ class ChatboxViewModel(
 
     // =========================
     // Card output order (persisted)
-    // Valid component names: "NowPlaying", "AFK", "Cycle"
+    // Valid component names: "NowPlaying", "Pinned", "Cycle"
     // Order = top-to-bottom in the chatbox output. Cut-off priority is unchanged.
     // =========================
-    val DEFAULT_CARD_ORDER = listOf("Time", "AFK", "Cycle", "NowPlaying")
+    val DEFAULT_CARD_ORDER = listOf("Time", "Pinned", "Cycle", "NowPlaying")
 
-    var cardOrder by mutableStateOf(listOf("Time", "AFK", "Cycle", "NowPlaying"))
+    var cardOrder by mutableStateOf(listOf("Time", "Pinned", "Cycle", "NowPlaying"))
         private set
 
     fun updateCardOrder(order: List<String>) {
@@ -982,9 +1059,11 @@ class ChatboxViewModel(
 
         viewModelScope.launch {
             userPreferencesRepository.cardOrder.collect { saved ->
+                // Migrate legacy "AFK" key to "Pinned"
+                val migrated = saved.map { if (it == "AFK") "Pinned" else it }
                 // Allow Divider_N entries alongside standard components
                 val validComponents = DEFAULT_CARD_ORDER.toSet()
-                val valid = saved.filter { it in validComponents || it.startsWith("Divider_") }.distinct()
+                val valid = migrated.filter { it in validComponents || it.startsWith("Divider_") }.distinct()
                 val full = valid + DEFAULT_CARD_ORDER.filter { it !in valid }
                 cardOrder = full
                 rebuildCombinedPreviewOnly()
@@ -993,7 +1072,7 @@ class ChatboxViewModel(
 
         viewModelScope.launch {
             userPreferencesRepository.dividerConfig.collect { json ->
-                // Parse JSON array: [{"id":"Divider_1","text":"ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬"}, ...]
+                // Parse JSON array: [{"id":"Divider_1","text":"-----"}, ...]
                 try {
                     val arr = org.json.JSONArray(json)
                     dividerTexts.clear()
@@ -1001,7 +1080,7 @@ class ChatboxViewModel(
                         val obj = arr.getJSONObject(i)
                         dividerTexts[obj.getString("id")] = obj.optString("text", "-----")
                     }
-                } catch (_: Exception) { /* malformed ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â keep empty */ }
+                } catch (_: Exception) { /* malformed - keep empty */ }
                 rebuildCombinedPreviewOnly()
             }
         }
@@ -1620,7 +1699,7 @@ class ChatboxViewModel(
         val rawLines = mutableListOf<LineWithPriority>()
         for (component in cardOrder) {
             when {
-                component == "AFK" -> if (afkLine.isNotBlank()) rawLines += LineWithPriority(text = afkLine, priority = Priority.AFK)
+                component == "Pinned" || component == "AFK" -> if (afkLine.isNotBlank()) rawLines += LineWithPriority(text = afkLine, priority = Priority.AFK)
                 component == "Cycle" -> if (cycleLine.isNotBlank()) rawLines += LineWithPriority(text = cycleLine, priority = Priority.CYCLE)
                 component == "NowPlaying" -> for (m in musicLines) if (m.isNotBlank()) rawLines += LineWithPriority(text = m, priority = Priority.MUSIC)
                 component == "Time" -> if (standalonTimeLine.isNotBlank()) rawLines += LineWithPriority(text = standalonTimeLine, priority = Priority.MUSIC)
@@ -1736,7 +1815,7 @@ class ChatboxViewModel(
         var cycleModifiedForMusic = false
 
         while (cleaned.size > maxLines) {
-            // Dividers are always dropped first ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â they are cosmetic
+            // Dividers are always dropped first - they are cosmetic
             val divIdx = cleaned.indexOfLast { it.isDivider }
             if (divIdx >= 0) {
                 cleaned.removeAt(divIdx)
@@ -1776,7 +1855,7 @@ class ChatboxViewModel(
         while (len > maxChars && cleaned.isNotEmpty()) {
             val excess = len - maxChars
 
-            // Drop dividers first ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â cosmetic, never truncate
+            // Drop dividers first - cosmetic, never truncate
             val divIdx = cleaned.indexOfLast { it.isDivider }
             if (divIdx >= 0) {
                 cleaned.removeAt(divIdx)
@@ -1847,8 +1926,8 @@ class ChatboxViewModel(
             3 -> {
                 val slots = 10
                 val idx = (p * (slots - 1)).toInt()
-                // U+25C7 (ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¡ White Diamond) ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â in basic geometric shapes block,
-                // renders correctly in VRChat. U+27E1 (ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¡) is not in VRChat's font.
+                // U+25C7 (White Diamond) - in basic geometric shapes block,
+                // renders correctly in VRChat. U+27E1 is not in VRChat's font.
                 val bg = CharArray(slots) { '\u25C7' }
                 bg[idx] = dot
                 bg.concatToString()

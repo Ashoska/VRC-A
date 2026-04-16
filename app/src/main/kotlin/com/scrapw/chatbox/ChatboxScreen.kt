@@ -137,7 +137,7 @@ private enum class AppPage(val title: String) {
     Automations("Automations"),
     Music("Music"),
     VrchatStatus("VRChat"),
-    Debug("Debug"),
+    Settings("Settings"),
     Admin("Admin")
 }
 
@@ -472,8 +472,6 @@ fun ChatboxScreen(
         if (!BuildConfig.IS_ADMIN_BUILD && page == AppPage.Admin) page = AppPage.Home
     }
 
-    var showSettingsSheet by remember { mutableStateOf(false) }
-    var showInfoSheet by remember { mutableStateOf(false) }
 
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val snackbarHostState = remember { SnackbarHostState() }
@@ -520,13 +518,13 @@ fun ChatboxScreen(
                         }
                     },
                     actions = {
-                        IconButton(onClick = { showSettingsSheet = true }) {
+                        IconButton(onClick = { page = AppPage.Settings }) {
                             Icon(Icons.Filled.Settings, contentDescription = "Settings")
                         }
                     }
                 )
             },
-            // Bottom navigation bar ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â always visible, labelled
+            // Bottom navigation bar -- always visible, labelled
             bottomBar = {
                 if (!isBannedEffective) {
                     NavigationBar {
@@ -565,13 +563,13 @@ fun ChatboxScreen(
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                // Persistent setup banner ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â shows until both steps complete
+                // Persistent setup banner -- shows until both steps complete
                 if (showSetupBanner && !isBannedEffective) {
                     SetupIncompleteBanner(
                         vrcLinked = vrcLinked,
                         ipSet = ipSet.value,
                         onFixVrc = { page = AppPage.VrchatStatus },
-                        onFixIp = { showSettingsSheet = true }
+                        onFixIp = { page = AppPage.Settings }
                     )
                 }
 
@@ -584,14 +582,14 @@ fun ChatboxScreen(
                                     deviceHash = deviceHash,
                                     banReason = moderation.banReason,
                                     deviceBanReason = moderation.deviceBanReason,
-                                    onOpenInfo = { showInfoSheet = true },
-                                    onOpenSettings = { showSettingsSheet = true }
+                                    onOpenInfo = { page = AppPage.Settings },
+                                    onOpenSettings = { page = AppPage.Settings }
                                 )
                             } else {
                                 HomePage(
                                     vm = chatboxViewModel,
                                     snackbarHostState = snackbarHostState,
-                                    onOpenSettings = { showSettingsSheet = true },
+                                    onOpenSettings = { page = AppPage.Settings },
                                     announcements = announcements,
                                     moderation = moderation,
                                     isBanned = false
@@ -610,10 +608,11 @@ fun ChatboxScreen(
                         )
 
                         AppPage.VrchatStatus -> VrchatStatusPage(
+                            vm = chatboxViewModel,
                             onOpenLogin = { /* navigate to login within page */ }
                         )
 
-                        AppPage.Debug -> DebugPage(
+                        AppPage.Settings -> SettingsPage(
                             vm = chatboxViewModel,
                             lastFirebaseIssue = lastFirebaseIssue,
                             moderationError = chatboxViewModel.moderationLastError
@@ -626,7 +625,7 @@ fun ChatboxScreen(
                                 HomePage(
                                     vm = chatboxViewModel,
                                     snackbarHostState = snackbarHostState,
-                                    onOpenSettings = { showSettingsSheet = true },
+                                    onOpenSettings = { page = AppPage.Settings },
                                     announcements = announcements,
                                     moderation = moderation,
                                     isBanned = isBannedEffective
@@ -636,16 +635,6 @@ fun ChatboxScreen(
                     }
                 }
 
-                if (showSettingsSheet) {
-                    SettingsSheet(
-                        vm = chatboxViewModel,
-                        onDismiss = { showSettingsSheet = false }
-                    )
-                }
-
-                if (showInfoSheet) {
-                    InfoSheet(onDismiss = { showInfoSheet = false })
-                }
             }
         }
 }
@@ -833,9 +822,7 @@ If you do not agree, close the app.
 @Composable
 private fun DrawerContent(
     current: AppPage,
-    onSelect: (AppPage) -> Unit,
-    onOpenSettings: () -> Unit,
-    onOpenInfo: () -> Unit
+    onSelect: (AppPage) -> Unit
 ) {
     Surface(
         modifier = Modifier
@@ -871,12 +858,14 @@ private fun DrawerContent(
                 onClick = { onSelect(AppPage.Music) }
             )
 
-            DrawerSectionHeader("Tools")
+            Divider()
+
+            DrawerSectionHeader("Setup")
             DrawerItem(
-                title = AppPage.Debug.title,
-                icon = Icons.Filled.BugReport,
-                selected = current == AppPage.Debug,
-                onClick = { onSelect(AppPage.Debug) }
+                title = AppPage.Settings.title,
+                icon = Icons.Filled.Settings,
+                selected = current == AppPage.Settings,
+                onClick = { onSelect(AppPage.Settings) }
             )
 
             if (BuildConfig.IS_ADMIN_BUILD) {
@@ -887,22 +876,6 @@ private fun DrawerContent(
                     onClick = { onSelect(AppPage.Admin) }
                 )
             }
-
-            Divider()
-
-            DrawerSectionHeader("Setup")
-            DrawerItem(
-                title = "Settings & Permissions",
-                icon = Icons.Filled.Settings,
-                selected = false,
-                onClick = onOpenSettings
-            )
-            DrawerItem(
-                title = "Info",
-                icon = Icons.Filled.Info,
-                selected = false,
-                onClick = onOpenInfo
-            )
 
             Spacer(Modifier.weight(1f))
 
@@ -1191,7 +1164,7 @@ private fun HomePage(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        "ÃƒÂ¢Ã…Â¡  ${vm.cycleTrimWarning}",
+                        "${vm.cycleTrimWarning}",
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onTertiaryContainer
@@ -1204,7 +1177,7 @@ private fun HomePage(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        "ÃƒÂ¢Ã…Â¡  A divider was removed ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â character or line limit reached.",
+                        "A divider was removed - character or line limit reached.",
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onTertiaryContainer
@@ -1256,7 +1229,7 @@ private fun HomePage(
                             // Component toggle or time row
                             Box(Modifier.weight(1f)) {
                                 when {
-                                    component == "Pinned" -> ToggleRow("Pinned", vm.afkEnabled, enabled = !isBanned) { vm.setAfkEnabledFlag(it) }
+                                    component == "Pinned" || component == "AFK" -> ToggleRow("Pinned", vm.afkEnabled, enabled = !isBanned) { vm.setAfkEnabledFlag(it) }
                                     component == "Cycle" -> ToggleRow("Cycle", vm.cycleEnabled, enabled = !isBanned) { vm.setCycleEnabledFlag(it) }
                                     component == "NowPlaying" -> ToggleRow("Now Playing", vm.spotifyEnabled, enabled = !isBanned) { vm.setSpotifyEnabledFlag(it) }
                                     component == "Time" -> Row(
@@ -1296,7 +1269,7 @@ private fun HomePage(
                                         }
                                     }
                                     component.startsWith("Divider_") -> {
-                                        val currentText = vm.dividerTexts[component] ?: "ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬"
+                                        val currentText = vm.dividerTexts[component] ?: "-----"
                                         if (cardReorderMode) {
                                             var divEdit by remember(currentText) { mutableStateOf(currentText) }
                                             Row(
@@ -1313,7 +1286,7 @@ private fun HomePage(
                                                     textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
                                                 )
                                                 IconButton(
-                                                    onClick = { vm.updateDividerText(component, divEdit.trim().ifBlank { "ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬" }) },
+                                                    onClick = { vm.updateDividerText(component, divEdit.trim().ifBlank { "-----" }) },
                                                     enabled = divEdit.trim() != currentText
                                                 ) { Icon(Icons.Filled.Check, contentDescription = "Save", modifier = Modifier.size(18.dp)) }
                                                 IconButton(onClick = { vm.removeDivider(component) }) {
@@ -2104,127 +2077,125 @@ private fun NowPlayingPage(
 }
 
 /* =========================
-   DEBUG
+   SETTINGS PAGE (combines Settings, Debug, and About)
    ========================= */
 
 @Composable
-private fun DebugPage(
+private fun SettingsPage(
     vm: com.scrapw.chatbox.ui.ChatboxViewModel,
     lastFirebaseIssue: String?,
     moderationError: String?
 ) {
-    PageContainer {
-        SectionCard(
-            title = "Firebase (last issue)",
-            subtitle = "ToS / Announcements / Auth errors captured here."
-        ) {
-            Text(
-                text = lastFirebaseIssue ?: "(none captured)",
-                fontFamily = FontFamily.Monospace
-            )
-        }
-
-        SectionCard(
-            title = "Moderation listener (last error)",
-            subtitle = "If non-empty, moderation reads may be failing."
-        ) {
-            Text(
-                text = moderationError?.ifBlank { "(none)" } ?: "(none)",
-                fontFamily = FontFamily.Monospace
-            )
-        }
-
-        SectionCard(
-            title = "Listener",
-            subtitle = "Confirms Notification Access + media detection."
-        ) {
-            Text("Listener connected: ${vm.listenerConnected}")
-            Text("Active package: ${vm.activePackage}")
-            Text("Detected: ${vm.nowPlayingDetected}")
-            Text("Playing: ${vm.nowPlayingIsPlaying}")
-        }
-
-        SectionCard(
-            title = "OSC Output Preview",
-            subtitle = "Raw lines + combined output."
-        ) {
-            SelectionContainer {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("AFK:", style = MaterialTheme.typography.labelLarge)
-                    Text(vm.debugLastAfkOsc, fontFamily = FontFamily.Monospace)
-
-                    Text("Cycle:", style = MaterialTheme.typography.labelLarge)
-                    Text(vm.debugLastCycleOsc, fontFamily = FontFamily.Monospace)
-
-                    Text("Music:", style = MaterialTheme.typography.labelLarge)
-                    Text(vm.debugLastMusicOsc, fontFamily = FontFamily.Monospace)
-
-                    Text("Combined:", style = MaterialTheme.typography.labelLarge)
-                    Text(vm.debugLastCombinedOsc, fontFamily = FontFamily.Monospace)
-                }
-            }
-        }
-
-        SectionCard(title = "VRChat send status") {
-            Text("Last sent to VRChat (ms): ${vm.lastSentToVrchatAtMs}")
-        }
-    }
-}
-
-/* =========================
-   SETTINGS SHEET
-   ========================= */
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun SettingsSheet(
-    vm: com.scrapw.chatbox.ui.ChatboxViewModel,
-    onDismiss: () -> Unit
-) {
     val ctx = LocalContext.current
+    var debugExpanded by rememberSaveable { mutableStateOf(false) }
 
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Filled.Settings, contentDescription = null)
-                Spacer(Modifier.width(8.dp))
-                Text("Settings & Setup", style = MaterialTheme.typography.titleMedium)
-            }
+    PageContainer {
+        // -- Permissions --
+        SectionCard(title = "Permissions") {
+            SettingsRow(
+                icon = Icons.Filled.MusicNote,
+                title = "Notification Access",
+                subtitle = "Required for Now Playing detection.",
+                primary = "Open"
+            ) { ctx.startActivity(vm.notificationAccessIntent()) }
 
-            ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    SettingsGroupHeader("Permissions")
+            SettingsRow(
+                icon = Icons.Filled.Bolt,
+                title = "Overlay Permission",
+                subtitle = "Only needed if you use overlay.",
+                primary = "Open"
+            ) { ctx.startActivity(vm.overlayPermissionIntent()) }
 
-                    SettingsRow(
-                        icon = Icons.Filled.MusicNote,
-                        title = "Notification Access",
-                        subtitle = "Required for Now Playing detection.",
-                        primary = "Open"
-                    ) { ctx.startActivity(vm.notificationAccessIntent()) }
+            SettingsRow(
+                icon = Icons.Filled.Power,
+                title = "Battery Optimization",
+                subtitle = "Stops Android pausing when screen is off.",
+                primary = "Request"
+            ) { ctx.startActivity(vm.batteryOptimizationIntent()) }
+        }
 
-                    SettingsRow(
-                        icon = Icons.Filled.Bolt,
-                        title = "Overlay Permission",
-                        subtitle = "Only needed if you use overlay.",
-                        primary = "Open"
-                    ) { ctx.startActivity(vm.overlayPermissionIntent()) }
+        // -- About --
+        SectionCard(title = "About") {
+            Text(
+                "VRC-A (made by Ashoska Mitsu Sisko)\n\n" +
+                "- Sends OSC chatbox text to your Quest/PC target\n" +
+                "- Includes: AFK, Cycle, Now Playing, Manual Send\n" +
+                "- Use KILL to stop all senders and clear the VRChat chatbox",
+                style = MaterialTheme.typography.bodyMedium
+            )
+        }
 
-                    SettingsRow(
-                        icon = Icons.Filled.Power,
-                        title = "Battery Optimization",
-                        subtitle = "Stops Android pausing when screen is off.",
-                        primary = "Request"
-                    ) { ctx.startActivity(vm.batteryOptimizationIntent()) }
+        // -- Help --
+        SectionCard(title = "Help") {
+            Text(
+                "Nothing appears in VRChat:\n" +
+                "- VRChat -> Settings -> OSC -> Enable OSC\n" +
+                "- Phone + headset on the same Wi-Fi\n" +
+                "- Set the correct headset IP (Home -> Connection)\n" +
+                "- Try Manual Send\n\n" +
+                "Now Playing blank:\n" +
+                "- Enable Notification Access\n" +
+                "- Reopen the app\n" +
+                "- Start music so a notification exists\n\n" +
+                "Stops sending with screen off:\n" +
+                "- Disable Battery Optimization for VRC-A",
+                style = MaterialTheme.typography.bodyMedium
+            )
+        }
+
+        // -- Debug (collapsible) --
+        ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(12.dp)) {
+                Row(
+                    Modifier.fillMaxWidth().clickable { debugExpanded = !debugExpanded },
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Debug", style = MaterialTheme.typography.titleMedium)
+                    Icon(
+                        if (debugExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                        contentDescription = if (debugExpanded) "Collapse" else "Expand"
+                    )
                 }
-            }
+                AnimatedVisibility(visible = debugExpanded) {
+                    Column(
+                        Modifier.padding(top = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text("Firebase (last issue)", style = MaterialTheme.typography.labelMedium)
+                        Text(
+                            text = lastFirebaseIssue ?: "(none captured)",
+                            fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodySmall
+                        )
 
-            OutlinedButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) {
-                Text("Close")
+                        Text("Moderation listener (last error)", style = MaterialTheme.typography.labelMedium)
+                        Text(
+                            text = moderationError?.ifBlank { "(none)" } ?: "(none)",
+                            fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+
+                        Text("Listener", style = MaterialTheme.typography.labelMedium)
+                        Text("Connected: ${vm.listenerConnected}", style = MaterialTheme.typography.bodySmall)
+                        Text("Active package: ${vm.activePackage}", style = MaterialTheme.typography.bodySmall)
+                        Text("Detected: ${vm.nowPlayingDetected}", style = MaterialTheme.typography.bodySmall)
+                        Text("Playing: ${vm.nowPlayingIsPlaying}", style = MaterialTheme.typography.bodySmall)
+
+                        Text("OSC Output Preview", style = MaterialTheme.typography.labelMedium)
+                        SelectionContainer {
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("AFK: ${vm.debugLastAfkOsc}", fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                                Text("Cycle: ${vm.debugLastCycleOsc}", fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                                Text("Music: ${vm.debugLastMusicOsc}", fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                                Text("Combined: ${vm.debugLastCombinedOsc}", fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+
+                        Text("Last sent to VRChat (ms): ${vm.lastSentToVrchatAtMs}",
+                            style = MaterialTheme.typography.bodySmall)
+                    }
+                }
             }
         }
     }
@@ -2275,92 +2246,6 @@ private fun SettingsRow(
             Text(primary)
             Spacer(Modifier.width(4.dp))
             Icon(Icons.Filled.ChevronRight, contentDescription = null)
-        }
-    }
-}
-
-/* =========================
-   INFO SHEET
-   ========================= */
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun InfoSheet(onDismiss: () -> Unit) {
-    var tab by rememberSaveable { mutableStateOf(ChatboxInfoTab.Overview) }
-
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Filled.Info, contentDescription = null)
-                Spacer(Modifier.width(8.dp))
-                Text("Info", style = MaterialTheme.typography.titleMedium)
-            }
-
-            ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    TabRow(selectedTabIndex = tab.ordinal) {
-                        ChatboxInfoTab.entries.forEachIndexed { idx, t ->
-                            Tab(
-                                selected = (tab.ordinal == idx),
-                                onClick = { tab = t },
-                                text = { Text(t.title) }
-                            )
-                        }
-                    }
-
-                    val overview = remember {
-                        """
-VRC-A (made by Ashoska Mitsu Sisko)
-
-- Sends OSC chatbox text to your Quest/PC target
-- Includes: AFK, Cycle, Now Playing, Manual Send
-- Use KILL to stop all senders and clear the VRChat chatbox
-                        """.trimIndent()
-                    }
-
-                    val help = remember {
-                        """
-HELP
-
-Nothing appears in VRChat:
-- VRChat -> Settings -> OSC -> Enable OSC
-- Phone + headset on the same Wi-Fi
-- Set the correct headset IP (Home -> Connection)
-- Try Manual Send
-
-Now Playing blank:
-- Enable Notification Access
-- Reopen the app
-- Start music so a notification exists
-
-Stops sending with screen off:
-- Disable Battery Optimization for VRC-A
-                        """.trimIndent()
-                    }
-
-                    val text = when (tab) {
-                        ChatboxInfoTab.Overview -> overview
-                        ChatboxInfoTab.Help -> help
-                    }
-
-                    SelectionContainer {
-                        Text(
-                            text = text,
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontFamily = FontFamily.Monospace
-                        )
-                    }
-                }
-            }
-
-            OutlinedButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) {
-                Text("Close")
-            }
         }
     }
 }
@@ -2417,7 +2302,7 @@ private fun SetupIncompleteBanner(
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Text(
-                "ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡  Setup incomplete",
+                "Setup incomplete",
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onTertiaryContainer
             )
@@ -2461,7 +2346,10 @@ private fun SetupIncompleteBanner(
    ========================= */
 
 @Composable
-private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
+private fun VrchatStatusPage(
+    vm: com.scrapw.chatbox.ui.ChatboxViewModel,
+    onOpenLogin: () -> Unit
+) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -2489,8 +2377,8 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
                         style = MaterialTheme.typography.titleMedium
                     )
                     Text(
-                        if (isConnected) "ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢ Live connection active"
-                        else if (isLinked.value) "ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â´ ConnectingÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¦"
+                        if (isConnected) "Live connection active"
+                        else if (isLinked.value) "Connecting..."
                         else "Sign in to enable notifications and presence",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -2504,14 +2392,16 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
             }
         }
 
-        // Presence card (mirrors what Discord shows)
+        // Presence card
         if (presence != null && isLinked.value) {
-            val statusIcon = when (presence.status) {
-                "active", "join me" -> "ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢"
-                "ask me"            -> "ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ "
-                "busy"              -> "ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â´"
-                else                -> "ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â«"
+            // Use location-based online detection (not status field)
+            val statusLabel = when (presence.status) {
+                "active", "join me" -> "[online]"
+                "ask me"            -> "[ask me]"
+                "busy"              -> "[busy]"
+                else                -> "[offline]"
             }
+            val onlineLabel = if (presence.isOnlineInVRChat) "Online in VRChat" else "Not in VRChat"
             ElevatedCard {
                 Column(
                     Modifier.padding(14.dp),
@@ -2520,11 +2410,17 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
                     Text("Presence", style = MaterialTheme.typography.titleSmall)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically) {
-                        Text(statusIcon)
+                        Text(statusLabel)
                         Column {
                             Text(
                                 presence.displayName,
                                 style = MaterialTheme.typography.bodyMedium
+                            )
+                            Text(
+                                onlineLabel,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (presence.isOnlineInVRChat) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurfaceVariant
                             )
                             if (presence.statusDescription.isNotBlank())
                                 Text(
@@ -2537,7 +2433,7 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
                     Divider()
                     if (presence.worldName.isNotBlank()) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã¢â‚¬Å“ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â", style = MaterialTheme.typography.bodySmall)
+                            Text("World:", style = MaterialTheme.typography.bodySmall)
                             Column {
                                 Text(presence.worldName, style = MaterialTheme.typography.bodyMedium)
                                 val count = if (presence.instanceCapacity > 0)
@@ -2552,7 +2448,7 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
                             when (presence.location) {
                                 "offline"   -> "Offline"
                                 "private"   -> "In a private world"
-                                "traveling" -> "Traveling between worldsÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¦"
+                                "traveling" -> "Traveling between worlds..."
                                 else        -> "In a world"
                             },
                             style = MaterialTheme.typography.bodySmall,
@@ -2560,9 +2456,9 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
                         )
                     }
                     val platform = when (presence.platform) {
-                        "standalonewindows" -> "ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã…â€œÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¥ Desktop"
-                        "android"           -> "ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã¢â‚¬Å“ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â± Android/Quest"
-                        "ios"               -> "ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬Â¦Ãƒâ€šÃ‚Â¸ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€¦Ã¢â‚¬Å“ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â± iOS"
+                        "standalonewindows" -> "Desktop"
+                        "android"           -> "Android/Quest"
+                        "ios"               -> "iOS"
                         else                -> ""
                     }
                     if (platform.isNotBlank())
@@ -2574,8 +2470,45 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
             ElevatedCard {
                 Row(Modifier.padding(14.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                    Text("Fetching presenceÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¦", style = MaterialTheme.typography.bodySmall)
+                    Text("Fetching presence...", style = MaterialTheme.typography.bodySmall)
                 }
+            }
+        }
+
+        // -- VRChat Notification Toggles --
+        val repo = vm.userPreferencesRepository
+        val friendRequest by repo.notifFriendRequest.collectAsState(initial = true)
+        val invite by repo.notifInvite.collectAsState(initial = true)
+        val friendOnline by repo.notifFriendOnline.collectAsState(initial = true)
+        val friendOffline by repo.notifFriendOffline.collectAsState(initial = false)
+        val unfriend by repo.notifUnfriend.collectAsState(initial = true)
+        val groupEvent by repo.notifGroupEvent.collectAsState(initial = true)
+        val groupAnnouncement by repo.notifGroupAnnouncement.collectAsState(initial = true)
+
+        SectionCard(
+            title = "VRChat Notifications",
+            subtitle = "Choose which events send a phone notification."
+        ) {
+            ToggleRow("Friend requests", friendRequest) {
+                scope.launch { repo.saveNotifFriendRequest(it) }
+            }
+            ToggleRow("Invites received", invite) {
+                scope.launch { repo.saveNotifInvite(it) }
+            }
+            ToggleRow("Friend came online", friendOnline) {
+                scope.launch { repo.saveNotifFriendOnline(it) }
+            }
+            ToggleRow("Friend went offline", friendOffline) {
+                scope.launch { repo.saveNotifFriendOffline(it) }
+            }
+            ToggleRow("Someone unfriended you", unfriend) {
+                scope.launch { repo.saveNotifUnfriend(it) }
+            }
+            ToggleRow("Group events", groupEvent) {
+                scope.launch { repo.saveNotifGroupEvent(it) }
+            }
+            ToggleRow("Group announcements", groupAnnouncement) {
+                scope.launch { repo.saveNotifGroupAnnouncement(it) }
             }
         }
 
@@ -2584,7 +2517,7 @@ private fun VrchatStatusPage(onOpenLogin: () -> Unit) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("About VRChat integration", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    "VRC-A connects to VRChat's web API to show your status, detect notifications (friend requests, invites, unfriends, group events), and identify you in the moderation system.\n\nYour password is only used to get a session cookie from VRChat's servers ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡Ãƒâ€šÃ‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â it is never stored.",
+                    "VRC-A connects to VRChat's web API to show your status, detect notifications (friend requests, invites, unfriends, group events), and identify you in the moderation system.\n\nYour password is only used to get a session cookie from VRChat's servers - it is never stored.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

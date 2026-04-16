@@ -156,7 +156,7 @@ class UserPreferencesRepository(private val context: Context) {
 
     val cardOrder: Flow<List<String>> = context.dataStore.data.map { prefs ->
         val raw = prefs[Keys.CARD_ORDER] ?: "Time,Pinned,Cycle,NowPlaying"
-        raw.split(",").map { it.trim() }.filter { it.isNotBlank() }
+        raw.split(",").map { it.trim().let { k -> if (k == "AFK") "Pinned" else k } }.filter { it.isNotBlank() }
     }
 
     val notifFriendRequest:     Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_REQUEST]     ?: false }
@@ -259,7 +259,7 @@ class UserPreferencesRepository(private val context: Context) {
         }
     }
 
-    // Backwards-compat aliases (AFK Ã¢â€ â€™ Pinned rename, ViewModel doesn't need changes)
+    // Backwards-compat aliases (AFK -> Pinned rename, ViewModel doesn't need changes)
     val afkMessage: Flow<String>  get() = pinnedMessage
     val afkEnabled: Flow<Boolean> get() = pinnedMessageEnabled
     val afkPreset1: Flow<String>  get() = pinnedPreset1

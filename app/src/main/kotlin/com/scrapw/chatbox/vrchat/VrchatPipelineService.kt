@@ -34,6 +34,7 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
+import com.google.android.gms.tasks.Tasks
 import java.util.concurrent.TimeUnit
 
 /**
@@ -85,7 +86,7 @@ class VrchatPipelineService : Service() {
     // Local friends cache for unfriend detection.
     // Keyed by userId -> displayName (snapshot at connect time).
     private val friendsCache = mutableMapOf<String, String>()
-    // Pending offline notifications â€” userId -> time they went offline
+    // Pending offline notifications -- userId -> time they went offline
     // We wait 10 minutes before notifying in case they're just hopping worlds
     private val pendingOffline = mutableMapOf<String, Long>()
     private val OFFLINE_COOLDOWN_MS = 10 * 60 * 1000L  // 10 minutes
@@ -142,31 +143,42 @@ class VrchatPipelineService : Service() {
             // First validate/refresh session
             val valid = VrchatAuthManager.validateSession(this@VrchatPipelineService)
             if (!valid) {
-                updatePersistentNotif("Not logged in to VRChat ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â tap to sign in")
+                updatePersistentNotif("Not logged in to VRChat - tap to sign in")
                 VrchatPipelineState.isConnected = false
                 fireNotLoggedInNotification()
                 return@launch
             }
 
             // Load friends cache for unfriend detection.
-            // On first start: restore persisted cache from SharedPrefs (saved before app close),
+            // On first start: restore persisted cache from Firestore (saved before app close),
             // then fetch fresh from API and diff to detect any unfriends since last session.
             if (!friendsCacheLoaded) {
-                restoreFriendsCache()  // load persisted cache first
+                restoreFriendsCache()  // load persisted cache from Firestore
                 val previousIds = friendsCache.keys.toSet()
-                loadFriendsCache()     // fetch fresh list from API
-                // Detect unfriends that happened while app was closed
-                val removedIds = previousIds - friendsCache.keys
-                removedIds.forEach { userId ->
-                    // We can't get display name from API anymore, but we had it in the old cache
-                    val displayName = friendsCache[userId] ?: "Someone"
-                    fireEventNotification(
-                        id = "unfriend_offline_$userId".hashCode(),
-                        title = "Unfriended while offline",
-                        text = "$displayName removed you as a friend",
-                        profileUrl = "https://vrchat.com/home/user/$userId",
-                        channelKey = VrchatNotificationPrefs.KEY_NOTIF_UNFRIEND
-                    )
+                val previousNames = friendsCache.toMap()  // snapshot names before overwrite
+                loadFriendsCache()     // fetch fresh list from API (clears + refills friendsCache)
+
+                // Only diff if both old and new lists are non-empty
+                // (skip on first install or cache wipe to avoid mass false notifications)
+                if (previousIds.isNotEmpty() && friendsCache.isNotEmpty()) {
+                    // Half-list guard: if fresh list is less than half the previous,
+                    // treat it as an API pagination error rather than mass unfriending
+                    if (friendsCache.size >= previousIds.size / 2) {
+                        val removedIds = previousIds - friendsCache.keys
+                        removedIds.forEach { userId ->
+                            // Look up name from the old snapshot (friendsCache was already overwritten)
+                            val displayName = previousNames[userId] ?: "Someone"
+                            fireEventNotification(
+                                id = "unfriend_offline_$userId".hashCode(),
+                                title = "Unfriended while offline",
+                                text = "$displayName removed you as a friend",
+                                profileUrl = "https://vrchat.com/home/user/$userId",
+                                channelKey = VrchatNotificationPrefs.KEY_NOTIF_UNFRIEND
+                            )
+                        }
+                    } else {
+                        Log.w(TAG, "Skipping unfriend diff: fresh list (${friendsCache.size}) < half of previous (${previousIds.size})")
+                    }
                 }
             }
 
@@ -271,8 +283,9 @@ class VrchatPipelineService : Service() {
 
                 "friend-delete" -> {
                     val userId = content?.optString("userId") ?: return
-                    // Look up cached display name ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â after deletion the API won't return them
+                    // Look up cached display name - after deletion the API won't return them
                     val displayName = friendsCache.remove(userId) ?: "Someone"
+                    persistFriendsCache()
                     fireEventNotification(
                         id = "unfriend_$userId".hashCode(),
                         title = "Unfriended",
@@ -295,7 +308,7 @@ class VrchatPipelineService : Service() {
                         location == "traveling" -> "traveling between worlds"
                         else -> "VRChat"
                     }
-                    // Cancel any pending offline notification â€” they hopped worlds
+                    // Cancel any pending offline notification -- they hopped worlds
                     pendingOffline.remove(userId)
                     fireEventNotification(
                         id = "online_$userId".hashCode(),
@@ -308,13 +321,13 @@ class VrchatPipelineService : Service() {
 
                 "friend-offline" -> {
                     val userId = content?.optString("userId") ?: return
-                    // Start a 10-minute cooldown â€” if they come back online within that
+                    // Start a 10-minute cooldown -- if they come back online within that
                     // window (world hop) we cancel the notification. Only fire if they
                     // stay offline for the full cooldown period.
                     pendingOffline[userId] = System.currentTimeMillis()
                     serviceScope.launch {
                         delay(OFFLINE_COOLDOWN_MS)
-                        // Still pending? They didn't come back online â€” fire now
+                        // Still pending? They didn't come back online -- fire now
                         if (pendingOffline.containsKey(userId)) {
                             pendingOffline.remove(userId)
                             val displayName = friendsCache[userId] ?: "A friend"
@@ -334,7 +347,7 @@ class VrchatPipelineService : Service() {
                 }
 
                 "friend-location" -> {
-                    // Friend moved to a new world ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â update cache but no notification by default
+                    // Friend moved to a new world - update cache but no notification by default
                     val userId = content?.optString("userId") ?: return
                     val user = content.optJSONObject("user")
                     val displayName = user?.optString("displayName")
@@ -346,7 +359,7 @@ class VrchatPipelineService : Service() {
                 }
 
                 "user-update" -> {
-                    // The logged-in user's profile changed ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â re-sync presence
+                    // The logged-in user's profile changed - re-sync presence
                     syncPresenceToFirestore()
                 }
             }
@@ -422,28 +435,49 @@ class VrchatPipelineService : Service() {
         friends.forEach { friendsCache[it.userId] = it.displayName }
         friendsCacheLoaded = true
 
-        // Also persist to DataStore so service restarts can diff correctly
+        // Persist to Firestore so service restarts can diff correctly
         persistFriendsCache()
         Log.i(TAG, "Loaded ${friendsCache.size} friends into cache")
     }
 
     private fun persistFriendsCache() {
-        // Store as JSON string in SharedPreferences (not encrypted ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â just display names)
-        val prefs = getSharedPreferences("vrca_friends_cache", Context.MODE_PRIVATE)
-        val json = JSONObject()
-        friendsCache.forEach { (id, name) -> json.put(id, name) }
-        prefs.edit().putString("cache", json.toString()).apply()
+        if (deviceHash.isBlank()) return
+        try {
+            val ids = friendsCache.keys.toList()
+            val names = friendsCache.values.toList()
+            FirebaseFirestore.getInstance()
+                .collection("users")
+                .document(deviceHash)
+                .set(mapOf(
+                    "savedFriendIds" to ids,
+                    "savedFriendNames" to names
+                ), SetOptions.merge())
+                .addOnFailureListener { e -> Log.w(TAG, "Failed to persist friends cache", e) }
+        } catch (e: Exception) {
+            Log.w(TAG, "persistFriendsCache error", e)
+        }
     }
 
-    private fun restoreFriendsCache() {
-        val prefs = getSharedPreferences("vrca_friends_cache", Context.MODE_PRIVATE)
-        val raw = prefs.getString("cache", null) ?: return
+    private suspend fun restoreFriendsCache() {
+        if (deviceHash.isBlank()) return
         try {
-            val json = JSONObject(raw)
-            json.keys().forEach { key -> friendsCache[key] = json.optString(key) }
+            val doc = withContext(Dispatchers.IO) {
+                Tasks.await(
+                    FirebaseFirestore.getInstance()
+                        .collection("users")
+                        .document(deviceHash)
+                        .get()
+                )
+            }
+            @Suppress("UNCHECKED_CAST")
+            val ids = doc.get("savedFriendIds") as? List<String> ?: return
+            @Suppress("UNCHECKED_CAST")
+            val names = doc.get("savedFriendNames") as? List<String> ?: return
+            if (ids.size != names.size) return
+            ids.zip(names).forEach { (id, name) -> friendsCache[id] = name }
             friendsCacheLoaded = friendsCache.isNotEmpty()
         } catch (e: Exception) {
-            Log.w(TAG, "Could not restore friends cache", e)
+            Log.w(TAG, "Could not restore friends cache from Firestore", e)
         }
     }
 
@@ -594,7 +628,7 @@ class VrchatPipelineService : Service() {
 }
 
 /**
- * Shared in-memory state for the pipeline ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â lets the UI read connection
+ * Shared in-memory state for the pipeline - lets the UI read connection
  * status and presence data without needing to bind to the service.
  */
 object VrchatPipelineState {
