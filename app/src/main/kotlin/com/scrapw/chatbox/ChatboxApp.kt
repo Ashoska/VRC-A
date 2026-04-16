@@ -180,7 +180,7 @@ fun ChatboxApp() {
     /* -------------------------
        ToS gate
        Must be accepted before the VRChat login is shown.
-       Uses local SharedPreferences â€” no Firestore needed at this stage.
+       Uses local SharedPreferences â€" no Firestore needed at this stage.
        Re-shows if ToS version bumped (checked in ChatboxScreen too for
        returning users who already logged in).
        ------------------------- */

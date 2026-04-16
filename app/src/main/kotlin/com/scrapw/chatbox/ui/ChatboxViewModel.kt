@@ -1759,7 +1759,7 @@ class ChatboxViewModel(
             (safeTitle.isBlank() || safeArtist.isBlank())
 
         // Ad suppression: if the special window is active and it's not a DJ segment,
-        // always suppress all content â€” title, artist, progress bar, timestamps.
+        // always suppress all content â€" title, artist, progress bar, timestamps.
         // This catches every Spotify ad variant regardless of the title text.
         if (nowPlayingSpecialActive && !isSpotifyDj) {
             return listOf("Ad $adSegmentCount")

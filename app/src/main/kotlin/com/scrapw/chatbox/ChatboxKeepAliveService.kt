@@ -63,7 +63,7 @@ class ChatboxKeepAliveService : Service() {
             }
         }
 
-        // Small periodic loop to keep the process “active” under some OEMs.
+        // Small periodic loop to keep the process "active" under some OEMs.
         loopJob?.cancel()
         loopJob = scope.launch {
             while (true) {
