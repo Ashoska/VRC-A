@@ -873,7 +873,7 @@ private fun UsersTab(
                                 maxLines = 1)
                         }
                         if (u.vrchatWorld.isNotBlank()) {
-                            Text("Ã°Å¸â€œÂ ${u.vrchatWorld}",
+                            Text("📍 ${u.vrchatWorld}",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.primary,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -927,7 +927,7 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
             .addOnFailureListener { e -> setError("Write failed: ${e.message}") }
     }
 
-    // â"€â"€ VRChat â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+    // ── VRChat ──────────────────────────────────────────────────────
     ElevatedCard {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("VRChat", style = MaterialTheme.typography.titleSmall)
@@ -936,7 +936,7 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             } else {
                 val dot = when (d.vrchatStatus) {
-                    "active", "join me" -> "ðŸŸ¢"; "ask me" -> "ðŸŸ "; "busy" -> "ðŸ"´"; else -> "âš«"
+                    "active", "join me" -> "🟢"; "ask me" -> "🟠"; "busy" -> "🔴"; else -> "⚫"
                 }
                 Text("$dot ${d.vrchatDisplayName.ifBlank { d.vrchatUserId }}",
                     style = MaterialTheme.typography.bodyMedium)
@@ -946,7 +946,7 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
                 if (d.vrchatWorld.isNotBlank()) {
                     val cnt = if (d.vrchatCapacity > 0) "${d.vrchatPlayerCount}/${d.vrchatCapacity}"
                               else "${d.vrchatPlayerCount}"
-                    Text("ðŸ" ${d.vrchatWorld} ($cnt)", style = MaterialTheme.typography.bodySmall)
+                    Text("📍 ${d.vrchatWorld} ($cnt)", style = MaterialTheme.typography.bodySmall)
                 }
                 Text("ID: ${d.vrchatUserId}", fontFamily = FontFamily.Monospace,
                     style = MaterialTheme.typography.bodySmall,
@@ -959,7 +959,7 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
         }
     }
 
-    // â"€â"€ Live Output + Feature Toggles â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+    // ── Live Output + Feature Toggles ───────────────────────────────
     ElevatedCard {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Live Chatbox Output", style = MaterialTheme.typography.titleSmall)
@@ -981,14 +981,14 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
                     label = { Text("Time", style = MaterialTheme.typography.labelSmall) })
             }
             if (d.nowPlayingDetected) {
-                Text("ðŸŽµ ${d.nowPlayingTitle.ifBlank { "?" }} â€" ${d.nowPlayingArtist.ifBlank { "?" }} " +
-                    if (d.nowPlayingIsPlaying) "â–¶" else "â¸",
+                Text("🎵 ${d.nowPlayingTitle.ifBlank { "?" }} — ${d.nowPlayingArtist.ifBlank { "?" }} " +
+                    if (d.nowPlayingIsPlaying) "▶" else "⏸",
                     style = MaterialTheme.typography.bodySmall)
             }
         }
     }
 
-    // â"€â"€ Pinned Message â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+    // ── Pinned Message ───────────────────────────────────────────────
     ElevatedCard {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Pinned Message", style = MaterialTheme.typography.titleSmall)
@@ -1029,7 +1029,7 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
         }
     }
 
-    // â"€â"€ Cycle â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+    // ── Cycle ────────────────────────────────────────────────────────
     ElevatedCard {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
@@ -1084,7 +1084,7 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
         }
     }
 
-    // â"€â"€ Network â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+    // ── Network ──────────────────────────────────────────────────────
     ElevatedCard {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("Network", style = MaterialTheme.typography.titleSmall)
@@ -1094,7 +1094,7 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
                 var addrEdit by remember(addr) { mutableStateOf(addr) }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (slot == d.activeIpSlot) "â–¶" else "  ",
+                    Text(if (slot == d.activeIpSlot) "▶" else "  ",
                         color = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.width(16.dp))
                     Text("[$name]", style = MaterialTheme.typography.labelSmall,
@@ -1115,7 +1115,7 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
         }
     }
 
-    // â"€â"€ App Info â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+    // ── App Info ─────────────────────────────────────────────────────
     ElevatedCard {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("App", style = MaterialTheme.typography.titleSmall)
@@ -1130,7 +1130,7 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
         }
     }
 
-    // â"€â"€ Moderation flags â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+    // ── Moderation flags ─────────────────────────────────────────────
     if (d.warnReason.isNotBlank() || d.banReason.isNotBlank()) {
         Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
