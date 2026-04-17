@@ -2497,6 +2497,14 @@ private fun VrchatStatusPage(
             title = "Discord Rich Presence",
             subtitle = "Show VRChat activity on your Discord profile."
         ) {
+            Text(
+                "This works by simulating what VRChat's desktop client sends to Discord. " +
+                "Your token is only used for the Discord gateway connection and never leaves your device otherwise. " +
+                "Use at your own discretion.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(4.dp))
             ToggleRow("Enable Discord RPC", discordEnabled) { enabled ->
                 scope.launch {
                     repo.saveDiscordRpcEnabled(enabled)
@@ -2526,7 +2534,7 @@ private fun VrchatStatusPage(
                 }
             )
             Text(
-                "Your Discord token is stored securely on-device and only sent to Discord's servers.",
+                "Your token is stored securely on-device. Never share it with anyone.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

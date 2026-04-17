@@ -87,8 +87,8 @@ fun IpField(
         focusManager.clearFocus()
     }
 
-    fun switchToSlot(slot: Int) {
-        val addr = addresses.getOrElse(slot - 1) { "" }
+    fun switchToSlot(slot: Int, overrideAddr: String? = null) {
+        val addr = overrideAddr ?: addresses.getOrElse(slot - 1) { "" }
         if (addr.isBlank()) return
         scope.launch { repo.saveActiveIpSlot(slot) }
         chatboxViewModel.ipAddressApply(addr)
@@ -227,7 +227,7 @@ fun IpField(
                                     Button(
                                         onClick = {
                                             saveSlot(slot, nameVal, addrVal)
-                                            if (addrVal.trim().isNotBlank()) switchToSlot(slot)
+                                            if (addrVal.trim().isNotBlank()) switchToSlot(slot, addrVal.trim())
                                         },
                                         modifier = Modifier.weight(1f),
                                         enabled = addrVal.trim().isNotBlank()

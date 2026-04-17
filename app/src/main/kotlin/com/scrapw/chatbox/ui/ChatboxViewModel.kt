@@ -335,6 +335,8 @@ class ChatboxViewModel(
         // Heartbeat loop: start once, always writes online status + timestamp
         if (selfSyncJob != null) return
         selfSyncJob = viewModelScope.launch {
+            performHeartbeat()
+            performSelfSync()
             while (true) {
                 delay(SELF_SYNC_HEARTBEAT_MS)
                 performHeartbeat()
@@ -584,6 +586,31 @@ class ChatboxViewModel(
             snap.getBoolean("timeEnabled")?.let { remote ->
                 if (remote != timeEnabled) {
                     userPreferencesRepository.saveTimeEnabled(remote)
+                }
+            }
+            // Cycle presets (admin can edit preset contents + names)
+            val presetSavers = listOf<suspend (String, Int, String?) -> Unit>(
+                userPreferencesRepository::saveCyclePreset1,
+                userPreferencesRepository::saveCyclePreset2,
+                userPreferencesRepository::saveCyclePreset3,
+                userPreferencesRepository::saveCyclePreset4,
+                userPreferencesRepository::saveCyclePreset5
+            )
+            for (i in 1..5) {
+                val msgKey = "cyclePreset$i"
+                val nameKey = "cyclePreset${i}Name"
+                val remoteMsg = snap.getString(msgKey)
+                val remoteName = snap.getString(nameKey)
+                val currentMsg = cyclePresetMessages.getOrNull(i - 1) ?: ""
+                val currentName = cyclePresetNames.getOrElse(i - 1) { "Preset $i" }
+                if (remoteMsg != null && remoteMsg.trim() != currentMsg.trim()) {
+                    val interval = cyclePresetIntervals.getOrElse(i - 1) { 10 }
+                    val nameToSave = if (remoteName != null && remoteName.trim() != currentName.trim()) remoteName.trim() else null
+                    presetSavers[i - 1](remoteMsg.trim(), interval, nameToSave)
+                } else if (remoteName != null && remoteName.trim() != currentName.trim()) {
+                    val msg = currentMsg
+                    val interval = cyclePresetIntervals.getOrElse(i - 1) { 10 }
+                    presetSavers[i - 1](msg, interval, remoteName.trim())
                 }
             }
         }

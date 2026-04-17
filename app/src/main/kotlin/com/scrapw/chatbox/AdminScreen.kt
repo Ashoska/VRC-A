@@ -478,10 +478,6 @@ private data class UserDetail(
     val warnReason: String,
     val banReason: String,
     // Network
-    val ip1Name: String, val ip1Address: String,
-    val ip2Name: String, val ip2Address: String,
-    val ip3Name: String, val ip3Address: String,
-    val activeIpSlot: Long,
     // App info
     val versionName: String,
     val versionCode: Long,
@@ -620,10 +616,6 @@ private fun UsersTab(
                     nowPlayingTitle = s("nowPlayingTitle"), nowPlayingArtist = s("nowPlayingArtist"),
                     combinedPreviewText = s("combinedPreviewText"),
                     warnReason = s("warnReason"), banReason = s("banReason"),
-                    ip1Name = s("ip1Name").ifBlank { "Home" }, ip1Address = s("ip1Address"),
-                    ip2Name = s("ip2Name").ifBlank { "Hotspot" }, ip2Address = s("ip2Address"),
-                    ip3Name = s("ip3Name").ifBlank { "Other" }, ip3Address = s("ip3Address"),
-                    activeIpSlot = l("activeIpSlot").let { if (it == 0L) 1L else it },
                     versionName = s("versionName"), versionCode = l("versionCode"), appId = s("appId"),
                     adminBuild = b("adminBuild"),
                     vrchatUserId = s("vrchatUserId"), vrchatDisplayName = s("vrchatDisplayName"),
@@ -1127,37 +1119,6 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
-                }
-            }
-        }
-    }
-
-    // ── Network ──────────────────────────────────────────────────────
-    ElevatedCard {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("Network", style = MaterialTheme.typography.titleSmall)
-            listOf(Triple(1L, d.ip1Name, d.ip1Address),
-                   Triple(2L, d.ip2Name, d.ip2Address),
-                   Triple(3L, d.ip3Name, d.ip3Address)).forEach { (slot, name, addr) ->
-                var addrEdit by remember(addr) { mutableStateOf(addr) }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (slot == d.activeIpSlot) "▶" else "  ",
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.width(16.dp))
-                    Text("[$name]", style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.width(72.dp))
-                    OutlinedTextField(value = addrEdit, onValueChange = { addrEdit = it },
-                        modifier = Modifier.weight(1f), singleLine = true, label = { Text("IP") })
-                    if (addrEdit.trim() != addr)
-                        IconButton(onClick = { writeField("ip${slot}Address", addrEdit.trim()) }) {
-                            Icon(Icons.Filled.Check, "Save", modifier = Modifier.size(18.dp))
-                        }
-                    if (slot != d.activeIpSlot)
-                        OutlinedButton(onClick = { writeField("activeIpSlot", slot.toInt()) },
-                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)) {
-                            Text("Set", style = MaterialTheme.typography.labelSmall)
-                        }
                 }
             }
         }
