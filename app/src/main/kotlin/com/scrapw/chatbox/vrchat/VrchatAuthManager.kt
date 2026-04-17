@@ -334,29 +334,33 @@ object VrchatAuthManager {
 
     suspend fun fetchFriends(context: Context): List<VrcFriend> = withContext(Dispatchers.IO) {
         val cookieHeader = getCookieHeader(context) ?: return@withContext emptyList()
-        val friends = mutableListOf<VrcFriend>()
-        var offset = 0
+        val seen = mutableMapOf<String, String>()
         val pageSize = 100
-        try {
-            while (true) {
-                val (code, body, _) = get(
-                    "$BASE/auth/user/friends?offset=$offset&n=$pageSize&offline=false",
-                    null, cookieHeader
-                )
-                if (code != 200) break
-                val arr = org.json.JSONArray(body)
-                if (arr.length() == 0) break
-                for (i in 0 until arr.length()) {
-                    val obj = arr.getJSONObject(i)
-                    friends += VrcFriend(obj.optString("id"), obj.optString("displayName"))
+        for (offline in listOf(false, true)) {
+            var offset = 0
+            try {
+                while (true) {
+                    val (code, body, _) = get(
+                        "$BASE/auth/user/friends?offset=$offset&n=$pageSize&offline=$offline",
+                        null, cookieHeader
+                    )
+                    if (code != 200) break
+                    val arr = org.json.JSONArray(body)
+                    if (arr.length() == 0) break
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.getJSONObject(i)
+                        val id = obj.optString("id")
+                        val name = obj.optString("displayName")
+                        if (id.isNotBlank()) seen[id] = name
+                    }
+                    if (arr.length() < pageSize) break
+                    offset += pageSize
                 }
-                if (arr.length() < pageSize) break
-                offset += pageSize
+            } catch (e: Exception) {
+                Log.e(TAG, "fetchFriends(offline=$offline) failed", e)
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "fetchFriends failed", e)
         }
-        friends
+        seen.map { VrcFriend(it.key, it.value) }
     }
 
     // ------------------------------------------------------------------

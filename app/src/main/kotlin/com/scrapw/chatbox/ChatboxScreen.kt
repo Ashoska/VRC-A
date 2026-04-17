@@ -2395,11 +2395,14 @@ private fun VrchatStatusPage(
         // Presence card
         if (presence != null && isLinked.value) {
             // Use location-based online detection (not status field)
-            val statusLabel = when (presence.status) {
-                "active", "join me" -> "[online]"
-                "ask me"            -> "[ask me]"
-                "busy"              -> "[busy]"
-                else                -> "[offline]"
+            val statusLabel = if (presence.isOnlineInVRChat) {
+                when (presence.status) {
+                    "ask me" -> "[ask me]"
+                    "busy"   -> "[busy]"
+                    else     -> "[online]"
+                }
+            } else {
+                "[offline]"
             }
             val onlineLabel = if (presence.isOnlineInVRChat) "Online in VRChat" else "Not in VRChat"
             ElevatedCard {
@@ -2477,13 +2480,13 @@ private fun VrchatStatusPage(
 
         // -- VRChat Notification Toggles --
         val repo = vm.userPreferencesRepository
-        val friendRequest by repo.notifFriendRequest.collectAsState(initial = true)
-        val invite by repo.notifInvite.collectAsState(initial = true)
-        val friendOnline by repo.notifFriendOnline.collectAsState(initial = true)
+        val friendRequest by repo.notifFriendRequest.collectAsState(initial = false)
+        val invite by repo.notifInvite.collectAsState(initial = false)
+        val friendOnline by repo.notifFriendOnline.collectAsState(initial = false)
         val friendOffline by repo.notifFriendOffline.collectAsState(initial = false)
-        val unfriend by repo.notifUnfriend.collectAsState(initial = true)
-        val groupEvent by repo.notifGroupEvent.collectAsState(initial = true)
-        val groupAnnouncement by repo.notifGroupAnnouncement.collectAsState(initial = true)
+        val unfriend by repo.notifUnfriend.collectAsState(initial = false)
+        val groupEvent by repo.notifGroupEvent.collectAsState(initial = false)
+        val groupAnnouncement by repo.notifGroupAnnouncement.collectAsState(initial = false)
 
         SectionCard(
             title = "VRChat Notifications",

@@ -83,14 +83,13 @@ class VrchatPipelineService : Service() {
     private var webSocket: WebSocket? = null
     private var reconnectAttempt = 0
 
-    // Local friends cache for unfriend detection.
-    // Keyed by userId -> displayName (snapshot at connect time).
     private val friendsCache = mutableMapOf<String, String>()
-    // Pending offline notifications -- userId -> time they went offline
-    // We wait 10 minutes before notifying in case they're just hopping worlds
     private val pendingOffline = mutableMapOf<String, Long>()
-    private val OFFLINE_COOLDOWN_MS = 10 * 60 * 1000L  // 10 minutes
+    private val OFFLINE_COOLDOWN_MS = 10 * 60 * 1000L
     private var friendsCacheLoaded = false
+    private var friendsFetchCount = 0
+    private var lastUnfriendDiffMs = 0L
+    private var pipelineConnectedAtMs = 0L
 
     private val okClient by lazy {
         OkHttpClient.Builder()
@@ -149,35 +148,22 @@ class VrchatPipelineService : Service() {
                 return@launch
             }
 
-            // Load friends cache for unfriend detection.
-            // On first start: restore persisted cache from Firestore (saved before app close),
-            // then fetch fresh from API and diff to detect any unfriends since last session.
             if (!friendsCacheLoaded) {
-                restoreFriendsCache()  // load persisted cache from Firestore
+                restoreFriendsCache()
                 val previousIds = friendsCache.keys.toSet()
-                val previousNames = friendsCache.toMap()  // snapshot names before overwrite
-                loadFriendsCache()     // fetch fresh list from API (clears + refills friendsCache)
+                val previousNames = friendsCache.toMap()
+                loadFriendsCache()
+                friendsFetchCount++
 
-                // Only diff if both old and new lists are non-empty
-                // (skip on first install or cache wipe to avoid mass false notifications)
-                if (previousIds.isNotEmpty() && friendsCache.isNotEmpty()) {
-                    // Half-list guard: if fresh list is less than half the previous,
-                    // treat it as an API pagination error rather than mass unfriending
-                    if (friendsCache.size >= previousIds.size / 2) {
-                        val removedIds = previousIds - friendsCache.keys
-                        removedIds.forEach { userId ->
-                            // Look up name from the old snapshot (friendsCache was already overwritten)
-                            val displayName = previousNames[userId] ?: "Someone"
-                            fireEventNotification(
-                                id = "unfriend_offline_$userId".hashCode(),
-                                title = "Unfriended while offline",
-                                text = "$displayName removed you as a friend",
-                                profileUrl = "https://vrchat.com/home/user/$userId",
-                                channelKey = VrchatNotificationPrefs.KEY_NOTIF_UNFRIEND
-                            )
-                        }
-                    } else {
-                        Log.w(TAG, "Skipping unfriend diff: fresh list (${friendsCache.size}) < half of previous (${previousIds.size})")
+                // Schedule a delayed second fetch + diff after 60s grace period.
+                // This avoids false positives from incomplete API results on first connect.
+                if (previousIds.isNotEmpty()) {
+                    serviceScope.launch {
+                        delay(60_000)
+                        val snapshotBeforeRefresh = friendsCache.toMap()
+                        loadFriendsCache()
+                        friendsFetchCount++
+                        diffFriendsCache(previousIds, previousNames)
                     }
                 }
             }
@@ -458,6 +444,35 @@ class VrchatPipelineService : Service() {
         }
     }
 
+    private suspend fun diffFriendsCache(
+        previousIds: Set<String>,
+        previousNames: Map<String, String>
+    ) {
+        val now = System.currentTimeMillis()
+        if (now - lastUnfriendDiffMs < 5 * 60 * 1000L) return
+        if (previousIds.isEmpty() || friendsCache.isEmpty()) return
+        // Guard: if fresh list is less than 80% of previous, assume API pagination error
+        if (friendsCache.size < previousIds.size * 4 / 5) {
+            Log.w(TAG, "Skipping unfriend diff: fresh list (${friendsCache.size}) < 80% of previous (${previousIds.size})")
+            return
+        }
+        lastUnfriendDiffMs = now
+        val removedIds = previousIds - friendsCache.keys
+        removedIds.forEach { userId ->
+            val displayName = previousNames[userId] ?: "Someone"
+            fireEventNotification(
+                id = "unfriend_offline_$userId".hashCode(),
+                title = "Unfriended while offline",
+                text = "$displayName removed you as a friend",
+                profileUrl = "https://vrchat.com/home/user/$userId",
+                channelKey = VrchatNotificationPrefs.KEY_NOTIF_UNFRIEND
+            )
+        }
+        if (removedIds.isNotEmpty()) {
+            Log.i(TAG, "Unfriend diff: ${removedIds.size} removed (prev=${previousIds.size}, now=${friendsCache.size})")
+        }
+    }
+
     private suspend fun restoreFriendsCache() {
         if (deviceHash.isBlank()) return
         try {
@@ -530,7 +545,7 @@ class VrchatPipelineService : Service() {
     ) {
         // Check if user has this notification type enabled
         val prefs = dataStore.data.first()
-        val enabled = prefs[booleanPreferencesKey(channelKey)] ?: true
+        val enabled = prefs[booleanPreferencesKey(channelKey)] ?: false
         if (!enabled) return
 
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager

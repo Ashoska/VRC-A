@@ -923,7 +923,7 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
     fun writeField(key: String, value: Any) {
         if (docId.isBlank()) return
         db.collection("users").document(docId)
-            .update(key, value)
+            .set(mapOf(key to value), SetOptions.merge())
             .addOnFailureListener { e -> setError("Write failed: ${e.message}") }
     }
 
