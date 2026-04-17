@@ -2355,10 +2355,10 @@ private fun VrchatStatusPage(
         }
 
         // Presence card
-        if (presence != null && isLinked.value) {
-            // Use location-based online detection (not status field)
-            val statusLabel = if (presence.isOnlineInVRChat) {
-                when (presence.status) {
+        val p = presence
+        if (p != null && isLinked.value) {
+            val statusLabel = if (p.isOnlineInVRChat) {
+                when (p.status) {
                     "ask me" -> "[ask me]"
                     "busy"   -> "[busy]"
                     else     -> "[online]"
@@ -2366,7 +2366,7 @@ private fun VrchatStatusPage(
             } else {
                 "[offline]"
             }
-            val onlineLabel = if (presence.isOnlineInVRChat) "Online in VRChat" else "Not in VRChat"
+            val onlineLabel = if (p.isOnlineInVRChat) "Online in VRChat" else "Not in VRChat"
             ElevatedCard {
                 Column(
                     Modifier.padding(14.dp),
@@ -2378,39 +2378,39 @@ private fun VrchatStatusPage(
                         Text(statusLabel)
                         Column {
                             Text(
-                                presence.displayName,
+                                p.displayName,
                                 style = MaterialTheme.typography.bodyMedium
                             )
                             Text(
                                 onlineLabel,
                                 style = MaterialTheme.typography.bodySmall,
-                                color = if (presence.isOnlineInVRChat) MaterialTheme.colorScheme.primary
+                                color = if (p.isOnlineInVRChat) MaterialTheme.colorScheme.primary
                                         else MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                            if (presence.statusDescription.isNotBlank())
+                            if (p.statusDescription.isNotBlank())
                                 Text(
-                                    presence.statusDescription,
+                                    p.statusDescription,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                         }
                     }
                     Divider()
-                    if (presence.worldName.isNotBlank()) {
+                    if (p.worldName.isNotBlank()) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("World:", style = MaterialTheme.typography.bodySmall)
                             Column {
-                                Text(presence.worldName, style = MaterialTheme.typography.bodyMedium)
-                                val count = if (presence.instanceCapacity > 0)
-                                    "${presence.instancePlayerCount} / ${presence.instanceCapacity}"
-                                else "${presence.instancePlayerCount} players"
+                                Text(p.worldName, style = MaterialTheme.typography.bodyMedium)
+                                val count = if (p.instanceCapacity > 0)
+                                    "${p.instancePlayerCount} / ${p.instanceCapacity}"
+                                else "${p.instancePlayerCount} players"
                                 Text(count, style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
                     } else {
                         Text(
-                            when (presence.location) {
+                            when (p.location) {
                                 "offline"   -> "Offline"
                                 "private"   -> "In a private world"
                                 "traveling" -> "Traveling between worlds..."
@@ -2420,7 +2420,7 @@ private fun VrchatStatusPage(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                    val platform = when (presence.platform) {
+                    val platform = when (p.platform) {
                         "standalonewindows" -> "Desktop"
                         "android"           -> "Android/Quest"
                         "ios"               -> "iOS"
@@ -2429,15 +2429,15 @@ private fun VrchatStatusPage(
                     if (platform.isNotBlank())
                         Text(platform, style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (presence.userId.isNotBlank()) {
+                    if (p.userId.isNotBlank()) {
                         Divider()
                         Text(
-                            text = presence.userId,
+                            text = p.userId,
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.clickable {
                                 val intent = Intent(Intent.ACTION_VIEW,
-                                    Uri.parse("https://vrchat.com/home/user/${presence.userId}"))
+                                    Uri.parse("https://vrchat.com/home/user/${p.userId}"))
                                 ctx.startActivity(intent)
                             }
                         )
