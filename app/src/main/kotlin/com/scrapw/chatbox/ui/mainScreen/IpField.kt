@@ -48,22 +48,23 @@ fun IpField(
 
     val activeAddress = addresses.getOrElse(activeSlot - 1) { "" }
 
-    // Edit buffer - initialised empty, synced via LaunchedEffect so first-open works
-    var editBuffer by remember { mutableStateOf("") }
-    var hasInitialised by remember { mutableStateOf(false) }
-
-    // Sync buffer when slot changes or address loads for the first time
-    LaunchedEffect(activeSlot, activeAddress) {
-        if (!hasInitialised || (editBuffer.isBlank() && activeAddress.isNotBlank())) {
-            editBuffer = activeAddress
-            hasInitialised = true
+    // Auto-migrate: if active slot is empty but the ViewModel has a saved IP, populate slot 1
+    val uiState by chatboxViewModel.messengerUiState.collectAsState()
+    LaunchedEffect(ip1Address, uiState.ipAddress) {
+        if (ip1Address.isBlank() && uiState.ipAddress.isNotBlank() && uiState.ipAddress != "127.0.0.1") {
+            repo.saveIpSlot(1, "Home", uiState.ipAddress)
         }
     }
-    // Also sync when the user navigates away and back (recomposition with new address)
-    LaunchedEffect(activeAddress) {
-        if (editBuffer.isBlank() && activeAddress.isNotBlank()) {
-            editBuffer = activeAddress
-        }
+
+    val resolvedAddress = activeAddress.ifBlank {
+        uiState.ipAddress.takeIf { it != "127.0.0.1" } ?: ""
+    }
+
+    // Edit buffer - always syncs from resolved address when slot changes
+    var editBuffer by remember { mutableStateOf(resolvedAddress) }
+
+    LaunchedEffect(activeSlot, resolvedAddress) {
+        editBuffer = resolvedAddress
     }
 
     var expanded by remember { mutableStateOf(false) }

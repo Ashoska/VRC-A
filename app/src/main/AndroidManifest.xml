@@ -54,6 +54,12 @@
             android:foregroundServiceType="dataSync"
             android:stopWithTask="false" />
 
+        <!-- Discord Rich Presence service -->
+        <service
+            android:name=".vrchat.DiscordRpcService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
         <!-- Boot receiver: restarts pipeline after device reboot -->
         <receiver
             android:name=".vrchat.BootReceiver"

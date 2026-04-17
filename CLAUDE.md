@@ -46,12 +46,14 @@ Display name embedded in UI strings: "Ashoska Mitsu Sisko".
 - **VrchatAuthManager**: Singleton handling VRChat API auth (Basic auth + 2FA), cookie storage via EncryptedSharedPreferences, presence fetching, and friends list retrieval
 - **VrchatPipelineService**: Foreground service with OkHttp WebSocket to `wss://pipeline.vrchat.cloud`. Handles real-time events (friend online/offline, unfriend, invites, group events), syncs VRChat presence to Firestore, and manages friends cache
 - **Friends cache**: Persisted to Firestore (`users/{deviceHash}` fields: `savedFriendIds`, `savedFriendNames`) for cross-session unfriend detection. Includes half-list guard to prevent mass false notifications on API pagination errors or first install
-- **VrchatPipelineState**: Shared in-memory singleton for cross-component state (connection status, presence data)
+- **VrchatPipelineState**: Shared in-memory singleton using `MutableStateFlow` for reactive cross-component state (connection status, presence data). Compose UI observes via `collectAsState()`.
+- **DiscordRpcService**: Foreground service connecting to Discord Gateway WebSocket (`wss://gateway.discord.gg`). Sends VRChat Rich Presence (world name, player count, elapsed time) mimicking VRChat desktop's Discord integration. Requires user's Discord token stored in DataStore. Auto-starts when VRChat pipeline connects if enabled.
+- **IpField**: Multi-slot IP field component with 3 named slots (Home/Hotspot/Other). Supports slot switching, per-slot editing, and auto-migration from legacy single IP key.
 
 ### Firestore Schema (users/{deviceHash})
 Key fields written by the app:
-- `isOnlineInApp` (bool): Set to `true` by self-sync loop, `false` on ViewModel cleanup
-- `lastSeenAt` (timestamp): Updated every ~10s by self-sync as a heartbeat
+- `isOnlineInApp` (bool): Set to `true` by dedicated heartbeat write, `false` on ViewModel cleanup
+- `lastSeenAt` (timestamp): Updated every ~8s by heartbeat (separate from data sync)
 - `savedFriendIds` / `savedFriendNames` (string arrays): Friends cache for unfriend detection
 - `afkEnabled`, `cycleEnabled`, `spotifyEnabled`, `timeEnabled`: Feature toggles (admin-editable)
 - `warned`, `banned`, `warnReason`, `banReason`: Moderation flags (read by public app via snapshot listener)
@@ -63,6 +65,17 @@ Key fields written by the app:
 - Bottom nav: Home, Automations, Music, VRChat (4 items)
 - Settings: Full page accessed via gear icon in top app bar. Contains Permissions, About, Help, and collapsible Debug section
 - Admin: Full page accessed via gavel icon in top app bar (admin build only)
+
+### Firestore Sync Architecture
+- **Event-driven sync**: Data changes trigger an immediate debounced sync (500ms) to Firestore
+- **Heartbeat**: Separate lightweight write of `isOnlineInApp` + `lastSeenAt` every 8s, always fires regardless of data changes
+- **Admin reads**: Snapshot listeners provide real-time updates from Firestore (no polling)
+
+### NowPlaying
+- Ad/DJ detection restricted to Spotify only (`com.spotify.music`) to prevent false positives on regular songs
+- Special window reduced to 10s (from 30s) for faster recovery after ads
+- Motion-based play detection with YouTube-specific stall tracking
+- Crystal progress bar (preset 3) uses filled diamonds (U+25C6) before the marker position
 
 ### Remote Config (Admin Edits)
 The public app's moderation snapshot listener on `users/{deviceHash}` also picks up admin-editable fields (feature toggles, messages, intervals) and applies them in real-time via DataStore flow collectors.

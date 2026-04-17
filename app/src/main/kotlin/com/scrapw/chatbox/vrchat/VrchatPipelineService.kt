@@ -25,6 +25,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -90,6 +93,7 @@ class VrchatPipelineService : Service() {
     private var friendsFetchCount = 0
     private var lastUnfriendDiffMs = 0L
     private var pipelineConnectedAtMs = 0L
+    private var presenceRefreshJob: Job? = null
 
     private val okClient by lazy {
         OkHttpClient.Builder()
@@ -171,7 +175,22 @@ class VrchatPipelineService : Service() {
             // Sync initial presence to Firestore
             syncPresenceToFirestore()
 
+            startPresenceRefreshLoop()
             connectWebSocket()
+        }
+    }
+
+    private fun startPresenceRefreshLoop() {
+        presenceRefreshJob?.cancel()
+        presenceRefreshJob = serviceScope.launch {
+            while (true) {
+                delay(30_000)
+                try {
+                    syncPresenceToFirestore()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Presence refresh failed", e)
+                }
+            }
         }
     }
 
@@ -198,9 +217,25 @@ class VrchatPipelineService : Service() {
                     this@VrchatPipelineService.webSocket = webSocket
                     reconnectAttempt = 0
                     VrchatPipelineState.isConnected = true
+                    pipelineConnectedAtMs = System.currentTimeMillis()
                     updatePersistentNotif(
                         "Connected as ${VrchatAuthManager.getStoredDisplayName(this@VrchatPipelineService) ?: "VRChat user"}"
                     )
+                    // Auto-start Discord RPC if enabled
+                    serviceScope.launch {
+                        try {
+                            val prefs = dataStore.data.first()
+                            val rpcEnabled = prefs[booleanPreferencesKey("discord_rpc_enabled")] ?: false
+                            val rpcToken = prefs[androidx.datastore.preferences.core.stringPreferencesKey("discord_token")] ?: ""
+                            if (rpcEnabled && rpcToken.isNotBlank() && !DiscordRpcService.isRunning) {
+                                val rpcIntent = Intent(this@VrchatPipelineService, DiscordRpcService::class.java)
+                                rpcIntent.action = DiscordRpcService.ACTION_START
+                                startForegroundService(rpcIntent)
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Could not auto-start Discord RPC", e)
+                        }
+                    }
                 }
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
@@ -645,8 +680,18 @@ class VrchatPipelineService : Service() {
 /**
  * Shared in-memory state for the pipeline - lets the UI read connection
  * status and presence data without needing to bind to the service.
+ * Uses StateFlow so Compose UI automatically recomposes on changes.
  */
 object VrchatPipelineState {
-    var isConnected: Boolean = false
-    var presence: VrchatAuthManager.VrcUserPresence? = null
+    private val _isConnected = MutableStateFlow(false)
+    val isConnectedFlow: StateFlow<Boolean> = _isConnected.asStateFlow()
+    var isConnected: Boolean
+        get() = _isConnected.value
+        set(value) { _isConnected.value = value }
+
+    private val _presence = MutableStateFlow<VrchatAuthManager.VrcUserPresence?>(null)
+    val presenceFlow: StateFlow<VrchatAuthManager.VrcUserPresence?> = _presence.asStateFlow()
+    var presence: VrchatAuthManager.VrcUserPresence?
+        get() = _presence.value
+        set(value) { _presence.value = value }
 }

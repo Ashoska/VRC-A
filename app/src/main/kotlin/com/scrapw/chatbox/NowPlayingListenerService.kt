@@ -194,25 +194,21 @@ class NowPlayingListenerService : NotificationListenerService() {
     private enum class SpecialKind { DJ, AD }
 
     private fun classifySpecial(pkg: String, title: String, artist: String): SpecialKind? {
+        if (pkg != "com.spotify.music") return null
 
         val t = title.trim().lowercase()
         val a = artist.trim().lowercase()
 
-        // Common Spotify ad / dj patterns.
-        // Ads often show "Advertisement" (or similar) with blank/Spotify artist.
         val looksLikeAd =
-            t.contains("advert") ||
+            t == "advertisement" ||
                 t == "ad" ||
-                t.contains("spotify") && t.contains("ad") ||
-                (t.contains("advertisement") || t.contains("sponsored"))
+                t == "spotify ad" ||
+                (t.startsWith("advert") && (a.isBlank() || a.contains("spotify")))
 
-        // Spotify DJ often shows "DJ" / "Spotify DJ" / voice segments.
         val looksLikeDj =
             t == "dj" ||
-                t.contains("spotify dj") ||
-                t.startsWith("dj ") ||
-                t.contains(" dj ") ||
-                (t.contains("dj") && (a.contains("spotify") || a.isBlank()))
+                t == "spotify dj" ||
+                (t == "dj" && a.isBlank())
 
         return when {
             looksLikeAd -> SpecialKind.AD
@@ -268,8 +264,7 @@ class NowPlayingListenerService : NotificationListenerService() {
                 }
             }
 
-            // Hold special window so UI never shows Paused flicker during DJ/ads.
-            markSpecialWindow(pkg, 30000L)
+            markSpecialWindow(pkg, 10_000L)
 
             // Start watchdog polling to catch the first real track after the segment ends.
             if (controller != null) startPollForRealTrack(pkg, controller)

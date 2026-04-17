@@ -948,9 +948,15 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
                               else "${d.vrchatPlayerCount}"
                     Text("📍 ${d.vrchatWorld} ($cnt)", style = MaterialTheme.typography.bodySmall)
                 }
+                val ctx = androidx.compose.ui.platform.LocalContext.current
                 Text("ID: ${d.vrchatUserId}", fontFamily = FontFamily.Monospace,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.clickable {
+                        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW,
+                            android.net.Uri.parse("https://vrchat.com/home/user/${d.vrchatUserId}"))
+                        ctx.startActivity(intent)
+                    })
                 if (d.vrchatLastSyncAt != null)
                     Text("Synced ${relativeTime(d.vrchatLastSyncAt, System.currentTimeMillis())}",
                         style = MaterialTheme.typography.labelSmall,
@@ -981,9 +987,20 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
                     label = { Text("Time", style = MaterialTheme.typography.labelSmall) })
             }
             if (d.nowPlayingDetected) {
+                val musicCtx = androidx.compose.ui.platform.LocalContext.current
+                val musicQuery = "${d.nowPlayingTitle} ${d.nowPlayingArtist}".trim()
                 Text("🎵 ${d.nowPlayingTitle.ifBlank { "?" }} — ${d.nowPlayingArtist.ifBlank { "?" }} " +
                     if (d.nowPlayingIsPlaying) "▶" else "⏸",
-                    style = MaterialTheme.typography.bodySmall)
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.clickable {
+                        if (musicQuery.isNotBlank()) {
+                            val searchUrl = "https://open.spotify.com/search/${android.net.Uri.encode(musicQuery)}"
+                            val intent = android.content.Intent(android.content.Intent.ACTION_VIEW,
+                                android.net.Uri.parse(searchUrl))
+                            musicCtx.startActivity(intent)
+                        }
+                    })
             }
         }
     }
@@ -1064,20 +1081,51 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
             Text("Cycle Presets", style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             d.cyclePresets.forEachIndexed { i, preset ->
-                val name = d.cyclePresetNames.getOrElse(i) { "Preset ${i+1}" }
-                val firstLine = preset.lines().firstOrNull { it.isNotBlank() }?.trim() ?: ""
-                var pe by remember(firstLine) { mutableStateOf(firstLine) }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedTextField(value = pe, onValueChange = { pe = it },
-                        modifier = Modifier.weight(1f), singleLine = true, label = { Text(name) })
-                    if (pe != firstLine)
-                        IconButton(onClick = { writeField("cyclePreset${i+1}", pe) }) {
-                            Icon(Icons.Filled.Check, "Save", modifier = Modifier.size(18.dp))
+                val defaultName = "Preset ${i+1}"
+                val name = d.cyclePresetNames.getOrElse(i) { defaultName }
+                var nameEdit by remember(name) { mutableStateOf(name) }
+                var pe by remember(preset) { mutableStateOf(preset) }
+                var expanded by remember { mutableStateOf(false) }
+                ElevatedCard {
+                    Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            OutlinedTextField(value = nameEdit, onValueChange = { nameEdit = it },
+                                modifier = Modifier.weight(1f), singleLine = true,
+                                label = { Text("Name") })
+                            if (nameEdit != name)
+                                IconButton(onClick = { writeField("cyclePreset${i+1}Name", nameEdit) }) {
+                                    Icon(Icons.Filled.Check, "Save name", modifier = Modifier.size(18.dp))
+                                }
+                            IconButton(onClick = { expanded = !expanded }) {
+                                Icon(
+                                    if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                                    contentDescription = if (expanded) "Collapse" else "Expand"
+                                )
+                            }
                         }
-                    OutlinedButton(onClick = { writeField("cycleLinesText", preset) },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
-                        Text("Load", style = MaterialTheme.typography.labelSmall)
+                        if (expanded) {
+                            OutlinedTextField(value = pe, onValueChange = { pe = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                label = { Text("Cycle lines") },
+                                minLines = 2, maxLines = 8)
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                if (pe != preset)
+                                    Button(onClick = { writeField("cyclePreset${i+1}", pe) },
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) {
+                                        Text("Save", style = MaterialTheme.typography.labelSmall)
+                                    }
+                                OutlinedButton(onClick = { writeField("cycleLinesText", pe) },
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) {
+                                    Text("Load to active", style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                        } else {
+                            val preview = preset.lines().firstOrNull { it.isNotBlank() }?.trim() ?: "(empty)"
+                            Text(preview, style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
                     }
                 }
             }

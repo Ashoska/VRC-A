@@ -153,13 +153,6 @@ private fun HomePage(vm: ChatboxViewModel) {
     val uiState by vm.messengerUiState.collectAsState()
     val ctx = androidx.compose.ui.platform.LocalContext.current
 
-    var ipInput by rememberSaveable(stateSaver = TextFieldValue.Saver) {
-        mutableStateOf(TextFieldValue(uiState.ipAddress))
-    }
-    LaunchedEffect(uiState.ipAddress) {
-        if (ipInput.text.isBlank()) ipInput = TextFieldValue(uiState.ipAddress)
-    }
-
     var wizardExpanded by rememberSaveable { mutableStateOf(true) }
     var testSentOnce by rememberSaveable { mutableStateOf(false) }
 
@@ -316,13 +309,11 @@ private fun HomePage(vm: ChatboxViewModel) {
                     WizardStep(
                         number = 4,
                         title = "Set Headset IP",
-                        subtitle = "Quest/PC IP on the same Wi-Fi.",
+                        subtitle = "Configure IP in the Connection section below.",
                         done = ipOk,
                         icon = Icons.Filled.Wifi,
-                        primary = "Apply"
-                    ) {
-                        vm.ipAddressApply(ipInput.text.trim())
-                    }
+                        primary = "Done"
+                    ) { }
 
                     WizardStep(
                         number = 5,
@@ -348,31 +339,9 @@ private fun HomePage(vm: ChatboxViewModel) {
             title = "Connection",
             subtitle = "Headset IP (Quest / PC)."
         ) {
-            OutlinedTextField(
-                value = ipInput,
-                onValueChange = { ipInput = it },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                label = { Text("Headset IP address") },
-                placeholder = { Text("Example: 192.168.1.23") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
-            )
-
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(
-                    onClick = { vm.ipAddressApply(ipInput.text.trim()) },
-                    modifier = Modifier.weight(1f)
-                ) { Text("Apply") }
-
-                OutlinedButton(
-                    onClick = { ipInput = TextFieldValue(uiState.ipAddress) },
-                    modifier = Modifier.weight(1f)
-                ) { Text("Reset") }
-            }
-
-            Text(
-                text = "Current target: ${uiState.ipAddress}",
-                style = MaterialTheme.typography.bodySmall
+            com.scrapw.chatbox.ui.mainScreen.IpField(
+                chatboxViewModel = vm,
+                modifier = Modifier.fillMaxWidth()
             )
         }
 

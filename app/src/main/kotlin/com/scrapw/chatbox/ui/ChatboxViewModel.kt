@@ -95,8 +95,8 @@ class ChatboxViewModel(
         private const val UI_TICK_MS = 500L
 
         // Firestore sync throttles
-        private const val SELF_SYNC_MIN_INTERVAL_MS = 12_000L
-        private const val SELF_SYNC_FORCE_INTERVAL_MS = 10_000L
+        private const val SELF_SYNC_DEBOUNCE_MS = 500L
+        private const val SELF_SYNC_HEARTBEAT_MS = 8_000L
 
         // Moderation attach retry
         private const val MOD_ATTACH_RETRY_MS = 1_250L
@@ -163,6 +163,7 @@ class ChatboxViewModel(
     private val db: FirebaseFirestore by lazy { FirebaseFirestore.getInstance() }
 
     private var selfSyncJob: Job? = null
+    private var syncTriggerJob: Job? = null
     private var lastSelfSyncAtMs: Long = 0L
     private var lastSelfSyncFingerprint: String = ""
     private var lastSelfSyncError: String = ""
@@ -323,47 +324,67 @@ class ChatboxViewModel(
      */
     private fun startSelfSyncLoopIfNeeded() {
         if (BuildConfig.IS_ADMIN_BUILD) return
-        if (selfSyncJob != null) return
 
+        // Debounced trigger: cancel any pending debounce and start a new one
+        syncTriggerJob?.cancel()
+        syncTriggerJob = viewModelScope.launch {
+            delay(SELF_SYNC_DEBOUNCE_MS)
+            performSelfSync()
+        }
+
+        // Heartbeat loop: start once, always writes online status + timestamp
+        if (selfSyncJob != null) return
         selfSyncJob = viewModelScope.launch {
             while (true) {
-                runCatching {
-                    val authUid = ensureAnonAuth() ?: return@runCatching
-
-                    val deviceHash = readDeviceHashFromPrefs()
-                    if (!isValidDeviceHash(deviceHash)) {
-                        lastSelfSyncError =
-                            "deviceHash missing/invalid. Ensure app sets prefs key device_id_hash."
-                        return@runCatching
-                    }
-
-                    val now = System.currentTimeMillis()
-                    val fp = computeSelfFingerprint(authUid, deviceHash)
-
-                    val changed = fp != lastSelfSyncFingerprint
-                    val dueByForce = (now - lastSelfSyncAtMs) >= SELF_SYNC_FORCE_INTERVAL_MS
-                    val dueByChange = changed && (now - lastSelfSyncAtMs) >= SELF_SYNC_MIN_INTERVAL_MS
-                    if (!dueByForce && !dueByChange) return@runCatching
-
-                    db.collection(COL_USERS).document(deviceHash)
-                        .set(buildUserSnapshot(authUid, deviceHash), SetOptions.merge())
-                        .await()
-
-                    runCatching {
-                        db.collection(COL_USERS_BY_ID).document(authUid)
-                            .set(buildUsersByIdLink(authUid, deviceHash), SetOptions.merge())
-                            .await()
-                    }
-
-                    lastSelfSyncAtMs = now
-                    lastSelfSyncFingerprint = fp
-                    lastSelfSyncError = ""
-                }.onFailure { e ->
-                    lastSelfSyncError = (e.message ?: e.toString()).take(4000)
-                }
-
-                delay(2_000L)
+                delay(SELF_SYNC_HEARTBEAT_MS)
+                performHeartbeat()
+                performSelfSync()
             }
+        }
+    }
+
+    private suspend fun performHeartbeat() {
+        runCatching {
+            val deviceHash = readDeviceHashFromPrefs()
+            if (!isValidDeviceHash(deviceHash)) return@runCatching
+            db.collection(COL_USERS).document(deviceHash)
+                .set(mapOf(
+                    "isOnlineInApp" to true,
+                    "lastSeenAt" to FieldValue.serverTimestamp()
+                ), SetOptions.merge())
+                .await()
+        }
+    }
+
+    private suspend fun performSelfSync() {
+        runCatching {
+            val authUid = ensureAnonAuth() ?: return@runCatching
+
+            val deviceHash = readDeviceHashFromPrefs()
+            if (!isValidDeviceHash(deviceHash)) {
+                lastSelfSyncError =
+                    "deviceHash missing/invalid. Ensure app sets prefs key device_id_hash."
+                return@runCatching
+            }
+
+            val fp = computeSelfFingerprint(authUid, deviceHash)
+            if (fp == lastSelfSyncFingerprint) return@runCatching
+
+            db.collection(COL_USERS).document(deviceHash)
+                .set(buildUserSnapshot(authUid, deviceHash), SetOptions.merge())
+                .await()
+
+            runCatching {
+                db.collection(COL_USERS_BY_ID).document(authUid)
+                    .set(buildUsersByIdLink(authUid, deviceHash), SetOptions.merge())
+                    .await()
+            }
+
+            lastSelfSyncAtMs = System.currentTimeMillis()
+            lastSelfSyncFingerprint = fp
+            lastSelfSyncError = ""
+        }.onFailure { e ->
+            lastSelfSyncError = (e.message ?: e.toString()).take(4000)
         }
     }
 
@@ -1926,11 +1947,14 @@ class ChatboxViewModel(
             3 -> {
                 val slots = 10
                 val idx = (p * (slots - 1)).toInt()
-                // U+25C7 (White Diamond) - in basic geometric shapes block,
-                // renders correctly in VRChat. U+27E1 is not in VRChat's font.
-                val bg = CharArray(slots) { '\u25C7' }
-                bg[idx] = dot
-                bg.concatToString()
+                val out = CharArray(slots) { i ->
+                    when {
+                        i < idx  -> '\u25C6'
+                        i == idx -> dot
+                        else     -> '\u25C7'
+                    }
+                }
+                out.concatToString()
             }
             4 -> renderSoundwaveBar(p, posMs, isPlaying, dotIsPlaying)
             else -> {

@@ -91,6 +91,9 @@ class UserPreferencesRepository(private val context: Context) {
         val TOS_ACCEPTED_AT_EPOCH = longPreferencesKey("tos_accepted_at_epoch")
         val SETUP_VRCHAT_DONE     = booleanPreferencesKey("setup_vrchat_done")
         val SETUP_IP_DONE         = booleanPreferencesKey("setup_ip_done")
+
+        val DISCORD_RPC_ENABLED   = booleanPreferencesKey("discord_rpc_enabled")
+        val DISCORD_TOKEN         = stringPreferencesKey("discord_token")
     }
 
     val ipAddress: Flow<String> = context.dataStore.data.map { prefs ->
@@ -171,6 +174,12 @@ class UserPreferencesRepository(private val context: Context) {
 
     val setupVrchatDone: Flow<Boolean> = context.dataStore.data.map { it[Keys.SETUP_VRCHAT_DONE] ?: false }
     val setupIpDone:     Flow<Boolean> = context.dataStore.data.map { it[Keys.SETUP_IP_DONE]     ?: false }
+
+    val discordRpcEnabled: Flow<Boolean> = context.dataStore.data.map { it[Keys.DISCORD_RPC_ENABLED] ?: false }
+    val discordToken:      Flow<String>  = context.dataStore.data.map { it[Keys.DISCORD_TOKEN] ?: "" }
+
+    suspend fun saveDiscordRpcEnabled(value: Boolean) = context.dataStore.edit { it[Keys.DISCORD_RPC_ENABLED] = value }
+    suspend fun saveDiscordToken(value: String) = context.dataStore.edit { it[Keys.DISCORD_TOKEN] = value.trim() }
 
     suspend fun savePort(value: Int)              = context.dataStore.edit { it[Keys.PORT] = value.coerceIn(1, 65535) }
     suspend fun saveIsRealtimeMsg(value: Boolean) = context.dataStore.edit { it[Keys.REALTIME]         = value }

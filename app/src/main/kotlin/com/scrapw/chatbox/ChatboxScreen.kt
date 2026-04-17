@@ -1006,11 +1006,6 @@ private fun HomePage(
     val connectionBring = remember { BringIntoViewRequester() }
     val manualSendBring = remember { BringIntoViewRequester() }
 
-    var ipInputText by rememberSaveable { mutableStateOf(uiState.ipAddress) }
-    LaunchedEffect(uiState.ipAddress) {
-        if (ipInputText.isBlank()) ipInputText = uiState.ipAddress
-    }
-
     var tutorialExpanded by remember { mutableStateOf(UiPrefs.readTutorialExpanded(ctx)) }
 
     var overlayGranted by remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
@@ -1437,42 +1432,9 @@ private fun HomePage(
             subtitle = "Headset IP (Quest / PC)."
         ) {
             Column(Modifier.bringIntoViewRequester(connectionBring)) {
-                OutlinedTextField(
-                    value = ipInputText,
-                    onValueChange = { s: String -> ipInputText = s },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    label = { Text("Headset IP address") },
-                    placeholder = { Text("Example: 192.168.1.23") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
-                    enabled = !isBanned
-                )
-
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(
-                        onClick = {
-                            val ip = ipInputText.trim()
-                            runCatching { vm.ipAddressApply(ip) }
-                                .onFailure {
-                                    scope.launch {
-                                        snackbarHostState.showSnackbar("IP apply failed. Check format (e.g. 192.168.1.23)")
-                                    }
-                                }
-                        },
-                        modifier = Modifier.weight(1f),
-                        enabled = !isBanned
-                    ) { Text("Apply") }
-
-                    OutlinedButton(
-                        onClick = { ipInputText = uiState.ipAddress },
-                        modifier = Modifier.weight(1f),
-                        enabled = !isBanned
-                    ) { Text("Reset") }
-                }
-
-                Text(
-                    text = "Current target: ${uiState.ipAddress}",
-                    style = MaterialTheme.typography.bodySmall
+                com.scrapw.chatbox.ui.mainScreen.IpField(
+                    chatboxViewModel = vm,
+                    modifier = Modifier.fillMaxWidth()
                 )
             }
         }
@@ -2355,8 +2317,8 @@ private fun VrchatStatusPage(
 
     val isLinked = remember { mutableStateOf(VrchatAuthManager.isLoggedIn(ctx)) }
     val displayName = remember { mutableStateOf(VrchatAuthManager.getStoredDisplayName(ctx) ?: "") }
-    val presence = VrchatPipelineState.presence
-    val isConnected = VrchatPipelineState.isConnected
+    val presence by VrchatPipelineState.presenceFlow.collectAsState()
+    val isConnected by VrchatPipelineState.isConnectedFlow.collectAsState()
 
     var showLogoutDialog by remember { mutableStateOf(false) }
 
@@ -2467,6 +2429,19 @@ private fun VrchatStatusPage(
                     if (platform.isNotBlank())
                         Text(platform, style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (presence.userId.isNotBlank()) {
+                        Divider()
+                        Text(
+                            text = presence.userId,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.clickable {
+                                val intent = Intent(Intent.ACTION_VIEW,
+                                    Uri.parse("https://vrchat.com/home/user/${presence.userId}"))
+                                ctx.startActivity(intent)
+                            }
+                        )
+                    }
                 }
             }
         } else if (isLinked.value) {
@@ -2513,6 +2488,48 @@ private fun VrchatStatusPage(
             ToggleRow("Group announcements", groupAnnouncement) {
                 scope.launch { repo.saveNotifGroupAnnouncement(it) }
             }
+        }
+
+        // -- Discord Rich Presence --
+        val discordEnabled by repo.discordRpcEnabled.collectAsState(initial = false)
+        val discordToken by repo.discordToken.collectAsState(initial = "")
+        SectionCard(
+            title = "Discord Rich Presence",
+            subtitle = "Show VRChat activity on your Discord profile."
+        ) {
+            ToggleRow("Enable Discord RPC", discordEnabled) { enabled ->
+                scope.launch {
+                    repo.saveDiscordRpcEnabled(enabled)
+                    val svcIntent = Intent(ctx, com.scrapw.chatbox.vrchat.DiscordRpcService::class.java)
+                    if (enabled && discordToken.isNotBlank()) {
+                        svcIntent.action = com.scrapw.chatbox.vrchat.DiscordRpcService.ACTION_START
+                        ctx.startForegroundService(svcIntent)
+                    } else {
+                        svcIntent.action = com.scrapw.chatbox.vrchat.DiscordRpcService.ACTION_STOP
+                        ctx.startService(svcIntent)
+                    }
+                }
+            }
+            var tokenEdit by remember(discordToken) { mutableStateOf(discordToken) }
+            OutlinedTextField(
+                value = tokenEdit,
+                onValueChange = { tokenEdit = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("Discord token") },
+                placeholder = { Text("Paste your Discord user token") },
+                trailingIcon = {
+                    if (tokenEdit != discordToken)
+                        IconButton(onClick = { scope.launch { repo.saveDiscordToken(tokenEdit.trim()) } }) {
+                            Icon(Icons.Filled.Check, "Save")
+                        }
+                }
+            )
+            Text(
+                "Your Discord token is stored securely on-device and only sent to Discord's servers.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
 
         // Info card
