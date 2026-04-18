@@ -292,9 +292,41 @@ object VrchatAuthManager {
                 return@withContext null
             }
             val json = JSONObject(body)
-            Log.d(TAG, "fetchPresence raw: state=${json.optString("state")} status=${json.optString("status")} location=${json.optString("location")}")
-            val state = json.optString("state", "offline")
-            val location = json.optString("location", "offline")
+            val userId = json.optString("id")
+            var state = json.optString("state", "offline")
+            var location = json.optString("location", "offline")
+            var status = json.optString("status", "offline")
+            var statusDescription = json.optString("statusDescription", "")
+            var platform = json.optString("last_platform", "")
+            var displayName = json.optString("displayName")
+            var avatarThumb = json.optString("currentAvatarThumbnailImageUrl", "")
+
+            Log.d(TAG, "fetchPresence /auth/user: state=$state status=$status location=$location")
+
+            // /auth/user can return stale presence when session was created by a
+            // companion app rather than the VRChat game client. Fetch the specific
+            // user endpoint which reflects the true live state.
+            if (userId.isNotBlank()) {
+                try {
+                    val (uCode, uBody, _) = get("$BASE/users/$userId", null, cookieHeader)
+                    if (uCode == 200) {
+                        val uj = JSONObject(uBody)
+                        val uState = uj.optString("state", "")
+                        val uLocation = uj.optString("location", "")
+                        val uStatus = uj.optString("status", "")
+                        Log.d(TAG, "fetchPresence /users/$userId: state=$uState status=$uStatus location=$uLocation")
+                        if (uState.isNotBlank()) state = uState
+                        if (uLocation.isNotBlank()) location = uLocation
+                        if (uStatus.isNotBlank()) status = uStatus
+                        uj.optString("statusDescription", "").let { if (it.isNotBlank()) statusDescription = it }
+                        uj.optString("last_platform", "").let { if (it.isNotBlank()) platform = it }
+                        uj.optString("displayName", "").let { if (it.isNotBlank()) displayName = it }
+                        uj.optString("currentAvatarThumbnailImageUrl", "").let { if (it.isNotBlank()) avatarThumb = it }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Could not fetch /users/$userId", e)
+                }
+            }
 
             var worldName = ""
             var playerCount = 0
@@ -320,17 +352,17 @@ object VrchatAuthManager {
                 (location != "offline" && location.isNotBlank())
 
             VrcUserPresence(
-                userId = json.optString("id"),
-                displayName = json.optString("displayName"),
+                userId = userId,
+                displayName = displayName,
                 state = state,
-                status = json.optString("status", "offline"),
-                statusDescription = json.optString("statusDescription", ""),
+                status = status,
+                statusDescription = statusDescription,
                 location = location,
-                platform = json.optString("last_platform", ""),
+                platform = platform,
                 worldName = worldName,
                 instancePlayerCount = playerCount,
                 instanceCapacity = capacity,
-                currentAvatarThumbnailUrl = json.optString("currentAvatarThumbnailImageUrl", ""),
+                currentAvatarThumbnailUrl = avatarThumb,
                 isOnlineInVRChat = isOnline
             )
         } catch (e: Exception) {

@@ -27,13 +27,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
-/**
- * Discord Rich Presence via Gateway WebSocket.
- * Mimics VRChat desktop's Discord integration:
- *   - Shows "VRChat" with VR logo
- *   - World name + player count
- *   - Elapsed time since going online
- */
 class DiscordRpcService : Service() {
 
     companion object {
@@ -55,7 +48,7 @@ class DiscordRpcService : Service() {
     private var heartbeatJob: Job? = null
     private var presenceJob: Job? = null
     private var lastSeq: Int? = null
-    private var sessionStartMs = 0L
+    private var onlineStartMs = 0L
     private var token = ""
 
     private val client by lazy {
@@ -87,7 +80,7 @@ class DiscordRpcService : Service() {
             }
             connect()
         }
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {
@@ -103,7 +96,6 @@ class DiscordRpcService : Service() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.i(TAG, "Gateway connected")
                 isRunning = true
-                sessionStartMs = System.currentTimeMillis()
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -199,9 +191,9 @@ class DiscordRpcService : Service() {
                 put("token", token)
                 put("intents", 0)
                 put("properties", JSONObject().apply {
-                    put("os", "Android")
-                    put("browser", "VRC-A")
-                    put("device", "VRC-A")
+                    put("os", "Windows")
+                    put("browser", "Discord Client")
+                    put("device", "")
                 })
                 put("presence", presence)
             })
@@ -232,41 +224,75 @@ class DiscordRpcService : Service() {
         val vrcPresence = VrchatPipelineState.presence
         val isOnline = vrcPresence?.isOnlineInVRChat == true
 
+        if (isOnline && onlineStartMs == 0L) {
+            onlineStartMs = System.currentTimeMillis()
+        } else if (!isOnline) {
+            onlineStartMs = 0L
+        }
+
         val activity = JSONObject().apply {
             put("name", "VRChat")
             put("type", 0)
             put("application_id", VRCHAT_APP_ID)
 
             if (isOnline && vrcPresence != null) {
+                val statusText = when (vrcPresence.status) {
+                    "ask me" -> "Ask Me"
+                    "busy" -> "Do Not Disturb"
+                    "join me" -> "Join Me"
+                    else -> "Online"
+                }
+
                 if (vrcPresence.worldName.isNotBlank()) {
                     put("details", vrcPresence.worldName)
                     val playerInfo = if (vrcPresence.instanceCapacity > 0)
-                        "${vrcPresence.instancePlayerCount}/${vrcPresence.instanceCapacity}"
+                        "${vrcPresence.instancePlayerCount} of ${vrcPresence.instanceCapacity}"
                     else "${vrcPresence.instancePlayerCount} players"
-                    put("state", "Online ($playerInfo)")
+                    put("state", "$statusText - $playerInfo")
                 } else {
                     put("details", when (vrcPresence.location) {
                         "private" -> "In a Private World"
-                        "traveling" -> "Traveling..."
-                        else -> "Online"
+                        "traveling" -> "Traveling"
+                        else -> statusText
                     })
-                    put("state", "Online")
+                    put("state", when (vrcPresence.location) {
+                        "private" -> statusText
+                        "traveling" -> "Between Worlds"
+                        else -> "In VRChat"
+                    })
                 }
+
+                if (onlineStartMs > 0) {
+                    put("timestamps", JSONObject().apply {
+                        put("start", onlineStartMs / 1000)
+                    })
+                }
+
+                put("assets", JSONObject().apply {
+                    if (vrcPresence.currentAvatarThumbnailUrl.isNotBlank()) {
+                        put("large_image", vrcPresence.currentAvatarThumbnailUrl)
+                        put("large_text", vrcPresence.displayName)
+                    } else {
+                        put("large_image", "vrchat")
+                        put("large_text", "VRChat")
+                    }
+                    val smallKey = when (vrcPresence.status) {
+                        "ask me" -> "type-orange"
+                        "busy" -> "type-red"
+                        "join me" -> "type-blue"
+                        else -> "type-green"
+                    }
+                    put("small_image", smallKey)
+                    put("small_text", statusText)
+                })
             } else {
-                put("details", "Online")
+                put("details", "Not in VRChat")
                 put("state", "Using VRC-A")
+                put("assets", JSONObject().apply {
+                    put("large_image", "vrchat")
+                    put("large_text", "VRChat")
+                })
             }
-
-            put("timestamps", JSONObject().apply {
-                put("start", sessionStartMs / 1000)
-            })
-
-            put("assets", JSONObject().apply {
-                put("large_image", "vrchat_icon")
-                put("large_text", "VRChat")
-                put("small_image", "online")
-                put("small_text", if (isOnline) "Online" else "Away")
-            })
         }
 
         return JSONObject().apply {

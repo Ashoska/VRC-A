@@ -133,6 +133,13 @@ class VrchatPipelineService : Service() {
         webSocket?.cancel()
         serviceScope.cancel()
         VrchatPipelineState.isConnected = false
+        VrchatPipelineState.presence = null
+        // Stop Discord RPC when pipeline stops
+        if (DiscordRpcService.isRunning) {
+            val stopRpc = Intent(this, DiscordRpcService::class.java)
+            stopRpc.action = DiscordRpcService.ACTION_STOP
+            startService(stopRpc)
+        }
         super.onDestroy()
     }
 

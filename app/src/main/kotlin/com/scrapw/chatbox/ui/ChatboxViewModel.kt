@@ -593,6 +593,31 @@ class ChatboxViewModel(
                     userPreferencesRepository.saveTimeEnabled(remote)
                 }
             }
+            // Pinned (AFK) presets (admin can edit preset contents + names)
+            val afkPresetSavers = listOf<suspend (String) -> Unit>(
+                userPreferencesRepository::saveAfkPreset1,
+                userPreferencesRepository::saveAfkPreset2,
+                userPreferencesRepository::saveAfkPreset3
+            )
+            val afkPresetNameSavers = listOf<suspend (String) -> Unit>(
+                userPreferencesRepository::savePinnedPreset1Name,
+                userPreferencesRepository::savePinnedPreset2Name,
+                userPreferencesRepository::savePinnedPreset3Name
+            )
+            for (i in 1..3) {
+                val msgKey = "afkPreset$i"
+                val nameKey = "afkPreset${i}Name"
+                val remoteMsg = snap.getString(msgKey)
+                val remoteName = snap.getString(nameKey)
+                val currentMsg = getAfkPresetPreview(i).trim()
+                val currentName = pinnedPresetNames.getOrElse(i - 1) { "Preset $i" }
+                if (remoteMsg != null && remoteMsg.trim() != currentMsg) {
+                    afkPresetSavers[i - 1](remoteMsg.trim())
+                }
+                if (remoteName != null && remoteName.trim() != currentName.trim()) {
+                    afkPresetNameSavers[i - 1](remoteName.trim())
+                }
+            }
             // Cycle presets (admin can edit preset contents + names)
             val presetSavers = listOf<suspend (String, Int, String?) -> Unit>(
                 userPreferencesRepository::saveCyclePreset1,

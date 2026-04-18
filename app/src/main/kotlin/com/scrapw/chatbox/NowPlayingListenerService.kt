@@ -269,26 +269,27 @@ class NowPlayingListenerService : NotificationListenerService() {
             // Start watchdog polling to catch the first real track after the segment ends.
             if (controller != null) startPollForRealTrack(pkg, controller)
         } else {
-            // Suppress paused-flicker ONLY for genuine stalls.
-            // STATE_PAUSED = user explicitly paused \u2014 never suppress that.
-            // Other non-playing states (buffering, skipping) may be transient stalls.
-            val rawState = pb?.state ?: PlaybackState.STATE_NONE
-            val isPausedByUser = rawState == PlaybackState.STATE_PAUSED
-            if (metaSame && !isPlaying && !isPausedByUser && (title.isNotBlank() || artist.isNotBlank())) {
-                val n = (stallCountByPackage[pkg] ?: 0) + 1
-                stallCountByPackage[pkg] = n
-                if (n >= 2) {
-                    markSpecialWindow(pkg, 8000L)
-                    if (controller != null) startPollForRealTrack(pkg, controller)
+            // Stall detection only for Spotify — other apps don't have ad segments
+            if (pkg == "com.spotify.music") {
+                val rawState = pb?.state ?: PlaybackState.STATE_NONE
+                val isPausedByUser = rawState == PlaybackState.STATE_PAUSED
+                if (metaSame && !isPlaying && !isPausedByUser && (title.isNotBlank() || artist.isNotBlank())) {
+                    val n = (stallCountByPackage[pkg] ?: 0) + 1
+                    stallCountByPackage[pkg] = n
+                    if (n >= 4) {
+                        markSpecialWindow(pkg, 8000L)
+                        if (controller != null) startPollForRealTrack(pkg, controller)
+                    }
+                } else {
+                    stallCountByPackage[pkg] = 0
                 }
             } else {
                 stallCountByPackage[pkg] = 0
             }
 
-            // Keep a general watchdog alive for any detected media.
-            if (controller != null && (title.isNotBlank() || artist.isNotBlank())) {
+            if (controller != null && pkg == "com.spotify.music" && isSpecialWindowActive(pkg)) {
                 startPollForRealTrack(pkg, controller)
-            } else {
+            } else if (!isSpecialWindowActive(pkg)) {
                 stopPoll(pkg)
             }
         }
