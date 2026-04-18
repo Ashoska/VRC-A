@@ -143,6 +143,11 @@ class VrchatPipelineService : Service() {
     private fun startPipeline() {
         wsJob?.cancel()
         wsJob = serviceScope.launch {
+            // Refresh cookies if they're older than 12 days
+            if (VrchatAuthManager.shouldRefreshCookies(this@VrchatPipelineService)) {
+                Log.i(TAG, "VRChat cookies expired, re-validating session")
+            }
+
             // First validate/refresh session
             val valid = VrchatAuthManager.validateSession(this@VrchatPipelineService)
             if (!valid) {
@@ -551,6 +556,7 @@ class VrchatPipelineService : Service() {
             "vrchatInstanceCapacity" to presence.instanceCapacity,
             "vrchatPlatform" to presence.platform,
             "vrchatAvatarThumb" to presence.currentAvatarThumbnailUrl,
+            "vrchatIsOnline" to presence.isOnlineInVRChat,
             "vrchatLastSyncAt" to FieldValue.serverTimestamp()
         )
 

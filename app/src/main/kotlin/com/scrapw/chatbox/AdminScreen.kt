@@ -446,7 +446,9 @@ private data class UserRow(
     // VRChat
     val vrchatUserId: String = "",
     val vrchatDisplayName: String = "",
+    val vrchatState: String = "",
     val vrchatStatus: String = "",
+    val vrchatIsOnline: Boolean = false,
     val vrchatWorld: String = "",
     val vrchatPlayerCount: Int = 0,
     val vrchatCapacity: Int = 0,
@@ -489,7 +491,9 @@ private data class UserDetail(
     // VRChat
     val vrchatUserId: String,
     val vrchatDisplayName: String,
+    val vrchatState: String,
     val vrchatStatus: String,
+    val vrchatIsOnline: Boolean,
     val vrchatStatusDescription: String,
     val vrchatWorld: String,
     val vrchatLocation: String,
@@ -577,7 +581,9 @@ private fun UsersTab(
                         updatedAt = d.getTimestamp("updatedAt"),
                         vrchatUserId = (d.getString("vrchatUserId") ?: "").trim(),
                         vrchatDisplayName = (d.getString("vrchatDisplayName") ?: "").trim(),
+                        vrchatState = (d.getString("vrchatState") ?: "").trim(),
                         vrchatStatus = (d.getString("vrchatStatus") ?: "").trim(),
+                        vrchatIsOnline = d.getBoolean("vrchatIsOnline") ?: false,
                         vrchatWorld = (d.getString("vrchatWorld") ?: "").trim(),
                         vrchatPlayerCount = (d.getLong("vrchatInstancePlayerCount") ?: 0).toInt(),
                         vrchatCapacity = (d.getLong("vrchatInstanceCapacity") ?: 0).toInt(),
@@ -622,7 +628,9 @@ private fun UsersTab(
                     versionName = s("versionName"), versionCode = l("versionCode"), appId = s("appId"),
                     adminBuild = b("adminBuild"),
                     vrchatUserId = s("vrchatUserId"), vrchatDisplayName = s("vrchatDisplayName"),
-                    vrchatStatus = s("vrchatStatus"), vrchatStatusDescription = s("vrchatStatusDescription"),
+                    vrchatState = s("vrchatState"), vrchatStatus = s("vrchatStatus"),
+                    vrchatIsOnline = snap.getBoolean("vrchatIsOnline") ?: false,
+                    vrchatStatusDescription = s("vrchatStatusDescription"),
                     vrchatWorld = s("vrchatWorld"), vrchatLocation = s("vrchatLocation"),
                     vrchatPlayerCount = l("vrchatInstancePlayerCount"), vrchatCapacity = l("vrchatInstanceCapacity"),
                     vrchatPlatform = s("vrchatPlatform"),
@@ -881,6 +889,11 @@ private fun UsersTab(
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                        if (u.vrchatIsOnline) {
+                            androidx.compose.material3.Badge(
+                                containerColor = MaterialTheme.colorScheme.tertiary
+                            ) { Text("VRC", style = MaterialTheme.typography.labelSmall) }
+                        }
                         val isRecentlyOnline = u.isOnlineInApp &&
                             (u.lastSeenAt?.toDate()?.time ?: 0L) > System.currentTimeMillis() - 30_000
                         if (isRecentlyOnline) {
@@ -932,10 +945,13 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
                 Text("Not linked", style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             } else {
-                val dot = when (d.vrchatStatus) {
-                    "active", "join me" -> "🟢"; "ask me" -> "🟠"; "busy" -> "🔴"; else -> "⚫"
-                }
-                Text("$dot ${d.vrchatDisplayName.ifBlank { d.vrchatUserId }}",
+                val dot = if (d.vrchatIsOnline) {
+                    when (d.vrchatStatus) {
+                        "join me" -> "🟢"; "ask me" -> "🟠"; "busy" -> "🔴"; else -> "🟢"
+                    }
+                } else "⚫"
+                val onlineLabel = if (d.vrchatIsOnline) "Online" else "Offline"
+                Text("$dot ${d.vrchatDisplayName.ifBlank { d.vrchatUserId }} ($onlineLabel)",
                     style = MaterialTheme.typography.bodyMedium)
                 if (d.vrchatStatusDescription.isNotBlank())
                     Text(d.vrchatStatusDescription, style = MaterialTheme.typography.bodySmall,
