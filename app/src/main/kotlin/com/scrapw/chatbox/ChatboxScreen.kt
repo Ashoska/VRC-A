@@ -2493,50 +2493,83 @@ private fun VrchatStatusPage(
         // -- Discord Rich Presence --
         val discordEnabled by repo.discordRpcEnabled.collectAsState(initial = false)
         val discordToken by repo.discordToken.collectAsState(initial = "")
+        var showDiscordLogin by remember { mutableStateOf(false) }
         SectionCard(
             title = "Discord Rich Presence",
             subtitle = "Show VRChat activity on your Discord profile."
         ) {
             Text(
-                "This works by simulating what VRChat's desktop client sends to Discord. " +
-                "Your token is only used for the Discord gateway connection and never leaves your device otherwise. " +
-                "Use at your own discretion.",
+                "Simulates what VRChat's desktop client sends to Discord. " +
+                "Sign in below to connect your Discord account.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(Modifier.height(4.dp))
-            ToggleRow("Enable Discord RPC", discordEnabled) { enabled ->
-                scope.launch {
-                    repo.saveDiscordRpcEnabled(enabled)
-                    val svcIntent = Intent(ctx, com.scrapw.chatbox.vrchat.DiscordRpcService::class.java)
-                    if (enabled && discordToken.isNotBlank()) {
-                        svcIntent.action = com.scrapw.chatbox.vrchat.DiscordRpcService.ACTION_START
-                        ctx.startForegroundService(svcIntent)
-                    } else {
+
+            if (discordToken.isNotBlank()) {
+                Card(colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+                    Row(Modifier.padding(10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Filled.Check, null, tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp))
+                        Text("Discord account connected", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                ToggleRow("Enable Discord RPC", discordEnabled) { enabled ->
+                    scope.launch {
+                        repo.saveDiscordRpcEnabled(enabled)
+                        val svcIntent = Intent(ctx, com.scrapw.chatbox.vrchat.DiscordRpcService::class.java)
+                        if (enabled) {
+                            svcIntent.action = com.scrapw.chatbox.vrchat.DiscordRpcService.ACTION_START
+                            ctx.startForegroundService(svcIntent)
+                        } else {
+                            svcIntent.action = com.scrapw.chatbox.vrchat.DiscordRpcService.ACTION_STOP
+                            ctx.startService(svcIntent)
+                        }
+                    }
+                }
+                OutlinedButton(onClick = {
+                    scope.launch {
+                        repo.saveDiscordRpcEnabled(false)
+                        repo.saveDiscordToken("")
+                        val svcIntent = Intent(ctx, com.scrapw.chatbox.vrchat.DiscordRpcService::class.java)
                         svcIntent.action = com.scrapw.chatbox.vrchat.DiscordRpcService.ACTION_STOP
                         ctx.startService(svcIntent)
                     }
+                }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Disconnect Discord")
                 }
+            } else {
+                Button(
+                    onClick = { showDiscordLogin = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Sign in to Discord") }
             }
-            var tokenEdit by remember(discordToken) { mutableStateOf(discordToken) }
-            OutlinedTextField(
-                value = tokenEdit,
-                onValueChange = { tokenEdit = it },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                label = { Text("Discord token") },
-                placeholder = { Text("Paste your Discord user token") },
-                trailingIcon = {
-                    if (tokenEdit != discordToken)
-                        IconButton(onClick = { scope.launch { repo.saveDiscordToken(tokenEdit.trim()) } }) {
-                            Icon(Icons.Filled.Check, "Save")
-                        }
-                }
-            )
             Text(
-                "Your token is stored securely on-device. Never share it with anyone.",
+                "Your session is stored securely on-device only.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        if (showDiscordLogin) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { showDiscordLogin = false },
+                confirmButton = {},
+                text = {
+                    Box(Modifier.fillMaxWidth().height(500.dp)) {
+                        com.scrapw.chatbox.vrchat.DiscordLoginWebView(
+                            onTokenObtained = { token ->
+                                scope.launch {
+                                    repo.saveDiscordToken(token)
+                                    showDiscordLogin = false
+                                }
+                            },
+                            onDismiss = { showDiscordLogin = false }
+                        )
+                    }
+                }
             )
         }
 

@@ -144,12 +144,17 @@ class ChatboxViewModel(
         // which caused the state to be wiped before the next DataStore read.
         stopAll(clearFromChatbox = false)
 
-        // Best-effort: mark user as offline in Firestore
+        // Mark user as offline — use GlobalScope so the write survives ViewModel teardown
         val deviceHash = runCatching { readDeviceHashFromPrefs() }.getOrDefault("")
         if (deviceHash.isNotBlank()) {
-            runCatching {
-                db.collection(COL_USERS).document(deviceHash)
-                    .set(mapOf("isOnlineInApp" to false, "lastSeenAt" to FieldValue.serverTimestamp()), SetOptions.merge())
+            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching {
+                    kotlinx.coroutines.withTimeout(3000) {
+                        db.collection(COL_USERS).document(deviceHash)
+                            .set(mapOf("isOnlineInApp" to false, "lastSeenAt" to FieldValue.serverTimestamp()), SetOptions.merge())
+                            .await()
+                    }
+                }
             }
         }
 

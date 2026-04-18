@@ -20,11 +20,6 @@ import androidx.compose.ui.unit.dp
 import com.scrapw.chatbox.ui.ChatboxViewModel
 import kotlinx.coroutines.launch
 
-/**
- * Multi-slot IP field.
- * 3 named slots (Home / Hotspot / Other). Tap a chip to switch.
- * The active slot's address always shows in the text field on first open.
- */
 @Composable
 fun IpField(
     chatboxViewModel: ChatboxViewModel,
@@ -34,19 +29,34 @@ fun IpField(
     val repo = chatboxViewModel.userPreferencesRepository
     val focusManager = LocalFocusManager.current
 
-    // Collect all slot data from DataStore
-    val activeSlot  by repo.activeIpSlot.collectAsState(initial = 1)
-    val ip1Name     by repo.ip1Name.collectAsState(initial = "Home")
-    val ip1Address  by repo.ip1Address.collectAsState(initial = "")
-    val ip2Name     by repo.ip2Name.collectAsState(initial = "Hotspot")
-    val ip2Address  by repo.ip2Address.collectAsState(initial = "")
-    val ip3Name     by repo.ip3Name.collectAsState(initial = "Other")
-    val ip3Address  by repo.ip3Address.collectAsState(initial = "")
+    // DataStore-backed state (async)
+    val dsActiveSlot by repo.activeIpSlot.collectAsState(initial = 1)
+    val ip1Name    by repo.ip1Name.collectAsState(initial = "Home")
+    val ip1Address by repo.ip1Address.collectAsState(initial = "")
+    val ip2Name    by repo.ip2Name.collectAsState(initial = "Hotspot")
+    val ip2Address by repo.ip2Address.collectAsState(initial = "")
+    val ip3Name    by repo.ip3Name.collectAsState(initial = "Other")
+    val ip3Address by repo.ip3Address.collectAsState(initial = "")
 
-    val names     = listOf(ip1Name, ip2Name, ip3Name)
-    val addresses = listOf(ip1Address, ip2Address, ip3Address)
+    // Local slot tracking (immediate, not async)
+    var currentSlot by remember { mutableIntStateOf(dsActiveSlot) }
+    LaunchedEffect(dsActiveSlot) { currentSlot = dsActiveSlot }
 
-    val activeAddress = addresses.getOrElse(activeSlot - 1) { "" }
+    // Local copies of names/addresses that update from DataStore
+    val dsNames     = listOf(ip1Name, ip2Name, ip3Name)
+    val dsAddresses = listOf(ip1Address, ip2Address, ip3Address)
+
+    // Mutable local address copies so saves take effect immediately
+    var localAddr1 by remember { mutableStateOf(ip1Address) }
+    var localAddr2 by remember { mutableStateOf(ip2Address) }
+    var localAddr3 by remember { mutableStateOf(ip3Address) }
+    LaunchedEffect(ip1Address) { localAddr1 = ip1Address }
+    LaunchedEffect(ip2Address) { localAddr2 = ip2Address }
+    LaunchedEffect(ip3Address) { localAddr3 = ip3Address }
+
+    val localAddresses = listOf(localAddr1, localAddr2, localAddr3)
+
+    val activeAddress = localAddresses.getOrElse(currentSlot - 1) { "" }
 
     // Auto-migrate: if active slot is empty but the ViewModel has a saved IP, populate slot 1
     val uiState by chatboxViewModel.messengerUiState.collectAsState()
@@ -60,10 +70,8 @@ fun IpField(
         uiState.ipAddress.takeIf { it != "127.0.0.1" } ?: ""
     }
 
-    // Edit buffer - always syncs from resolved address when slot changes
     var editBuffer by remember { mutableStateOf(resolvedAddress) }
-
-    LaunchedEffect(activeSlot, resolvedAddress) {
+    LaunchedEffect(currentSlot, resolvedAddress) {
         editBuffer = resolvedAddress
     }
 
@@ -77,29 +85,37 @@ fun IpField(
     var nameEdit3 by remember(ip3Name) { mutableStateOf(ip3Name) }
     var addrEdit3 by remember(ip3Address) { mutableStateOf(ip3Address) }
 
+    fun setLocalAddr(slot: Int, addr: String) {
+        when (slot) { 1 -> localAddr1 = addr; 2 -> localAddr2 = addr; 3 -> localAddr3 = addr }
+    }
+
     fun applyActiveSlot(addr: String) {
         val trimmed = addr.trim()
         if (trimmed.isBlank()) return
+        val slot = currentSlot
+        setLocalAddr(slot, trimmed)
         scope.launch {
-            repo.saveIpSlot(activeSlot, names.getOrElse(activeSlot - 1) { "Slot $activeSlot" }, trimmed)
+            repo.saveIpSlot(slot, dsNames.getOrElse(slot - 1) { "Slot $slot" }, trimmed)
         }
         chatboxViewModel.ipAddressApply(trimmed)
         focusManager.clearFocus()
     }
 
     fun switchToSlot(slot: Int, overrideAddr: String? = null) {
-        val addr = overrideAddr ?: addresses.getOrElse(slot - 1) { "" }
+        val addr = overrideAddr ?: localAddresses.getOrElse(slot - 1) { "" }
         if (addr.isBlank()) return
+        currentSlot = slot
+        editBuffer = addr
         scope.launch { repo.saveActiveIpSlot(slot) }
         chatboxViewModel.ipAddressApply(addr)
-        editBuffer = addr
     }
 
     fun saveSlot(slot: Int, name: String, addr: String) {
         val n = name.trim().ifBlank { "Slot $slot" }
         val a = addr.trim()
+        setLocalAddr(slot, a)
         scope.launch { repo.saveIpSlot(slot, n, a) }
-        if (slot == activeSlot && a.isNotBlank()) {
+        if (slot == currentSlot && a.isNotBlank()) {
             chatboxViewModel.ipAddressApply(a)
             editBuffer = a
         }
@@ -119,7 +135,7 @@ fun IpField(
                 Column {
                     Text("OSC Host", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        "${names.getOrElse(activeSlot - 1) { "Slot $activeSlot" }}  \u00b7  ${activeAddress.ifBlank { "not set" }}",
+                        "${dsNames.getOrElse(currentSlot - 1) { "Slot $currentSlot" }}  \u00b7  ${activeAddress.ifBlank { "not set" }}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -132,7 +148,7 @@ fun IpField(
                 }
             }
 
-            // Active slot quick-edit (always shown, always pre-filled)
+            // Active slot quick-edit
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -143,7 +159,7 @@ fun IpField(
                     onValueChange = { editBuffer = it },
                     modifier = Modifier.weight(1f),
                     singleLine = true,
-                    label = { Text(names.getOrElse(activeSlot - 1) { "IP" }) },
+                    label = { Text(dsNames.getOrElse(currentSlot - 1) { "IP" }) },
                     placeholder = { Text("192.168.1.x") },
                     keyboardOptions = KeyboardOptions(
                         keyboardType = KeyboardType.Uri,
@@ -163,17 +179,17 @@ fun IpField(
             // Slot switcher chips
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 (1..3).forEach { slot ->
-                    val addr = addresses.getOrElse(slot - 1) { "" }
+                    val addr = localAddresses.getOrElse(slot - 1) { "" }
                     FilterChip(
-                        selected = slot == activeSlot,
-                        onClick = { if (slot != activeSlot) switchToSlot(slot) },
+                        selected = slot == currentSlot,
+                        onClick = { if (slot != currentSlot) switchToSlot(slot) },
                         label = {
                             Text(
-                                names.getOrElse(slot - 1) { "Slot $slot" },
+                                dsNames.getOrElse(slot - 1) { "Slot $slot" },
                                 style = MaterialTheme.typography.labelSmall
                             )
                         },
-                        enabled = addr.isNotBlank() || slot == activeSlot,
+                        enabled = addr.isNotBlank() || slot == currentSlot,
                         modifier = Modifier.weight(1f)
                     )
                 }

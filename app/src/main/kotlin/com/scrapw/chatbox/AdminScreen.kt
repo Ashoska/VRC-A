@@ -32,7 +32,9 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -49,6 +51,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -878,7 +881,9 @@ private fun UsersTab(
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                        if (u.isOnlineInApp) {
+                        val isRecentlyOnline = u.isOnlineInApp &&
+                            (u.lastSeenAt?.toDate()?.time ?: 0L) > System.currentTimeMillis() - 30_000
+                        if (isRecentlyOnline) {
                             androidx.compose.material3.Badge(
                                 containerColor = MaterialTheme.colorScheme.primary
                             ) { Text("ONLINE", style = MaterialTheme.typography.labelSmall) }
@@ -1124,9 +1129,9 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
         }
     }
 
-    // ── App Info ─────────────────────────────────────────────────────
+    // ── App Info + Targeted Push ────────────────────────────────────
     ElevatedCard {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("App", style = MaterialTheme.typography.titleSmall)
             Text("${d.versionName} (${d.versionCode})", fontFamily = FontFamily.Monospace,
                 style = MaterialTheme.typography.bodySmall)
@@ -1136,6 +1141,85 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
             if (d.adminBuild)
                 Text("Admin build", style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.tertiary)
+
+            Divider()
+
+            // Targeted update push
+            var targetUrl by remember { mutableStateOf("") }
+            var targetNotes by remember { mutableStateOf("") }
+            var hasTargeted by remember { mutableStateOf(false) }
+            var loadedTarget by remember { mutableStateOf(false) }
+
+            LaunchedEffect(docId) {
+                if (docId.isBlank()) return@LaunchedEffect
+                runCatching {
+                    val snap = db.collection("users").document(docId).get().await()
+                    val url = snap.getString("targetedUpdateUrl").orEmpty()
+                    hasTargeted = url.isNotBlank()
+                    if (hasTargeted) { targetUrl = url; targetNotes = snap.getString("targetedUpdateNotes").orEmpty() }
+                    loadedTarget = true
+                }
+            }
+
+            if (hasTargeted) {
+                Card(colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.tertiaryContainer)) {
+                    Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Targeted update active", style = MaterialTheme.typography.labelMedium)
+                        Text(targetUrl.take(60), fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                OutlinedButton(onClick = {
+                    writeField("targetedUpdateUrl", "")
+                    writeField("targetedUpdateNotes", "")
+                    hasTargeted = false; targetUrl = ""; targetNotes = ""
+                }, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Filled.Delete, null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Remove Targeted Update", style = MaterialTheme.typography.labelMedium)
+                }
+            } else {
+                Text("Push update to this user", style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                OutlinedTextField(
+                    value = targetUrl,
+                    onValueChange = { targetUrl = it },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true,
+                    label = { Text("APK download URL") },
+                    placeholder = { Text("https://github.com/...release.apk") }
+                )
+                OutlinedTextField(
+                    value = targetNotes,
+                    onValueChange = { targetNotes = it },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true,
+                    label = { Text("Update notes (optional)") }
+                )
+                // Quick-fill from latest release
+                OutlinedButton(onClick = {
+                    scope.launch {
+                        runCatching {
+                            val snap = db.collection("releases").document("latest").get().await()
+                            targetUrl = snap.getString("downloadUrl").orEmpty()
+                            targetNotes = snap.getString("notes").orEmpty().ifBlank {
+                                "Update to ${snap.getString("versionName").orEmpty()}"
+                            }
+                        }.onFailure { setError("Could not load release: ${it.message}") }
+                    }
+                }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Fill from latest release", style = MaterialTheme.typography.labelMedium)
+                }
+                Button(onClick = {
+                    if (targetUrl.trim().isNotBlank()) {
+                        writeField("targetedUpdateUrl", targetUrl.trim())
+                        writeField("targetedUpdateNotes", targetNotes.trim())
+                        hasTargeted = true
+                    }
+                }, modifier = Modifier.fillMaxWidth(),
+                    enabled = targetUrl.trim().isNotBlank()) {
+                    Text("Push Update to This User")
+                }
+            }
         }
     }
 
@@ -2460,6 +2544,41 @@ private fun ReleasesTab(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
+
+                    var showRetractConfirm by remember { mutableStateOf(false) }
+                    OutlinedButton(
+                        onClick = { showRetractConfirm = true },
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        ),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Filled.Delete, null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Retract Release")
+                    }
+                    if (showRetractConfirm) {
+                        AlertDialog(
+                            onDismissRequest = { showRetractConfirm = false },
+                            title = { Text("Retract live release?") },
+                            text = { Text("This will remove the update prompt for all users. Existing installs are not affected.") },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    showRetractConfirm = false
+                                    scope.launch {
+                                        runCatching {
+                                            db.collection("releases").document("latest").delete().await()
+                                            liveVersionCode = 0L; liveVersionName = ""; liveDownloadUrl = ""
+                                            liveRequiredMin = 0L; liveNotes = ""; livePublishedAt = null
+                                        }.onFailure { setError(it.message) }
+                                    }
+                                }) { Text("Retract", color = MaterialTheme.colorScheme.error) }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { showRetractConfirm = false }) { Text("Cancel") }
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -2743,8 +2862,10 @@ private fun DashboardTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
                 totalUsers  = snap.size()
                 bannedCount = snap.documents.count { it.getBoolean("banned") == true }
                 warnedCount = snap.documents.count { it.getBoolean("warned") == true }
+                val cutoff = System.currentTimeMillis() - 30_000
                 onlineCount = snap.documents.count {
-                    it.getBoolean("isOnlineInApp") == true
+                    it.getBoolean("isOnlineInApp") == true &&
+                    (it.getTimestamp("lastSeenAt")?.toDate()?.time ?: 0L) > cutoff
                 }
                 loading = false
             }

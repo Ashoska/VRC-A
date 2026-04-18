@@ -542,6 +542,7 @@ class VrchatPipelineService : Service() {
         val updates = mapOf(
             "vrchatUserId" to presence.userId,
             "vrchatDisplayName" to presence.displayName,
+            "vrchatState" to presence.state,
             "vrchatStatus" to presence.status,
             "vrchatStatusDescription" to presence.statusDescription,
             "vrchatWorld" to presence.worldName,

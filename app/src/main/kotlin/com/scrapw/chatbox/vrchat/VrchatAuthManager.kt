@@ -268,6 +268,7 @@ object VrchatAuthManager {
     data class VrcUserPresence(
         val userId: String,
         val displayName: String,
+        val state: String,
         val status: String,
         val statusDescription: String,
         val location: String,
@@ -285,13 +286,16 @@ object VrchatAuthManager {
             val (code, body, _) = get("$BASE/auth/user", null, cookieHeader)
             if (code != 200) return@withContext null
             val json = JSONObject(body)
+            val state = json.optString("state", "offline")
             val location = json.optString("location", "offline")
 
             var worldName = ""
             var playerCount = 0
             var capacity = 0
-            if (location.isNotBlank() && location != "offline" && location != "private" &&
-                location != "traveling" && location.contains(":")) {
+            val hasWorldLocation = location.isNotBlank() &&
+                location != "offline" && location != "private" &&
+                location != "traveling" && location.startsWith("wrld_")
+            if (hasWorldLocation) {
                 try {
                     val (wCode, wBody, _) = get("$BASE/instances/$location", null, cookieHeader)
                     if (wCode == 200) {
@@ -305,11 +309,13 @@ object VrchatAuthManager {
                 }
             }
 
-            val isOnline = location != "offline" && location.isNotBlank()
+            val isOnline = state == "online" || state == "active" ||
+                (location != "offline" && location.isNotBlank())
 
             VrcUserPresence(
                 userId = json.optString("id"),
                 displayName = json.optString("displayName"),
+                state = state,
                 status = json.optString("status", "offline"),
                 statusDescription = json.optString("statusDescription", ""),
                 location = location,
