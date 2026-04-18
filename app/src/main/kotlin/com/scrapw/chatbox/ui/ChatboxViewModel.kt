@@ -705,6 +705,12 @@ class ChatboxViewModel(
         attachModerationListenersLoopOnce()
     }
 
+    fun ipAddressApplyRuntimeOnly(address: String) {
+        remoteChatboxOSC.ipAddress = address
+        startSelfSyncLoopIfNeeded()
+        attachModerationListenersLoopOnce()
+    }
+
     fun portApply(port: Int) {
         remoteChatboxOSC.port = port
         viewModelScope.launch { userPreferencesRepository.savePort(port) }

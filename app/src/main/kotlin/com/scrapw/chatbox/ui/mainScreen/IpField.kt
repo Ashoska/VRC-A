@@ -90,7 +90,7 @@ fun IpField(
         scope.launch {
             repo.saveIpSlot(slot, name, trimmed)
         }
-        chatboxViewModel.ipAddressApply(trimmed)
+        chatboxViewModel.ipAddressApplyRuntimeOnly(trimmed)
         focusManager.clearFocus()
     }
 
@@ -100,7 +100,7 @@ fun IpField(
         currentSlot = slot
         editBuffer = addr
         scope.launch { repo.saveActiveIpSlot(slot) }
-        chatboxViewModel.ipAddressApply(addr)
+        chatboxViewModel.ipAddressApplyRuntimeOnly(addr)
     }
 
     fun saveSlot(slot: Int, name: String, addr: String) {
@@ -108,7 +108,7 @@ fun IpField(
         val a = addr.trim()
         scope.launch { repo.saveIpSlot(slot, n, a) }
         if (slot == currentSlot && a.isNotBlank()) {
-            chatboxViewModel.ipAddressApply(a)
+            chatboxViewModel.ipAddressApplyRuntimeOnly(a)
             editBuffer = a
         }
     }

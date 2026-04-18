@@ -2,6 +2,7 @@ package com.scrapw.chatbox.vrchat
 
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
+import android.os.Message
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
@@ -88,10 +89,12 @@ fun DiscordLoginWebView(
                         settings.domStorageEnabled = true
                         settings.databaseEnabled = true
                         settings.javaScriptCanOpenWindowsAutomatically = true
-                        settings.setSupportMultipleWindows(false)
+                        settings.setSupportMultipleWindows(true)
                         settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                         settings.allowContentAccess = true
-                        settings.userAgentString = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
+                        settings.useWideViewPort = true
+                        settings.loadWithOverviewMode = true
+                        settings.userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 
                         CookieManager.getInstance().setAcceptCookie(true)
                         CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
@@ -114,7 +117,37 @@ fun DiscordLoginWebView(
                                 return false
                             }
                         }
-                        webChromeClient = WebChromeClient()
+                        webChromeClient = object : WebChromeClient() {
+                            override fun onCreateWindow(
+                                view: WebView?, isDialog: Boolean,
+                                isUserGesture: Boolean, resultMsg: Message?
+                            ): Boolean {
+                                val popup = WebView(ctx).apply {
+                                    settings.javaScriptEnabled = true
+                                    settings.domStorageEnabled = true
+                                    settings.databaseEnabled = true
+                                    settings.userAgentString = view?.settings?.userAgentString
+                                    CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                                    webViewClient = object : WebViewClient() {
+                                        override fun shouldOverrideUrlLoading(v: WebView?, req: WebResourceRequest?): Boolean = false
+                                    }
+                                    webChromeClient = object : WebChromeClient() {
+                                        override fun onCloseWindow(window: WebView?) {
+                                            (view as? ViewGroup)?.removeView(window)
+                                            window?.destroy()
+                                        }
+                                    }
+                                }
+                                view?.addView(popup, ViewGroup.LayoutParams(
+                                    ViewGroup.LayoutParams.MATCH_PARENT,
+                                    ViewGroup.LayoutParams.MATCH_PARENT
+                                ))
+                                val transport = resultMsg?.obj as? WebView.WebViewTransport
+                                transport?.webView = popup
+                                resultMsg?.sendToTarget()
+                                return true
+                            }
+                        }
 
                         loadUrl("https://discord.com/login")
                         webViewRef = this

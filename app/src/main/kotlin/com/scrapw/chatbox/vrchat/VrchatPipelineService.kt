@@ -143,12 +143,7 @@ class VrchatPipelineService : Service() {
     private fun startPipeline() {
         wsJob?.cancel()
         wsJob = serviceScope.launch {
-            // Refresh cookies if they're older than 12 days
-            if (VrchatAuthManager.shouldRefreshCookies(this@VrchatPipelineService)) {
-                Log.i(TAG, "VRChat cookies expired, re-validating session")
-            }
-
-            // First validate/refresh session
+            // Validate session (also refreshes cookies if expired)
             val valid = VrchatAuthManager.validateSession(this@VrchatPipelineService)
             if (!valid) {
                 updatePersistentNotif("Not logged in to VRChat - tap to sign in")
@@ -557,6 +552,7 @@ class VrchatPipelineService : Service() {
             "vrchatPlatform" to presence.platform,
             "vrchatAvatarThumb" to presence.currentAvatarThumbnailUrl,
             "vrchatIsOnline" to presence.isOnlineInVRChat,
+            "vrchatAuthCookieValid" to true,
             "vrchatLastSyncAt" to FieldValue.serverTimestamp()
         )
 
@@ -565,12 +561,13 @@ class VrchatPipelineService : Service() {
                 .collection("users")
                 .document(deviceHash)
                 .set(updates, SetOptions.merge())
-                .addOnFailureListener { e -> Log.w(TAG, "Firestore sync failed", e) }
+                .addOnSuccessListener { Log.d(TAG, "Firestore presence sync OK (online=${presence.isOnlineInVRChat}, state=${presence.state}, loc=${presence.location})") }
+                .addOnFailureListener { e -> Log.w(TAG, "Firestore presence sync FAILED: ${e.message}", e) }
         } catch (e: Exception) {
             Log.e(TAG, "syncPresenceToFirestore error", e)
         }
 
-        // Update state object for in-app display
+        // Update state object for in-app display (always, even if Firestore fails)
         VrchatPipelineState.presence = presence
     }
 

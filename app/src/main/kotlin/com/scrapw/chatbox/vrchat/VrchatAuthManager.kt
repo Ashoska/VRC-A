@@ -281,11 +281,18 @@ object VrchatAuthManager {
     )
 
     suspend fun fetchPresence(context: Context): VrcUserPresence? = withContext(Dispatchers.IO) {
-        val cookieHeader = getCookieHeader(context) ?: return@withContext null
+        val cookieHeader = getCookieHeader(context) ?: run {
+            Log.w(TAG, "fetchPresence: no cookie header available")
+            return@withContext null
+        }
         try {
             val (code, body, _) = get("$BASE/auth/user", null, cookieHeader)
-            if (code != 200) return@withContext null
+            if (code != 200) {
+                Log.w(TAG, "fetchPresence: API returned $code, body=${body.take(200)}")
+                return@withContext null
+            }
             val json = JSONObject(body)
+            Log.d(TAG, "fetchPresence raw: state=${json.optString("state")} status=${json.optString("status")} location=${json.optString("location")}")
             val state = json.optString("state", "offline")
             val location = json.optString("location", "offline")
 
