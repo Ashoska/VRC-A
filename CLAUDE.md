@@ -47,8 +47,9 @@ Display name embedded in UI strings: "Ashoska Mitsu Sisko".
 - **VrchatPipelineService**: Foreground service with OkHttp WebSocket to `wss://pipeline.vrchat.cloud`. Handles real-time events (friend online/offline, unfriend, invites, group events), syncs VRChat presence to Firestore, and manages friends cache
 - **Friends cache**: Persisted to Firestore (`users/{deviceHash}` fields: `savedFriendIds`, `savedFriendNames`) for cross-session unfriend detection. Includes half-list guard to prevent mass false notifications on API pagination errors or first install
 - **VrchatPipelineState**: Shared in-memory singleton using `MutableStateFlow` for reactive cross-component state (connection status, presence data). Compose UI observes via `collectAsState()`.
-- **DiscordRpcService**: Foreground service connecting to Discord Gateway WebSocket (`wss://gateway.discord.gg`). Sends VRChat Rich Presence (world name, player count, elapsed time) mimicking VRChat desktop's Discord integration. Requires user's Discord token stored in DataStore. Auto-starts when VRChat pipeline connects if enabled.
-- **IpField**: Multi-slot IP field component with 3 named slots (Home/Hotspot/Other). Supports slot switching, per-slot editing, and auto-migration from legacy single IP key.
+- **DiscordRpcService**: Foreground service connecting to Discord Gateway WebSocket (`wss://gateway.discord.gg`). Sends VRChat Rich Presence (world name, player count, elapsed time) mimicking VRChat desktop's Discord integration. Auto-starts when VRChat pipeline connects if enabled.
+- **DiscordLoginWebView**: WebView-based Discord login flow that extracts the user token from localStorage after login — no manual token paste needed.
+- **IpField**: Multi-slot IP field component with 3 named slots (Home/Hotspot/Other). Uses local state tracking (not async DataStore) for immediate slot switching without cross-contamination. Supports per-slot editing and auto-migration from legacy single IP key.
 
 ### Firestore Schema (users/{deviceHash})
 Key fields written by the app:
@@ -57,18 +58,20 @@ Key fields written by the app:
 - `savedFriendIds` / `savedFriendNames` (string arrays): Friends cache for unfriend detection
 - `afkEnabled`, `cycleEnabled`, `spotifyEnabled`, `timeEnabled`: Feature toggles (admin-editable)
 - `warned`, `banned`, `warnReason`, `banReason`: Moderation flags (read by public app via snapshot listener)
-- VRChat presence fields: `vrchatUserId`, `vrchatDisplayName`, `vrchatStatus`, `vrchatLocation`, etc.
+- `targetedUpdateUrl` / `targetedUpdateNotes` (strings): Admin-pushed targeted APK update for specific user
+- VRChat presence fields: `vrchatUserId`, `vrchatDisplayName`, `vrchatState`, `vrchatStatus`, `vrchatLocation`, etc.
 
 **Firestore rules must include** `savedFriendIds`, `savedFriendNames`, `isOnlineInApp` in the `selfMutableKeys()` allowlist.
 
 ### Navigation
 - Bottom nav: Home, Automations, Music, VRChat (4 items)
 - Settings: Full page accessed via gear icon in top app bar. Contains Permissions, About, Help, and collapsible Debug section
-- Admin: Full page accessed via gavel icon in top app bar (admin build only)
+- Admin: Full page accessed via gavel icon in top app bar (admin build only). Includes targeted APK push per user and release retraction.
 
 ### Firestore Sync Architecture
 - **Event-driven sync**: Data changes trigger an immediate debounced sync (500ms) to Firestore
-- **Heartbeat**: Separate lightweight write of `isOnlineInApp` + `lastSeenAt` every 8s, always fires regardless of data changes
+- **Heartbeat**: Separate lightweight write of `isOnlineInApp` + `lastSeenAt` every 8s, fires immediately on startup then repeats. Offline write uses `GlobalScope` to survive ViewModel teardown.
+- **Admin online detection**: Uses `lastSeenAt` within 30s + `isOnlineInApp` flag (auto-expires stale entries if offline write fails)
 - **Admin reads**: Snapshot listeners provide real-time updates from Firestore (no polling)
 
 ### NowPlaying
