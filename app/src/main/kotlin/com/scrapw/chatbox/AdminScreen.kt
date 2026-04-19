@@ -1161,10 +1161,27 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
             Divider()
 
             // Targeted update push
+            val ctx = LocalContext.current
             var targetUrl by remember { mutableStateOf("") }
             var targetNotes by remember { mutableStateOf("") }
             var hasTargeted by remember { mutableStateOf(false) }
             var loadedTarget by remember { mutableStateOf(false) }
+
+            // APK upload state
+            var tPickedFileName by remember { mutableStateOf("") }
+            var tParsedCode by remember { mutableLongStateOf(0L) }
+            var tParsedName by remember { mutableStateOf("") }
+            var tParseError by remember { mutableStateOf("") }
+            var tCachedApkPath by remember { mutableStateOf("") }
+            var tUploading by remember { mutableStateOf(false) }
+            var tUploadPhase by remember { mutableStateOf("") }
+            var tUploadProgress by remember { mutableStateOf(0f) }
+            var tUploadDone by remember { mutableStateOf(false) }
+
+            val githubPat   = BuildConfig.GITHUB_PAT
+            val githubOwner = BuildConfig.GITHUB_OWNER
+            val githubRepo  = BuildConfig.GITHUB_REPO
+            val tCredsMissing = githubPat.isBlank() || githubOwner.isBlank() || githubRepo.isBlank()
 
             LaunchedEffect(docId) {
                 if (docId.isBlank()) return@LaunchedEffect
@@ -1177,6 +1194,91 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
                 }
             }
 
+            val tFilePicker = rememberLauncherForActivityResult(
+                ActivityResultContracts.GetContent()
+            ) { uri: Uri? ->
+                if (uri == null) return@rememberLauncherForActivityResult
+                tParseError = ""; tParsedCode = 0L; tParsedName = ""
+                tPickedFileName = ""; tCachedApkPath = ""; tUploadDone = false
+
+                scope.launch {
+                    val tmp = copyUriToCache(ctx, uri)
+                    if (tmp == null) { tParseError = "Could not read the selected file."; return@launch }
+                    tCachedApkPath = tmp.absolutePath
+
+                    tPickedFileName = runCatching {
+                        ctx.contentResolver.query(uri, null, null, null, null)?.use { c ->
+                            c.moveToFirst()
+                            c.getString(c.getColumnIndexOrThrow(android.provider.OpenableColumns.DISPLAY_NAME))
+                        }
+                    }.getOrNull() ?: "targeted-update.apk"
+
+                    val info = parseApkInfo(ctx, tmp.absolutePath)
+                    if (info == null) {
+                        tParseError = "Could not read version info.\nMake sure this is a valid APK."
+                        return@launch
+                    }
+                    tParsedCode = info.first
+                    tParsedName = info.second
+                }
+            }
+
+            fun startTargetedUpload() {
+                val apkPath = tCachedApkPath
+                if (apkPath.isBlank()) return
+
+                scope.launch {
+                    tUploading = true; tUploadDone = false; tUploadProgress = 0f; setError(null)
+
+                    runCatching {
+                        val apkFile = File(apkPath)
+                        val tagName  = "targeted-${docId.take(8)}-${System.currentTimeMillis() / 1000}"
+                        val relName  = "Targeted v${tParsedName.ifBlank { tParsedCode.toString() }}"
+                        val fileName = "chatbox-vrc-a-targeted-${tParsedName.ifBlank { tParsedCode.toString() }}.apk"
+                            .replace(Regex("[^a-zA-Z0-9._-]"), "_")
+
+                        tUploadPhase = "Creating GitHub release..."
+                        val release = githubCreateRelease(
+                            owner       = githubOwner,
+                            repo        = githubRepo,
+                            pat         = githubPat,
+                            tagName     = tagName,
+                            releaseName = relName,
+                            body        = targetNotes.trim().ifBlank { "Targeted update for user" }
+                        )
+
+                        tUploadPhase = "Uploading APK..."
+                        val downloadUrl = githubUploadAsset(
+                            owner      = githubOwner,
+                            repo       = githubRepo,
+                            pat        = githubPat,
+                            releaseId  = release.releaseId,
+                            fileName   = fileName,
+                            apkFile    = apkFile,
+                            onProgress = { tUploadProgress = it }
+                        )
+
+                        tUploadPhase = "Pushing to user..."
+                        writeField("targetedUpdateUrl", downloadUrl)
+                        writeField("targetedUpdateNotes", targetNotes.trim())
+
+                        targetUrl = downloadUrl
+                        hasTargeted = true
+                        tUploadDone = true
+                        tUploadPhase = ""
+
+                        runCatching { apkFile.delete() }
+                        tCachedApkPath = ""; tPickedFileName = ""; tParsedCode = 0L; tParsedName = ""
+
+                    }.onFailure { e ->
+                        setError(e.message ?: "Upload failed")
+                        tUploadPhase = ""
+                    }
+
+                    tUploading = false
+                }
+            }
+
             if (hasTargeted) {
                 Card(colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.tertiaryContainer)) {
@@ -1184,6 +1286,9 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
                         Text("Targeted update active", style = MaterialTheme.typography.labelMedium)
                         Text(targetUrl.take(60), fontFamily = FontFamily.Monospace,
                             style = MaterialTheme.typography.bodySmall)
+                        if (targetNotes.isNotBlank())
+                            Text(targetNotes, style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer)
                     }
                 }
                 OutlinedButton(onClick = {
@@ -1198,6 +1303,90 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
             } else {
                 Text("Push update to this user", style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+                // Option 1: Upload APK file directly
+                OutlinedButton(
+                    onClick = { tFilePicker.launch("*/*") },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !tUploading && !tCredsMissing
+                ) {
+                    Icon(Icons.Filled.AttachFile, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (tPickedFileName.isBlank()) "Pick APK file" else tPickedFileName)
+                }
+
+                if (tParseError.isNotBlank()) {
+                    Card(colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                        Text(tParseError, modifier = Modifier.padding(10.dp),
+                            style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+
+                if (tParsedCode > 0L) {
+                    Card(colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("Read from APK", style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("versionCode = $tParsedCode",
+                                fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
+                            Text("versionName = ${tParsedName.ifBlank { "(blank)" }}",
+                                fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = targetNotes,
+                    onValueChange = { targetNotes = it },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true,
+                    label = { Text("Update notes (optional)") },
+                    enabled = !tUploading
+                )
+
+                if (tUploading) {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        LinearProgressIndicator(
+                            progress = tUploadProgress,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Text(tUploadPhase.ifBlank { "Working..." },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+
+                if (tUploadDone) {
+                    Card(colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+                        Row(Modifier.padding(10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Icon(Icons.Filled.CheckCircle, contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary)
+                            Text("Targeted update pushed! User will see it on next app launch.",
+                                style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+
+                // Upload & push button (APK file)
+                if (tParsedCode > 0L && tCachedApkPath.isNotBlank()) {
+                    Button(
+                        onClick = { startTargetedUpload() },
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !tUploading && !tCredsMissing
+                    ) {
+                        Icon(Icons.Filled.CloudUpload, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Upload & Push v$tParsedName ($tParsedCode)")
+                    }
+                }
+
+                Divider()
+
+                // Option 2: Manual URL or fill from latest release
+                Text("Or use a URL directly:", style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
                 OutlinedTextField(
                     value = targetUrl,
                     onValueChange = { targetUrl = it },
@@ -1205,13 +1394,6 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
                     label = { Text("APK download URL") },
                     placeholder = { Text("https://github.com/...release.apk") }
                 )
-                OutlinedTextField(
-                    value = targetNotes,
-                    onValueChange = { targetNotes = it },
-                    modifier = Modifier.fillMaxWidth(), singleLine = true,
-                    label = { Text("Update notes (optional)") }
-                )
-                // Quick-fill from latest release
                 OutlinedButton(onClick = {
                     scope.launch {
                         runCatching {
@@ -1232,8 +1414,8 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
                         hasTargeted = true
                     }
                 }, modifier = Modifier.fillMaxWidth(),
-                    enabled = targetUrl.trim().isNotBlank()) {
-                    Text("Push Update to This User")
+                    enabled = targetUrl.trim().isNotBlank() && tCachedApkPath.isBlank()) {
+                    Text("Push URL to This User")
                 }
             }
         }

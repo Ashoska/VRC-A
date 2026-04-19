@@ -595,14 +595,14 @@ class ChatboxViewModel(
             }
             // Pinned (AFK) presets (admin can edit preset contents + names)
             val afkPresetSavers = listOf<suspend (String) -> Unit>(
-                userPreferencesRepository::saveAfkPreset1,
-                userPreferencesRepository::saveAfkPreset2,
-                userPreferencesRepository::saveAfkPreset3
+                { v -> userPreferencesRepository.saveAfkPreset1(v) },
+                { v -> userPreferencesRepository.saveAfkPreset2(v) },
+                { v -> userPreferencesRepository.saveAfkPreset3(v) }
             )
             val afkPresetNameSavers = listOf<suspend (String) -> Unit>(
-                userPreferencesRepository::savePinnedPreset1Name,
-                userPreferencesRepository::savePinnedPreset2Name,
-                userPreferencesRepository::savePinnedPreset3Name
+                { v -> userPreferencesRepository.savePinnedPreset1Name(v) },
+                { v -> userPreferencesRepository.savePinnedPreset2Name(v) },
+                { v -> userPreferencesRepository.savePinnedPreset3Name(v) }
             )
             for (i in 1..3) {
                 val msgKey = "afkPreset$i"

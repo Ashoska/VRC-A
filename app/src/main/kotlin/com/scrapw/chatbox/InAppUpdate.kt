@@ -64,3 +64,32 @@ suspend fun checkFirestoreRelease(currentVersionCode: Int): ReleaseCheckResult {
         ReleaseCheckResult.Failed(e.message ?: "Unknown error")
     }
 }
+
+/**
+ * Check if the admin has pushed a targeted update specifically for this device.
+ * Reads `targetedUpdateUrl` and `targetedUpdateNotes` from `users/{deviceHash}`.
+ */
+suspend fun checkTargetedUpdate(deviceHash: String): ReleaseCheckResult {
+    if (deviceHash.isBlank()) return ReleaseCheckResult.UpToDate
+    return try {
+        val db = FirebaseFirestore.getInstance()
+        val snap = db.collection("users").document(deviceHash).get().await()
+        if (!snap.exists()) return ReleaseCheckResult.UpToDate
+
+        val url   = snap.getString("targetedUpdateUrl").orEmpty()
+        val notes = snap.getString("targetedUpdateNotes").orEmpty()
+
+        if (url.isBlank()) return ReleaseCheckResult.UpToDate
+
+        val info = ReleaseInfo(
+            versionCode     = Long.MAX_VALUE,
+            versionName     = "Targeted Update",
+            downloadUrl     = url,
+            requiredMinCode = 0L,
+            notes           = notes
+        )
+        ReleaseCheckResult.UpdateAvailable(info, forced = false)
+    } catch (e: Exception) {
+        ReleaseCheckResult.Failed(e.message ?: "Unknown error")
+    }
+}

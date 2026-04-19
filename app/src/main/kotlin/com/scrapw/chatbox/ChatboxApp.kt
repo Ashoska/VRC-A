@@ -287,7 +287,20 @@ fun ChatboxApp() {
 
     if (!BuildConfig.IS_ADMIN_BUILD) {
         LaunchedEffect(Unit) {
-            releaseCheckResult = checkFirestoreRelease(BuildConfig.VERSION_CODE)
+            // Check global release first
+            val globalResult = checkFirestoreRelease(BuildConfig.VERSION_CODE)
+
+            // Check targeted update for this specific device
+            val prefs = ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
+            val deviceHash = prefs.getString("device_id_hash", "") ?: ""
+            val targetedResult = checkTargetedUpdate(deviceHash)
+
+            // Targeted update takes priority over global release
+            releaseCheckResult = if (targetedResult is ReleaseCheckResult.UpdateAvailable) {
+                targetedResult
+            } else {
+                globalResult
+            }
         }
     }
 

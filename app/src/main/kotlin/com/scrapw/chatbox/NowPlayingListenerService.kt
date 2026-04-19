@@ -15,7 +15,6 @@ import android.service.notification.StatusBarNotification
 
 class NowPlayingListenerService : NotificationListenerService() {
 
-    // Optional: only accept these apps (keeps it clean).
     private val allowedPackages = setOf(
         "com.spotify.music",
         "com.google.android.youtube",
@@ -35,15 +34,19 @@ class NowPlayingListenerService : NotificationListenerService() {
 
     private val controllersByPackage = HashMap<String, ControllerEntry>()
 
-    // Polling only used as a fallback when Spotify DJ/Ads cause callbacks to stop updating.
     private val mainHandler = Handler(Looper.getMainLooper())
     private val pollRunnablesByPackage = HashMap<String, Runnable>()
 
     private val lastTitleArtistByPackage = HashMap<String, Pair<String, String>>()
     private val lastPushElapsedByPackage = HashMap<String, Long>()
-    private val stallCountByPackage = HashMap<String, Int>()
-    private val specialUntilElapsedByPackage = HashMap<String, Long>()
     private val lastPlayingStateByPackage = HashMap<String, Boolean>()
+
+    // Spotify ad/DJ: only activate special window when metadata explicitly says "ad" or "dj".
+    // Stall-based detection is removed entirely — it caused false positives on normal skips.
+    private val specialUntilElapsedByPackage = HashMap<String, Long>()
+
+    // Debounce: when metadata changes rapidly (skip/seek), wait before pushing to avoid flicker.
+    private val lastMetaChangeElapsedByPackage = HashMap<String, Long>()
 
     private fun markSpecialWindow(pkg: String, windowMs: Long) {
         specialUntilElapsedByPackage[pkg] = SystemClock.elapsedRealtime() + windowMs
@@ -58,14 +61,10 @@ class NowPlayingListenerService : NotificationListenerService() {
         super.onListenerConnected()
         NowPlayingState.setConnected(true)
 
-        // Prime state from currently active notifications so the UI works immediately.
         try {
             activeNotifications?.forEach { sbn -> onNotificationPosted(sbn) }
         } catch (_: Throwable) { }
 
-        // Also scan active MediaSessions directly. Apps that started playback
-        // before the listener connected (or after a listener rebind) may not
-        // re-post a notification, so the notification scan misses them.
         scanActiveMediaSessions()
     }
 
@@ -79,7 +78,6 @@ class NowPlayingListenerService : NotificationListenerService() {
             for (controller in controllers) {
                 val pkg = controller.packageName ?: continue
                 if (allowedPackages.isNotEmpty() && pkg !in allowedPackages) continue
-                // Register a callback and push an immediate snapshot.
                 val token = controller.sessionToken ?: continue
                 ensureControllerForPackage(pkg, token)
             }
@@ -104,8 +102,6 @@ class NowPlayingListenerService : NotificationListenerService() {
 
         val token = getMediaSessionToken(extras) ?: return
 
-        // Ensure we are listening to this session via MediaController callbacks.
-        // Skips/back/pauses often do NOT cause a fresh "posted" notification.
         ensureControllerForPackage(pkg, token)
     }
 
@@ -125,12 +121,10 @@ class NowPlayingListenerService : NotificationListenerService() {
 
         val existing = controllersByPackage[pkg]
         if (existing != null && tokensEqual(existing.token, token)) {
-            // Already listening to this exact session; just push a fresh snapshot.
             pushSnapshot(pkg, existing.controller.metadata, existing.controller.playbackState, existing.controller)
             return
         }
 
-        // Token changed or none exists: recreate.
         teardownController(pkg)
         stopPoll(pkg)
 
@@ -156,14 +150,11 @@ class NowPlayingListenerService : NotificationListenerService() {
             controller.registerCallback(cb)
             controllersByPackage[pkg] = ControllerEntry(controller, cb, token)
 
-            // Seed the playing state so the poll can detect the first pause/resume.
             val initState = controller.playbackState
             lastPlayingStateByPackage[pkg] = initState?.state == PlaybackState.STATE_PLAYING
 
-            // Push an immediate snapshot so UI/OSC updates right away.
             pushSnapshot(pkg, controller.metadata, initState, controller)
         } catch (_: Throwable) {
-            // If MediaController fails, do nothing (don\u00E2\u20AC\u2122t fall back to non-media notifications).
         }
     }
 
@@ -172,7 +163,6 @@ class NowPlayingListenerService : NotificationListenerService() {
         try {
             entry.controller.unregisterCallback(entry.callback)
         } catch (_: Throwable) {
-            // ignore
         }
         lastPlayingStateByPackage.remove(pkg)
     }
@@ -184,15 +174,17 @@ class NowPlayingListenerService : NotificationListenerService() {
     }
 
     private fun tokensEqual(a: MediaSession.Token, b: MediaSession.Token): Boolean {
-        // Token equality is inconsistent across OEMs; safest check is toString() + hashCode().
-        // This stays in-service and avoids additional dependencies.
         return (a == b) || (a.toString() == b.toString() && a.hashCode() == b.hashCode())
     }
 
-    // ---- Snapshot + Spotify DJ/Ad fallback ----
+    // ---- Ad/DJ classification (Spotify only, metadata-based only) ----
 
     private enum class SpecialKind { DJ, AD }
 
+    /**
+     * Only classifies based on explicit metadata strings from Spotify.
+     * No stall-based heuristics — those caused false positives on song skips.
+     */
     private fun classifySpecial(pkg: String, title: String, artist: String): SpecialKind? {
         if (pkg != "com.spotify.music") return null
 
@@ -202,13 +194,13 @@ class NowPlayingListenerService : NotificationListenerService() {
         val looksLikeAd =
             t == "advertisement" ||
                 t == "ad" ||
+                t == "spotify" ||
                 t == "spotify ad" ||
-                (t.startsWith("advert") && (a.isBlank() || a.contains("spotify")))
+                (t.startsWith("advert") && (a.isBlank() || a == "spotify"))
 
         val looksLikeDj =
-            t == "dj" ||
-                t == "spotify dj" ||
-                (t == "dj" && a.isBlank())
+            (t == "dj" && (a.isBlank() || a == "spotify")) ||
+                t == "spotify dj"
 
         return when {
             looksLikeAd -> SpecialKind.AD
@@ -216,6 +208,8 @@ class NowPlayingListenerService : NotificationListenerService() {
             else -> null
         }
     }
+
+    // ---- Snapshot push ----
 
     private fun pushSnapshot(
         pkg: String,
@@ -233,65 +227,36 @@ class NowPlayingListenerService : NotificationListenerService() {
 
         val isPlaying = pb?.state == PlaybackState.STATE_PLAYING
 
-        // lastPositionUpdateTime is based on elapsedRealtime.
         val snapshotUpdateTime =
             if (lastUpdate > 0L) lastUpdate else SystemClock.elapsedRealtime()
 
         lastPushElapsedByPackage[pkg] = SystemClock.elapsedRealtime()
 
-        // Stall tracking: if metadata stays the same while playback looks stalled, suppress paused flicker.
+        // Track metadata changes for debounce
         val prevTa = lastTitleArtistByPackage[pkg]
         val curTa = title to artist
-        val metaSame = prevTa != null && prevTa.first == curTa.first && prevTa.second == curTa.second
-        if (!metaSame) {
-            stallCountByPackage[pkg] = 0
+        val metaChanged = prevTa == null || prevTa.first != curTa.first || prevTa.second != curTa.second
+        if (metaChanged) {
             lastTitleArtistByPackage[pkg] = curTa
+            lastMetaChangeElapsedByPackage[pkg] = SystemClock.elapsedRealtime()
         }
 
+        // Spotify ad/DJ: only trigger on explicit metadata match
         val special = classifySpecial(pkg, title, artist)
         if (special != null) {
-            // Keep a stable label only for Spotify. Other apps keep original metadata.
-            if (pkg == "com.spotify.music") {
-                when (special) {
-                    SpecialKind.DJ -> {
-                        title = "DJ"
-                        artist = ""
-                    }
-                    SpecialKind.AD -> {
-                        title = "AD"
-                        artist = ""
-                    }
-                }
+            when (special) {
+                SpecialKind.DJ -> { title = "DJ"; artist = "" }
+                SpecialKind.AD -> { title = "AD"; artist = "" }
             }
-
             markSpecialWindow(pkg, 10_000L)
-
-            // Start watchdog polling to catch the first real track after the segment ends.
+            if (controller != null) startPollForRealTrack(pkg, controller)
+        } else if (isSpecialWindowActive(pkg) && pkg == "com.spotify.music") {
+            // Still in a special window from a previous ad/DJ — keep polling
+            // to catch the real track as soon as it starts
             if (controller != null) startPollForRealTrack(pkg, controller)
         } else {
-            // Stall detection only for Spotify — other apps don't have ad segments
-            if (pkg == "com.spotify.music") {
-                val rawState = pb?.state ?: PlaybackState.STATE_NONE
-                val isPausedByUser = rawState == PlaybackState.STATE_PAUSED
-                if (metaSame && !isPlaying && !isPausedByUser && (title.isNotBlank() || artist.isNotBlank())) {
-                    val n = (stallCountByPackage[pkg] ?: 0) + 1
-                    stallCountByPackage[pkg] = n
-                    if (n >= 4) {
-                        markSpecialWindow(pkg, 8000L)
-                        if (controller != null) startPollForRealTrack(pkg, controller)
-                    }
-                } else {
-                    stallCountByPackage[pkg] = 0
-                }
-            } else {
-                stallCountByPackage[pkg] = 0
-            }
-
-            if (controller != null && pkg == "com.spotify.music" && isSpecialWindowActive(pkg)) {
-                startPollForRealTrack(pkg, controller)
-            } else if (!isSpecialWindowActive(pkg)) {
-                stopPoll(pkg)
-            }
+            // Normal track — stop polling if we were
+            stopPoll(pkg)
         }
 
         val detected = title.isNotBlank() || artist.isNotBlank()
@@ -314,16 +279,14 @@ class NowPlayingListenerService : NotificationListenerService() {
     }
 
     private fun startPollForRealTrack(pkg: String, controller: MediaController) {
-        // If already polling, keep it (do not stack runnables).
         if (pollRunnablesByPackage.containsKey(pkg)) return
 
         val startAt = SystemClock.elapsedRealtime()
-        val maxMs = 10 * 60 * 1000L // 10 minutes max per activation
+        val maxMs = 10 * 60 * 1000L
         val intervalMs = 500L
 
         val r = object : Runnable {
             override fun run() {
-                // If controller got replaced, stop; new controller will start its own poll if needed.
                 val current = controllersByPackage[pkg]?.controller
                 if (current != controller) {
                     stopPoll(pkg)
@@ -342,18 +305,15 @@ class NowPlayingListenerService : NotificationListenerService() {
                 val lastPush = lastPushElapsedByPackage[pkg] ?: 0L
                 val sincePush = SystemClock.elapsedRealtime() - lastPush
 
-                // Also detect playback state changes (pause/resume) that callbacks missed.
                 val nowPlaying = pb?.state == PlaybackState.STATE_PLAYING
                 val statePrev = lastPlayingStateByPackage[pkg]
                 val stateChanged = statePrev != null && statePrev != nowPlaying
 
-                // Push if metadata changed, state changed, or stall recovery fallback.
                 if (changed || stateChanged || sincePush >= 4000L) {
                     pushSnapshot(pkg, md, pb, controller)
                 }
                 lastPlayingStateByPackage[pkg] = nowPlaying
 
-                // Give up after maxMs to avoid background churn.
                 if (SystemClock.elapsedRealtime() - startAt >= maxMs) {
                     stopPoll(pkg)
                     return
