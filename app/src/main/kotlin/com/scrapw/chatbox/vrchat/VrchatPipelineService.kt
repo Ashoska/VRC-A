@@ -191,7 +191,7 @@ class VrchatPipelineService : Service() {
         presenceRefreshJob?.cancel()
         presenceRefreshJob = serviceScope.launch {
             while (true) {
-                delay(30_000)
+                delay(15_000)
                 try {
                     syncPresenceToFirestore()
                 } catch (e: Exception) {

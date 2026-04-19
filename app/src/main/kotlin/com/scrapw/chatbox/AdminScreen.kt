@@ -3096,7 +3096,7 @@ private fun DashboardTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
                 totalUsers  = snap.size()
                 bannedCount = snap.documents.count { it.getBoolean("banned") == true }
                 warnedCount = snap.documents.count { it.getBoolean("warned") == true }
-                val cutoff = System.currentTimeMillis() - 30_000
+                val cutoff = System.currentTimeMillis() - 60_000
                 onlineCount = snap.documents.count {
                     it.getBoolean("isOnlineInApp") == true &&
                     (it.getTimestamp("lastSeenAt")?.toDate()?.time ?: 0L) > cutoff

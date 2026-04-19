@@ -2357,82 +2357,114 @@ private fun VrchatStatusPage(
         // Presence card
         val p = presence
         if (p != null && isLinked.value) {
-            val statusLabel = if (p.isOnlineInVRChat) {
+            val statusColor = if (p.isOnlineInVRChat) {
                 when (p.status) {
-                    "ask me" -> "[ask me]"
-                    "busy"   -> "[busy]"
-                    else     -> "[online]"
+                    "ask me" -> androidx.compose.ui.graphics.Color(0xFFFF9800)
+                    "busy"   -> androidx.compose.ui.graphics.Color(0xFFF44336)
+                    "join me" -> androidx.compose.ui.graphics.Color(0xFF2196F3)
+                    else     -> androidx.compose.ui.graphics.Color(0xFF4CAF50)
                 }
             } else {
-                "[offline]"
+                MaterialTheme.colorScheme.onSurfaceVariant
             }
-            val onlineLabel = if (p.isOnlineInVRChat) "Online in VRChat" else "Not in VRChat"
+            val statusText = if (p.isOnlineInVRChat) {
+                when (p.status) {
+                    "ask me" -> "Ask Me"
+                    "busy"   -> "Do Not Disturb"
+                    "join me" -> "Join Me"
+                    else     -> "Online"
+                }
+            } else "Offline"
+
+            val platform = when (p.platform) {
+                "standalonewindows" -> "Desktop"
+                "android"           -> "Android/Quest"
+                "ios"               -> "iOS"
+                else                -> ""
+            }
+
             ElevatedCard {
                 Column(
                     Modifier.padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Text("Presence", style = MaterialTheme.typography.titleSmall)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        Text(statusLabel)
-                        Column {
-                            Text(
-                                p.displayName,
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                            Text(
-                                onlineLabel,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = if (p.isOnlineInVRChat) MaterialTheme.colorScheme.primary
-                                        else MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            if (p.statusDescription.isNotBlank())
-                                Text(
-                                    p.statusDescription,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                        }
-                    }
-                    Divider()
-                    if (p.worldName.isNotBlank()) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("World:", style = MaterialTheme.typography.bodySmall)
+                    // Status header with colored dot
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            androidx.compose.foundation.Canvas(Modifier.size(12.dp)) {
+                                drawCircle(color = statusColor)
+                            }
                             Column {
-                                Text(p.worldName, style = MaterialTheme.typography.bodyMedium)
-                                val count = if (p.instanceCapacity > 0)
-                                    "${p.instancePlayerCount} / ${p.instanceCapacity}"
-                                else "${p.instancePlayerCount} players"
-                                Text(count, style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(
+                                    p.displayName,
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                                Text(
+                                    statusText,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = statusColor
+                                )
                             }
                         }
-                    } else {
+                        if (platform.isNotBlank()) {
+                            androidx.compose.material3.Badge(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant
+                            ) {
+                                Text(platform, style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                    }
+
+                    if (p.statusDescription.isNotBlank()) {
                         Text(
-                            when (p.location) {
-                                "offline"   -> "Offline"
-                                "private"   -> "In a private world"
-                                "traveling" -> "Traveling between worlds..."
-                                else        -> "In a world"
-                            },
+                            p.statusDescription,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                    val platform = when (p.platform) {
-                        "standalonewindows" -> "Desktop"
-                        "android"           -> "Android/Quest"
-                        "ios"               -> "iOS"
-                        else                -> ""
-                    }
-                    if (platform.isNotBlank())
-                        Text(platform, style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (p.userId.isNotBlank()) {
+
+                    // World info
+                    if (p.isOnlineInVRChat) {
                         Divider()
+                        if (p.worldName.isNotBlank()) {
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(
+                                    p.worldName,
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                                val count = if (p.instanceCapacity > 0)
+                                    "${p.instancePlayerCount} / ${p.instanceCapacity} players"
+                                else "${p.instancePlayerCount} players"
+                                Text(
+                                    count,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        } else {
+                            Text(
+                                when (p.location) {
+                                    "private"   -> "In a private world"
+                                    "traveling" -> "Traveling between worlds..."
+                                    else        -> "In a world"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    // VRChat profile link
+                    if (p.userId.isNotBlank()) {
                         Text(
-                            text = p.userId,
+                            text = "View VRChat Profile",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.clickable {

@@ -255,15 +255,16 @@ class ChatboxViewModel(
             "lastSeenAt" to FieldValue.serverTimestamp(),
             "updatedAt" to FieldValue.serverTimestamp(),
 
-            "afkEnabled" to afkEnabled,
+            // Toggle fields (afkEnabled, cycleEnabled, spotifyEnabled, timeEnabled)
+            // are NOT synced back from the public app — admin controls them via
+            // writeField() and the public app applies them via applyRemoteConfig().
+
             "afkMessage" to afkMessage.trim(),
 
-            "cycleEnabled" to cycleEnabled,
             "cycleIntervalSeconds" to cycleIntervalSeconds,
             "cycleLines" to cycleClean,
             "cycleLinesText" to cycleClean.joinToString("\n"),
 
-            "spotifyEnabled" to spotifyEnabled,
             "spotifyDemoEnabled" to spotifyDemoEnabled,
             "spotifyPreset" to spotifyPreset,
 
@@ -276,29 +277,15 @@ class ChatboxViewModel(
             "combinedPreviewText" to combinedPreviewText.trim(),
             "cycleTrimWarning" to cycleTrimWarning.trim(),
 
-            "timeEnabled" to timeEnabled,
             "timeMode" to timeMode,
             "lastReportedTime" to if (timeEnabled) currentTimeString() else "",
             "lastTimeUpdateAt" to FieldValue.serverTimestamp()
         )
 
-        data["afkPreset1"] = getAfkPresetPreview(1)
-        data["afkPreset2"] = getAfkPresetPreview(2)
-        data["afkPreset3"] = getAfkPresetPreview(3)
-        data["afkPreset1Name"] = pinnedPresetNames.getOrElse(0) { "Preset 1" }
-        data["afkPreset2Name"] = pinnedPresetNames.getOrElse(1) { "Preset 2" }
-        data["afkPreset3Name"] = pinnedPresetNames.getOrElse(2) { "Preset 3" }
-
-        data["cyclePreset1"] = cyclePresetMessages.getOrNull(0)?.trim().orEmpty()
-        data["cyclePreset2"] = cyclePresetMessages.getOrNull(1)?.trim().orEmpty()
-        data["cyclePreset3"] = cyclePresetMessages.getOrNull(2)?.trim().orEmpty()
-        data["cyclePreset4"] = cyclePresetMessages.getOrNull(3)?.trim().orEmpty()
-        data["cyclePreset5"] = cyclePresetMessages.getOrNull(4)?.trim().orEmpty()
-        data["cyclePreset1Name"] = cyclePresetNames.getOrElse(0) { "Preset 1" }
-        data["cyclePreset2Name"] = cyclePresetNames.getOrElse(1) { "Preset 2" }
-        data["cyclePreset3Name"] = cyclePresetNames.getOrElse(2) { "Preset 3" }
-        data["cyclePreset4Name"] = cyclePresetNames.getOrElse(3) { "Preset 4" }
-        data["cyclePreset5Name"] = cyclePresetNames.getOrElse(4) { "Preset 5" }
+        // Presets are NOT synced back to Firestore from the public app.
+        // Admin edits presets via writeField() directly on the user doc,
+        // and the public app applies them via applyRemoteConfig().
+        // Writing them back here would race with admin edits and overwrite them.
 
         // Multi-IP slots
         val activeSlot = runCatching {

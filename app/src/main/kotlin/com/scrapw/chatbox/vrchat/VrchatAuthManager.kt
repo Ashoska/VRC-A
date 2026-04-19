@@ -277,7 +277,8 @@ object VrchatAuthManager {
         val instancePlayerCount: Int,
         val instanceCapacity: Int,
         val currentAvatarThumbnailUrl: String,
-        val isOnlineInVRChat: Boolean
+        val isOnlineInVRChat: Boolean,
+        val worldImageUrl: String = ""
     )
 
     suspend fun fetchPresence(context: Context): VrcUserPresence? = withContext(Dispatchers.IO) {
@@ -329,6 +330,7 @@ object VrchatAuthManager {
             }
 
             var worldName = ""
+            var worldImageUrl = ""
             var playerCount = 0
             var capacity = 0
             val hasWorldLocation = location.isNotBlank() &&
@@ -341,7 +343,12 @@ object VrchatAuthManager {
                         val inst = JSONObject(wBody)
                         playerCount = inst.optInt("n_users", 0)
                         capacity = inst.optInt("capacity", 0)
-                        worldName = inst.optJSONObject("world")?.optString("name", "") ?: ""
+                        val worldObj = inst.optJSONObject("world")
+                        worldName = worldObj?.optString("name", "") ?: ""
+                        worldImageUrl = worldObj?.optString("thumbnailImageUrl", "") ?: ""
+                        if (worldImageUrl.isBlank()) {
+                            worldImageUrl = worldObj?.optString("imageUrl", "") ?: ""
+                        }
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "Could not fetch instance info", e)
@@ -363,7 +370,8 @@ object VrchatAuthManager {
                 instancePlayerCount = playerCount,
                 instanceCapacity = capacity,
                 currentAvatarThumbnailUrl = avatarThumb,
-                isOnlineInVRChat = isOnline
+                isOnlineInVRChat = isOnline,
+                worldImageUrl = worldImageUrl
             )
         } catch (e: Exception) {
             Log.e(TAG, "fetchPresence failed", e)

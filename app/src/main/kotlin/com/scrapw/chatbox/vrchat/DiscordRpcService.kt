@@ -48,8 +48,11 @@ class DiscordRpcService : Service() {
     private var heartbeatJob: Job? = null
     private var presenceJob: Job? = null
     private var lastSeq: Int? = null
-    private var onlineStartMs = 0L
     private var token = ""
+
+    // Track when user first came online in VRChat during THIS service session.
+    // Reset every time they go offline or the service restarts.
+    private var onlineStartEpochSec = 0L
 
     private val client by lazy {
         OkHttpClient.Builder()
@@ -70,6 +73,10 @@ class DiscordRpcService : Service() {
         }
         ensureChannel()
         startForeground(NOTIF_ID, buildNotif("Discord Rich Presence starting..."))
+
+        // Reset timestamp on every fresh start
+        onlineStartEpochSec = 0L
+
         scope.launch {
             val prefs = dataStore.data.first()
             token = prefs[androidx.datastore.preferences.core.stringPreferencesKey("discord_token")] ?: ""
@@ -122,7 +129,7 @@ class DiscordRpcService : Service() {
     private fun disconnect() {
         heartbeatJob?.cancel()
         presenceJob?.cancel()
-        ws?.close(1000, "Service stopping")
+        try { ws?.close(1000, "Service stopping") } catch (_: Throwable) {}
         ws = null
         isRunning = false
     }
@@ -205,7 +212,7 @@ class DiscordRpcService : Service() {
         presenceJob?.cancel()
         presenceJob = scope.launch {
             while (true) {
-                delay(15_000)
+                delay(5_000)
                 val update = JSONObject().apply {
                     put("op", 3)
                     put("d", buildPresenceData())
@@ -224,10 +231,11 @@ class DiscordRpcService : Service() {
         val vrcPresence = VrchatPipelineState.presence
         val isOnline = vrcPresence?.isOnlineInVRChat == true
 
-        if (isOnline && onlineStartMs == 0L) {
-            onlineStartMs = System.currentTimeMillis()
+        // Track online start time — reset when offline
+        if (isOnline && onlineStartEpochSec == 0L) {
+            onlineStartEpochSec = System.currentTimeMillis() / 1000
         } else if (!isOnline) {
-            onlineStartMs = 0L
+            onlineStartEpochSec = 0L
         }
 
         val activity = JSONObject().apply {
@@ -243,35 +251,42 @@ class DiscordRpcService : Service() {
                     else -> "Online"
                 }
 
-                if (vrcPresence.worldName.isNotBlank()) {
+                val showWorldDetails = vrcPresence.status != "busy" &&
+                    vrcPresence.status != "ask me" &&
+                    vrcPresence.worldName.isNotBlank() &&
+                    vrcPresence.location != "private"
+
+                if (showWorldDetails) {
                     put("details", vrcPresence.worldName)
                     val playerInfo = if (vrcPresence.instanceCapacity > 0)
                         "${vrcPresence.instancePlayerCount} of ${vrcPresence.instanceCapacity}"
                     else "${vrcPresence.instancePlayerCount} players"
                     put("state", "$statusText - $playerInfo")
                 } else {
-                    put("details", when (vrcPresence.location) {
-                        "private" -> "In a Private World"
-                        "traveling" -> "Traveling"
+                    put("details", when {
+                        vrcPresence.location == "private" -> "In a Private World"
+                        vrcPresence.location == "traveling" -> "Traveling"
+                        vrcPresence.worldName.isNotBlank() -> vrcPresence.worldName
                         else -> statusText
                     })
-                    put("state", when (vrcPresence.location) {
-                        "private" -> statusText
-                        "traveling" -> "Between Worlds"
+                    put("state", when {
+                        vrcPresence.location == "private" -> statusText
+                        vrcPresence.location == "traveling" -> "Between Worlds"
+                        vrcPresence.status == "busy" || vrcPresence.status == "ask me" -> statusText
                         else -> "In VRChat"
                     })
                 }
 
-                if (onlineStartMs > 0) {
+                if (onlineStartEpochSec > 0) {
                     put("timestamps", JSONObject().apply {
-                        put("start", onlineStartMs / 1000)
+                        put("start", onlineStartEpochSec)
                     })
                 }
 
                 put("assets", JSONObject().apply {
-                    if (vrcPresence.currentAvatarThumbnailUrl.isNotBlank()) {
-                        put("large_image", vrcPresence.currentAvatarThumbnailUrl)
-                        put("large_text", vrcPresence.displayName)
+                    if (showWorldDetails && vrcPresence.worldImageUrl.isNotBlank()) {
+                        put("large_image", vrcPresence.worldImageUrl)
+                        put("large_text", vrcPresence.worldName)
                     } else {
                         put("large_image", "vrchat")
                         put("large_text", "VRChat")
