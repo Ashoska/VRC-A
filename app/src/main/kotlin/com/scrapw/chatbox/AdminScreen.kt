@@ -477,6 +477,7 @@ private data class UserDetail(
     val nowPlayingIsPlaying: Boolean,
     val nowPlayingTitle: String,
     val nowPlayingArtist: String,
+    val nowPlayingPackage: String,
     // Output
     val combinedPreviewText: String,
     // Moderation
@@ -623,6 +624,7 @@ private fun UsersTab(
                     spotifyPreset  = l("spotifyPreset"),
                     nowPlayingDetected = b("nowPlayingDetected"), nowPlayingIsPlaying = b("nowPlayingIsPlaying"),
                     nowPlayingTitle = s("nowPlayingTitle"), nowPlayingArtist = s("nowPlayingArtist"),
+                    nowPlayingPackage = s("activePackage"),
                     combinedPreviewText = s("combinedPreviewText"),
                     warnReason = s("warnReason"), banReason = s("banReason"),
                     versionName = s("versionName"), versionCode = l("versionCode"), appId = s("appId"),
@@ -1002,13 +1004,47 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
             if (d.nowPlayingDetected) {
                 val musicCtx = androidx.compose.ui.platform.LocalContext.current
                 val musicQuery = "${d.nowPlayingTitle} ${d.nowPlayingArtist}".trim()
-                Text("🎵 ${d.nowPlayingTitle.ifBlank { "?" }} — ${d.nowPlayingArtist.ifBlank { "?" }} " +
-                    if (d.nowPlayingIsPlaying) "▶" else "⏸",
+                val appLabel = when (d.nowPlayingPackage) {
+                    "com.spotify.music" -> "Spotify"
+                    "com.google.android.youtube" -> "YouTube"
+                    "com.google.android.apps.youtube.music" -> "YT Music"
+                    "com.apple.android.music" -> "Apple Music"
+                    "deezer.android.app" -> "Deezer"
+                    "com.soundcloud.android" -> "SoundCloud"
+                    "com.amazon.mp3" -> "Amazon Music"
+                    "com.bandcamp.android" -> "Bandcamp"
+                    else -> null
+                }
+                val statusIcon = if (d.nowPlayingIsPlaying) "\u25B6" else "\u23F8"
+                val label = buildString {
+                    append("\uD83C\uDFB5 ")
+                    append(d.nowPlayingTitle.ifBlank { "?" })
+                    append(" \u2014 ")
+                    append(d.nowPlayingArtist.ifBlank { "?" })
+                    append(" $statusIcon")
+                    if (appLabel != null) append(" ($appLabel)")
+                }
+                Text(label,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.clickable {
                         if (musicQuery.isNotBlank()) {
-                            val searchUrl = "https://open.spotify.com/search/${android.net.Uri.encode(musicQuery)}"
+                            val searchUrl = when (d.nowPlayingPackage) {
+                                "com.google.android.youtube" ->
+                                    "https://www.youtube.com/results?search_query=${android.net.Uri.encode(musicQuery)}"
+                                "com.google.android.apps.youtube.music" ->
+                                    "https://music.youtube.com/search?q=${android.net.Uri.encode(musicQuery)}"
+                                "com.apple.android.music" ->
+                                    "https://music.apple.com/search?term=${android.net.Uri.encode(musicQuery)}"
+                                "deezer.android.app" ->
+                                    "https://www.deezer.com/search/${android.net.Uri.encode(musicQuery)}"
+                                "com.soundcloud.android" ->
+                                    "https://soundcloud.com/search?q=${android.net.Uri.encode(musicQuery)}"
+                                "com.amazon.mp3" ->
+                                    "https://music.amazon.com/search/${android.net.Uri.encode(musicQuery)}"
+                                else ->
+                                    "https://open.spotify.com/search/${android.net.Uri.encode(musicQuery)}"
+                            }
                             val intent = android.content.Intent(android.content.Intent.ACTION_VIEW,
                                 android.net.Uri.parse(searchUrl))
                             musicCtx.startActivity(intent)
