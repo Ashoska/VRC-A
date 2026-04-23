@@ -77,6 +77,7 @@ class ChatboxViewModel(
 
     companion object {
         private lateinit var instance: ChatboxViewModel
+        private var coldStartResetDone = false
 
         private const val CYCLE_INTERVAL_SECONDS_LOCKED = 10
         private const val MUSIC_REFRESH_SECONDS_LOCKED = 2
@@ -140,30 +141,6 @@ class ChatboxViewModel(
         moderationUserReg?.remove()
         moderationDeviceReg?.remove()
         stopAll(clearFromChatbox = false)
-
-        // Stop Discord RPC service when app closes
-        try {
-            if (com.scrapw.chatbox.vrchat.DiscordRpcService.isRunning) {
-                val stopIntent = android.content.Intent(app, com.scrapw.chatbox.vrchat.DiscordRpcService::class.java)
-                stopIntent.action = com.scrapw.chatbox.vrchat.DiscordRpcService.ACTION_STOP
-                app.startService(stopIntent)
-            }
-        } catch (_: Throwable) {}
-
-        // Mark user as offline — use GlobalScope so the write survives ViewModel teardown
-        val deviceHash = runCatching { readDeviceHashFromPrefs() }.getOrDefault("")
-        if (deviceHash.isNotBlank()) {
-            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                runCatching {
-                    kotlinx.coroutines.withTimeout(3000) {
-                        db.collection(COL_USERS).document(deviceHash)
-                            .set(mapOf("isOnlineInApp" to false, "lastSeenAt" to FieldValue.serverTimestamp()), SetOptions.merge())
-                            .await()
-                    }
-                }
-            }
-        }
-
         super.onCleared()
     }
 
@@ -551,6 +528,47 @@ class ChatboxViewModel(
      */
     private fun applyRemoteConfig(snap: com.google.firebase.firestore.DocumentSnapshot) {
         viewModelScope.launch {
+            snap.getBoolean("afkEnabled")?.let { remote ->
+                if (remote != afkEnabled) {
+                    afkEnabled = remote
+                    if (!remote) stopAfkSender(clearFromChatbox = true)
+                    rebuildCombinedPreviewOnly()
+                }
+            }
+            snap.getString("afkMessage")?.let { remote ->
+                if (remote.trim() != afkMessage.trim()) {
+                    userPreferencesRepository.saveAfkMessage(remote.trim())
+                }
+            }
+            snap.getBoolean("cycleEnabled")?.let { remote ->
+                if (remote != cycleEnabled) {
+                    userPreferencesRepository.saveCycleEnabled(remote)
+                }
+            }
+            snap.getLong("cycleIntervalSeconds")?.let { remote ->
+                val intVal = remote.toInt().coerceAtLeast(2)
+                if (intVal != cycleIntervalSeconds) {
+                    userPreferencesRepository.saveCycleInterval(intVal)
+                }
+            }
+            snap.getString("cycleLinesText")?.let { remote ->
+                val currentText = cycleLines.joinToString("\n")
+                if (remote.trim() != currentText.trim()) {
+                    userPreferencesRepository.saveCycleMessages(remote.trim())
+                }
+            }
+            snap.getBoolean("spotifyEnabled")?.let { remote ->
+                if (remote != spotifyEnabled) {
+                    spotifyEnabled = remote
+                    if (!remote) stopNowPlayingSender(clearFromChatbox = true)
+                    rebuildCombinedPreviewOnly()
+                }
+            }
+            snap.getBoolean("timeEnabled")?.let { remote ->
+                if (remote != timeEnabled) {
+                    userPreferencesRepository.saveTimeEnabled(remote)
+                }
+            }
             // Pinned (AFK) presets (admin can edit preset contents + names)
             val afkPresetSavers = listOf<suspend (String) -> Unit>(
                 { v -> userPreferencesRepository.saveAfkPreset1(v) },
@@ -1021,11 +1039,13 @@ class ChatboxViewModel(
     )
 
     init {
-        // Reset all quick toggles to off on app start so they don't persist.
-        viewModelScope.launch { userPreferencesRepository.saveCycleEnabled(false) }
-        viewModelScope.launch { userPreferencesRepository.saveTimeEnabled(false) }
-        afkEnabled = false
-        spotifyEnabled = false
+        if (!coldStartResetDone) {
+            coldStartResetDone = true
+            afkEnabled = false
+            spotifyEnabled = false
+            viewModelScope.launch { userPreferencesRepository.saveCycleEnabled(false) }
+            viewModelScope.launch { userPreferencesRepository.saveTimeEnabled(false) }
+        }
 
         // Public build: start periodic self sync (rules-compatible).
         // Admin build: startSelfSyncLoopIfNeeded() is a no-op (prevents UID tug-of-war).

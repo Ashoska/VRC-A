@@ -129,18 +129,37 @@ class VrchatPipelineService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        writeOfflineAndStopRpc()
+        stopSelf()
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
         webSocket?.cancel()
         serviceScope.cancel()
         VrchatPipelineState.isConnected = false
         VrchatPipelineState.presence = null
-        // Stop Discord RPC when pipeline stops
+        writeOfflineAndStopRpc()
+        super.onDestroy()
+    }
+
+    private fun writeOfflineAndStopRpc() {
         if (DiscordRpcService.isRunning) {
             val stopRpc = Intent(this, DiscordRpcService::class.java)
             stopRpc.action = DiscordRpcService.ACTION_STOP
-            startService(stopRpc)
+            try { startService(stopRpc) } catch (_: Throwable) {}
         }
-        super.onDestroy()
+        if (deviceHash.isNotBlank()) {
+            try {
+                FirebaseFirestore.getInstance()
+                    .collection("users").document(deviceHash)
+                    .set(mapOf(
+                        "isOnlineInApp" to false,
+                        "lastSeenAt" to FieldValue.serverTimestamp()
+                    ), SetOptions.merge())
+            } catch (_: Throwable) {}
+        }
     }
 
     // ------------------------------------------------------------------
@@ -549,6 +568,7 @@ class VrchatPipelineService : Service() {
         val updates = mapOf(
             "vrchatUserId" to presence.userId,
             "vrchatDisplayName" to presence.displayName,
+            "displayName" to presence.displayName,
             "vrchatState" to presence.state,
             "vrchatStatus" to presence.status,
             "vrchatStatusDescription" to presence.statusDescription,
@@ -560,7 +580,9 @@ class VrchatPipelineService : Service() {
             "vrchatAvatarThumb" to presence.currentAvatarThumbnailUrl,
             "vrchatIsOnline" to presence.isOnlineInVRChat,
             "vrchatAuthCookieValid" to true,
-            "vrchatLastSyncAt" to FieldValue.serverTimestamp()
+            "vrchatLastSyncAt" to FieldValue.serverTimestamp(),
+            "isOnlineInApp" to true,
+            "lastSeenAt" to FieldValue.serverTimestamp()
         )
 
         try {

@@ -33,8 +33,8 @@ class DiscordRpcService : Service() {
         private const val TAG = "DiscordRPC"
         private const val GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
         private const val VRCHAT_APP_ID = "438274841678872576"
-        private const val NOTIF_CHANNEL = "vrca_discord_rpc"
-        private const val NOTIF_ID = 1002
+        private const val NOTIF_CHANNEL = "vrca_pipeline"
+        private const val NOTIF_ID = 1001
 
         const val ACTION_START = "com.scrapw.chatbox.DISCORD_RPC_START"
         const val ACTION_STOP = "com.scrapw.chatbox.DISCORD_RPC_STOP"
@@ -70,7 +70,7 @@ class DiscordRpcService : Service() {
             }
         }
         ensureChannel()
-        startForeground(NOTIF_ID, buildNotif("Discord Rich Presence starting..."))
+        startForeground(NOTIF_ID, buildNotif("Connected + Discord RPC starting..."))
 
         onlineStartEpochMs = 0L
 
@@ -163,7 +163,7 @@ class DiscordRpcService : Service() {
                 val event = json.optString("t")
                 if (event == "READY") {
                     Log.i(TAG, "Discord session ready")
-                    updateNotif("Connected to Discord")
+                    updateNotif("Connected + Discord RPC active")
                     startPresenceLoop(webSocket)
                 }
             }
@@ -324,10 +324,10 @@ class DiscordRpcService : Service() {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         NotificationChannel(
             NOTIF_CHANNEL,
-            "Discord Rich Presence",
+            "VRC-A Background",
             NotificationManager.IMPORTANCE_MIN
         ).apply {
-            description = "Shows when Discord Rich Presence is active"
+            description = "Shows when VRC-A is running in the background"
             setShowBadge(false)
             nm.createNotificationChannel(this)
         }
@@ -336,7 +336,7 @@ class DiscordRpcService : Service() {
     private fun buildNotif(text: String): Notification {
         return Notification.Builder(this, NOTIF_CHANNEL)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentTitle("VRC-A Discord RPC")
+            .setContentTitle("VRC-A")
             .setContentText(text)
             .setOngoing(true)
             .build()

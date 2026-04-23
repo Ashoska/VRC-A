@@ -399,7 +399,15 @@ object VrchatAuthManager {
                         "$BASE/auth/user/friends?offset=$offset&n=$pageSize&offline=$offline",
                         null, cookieHeader
                     )
-                    if (code != 200) break
+                    if (code == 429) {
+                        Log.w(TAG, "fetchFriends rate limited, waiting 5s")
+                        kotlinx.coroutines.delay(5000)
+                        continue
+                    }
+                    if (code != 200) {
+                        Log.w(TAG, "fetchFriends(offline=$offline) page offset=$offset returned $code")
+                        break
+                    }
                     val arr = org.json.JSONArray(body)
                     if (arr.length() == 0) break
                     for (i in 0 until arr.length()) {
@@ -410,11 +418,13 @@ object VrchatAuthManager {
                     }
                     if (arr.length() < pageSize) break
                     offset += pageSize
+                    kotlinx.coroutines.delay(500)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "fetchFriends(offline=$offline) failed", e)
             }
         }
+        Log.i(TAG, "fetchFriends total: ${seen.size}")
         seen.map { VrcFriend(it.key, it.value) }
     }
 
