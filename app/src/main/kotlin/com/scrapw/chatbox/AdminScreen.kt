@@ -3082,10 +3082,6 @@ private fun DashboardTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
     var loading by remember { mutableStateOf(true) }
     var evasionCount by remember { mutableIntStateOf(0) }
 
-    val nowMs = System.currentTimeMillis()
-    val fiveMinAgo = com.google.firebase.Timestamp(
-        (nowMs - 5 * 60 * 1000L) / 1000, 0)
-
     DisposableEffect(Unit) {
         setError(null)
         loading = true
@@ -3096,10 +3092,8 @@ private fun DashboardTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
                 totalUsers  = snap.size()
                 bannedCount = snap.documents.count { it.getBoolean("banned") == true }
                 warnedCount = snap.documents.count { it.getBoolean("warned") == true }
-                val cutoff = System.currentTimeMillis() - 60_000
                 onlineCount = snap.documents.count {
-                    it.getBoolean("isOnlineInApp") == true &&
-                    (it.getTimestamp("lastSeenAt")?.toDate()?.time ?: 0L) > cutoff
+                    it.getBoolean("isOnlineInApp") == true
                 }
                 loading = false
             }

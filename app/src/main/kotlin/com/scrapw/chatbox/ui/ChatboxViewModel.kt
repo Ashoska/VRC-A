@@ -139,10 +139,16 @@ class ChatboxViewModel(
         moderationAttachJob?.cancel()
         moderationUserReg?.remove()
         moderationDeviceReg?.remove()
-        // Do NOT reset cycle/time enabled here.
-        // onCleared is called on backgrounding too, not just app death,
-        // which caused the state to be wiped before the next DataStore read.
         stopAll(clearFromChatbox = false)
+
+        // Stop Discord RPC service when app closes
+        try {
+            if (com.scrapw.chatbox.vrchat.DiscordRpcService.isRunning) {
+                val stopIntent = android.content.Intent(app, com.scrapw.chatbox.vrchat.DiscordRpcService::class.java)
+                stopIntent.action = com.scrapw.chatbox.vrchat.DiscordRpcService.ACTION_STOP
+                app.startService(stopIntent)
+            }
+        } catch (_: Throwable) {}
 
         // Mark user as offline — use GlobalScope so the write survives ViewModel teardown
         val deviceHash = runCatching { readDeviceHashFromPrefs() }.getOrDefault("")
@@ -255,16 +261,15 @@ class ChatboxViewModel(
             "lastSeenAt" to FieldValue.serverTimestamp(),
             "updatedAt" to FieldValue.serverTimestamp(),
 
-            // Toggle fields (afkEnabled, cycleEnabled, spotifyEnabled, timeEnabled)
-            // are NOT synced back from the public app — admin controls them via
-            // writeField() and the public app applies them via applyRemoteConfig().
-
+            "afkEnabled" to afkEnabled,
             "afkMessage" to afkMessage.trim(),
 
+            "cycleEnabled" to cycleEnabled,
             "cycleIntervalSeconds" to cycleIntervalSeconds,
             "cycleLines" to cycleClean,
             "cycleLinesText" to cycleClean.joinToString("\n"),
 
+            "spotifyEnabled" to spotifyEnabled,
             "spotifyDemoEnabled" to spotifyDemoEnabled,
             "spotifyPreset" to spotifyPreset,
 
@@ -277,15 +282,29 @@ class ChatboxViewModel(
             "combinedPreviewText" to combinedPreviewText.trim(),
             "cycleTrimWarning" to cycleTrimWarning.trim(),
 
+            "timeEnabled" to timeEnabled,
             "timeMode" to timeMode,
             "lastReportedTime" to if (timeEnabled) currentTimeString() else "",
             "lastTimeUpdateAt" to FieldValue.serverTimestamp()
         )
 
-        // Presets are NOT synced back to Firestore from the public app.
-        // Admin edits presets via writeField() directly on the user doc,
-        // and the public app applies them via applyRemoteConfig().
-        // Writing them back here would race with admin edits and overwrite them.
+        data["afkPreset1"] = getAfkPresetPreview(1)
+        data["afkPreset2"] = getAfkPresetPreview(2)
+        data["afkPreset3"] = getAfkPresetPreview(3)
+        data["afkPreset1Name"] = pinnedPresetNames.getOrElse(0) { "Preset 1" }
+        data["afkPreset2Name"] = pinnedPresetNames.getOrElse(1) { "Preset 2" }
+        data["afkPreset3Name"] = pinnedPresetNames.getOrElse(2) { "Preset 3" }
+
+        data["cyclePreset1"] = cyclePresetMessages.getOrNull(0)?.trim().orEmpty()
+        data["cyclePreset2"] = cyclePresetMessages.getOrNull(1)?.trim().orEmpty()
+        data["cyclePreset3"] = cyclePresetMessages.getOrNull(2)?.trim().orEmpty()
+        data["cyclePreset4"] = cyclePresetMessages.getOrNull(3)?.trim().orEmpty()
+        data["cyclePreset5"] = cyclePresetMessages.getOrNull(4)?.trim().orEmpty()
+        data["cyclePreset1Name"] = cyclePresetNames.getOrElse(0) { "Preset 1" }
+        data["cyclePreset2Name"] = cyclePresetNames.getOrElse(1) { "Preset 2" }
+        data["cyclePreset3Name"] = cyclePresetNames.getOrElse(2) { "Preset 3" }
+        data["cyclePreset4Name"] = cyclePresetNames.getOrElse(3) { "Preset 4" }
+        data["cyclePreset5Name"] = cyclePresetNames.getOrElse(4) { "Preset 5" }
 
         // Multi-IP slots
         val activeSlot = runCatching {
@@ -532,54 +551,6 @@ class ChatboxViewModel(
      */
     private fun applyRemoteConfig(snap: com.google.firebase.firestore.DocumentSnapshot) {
         viewModelScope.launch {
-            // Pinned (AFK) enabled -- no DataStore save, set directly
-            snap.getBoolean("afkEnabled")?.let { remote ->
-                if (remote != afkEnabled) {
-                    afkEnabled = remote
-                    if (!remote) stopAfkSender(clearFromChatbox = true)
-                    rebuildCombinedPreviewOnly()
-                }
-            }
-            // Pinned (AFK) message
-            snap.getString("afkMessage")?.let { remote ->
-                if (remote.trim() != afkMessage.trim()) {
-                    userPreferencesRepository.saveAfkMessage(remote.trim())
-                }
-            }
-            // Cycle enabled
-            snap.getBoolean("cycleEnabled")?.let { remote ->
-                if (remote != cycleEnabled) {
-                    userPreferencesRepository.saveCycleEnabled(remote)
-                }
-            }
-            // Cycle interval
-            snap.getLong("cycleIntervalSeconds")?.let { remote ->
-                val intVal = remote.toInt().coerceAtLeast(2)
-                if (intVal != cycleIntervalSeconds) {
-                    userPreferencesRepository.saveCycleInterval(intVal)
-                }
-            }
-            // Cycle lines text
-            snap.getString("cycleLinesText")?.let { remote ->
-                val currentText = cycleLines.joinToString("\n")
-                if (remote.trim() != currentText.trim()) {
-                    userPreferencesRepository.saveCycleMessages(remote.trim())
-                }
-            }
-            // Spotify (Music) enabled -- no DataStore save, set directly
-            snap.getBoolean("spotifyEnabled")?.let { remote ->
-                if (remote != spotifyEnabled) {
-                    spotifyEnabled = remote
-                    if (!remote) stopNowPlayingSender(clearFromChatbox = true)
-                    rebuildCombinedPreviewOnly()
-                }
-            }
-            // Time enabled
-            snap.getBoolean("timeEnabled")?.let { remote ->
-                if (remote != timeEnabled) {
-                    userPreferencesRepository.saveTimeEnabled(remote)
-                }
-            }
             // Pinned (AFK) presets (admin can edit preset contents + names)
             val afkPresetSavers = listOf<suspend (String) -> Unit>(
                 { v -> userPreferencesRepository.saveAfkPreset1(v) },
@@ -1050,11 +1021,11 @@ class ChatboxViewModel(
     )
 
     init {
-        // Always reset cycle to off on app start.
-        // Done in init (not onCleared) because onCleared fires on backgrounding too,
-        // causing a race where false is written mid-session. init runs exactly once
-        // per ViewModel creation = exactly once per app start.
+        // Reset all quick toggles to off on app start so they don't persist.
         viewModelScope.launch { userPreferencesRepository.saveCycleEnabled(false) }
+        viewModelScope.launch { userPreferencesRepository.saveTimeEnabled(false) }
+        afkEnabled = false
+        spotifyEnabled = false
 
         // Public build: start periodic self sync (rules-compatible).
         // Admin build: startSelfSyncLoopIfNeeded() is a no-op (prevents UID tug-of-war).

@@ -50,9 +50,7 @@ class DiscordRpcService : Service() {
     private var lastSeq: Int? = null
     private var token = ""
 
-    // Track when user first came online in VRChat during THIS service session.
-    // Reset every time they go offline or the service restarts.
-    private var onlineStartEpochSec = 0L
+    private var onlineStartEpochMs = 0L
 
     private val client by lazy {
         OkHttpClient.Builder()
@@ -74,8 +72,7 @@ class DiscordRpcService : Service() {
         ensureChannel()
         startForeground(NOTIF_ID, buildNotif("Discord Rich Presence starting..."))
 
-        // Reset timestamp on every fresh start
-        onlineStartEpochSec = 0L
+        onlineStartEpochMs = 0L
 
         scope.launch {
             val prefs = dataStore.data.first()
@@ -88,6 +85,13 @@ class DiscordRpcService : Service() {
             connect()
         }
         return START_NOT_STICKY
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        disconnect()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+        super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
@@ -231,11 +235,10 @@ class DiscordRpcService : Service() {
         val vrcPresence = VrchatPipelineState.presence
         val isOnline = vrcPresence?.isOnlineInVRChat == true
 
-        // Track online start time — reset when offline
-        if (isOnline && onlineStartEpochSec == 0L) {
-            onlineStartEpochSec = System.currentTimeMillis() / 1000
+        if (isOnline && onlineStartEpochMs == 0L) {
+            onlineStartEpochMs = System.currentTimeMillis()
         } else if (!isOnline) {
-            onlineStartEpochSec = 0L
+            onlineStartEpochMs = 0L
         }
 
         val activity = JSONObject().apply {
@@ -251,8 +254,10 @@ class DiscordRpcService : Service() {
                     else -> "Online"
                 }
 
-                val showWorldDetails = vrcPresence.status != "busy" &&
-                    vrcPresence.status != "ask me" &&
+                val isDndOrAskMe = vrcPresence.status == "busy" ||
+                    vrcPresence.status == "ask me"
+
+                val showWorldDetails = !isDndOrAskMe &&
                     vrcPresence.worldName.isNotBlank() &&
                     vrcPresence.location != "private"
 
@@ -262,24 +267,21 @@ class DiscordRpcService : Service() {
                         "${vrcPresence.instancePlayerCount} of ${vrcPresence.instanceCapacity}"
                     else "${vrcPresence.instancePlayerCount} players"
                     put("state", "$statusText - $playerInfo")
+                } else if (isDndOrAskMe) {
+                    put("details", statusText)
+                    put("state", "In VRChat")
                 } else {
                     put("details", when {
                         vrcPresence.location == "private" -> "In a Private World"
                         vrcPresence.location == "traveling" -> "Traveling"
-                        vrcPresence.worldName.isNotBlank() -> vrcPresence.worldName
-                        else -> statusText
-                    })
-                    put("state", when {
-                        vrcPresence.location == "private" -> statusText
-                        vrcPresence.location == "traveling" -> "Between Worlds"
-                        vrcPresence.status == "busy" || vrcPresence.status == "ask me" -> statusText
                         else -> "In VRChat"
                     })
+                    put("state", statusText)
                 }
 
-                if (onlineStartEpochSec > 0) {
+                if (onlineStartEpochMs > 0) {
                     put("timestamps", JSONObject().apply {
-                        put("start", onlineStartEpochSec)
+                        put("start", onlineStartEpochMs)
                     })
                 }
 

@@ -355,8 +355,10 @@ object VrchatAuthManager {
                 }
             }
 
-            val isOnline = state == "online" || state == "active" ||
-                (location != "offline" && location.isNotBlank())
+            val isOnline = state == "online" ||
+                location.startsWith("wrld_") ||
+                location == "private" ||
+                location == "traveling"
 
             VrcUserPresence(
                 userId = userId,
