@@ -246,6 +246,11 @@ class DiscordRpcService : Service() {
         }
     }
 
+    private fun toMpExternal(url: String): String {
+        val stripped = url.removePrefix("https://").removePrefix("http://")
+        return "mp:external/$stripped"
+    }
+
     private fun buildPresenceData(): JSONObject {
         val vrcPresence = VrchatPipelineState.presence
         val isOnline = vrcPresence?.isOnlineInVRChat == true
@@ -302,10 +307,10 @@ class DiscordRpcService : Service() {
 
                 put("assets", JSONObject().apply {
                     if (showWorldDetails && vrcPresence.worldImageUrl.isNotBlank()) {
-                        put("large_image", vrcPresence.worldImageUrl)
+                        put("large_image", toMpExternal(vrcPresence.worldImageUrl))
                         put("large_text", vrcPresence.worldName)
                     } else {
-                        put("large_image", VRCHAT_LOGO_URL)
+                        put("large_image", toMpExternal(VRCHAT_LOGO_URL))
                         put("large_text", "VRChat")
                     }
                 })
@@ -313,7 +318,7 @@ class DiscordRpcService : Service() {
                 put("details", "Not in VRChat")
                 put("state", "Using VRC-A")
                 put("assets", JSONObject().apply {
-                    put("large_image", VRCHAT_LOGO_URL)
+                    put("large_image", toMpExternal(VRCHAT_LOGO_URL))
                     put("large_text", "VRChat")
                 })
             }

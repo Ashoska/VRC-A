@@ -50,11 +50,11 @@ fun IpField(
         1 -> ip1Address; 2 -> ip2Address; 3 -> ip3Address; else -> ""
     }
 
-    // Auto-migrate: if active slot is empty but the ViewModel has a saved IP, populate slot 1
+    // Auto-migrate: if slot 1 address is empty but the ViewModel has a saved IP, populate slot 1
     val uiState by chatboxViewModel.messengerUiState.collectAsState()
     LaunchedEffect(ip1Address, uiState.ipAddress) {
         if (ip1Address.isBlank() && uiState.ipAddress.isNotBlank() && uiState.ipAddress != "127.0.0.1") {
-            repo.saveIpSlot(1, "Home", uiState.ipAddress)
+            repo.saveIpSlot(1, ip1Name, uiState.ipAddress)
         }
     }
 

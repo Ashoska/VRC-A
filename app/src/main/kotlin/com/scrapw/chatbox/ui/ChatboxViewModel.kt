@@ -545,9 +545,7 @@ class ChatboxViewModel(
         viewModelScope.launch {
             snap.getBoolean("afkEnabled")?.let { remote ->
                 if (remote != afkEnabled) {
-                    afkEnabled = remote
-                    if (!remote) stopAfkSender(clearFromChatbox = true)
-                    rebuildCombinedPreviewOnly()
+                    userPreferencesRepository.saveAfkEnabled(remote)
                 }
             }
             snap.getString("afkMessage")?.let { remote ->
@@ -574,9 +572,7 @@ class ChatboxViewModel(
             }
             snap.getBoolean("spotifyEnabled")?.let { remote ->
                 if (remote != spotifyEnabled) {
-                    spotifyEnabled = remote
-                    if (!remote) stopNowPlayingSender(clearFromChatbox = true)
-                    rebuildCombinedPreviewOnly()
+                    userPreferencesRepository.saveSpotifyEnabled(remote)
                 }
             }
             snap.getBoolean("timeEnabled")?.let { remote ->
@@ -989,21 +985,23 @@ class ChatboxViewModel(
         // Public build: attach moderation listeners once deviceHash + auth are available.
         attachModerationListenersLoopOnce()
 
-        viewModelScope.launch {
-            userPreferencesRepository.afkEnabled.collect {
-                afkEnabled = it
-                rebuildCombinedPreviewOnly()
-                if (!it) stopAfkSender(clearFromChatbox = true)
-                startSelfSyncLoopIfNeeded()
+        if (!BuildConfig.IS_ADMIN_BUILD) {
+            viewModelScope.launch {
+                userPreferencesRepository.afkEnabled.collect {
+                    afkEnabled = it
+                    rebuildCombinedPreviewOnly()
+                    if (!it) stopAfkSender(clearFromChatbox = true)
+                    startSelfSyncLoopIfNeeded()
+                }
             }
-        }
 
-        viewModelScope.launch {
-            userPreferencesRepository.spotifyEnabled.collect {
-                spotifyEnabled = it
-                rebuildCombinedPreviewOnly()
-                if (!it) stopNowPlayingSender(clearFromChatbox = true)
-                startSelfSyncLoopIfNeeded()
+            viewModelScope.launch {
+                userPreferencesRepository.spotifyEnabled.collect {
+                    spotifyEnabled = it
+                    rebuildCombinedPreviewOnly()
+                    if (!it) stopNowPlayingSender(clearFromChatbox = true)
+                    startSelfSyncLoopIfNeeded()
+                }
             }
         }
 
