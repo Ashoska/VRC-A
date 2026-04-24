@@ -462,13 +462,11 @@ private data class UserDetail(
     val pinnedEnabled: Boolean,
     val pinnedMessage: String,
     val pinnedPresets: List<String>,
-    val pinnedPresetNames: List<String>,
     // Cycle
     val cycleEnabled: Boolean,
     val cycleIntervalSeconds: Long,
     val cycleLinesText: String,
     val cyclePresets: List<String>,
-    val cyclePresetNames: List<String>,
     // Now Playing
     val spotifyEnabled: Boolean,
     val spotifyDemoEnabled: Boolean,
@@ -615,11 +613,9 @@ private fun UsersTab(
                 selectedDetail = UserDetail(
                     pinnedEnabled  = b("afkEnabled"), pinnedMessage = s("afkMessage"),
                     pinnedPresets  = listOf(s("afkPreset1"), s("afkPreset2"), s("afkPreset3")),
-                    pinnedPresetNames = listOf(s("afkPreset1Name").ifBlank { "Preset 1" }, s("afkPreset2Name").ifBlank { "Preset 2" }, s("afkPreset3Name").ifBlank { "Preset 3" }),
                     cycleEnabled   = b("cycleEnabled"), cycleIntervalSeconds = l("cycleIntervalSeconds"),
                     cycleLinesText = s("cycleLinesText"),
                     cyclePresets   = listOf(s("cyclePreset1"), s("cyclePreset2"), s("cyclePreset3"), s("cyclePreset4"), s("cyclePreset5")),
-                    cyclePresetNames = listOf(s("cyclePreset1Name").ifBlank { "Preset 1" }, s("cyclePreset2Name").ifBlank { "Preset 2" }, s("cyclePreset3Name").ifBlank { "Preset 3" }, s("cyclePreset4Name").ifBlank { "Preset 4" }, s("cyclePreset5Name").ifBlank { "Preset 5" }),
                     spotifyEnabled = b("spotifyEnabled"), spotifyDemoEnabled = b("spotifyDemoEnabled"),
                     spotifyPreset  = l("spotifyPreset"),
                     nowPlayingDetected = b("nowPlayingDetected"), nowPlayingIsPlaying = b("nowPlayingIsPlaying"),
@@ -1076,12 +1072,11 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
             Text("Presets", style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             d.pinnedPresets.forEachIndexed { i, preset ->
-                val name = d.pinnedPresetNames.getOrElse(i) { "Preset ${i+1}" }
                 var pe by remember(preset) { mutableStateOf(preset) }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(value = pe, onValueChange = { pe = it },
-                        modifier = Modifier.weight(1f), singleLine = true, label = { Text(name) })
+                        modifier = Modifier.weight(1f), singleLine = true, label = { Text("Preset ${i+1}") })
                     if (pe != preset)
                         IconButton(onClick = { writeField("afkPreset${i+1}", pe) }) {
                             Icon(Icons.Filled.Check, "Save", modifier = Modifier.size(18.dp))
@@ -1130,22 +1125,14 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
             Text("Cycle Presets", style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             d.cyclePresets.forEachIndexed { i, preset ->
-                val defaultName = "Preset ${i+1}"
-                val name = d.cyclePresetNames.getOrElse(i) { defaultName }
-                var nameEdit by remember(name) { mutableStateOf(name) }
                 var pe by remember(preset) { mutableStateOf(preset) }
                 var expanded by remember { mutableStateOf(false) }
                 ElevatedCard {
                     Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp),
                             verticalAlignment = Alignment.CenterVertically) {
-                            OutlinedTextField(value = nameEdit, onValueChange = { nameEdit = it },
-                                modifier = Modifier.weight(1f), singleLine = true,
-                                label = { Text("Name") })
-                            if (nameEdit != name)
-                                IconButton(onClick = { writeField("cyclePreset${i+1}Name", nameEdit) }) {
-                                    Icon(Icons.Filled.Check, "Save name", modifier = Modifier.size(18.dp))
-                                }
+                            Text("Preset ${i+1}", style = MaterialTheme.typography.labelMedium,
+                                modifier = Modifier.weight(1f))
                             IconButton(onClick = { expanded = !expanded }) {
                                 Icon(
                                     if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,

@@ -140,7 +140,6 @@ class VrchatPipelineService : Service() {
         serviceScope.cancel()
         VrchatPipelineState.isConnected = false
         VrchatPipelineState.presence = null
-        writeOfflineAndStopRpc()
         super.onDestroy()
     }
 

@@ -103,11 +103,16 @@ fun IpField(
         chatboxViewModel.ipAddressApplyRuntimeOnly(addr)
     }
 
-    fun saveSlot(slot: Int, name: String, addr: String) {
+    fun saveSlot(slot: Int, name: String, addr: String, thenSwitch: Boolean = false) {
         val n = name.trim().ifBlank { "Slot $slot" }
         val a = addr.trim()
-        scope.launch { repo.saveIpSlot(slot, n, a) }
-        if (slot == currentSlot && a.isNotBlank()) {
+        scope.launch {
+            repo.saveIpSlot(slot, n, a)
+            if (thenSwitch && a.isNotBlank()) {
+                switchToSlot(slot, a)
+            }
+        }
+        if (!thenSwitch && slot == currentSlot && a.isNotBlank()) {
             chatboxViewModel.ipAddressApplyRuntimeOnly(a)
             editBuffer = a
         }
@@ -234,8 +239,7 @@ fun IpField(
                                     }
                                     Button(
                                         onClick = {
-                                            saveSlot(slot, nameVal, addrVal)
-                                            if (addrVal.trim().isNotBlank()) switchToSlot(slot, addrVal.trim())
+                                            saveSlot(slot, nameVal, addrVal, thenSwitch = true)
                                         },
                                         modifier = Modifier.weight(1f),
                                         enabled = addrVal.trim().isNotBlank()

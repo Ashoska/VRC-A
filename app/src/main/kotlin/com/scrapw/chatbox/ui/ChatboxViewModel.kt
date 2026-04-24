@@ -77,7 +77,6 @@ class ChatboxViewModel(
 
     companion object {
         private lateinit var instance: ChatboxViewModel
-        private var coldStartResetDone = false
 
         private const val CYCLE_INTERVAL_SECONDS_LOCKED = 10
         private const val MUSIC_REFRESH_SECONDS_LOCKED = 2
@@ -268,20 +267,12 @@ class ChatboxViewModel(
         data["afkPreset1"] = getAfkPresetPreview(1)
         data["afkPreset2"] = getAfkPresetPreview(2)
         data["afkPreset3"] = getAfkPresetPreview(3)
-        data["afkPreset1Name"] = pinnedPresetNames.getOrElse(0) { "Preset 1" }
-        data["afkPreset2Name"] = pinnedPresetNames.getOrElse(1) { "Preset 2" }
-        data["afkPreset3Name"] = pinnedPresetNames.getOrElse(2) { "Preset 3" }
 
         data["cyclePreset1"] = cyclePresetMessages.getOrNull(0)?.trim().orEmpty()
         data["cyclePreset2"] = cyclePresetMessages.getOrNull(1)?.trim().orEmpty()
         data["cyclePreset3"] = cyclePresetMessages.getOrNull(2)?.trim().orEmpty()
         data["cyclePreset4"] = cyclePresetMessages.getOrNull(3)?.trim().orEmpty()
         data["cyclePreset5"] = cyclePresetMessages.getOrNull(4)?.trim().orEmpty()
-        data["cyclePreset1Name"] = cyclePresetNames.getOrElse(0) { "Preset 1" }
-        data["cyclePreset2Name"] = cyclePresetNames.getOrElse(1) { "Preset 2" }
-        data["cyclePreset3Name"] = cyclePresetNames.getOrElse(2) { "Preset 3" }
-        data["cyclePreset4Name"] = cyclePresetNames.getOrElse(3) { "Preset 4" }
-        data["cyclePreset5Name"] = cyclePresetNames.getOrElse(4) { "Preset 5" }
 
         // Multi-IP slots
         val activeSlot = runCatching {
@@ -351,13 +342,18 @@ class ChatboxViewModel(
     private suspend fun performHeartbeat() {
         runCatching {
             val deviceHash = readDeviceHashFromPrefs()
-            if (!isValidDeviceHash(deviceHash)) return@runCatching
+            if (!isValidDeviceHash(deviceHash)) {
+                Log.w("ChatboxViewModel", "Heartbeat skipped: invalid deviceHash")
+                return@runCatching
+            }
             db.collection(COL_USERS).document(deviceHash)
                 .set(mapOf(
                     "isOnlineInApp" to true,
                     "lastSeenAt" to FieldValue.serverTimestamp()
                 ), SetOptions.merge())
                 .await()
+        }.onFailure { e ->
+            Log.e("ChatboxViewModel", "Heartbeat write failed", e)
         }
     }
 
@@ -594,23 +590,12 @@ class ChatboxViewModel(
                 { v -> userPreferencesRepository.saveAfkPreset2(v) },
                 { v -> userPreferencesRepository.saveAfkPreset3(v) }
             )
-            val afkPresetNameSavers = listOf<suspend (String) -> Unit>(
-                { v -> userPreferencesRepository.savePinnedPreset1Name(v) },
-                { v -> userPreferencesRepository.savePinnedPreset2Name(v) },
-                { v -> userPreferencesRepository.savePinnedPreset3Name(v) }
-            )
             for (i in 1..3) {
                 val msgKey = "afkPreset$i"
-                val nameKey = "afkPreset${i}Name"
                 val remoteMsg = snap.getString(msgKey)
-                val remoteName = snap.getString(nameKey)
                 val currentMsg = getAfkPresetPreview(i).trim()
-                val currentName = pinnedPresetNames.getOrElse(i - 1) { "Preset $i" }
                 if (remoteMsg != null && remoteMsg.trim() != currentMsg) {
                     afkPresetSavers[i - 1](remoteMsg.trim())
-                }
-                if (remoteName != null && remoteName.trim() != currentName.trim()) {
-                    afkPresetNameSavers[i - 1](remoteName.trim())
                 }
             }
             // Cycle presets (admin can edit preset contents + names)
@@ -623,19 +608,11 @@ class ChatboxViewModel(
             )
             for (i in 1..5) {
                 val msgKey = "cyclePreset$i"
-                val nameKey = "cyclePreset${i}Name"
                 val remoteMsg = snap.getString(msgKey)
-                val remoteName = snap.getString(nameKey)
                 val currentMsg = cyclePresetMessages.getOrNull(i - 1) ?: ""
-                val currentName = cyclePresetNames.getOrElse(i - 1) { "Preset $i" }
                 if (remoteMsg != null && remoteMsg.trim() != currentMsg.trim()) {
                     val interval = cyclePresetIntervals.getOrElse(i - 1) { 10 }
-                    val nameToSave = if (remoteName != null && remoteName.trim() != currentName.trim()) remoteName.trim() else null
-                    presetSavers[i - 1](remoteMsg.trim(), interval, nameToSave)
-                } else if (remoteName != null && remoteName.trim() != currentName.trim()) {
-                    val msg = currentMsg
-                    val interval = cyclePresetIntervals.getOrElse(i - 1) { 10 }
-                    presetSavers[i - 1](msg, interval, remoteName.trim())
+                    presetSavers[i - 1](remoteMsg.trim(), interval, null)
                 }
             }
         }
@@ -930,7 +907,7 @@ class ChatboxViewModel(
 
     fun updateCardOrder(order: List<String>) {
         if (isBanned) return
-        val valid = order.filter { it in DEFAULT_CARD_ORDER || it.startsWith("Divider_") }.distinct()
+        val valid = order.filter { it in DEFAULT_CARD_ORDER }.distinct()
         val full = valid + DEFAULT_CARD_ORDER.filter { it !in valid }
         cardOrder = full
         viewModelScope.launch { userPreferencesRepository.saveCardOrder(full) }
@@ -940,51 +917,6 @@ class ChatboxViewModel(
 
     fun resetCardOrder() {
         updateCardOrder(DEFAULT_CARD_ORDER)
-    }
-
-    /** Add a new divider at the given position in cardOrder (after the component at insertAfterIdx) */
-    fun addDivider(insertAfterIdx: Int, text: String = "-----") {
-        if (isBanned) return
-        // Find a unique divider ID
-        val existingIds = cardOrder.filter { it.startsWith("Divider_") }.map {
-            it.removePrefix("Divider_").toIntOrNull() ?: 0
-        }.toSet()
-        val newId = (1..99).first { it !in existingIds }
-        val divId = "Divider_$newId"
-
-        // Save text config
-        dividerTexts[divId] = text
-        saveDividerConfig()
-
-        // Insert into order
-        val newOrder = cardOrder.toMutableList()
-        val insertAt = (insertAfterIdx + 1).coerceAtMost(newOrder.size)
-        newOrder.add(insertAt, divId)
-        updateCardOrder(newOrder)
-    }
-
-    fun removeDivider(divId: String) {
-        if (isBanned) return
-        dividerTexts.remove(divId)
-        saveDividerConfig()
-        updateCardOrder(cardOrder.filter { it != divId })
-    }
-
-    fun updateDividerText(divId: String, text: String) {
-        if (isBanned) return
-        dividerTexts[divId] = text
-        saveDividerConfig()
-        rebuildCombinedPreviewOnly()
-    }
-
-    private fun saveDividerConfig() {
-        val arr = org.json.JSONArray()
-        dividerTexts.entries.forEach { entry ->
-            arr.put(org.json.JSONObject()
-                .put("id", entry.key as String)
-                .put("text", entry.value as String))
-        }
-        viewModelScope.launch { userPreferencesRepository.saveDividerConfig(arr.toString()) }
     }
 
     // =========================
@@ -1039,15 +971,7 @@ class ChatboxViewModel(
         private set
 
     var cycleTrimWarning by mutableStateOf("")
-    /** Set when a divider line was auto-removed to fit the char limit */
-    var dividerRemovedWarning by mutableStateOf(false)
-
-    // Divider configs: map of "Divider_N" -> display text, loaded from DataStore
-    // e.g. {"Divider_1": "-----", "Divider_2": "- - -"}
-    val dividerTexts = mutableStateMapOf<String, String>()
     private val afkPresetTexts = mutableStateListOf("", "", "")
-    val pinnedPresetNames = mutableStateListOf("Preset 1", "Preset 2", "Preset 3")
-    val cyclePresetNames  = mutableStateListOf("Preset 1", "Preset 2", "Preset 3", "Preset 4", "Preset 5")
     private val cyclePresetMessages = mutableStateListOf("", "", "", "", "")
     private val cyclePresetIntervals = mutableStateListOf(
         CYCLE_INTERVAL_SECONDS_LOCKED,
@@ -1058,20 +982,30 @@ class ChatboxViewModel(
     )
 
     init {
-        if (!coldStartResetDone) {
-            coldStartResetDone = true
-            afkEnabled = false
-            spotifyEnabled = false
-            viewModelScope.launch { userPreferencesRepository.saveCycleEnabled(false) }
-            viewModelScope.launch { userPreferencesRepository.saveTimeEnabled(false) }
-        }
-
         // Public build: start periodic self sync (rules-compatible).
         // Admin build: startSelfSyncLoopIfNeeded() is a no-op (prevents UID tug-of-war).
         startSelfSyncLoopIfNeeded()
 
         // Public build: attach moderation listeners once deviceHash + auth are available.
         attachModerationListenersLoopOnce()
+
+        viewModelScope.launch {
+            userPreferencesRepository.afkEnabled.collect {
+                afkEnabled = it
+                rebuildCombinedPreviewOnly()
+                if (!it) stopAfkSender(clearFromChatbox = true)
+                startSelfSyncLoopIfNeeded()
+            }
+        }
+
+        viewModelScope.launch {
+            userPreferencesRepository.spotifyEnabled.collect {
+                spotifyEnabled = it
+                rebuildCombinedPreviewOnly()
+                if (!it) stopNowPlayingSender(clearFromChatbox = true)
+                startSelfSyncLoopIfNeeded()
+            }
+        }
 
         viewModelScope.launch {
             userPreferencesRepository.afkMessage.collect {
@@ -1107,14 +1041,6 @@ class ChatboxViewModel(
         viewModelScope.launch { userPreferencesRepository.afkPreset1.collect { afkPresetTexts[0] = it; startSelfSyncLoopIfNeeded() } }
         viewModelScope.launch { userPreferencesRepository.afkPreset2.collect { afkPresetTexts[1] = it; startSelfSyncLoopIfNeeded() } }
         viewModelScope.launch { userPreferencesRepository.afkPreset3.collect { afkPresetTexts[2] = it; startSelfSyncLoopIfNeeded() } }
-        viewModelScope.launch { userPreferencesRepository.pinnedPreset1Name.collect { pinnedPresetNames[0] = it } }
-        viewModelScope.launch { userPreferencesRepository.pinnedPreset2Name.collect { pinnedPresetNames[1] = it } }
-        viewModelScope.launch { userPreferencesRepository.pinnedPreset3Name.collect { pinnedPresetNames[2] = it } }
-        viewModelScope.launch { userPreferencesRepository.cyclePreset1Name.collect { cyclePresetNames[0] = it } }
-        viewModelScope.launch { userPreferencesRepository.cyclePreset2Name.collect { cyclePresetNames[1] = it } }
-        viewModelScope.launch { userPreferencesRepository.cyclePreset3Name.collect { cyclePresetNames[2] = it } }
-        viewModelScope.launch { userPreferencesRepository.cyclePreset4Name.collect { cyclePresetNames[3] = it } }
-        viewModelScope.launch { userPreferencesRepository.cyclePreset5Name.collect { cyclePresetNames[4] = it } }
 
         viewModelScope.launch { userPreferencesRepository.cyclePreset1Messages.collect { cyclePresetMessages[0] = it; startSelfSyncLoopIfNeeded() } }
         viewModelScope.launch { userPreferencesRepository.cyclePreset1Interval.collect { cyclePresetIntervals[0] = CYCLE_INTERVAL_SECONDS_LOCKED } }
@@ -1142,26 +1068,10 @@ class ChatboxViewModel(
             userPreferencesRepository.cardOrder.collect { saved ->
                 // Migrate legacy "AFK" key to "Pinned"
                 val migrated = saved.map { if (it == "AFK") "Pinned" else it }
-                // Allow Divider_N entries alongside standard components
                 val validComponents = DEFAULT_CARD_ORDER.toSet()
-                val valid = migrated.filter { it in validComponents || it.startsWith("Divider_") }.distinct()
+                val valid = migrated.filter { it in validComponents }.distinct()
                 val full = valid + DEFAULT_CARD_ORDER.filter { it !in valid }
                 cardOrder = full
-                rebuildCombinedPreviewOnly()
-            }
-        }
-
-        viewModelScope.launch {
-            userPreferencesRepository.dividerConfig.collect { json ->
-                // Parse JSON array: [{"id":"Divider_1","text":"-----"}, ...]
-                try {
-                    val arr = org.json.JSONArray(json)
-                    dividerTexts.clear()
-                    for (i in 0 until arr.length()) {
-                        val obj = arr.getJSONObject(i)
-                        dividerTexts[obj.getString("id")] = obj.optString("text", "-----")
-                    }
-                } catch (_: Exception) { /* malformed - keep empty */ }
                 rebuildCombinedPreviewOnly()
             }
         }
@@ -1387,6 +1297,7 @@ class ChatboxViewModel(
     fun setAfkEnabledFlag(enabled: Boolean) {
         if (isBanned) return
         afkEnabled = enabled
+        viewModelScope.launch { userPreferencesRepository.saveAfkEnabled(enabled) }
         rebuildCombinedPreviewOnly()
         if (!enabled) stopAfkSender(clearFromChatbox = true)
         startSelfSyncLoopIfNeeded()
@@ -1405,6 +1316,7 @@ class ChatboxViewModel(
     fun setSpotifyEnabledFlag(enabled: Boolean) {
         if (isBanned) return
         spotifyEnabled = enabled
+        viewModelScope.launch { userPreferencesRepository.saveSpotifyEnabled(enabled) }
         rebuildCombinedPreviewOnly()
         if (!enabled) stopNowPlayingSender(clearFromChatbox = true)
         startSelfSyncLoopIfNeeded()
@@ -1538,35 +1450,6 @@ class ChatboxViewModel(
         startSelfSyncLoopIfNeeded()
     }
 
-    suspend fun saveAfkPresetName(slot: Int, name: String) {
-        if (isBanned) return
-        when (slot.coerceIn(1, 3)) {
-            1 -> userPreferencesRepository.savePinnedPreset1Name(name)
-            2 -> userPreferencesRepository.savePinnedPreset2Name(name)
-            else -> userPreferencesRepository.savePinnedPreset3Name(name)
-        }
-    }
-
-    suspend fun saveCyclePresetName(slot: Int, name: String) {
-        if (isBanned) return
-        when (slot.coerceIn(1, 5)) {
-            1 -> userPreferencesRepository.saveCyclePreset1(
-                userPreferencesRepository.cyclePreset1Messages.first(),
-                userPreferencesRepository.cyclePreset1Interval.first(), name)
-            2 -> userPreferencesRepository.saveCyclePreset2(
-                userPreferencesRepository.cyclePreset2Messages.first(),
-                userPreferencesRepository.cyclePreset2Interval.first(), name)
-            3 -> userPreferencesRepository.saveCyclePreset3(
-                userPreferencesRepository.cyclePreset3Messages.first(),
-                userPreferencesRepository.cyclePreset3Interval.first(), name)
-            4 -> userPreferencesRepository.saveCyclePreset4(
-                userPreferencesRepository.cyclePreset4Messages.first(),
-                userPreferencesRepository.cyclePreset4Interval.first(), name)
-            else -> userPreferencesRepository.saveCyclePreset5(
-                userPreferencesRepository.cyclePreset5Messages.first(),
-                userPreferencesRepository.cyclePreset5Interval.first(), name)
-        }
-    }
 
     suspend fun loadAfkPreset(slot: Int) {
         if (isBanned) return
@@ -1760,7 +1643,6 @@ class ChatboxViewModel(
 
     private fun buildCombinedText(cycleLineOverride: String?): String {
         cycleTrimWarning = ""
-        dividerRemovedWarning = false
 
         // If banned, preview can still show what WOULD be sent, but nothing will send.
         val afkLine = if (afkEnabled && afkMessage.trim().isNotEmpty()) afkMessage.trim() else ""
@@ -1784,25 +1666,13 @@ class ChatboxViewModel(
                 component == "Cycle" -> if (cycleLine.isNotBlank()) rawLines += LineWithPriority(text = cycleLine, priority = Priority.CYCLE)
                 component == "NowPlaying" -> for (m in musicLines) if (m.isNotBlank()) rawLines += LineWithPriority(text = m, priority = Priority.MUSIC)
                 component == "Time" -> if (standalonTimeLine.isNotBlank()) rawLines += LineWithPriority(text = standalonTimeLine, priority = Priority.MUSIC)
-                component.startsWith("Divider_") -> {
-                    val divText = dividerTexts[component]?.trim() ?: "-----"
-                    // Only insert divider if there's content on both sides (don't add leading/trailing dividers)
-                    if (rawLines.isNotEmpty()) {
-                        rawLines += LineWithPriority(text = divText, priority = Priority.DIVIDER, isDivider = true)
-                    }
-                }
             }
         }
-        // Remove trailing divider if it ended up last
-        while (rawLines.isNotEmpty() && rawLines.last().isDivider) rawLines.removeAt(rawLines.lastIndex)
 
         val limited = limitWithPriority(rawLines, VRC_MAX_CHARS, VRC_MAX_LINES)
 
         if (limited.cycleWasModifiedToPreserveMusic) {
             cycleTrimWarning = "Cycle was trimmed to preserve Now Playing (VRChat limits)."
-        }
-        if (limited.dividerWasRemoved || dividerRemovedWarning) {
-            dividerRemovedWarning = true
         }
 
         val combined = limited.text
@@ -1883,9 +1753,9 @@ class ChatboxViewModel(
         return listOfNotNull(line1.takeIf { it.isNotBlank() }, line2.takeIf { it.isNotBlank() })
     }
 
-    private enum class Priority { AFK, MUSIC, CYCLE, DIVIDER }
-    private data class LineWithPriority(val text: String, val priority: Priority, val isDivider: Boolean = false)
-    private data class LimitedResult(val text: String, val cycleWasModifiedToPreserveMusic: Boolean, val dividerWasRemoved: Boolean = false)
+    private enum class Priority { AFK, MUSIC, CYCLE }
+    private data class LineWithPriority(val text: String, val priority: Priority)
+    private data class LimitedResult(val text: String, val cycleWasModifiedToPreserveMusic: Boolean)
 
     private fun limitWithPriority(lines: List<LineWithPriority>, maxChars: Int, maxLines: Int): LimitedResult {
         if (lines.isEmpty()) return LimitedResult("", false)
@@ -1896,13 +1766,6 @@ class ChatboxViewModel(
         var cycleModifiedForMusic = false
 
         while (cleaned.size > maxLines) {
-            // Dividers are always dropped first - they are cosmetic
-            val divIdx = cleaned.indexOfLast { it.isDivider }
-            if (divIdx >= 0) {
-                cleaned.removeAt(divIdx)
-                dividerRemovedWarning = true
-                continue
-            }
             val idxToRemove = cleaned.indexOfLast { it.priority == Priority.CYCLE }
                 .takeIf { it >= 0 }
                 ?: cleaned.indexOfLast { it.priority == Priority.MUSIC }.takeIf { it >= 0 }
@@ -1935,15 +1798,6 @@ class ChatboxViewModel(
         var len = totalLen(cleaned)
         while (len > maxChars && cleaned.isNotEmpty()) {
             val excess = len - maxChars
-
-            // Drop dividers first - cosmetic, never truncate
-            val divIdx = cleaned.indexOfLast { it.isDivider }
-            if (divIdx >= 0) {
-                cleaned.removeAt(divIdx)
-                dividerRemovedWarning = true
-                len = totalLen(cleaned)
-                continue
-            }
 
             val cycleIdx = cleaned.indexOfLast { it.priority == Priority.CYCLE }
             val musicIdx = cleaned.indexOfLast { it.priority == Priority.MUSIC }

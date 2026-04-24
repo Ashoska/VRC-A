@@ -1166,19 +1166,6 @@ private fun HomePage(
                     )
                 }
             }
-            if (vm.dividerRemovedWarning) {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        "A divider was removed - character or line limit reached.",
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onTertiaryContainer
-                    )
-                }
-            }
 
             ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -1197,10 +1184,6 @@ private fun HomePage(
                                     onClick = { vm.resetCardOrder() },
                                     contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 4.dp)
                                 ) { Text("Reset", style = MaterialTheme.typography.labelSmall) }
-                                TextButton(
-                                    onClick = { vm.addDivider(vm.cardOrder.size - 1) },
-                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                                ) { Text("+ Divider", style = MaterialTheme.typography.labelSmall) }
                             }
                             TextButton(
                                 onClick = { cardReorderMode = !cardReorderMode },
@@ -1263,47 +1246,9 @@ private fun HomePage(
                                             Switch(checked = vm.timeEnabled, onCheckedChange = { vm.updateTimeEnabled(it) }, enabled = !isBanned)
                                         }
                                     }
-                                    component.startsWith("Divider_") -> {
-                                        val currentText = vm.dividerTexts[component] ?: "-----"
-                                        if (cardReorderMode) {
-                                            var divEdit by remember(currentText) { mutableStateOf(currentText) }
-                                            Row(
-                                                Modifier.fillMaxWidth(),
-                                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                OutlinedTextField(
-                                                    value = divEdit,
-                                                    onValueChange = { divEdit = it },
-                                                    modifier = Modifier.weight(1f),
-                                                    singleLine = true,
-                                                    label = { Text("Divider") },
-                                                    textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
-                                                )
-                                                IconButton(
-                                                    onClick = { vm.updateDividerText(component, divEdit.trim().ifBlank { "-----" }) },
-                                                    enabled = divEdit.trim() != currentText
-                                                ) { Icon(Icons.Filled.Check, contentDescription = "Save", modifier = Modifier.size(18.dp)) }
-                                                IconButton(onClick = { vm.removeDivider(component) }) {
-                                                    Icon(Icons.Filled.Delete, contentDescription = "Remove divider",
-                                                        modifier = Modifier.size(18.dp),
-                                                        tint = MaterialTheme.colorScheme.error)
-                                                }
-                                            }
-                                        } else {
-                                            Text(
-                                                currentText,
-                                                style = MaterialTheme.typography.bodySmall,
-                                                fontFamily = FontFamily.Monospace,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                                            )
-                                        }
-                                    }
                                 }
                             }
-                            // Up / Down arrows - only shown when in reorder mode (not for dividers in non-reorder)
-                            if (cardReorderMode && !component.startsWith("Divider_")) {
+                            if (cardReorderMode) {
                                 Row {
                                     IconButton(
                                         onClick = {
@@ -1323,24 +1268,6 @@ private fun HomePage(
                                     ) {
                                         Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Move down", modifier = Modifier.size(18.dp))
                                     }
-                                }
-                            } else if (cardReorderMode && component.startsWith("Divider_")) {
-                                // Divider gets up/down too
-                                Row {
-                                    IconButton(
-                                        onClick = {
-                                            val order = vm.cardOrder.toMutableList()
-                                            if (idx > 0) { val tmp = order[idx]; order[idx] = order[idx - 1]; order[idx - 1] = tmp; vm.updateCardOrder(order) }
-                                        },
-                                        enabled = idx > 0
-                                    ) { Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "Move up", modifier = Modifier.size(18.dp)) }
-                                    IconButton(
-                                        onClick = {
-                                            val order = vm.cardOrder.toMutableList()
-                                            if (idx < order.size - 1) { val tmp = order[idx]; order[idx] = order[idx + 1]; order[idx + 1] = tmp; vm.updateCardOrder(order) }
-                                        },
-                                        enabled = idx < vm.cardOrder.size - 1
-                                    ) { Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Move down", modifier = Modifier.size(18.dp)) }
                                 }
                             }
                         }
@@ -1643,29 +1570,6 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel, isBanned
                                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                                             ) {
                                                 val preview = vm.getAfkPresetPreview(slot).ifBlank { "(empty)" }
-                                                val currentName = vm.pinnedPresetNames.getOrElse(slot - 1) { "Preset $slot" }
-                                                var nameEdit by remember(currentName) { mutableStateOf(currentName) }
-
-                                                Row(
-                                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                                    verticalAlignment = Alignment.CenterVertically
-                                                ) {
-                                                    OutlinedTextField(
-                                                        value = nameEdit,
-                                                        onValueChange = { nameEdit = it },
-                                                        modifier = Modifier.weight(1f),
-                                                        singleLine = true,
-                                                        label = { Text("Name") },
-                                                        enabled = !isBanned
-                                                    )
-                                                    IconButton(
-                                                        onClick = { scope.launch { vm.saveAfkPresetName(slot, nameEdit.trim().ifBlank { "Preset $slot" }) } },
-                                                        enabled = !isBanned && nameEdit.trim() != currentName
-                                                    ) {
-                                                        Icon(Icons.Filled.Check, contentDescription = "Save name",
-                                                            modifier = Modifier.size(18.dp))
-                                                    }
-                                                }
 
                                                 Text(
                                                     preview,
@@ -1694,25 +1598,6 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel, isBanned
                         }
                     }
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Button(
-                            onClick = { vm.startAfkSender() },
-                            modifier = Modifier.weight(1f),
-                            enabled = !isBanned && vm.afkEnabled
-                        ) { Text("Pin") }
-
-                        OutlinedButton(
-                            onClick = { vm.stopAfkSender(clearFromChatbox = true) },
-                            modifier = Modifier.weight(1f),
-                            enabled = !isBanned
-                        ) { Text("Unpin") }
-                    }
-
-                    OutlinedButton(
-                        onClick = { vm.sendAfkNow() },
-                        modifier = Modifier.fillMaxWidth(),
-                        enabled = !isBanned && vm.afkEnabled
-                    ) { Text("Send once") }
                 }
             }
 
@@ -1848,29 +1733,6 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel, isBanned
                                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                                             ) {
                                                 val preview = vm.getCyclePresetPreview(slot).ifBlank { "(empty)" }
-                                                val currentName = vm.cyclePresetNames.getOrElse(slot - 1) { "Preset $slot" }
-                                                var nameEdit by remember(currentName) { mutableStateOf(currentName) }
-
-                                                Row(
-                                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                                    verticalAlignment = Alignment.CenterVertically
-                                                ) {
-                                                    OutlinedTextField(
-                                                        value = nameEdit,
-                                                        onValueChange = { nameEdit = it },
-                                                        modifier = Modifier.weight(1f),
-                                                        singleLine = true,
-                                                        label = { Text("Name") },
-                                                        enabled = !isBanned
-                                                    )
-                                                    IconButton(
-                                                        onClick = { scope.launch { vm.saveCyclePresetName(slot, nameEdit.trim().ifBlank { "Preset $slot" }) } },
-                                                        enabled = !isBanned && nameEdit.trim() != currentName
-                                                    ) {
-                                                        Icon(Icons.Filled.Check, contentDescription = "Save name",
-                                                            modifier = Modifier.size(18.dp))
-                                                    }
-                                                }
 
                                                 Text(
                                                     preview,
@@ -1899,19 +1761,6 @@ private fun AutomationsPage(vm: com.scrapw.chatbox.ui.ChatboxViewModel, isBanned
                         }
                     }
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Button(
-                            onClick = { vm.startCycle() },
-                            modifier = Modifier.weight(1f),
-                            enabled = !isBanned && vm.cycleEnabled && vm.cycleLines.any { it.trim().isNotEmpty() }
-                        ) { Text("Start") }
-
-                        OutlinedButton(
-                            onClick = { vm.stopCycle(clearFromChatbox = true) },
-                            modifier = Modifier.weight(1f),
-                            enabled = !isBanned
-                        ) { Text("Stop") }
-                    }
                 }
             }
         }
@@ -2004,25 +1853,6 @@ private fun NowPlayingPage(
                 }
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(
-                    onClick = { vm.startNowPlayingSender() },
-                    modifier = Modifier.weight(1f),
-                    enabled = !isBanned && vm.spotifyEnabled
-                ) { Text("Start") }
-
-                OutlinedButton(
-                    onClick = { vm.stopNowPlayingSender(clearFromChatbox = true) },
-                    modifier = Modifier.weight(1f),
-                    enabled = !isBanned
-                ) { Text("Stop") }
-            }
-
-            OutlinedButton(
-                onClick = { vm.sendNowPlayingOnce() },
-                modifier = Modifier.fillMaxWidth(),
-                enabled = !isBanned && vm.spotifyEnabled
-            ) { Text("Send once now (test)") }
         }
 
         SectionCard(

@@ -33,6 +33,7 @@ class DiscordRpcService : Service() {
         private const val TAG = "DiscordRPC"
         private const val GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
         private const val VRCHAT_APP_ID = "438274841678872576"
+        private const val VRCHAT_LOGO_URL = "https://cdn.cloudflare.steamstatic.com/steam/apps/438100/header.jpg"
         private const val NOTIF_CHANNEL = "vrca_pipeline"
         private const val NOTIF_ID = 1001
 
@@ -303,18 +304,18 @@ class DiscordRpcService : Service() {
                     if (showWorldDetails && vrcPresence.worldImageUrl.isNotBlank()) {
                         put("large_image", vrcPresence.worldImageUrl)
                         put("large_text", vrcPresence.worldName)
-                    } else if (vrcPresence.currentAvatarThumbnailUrl.isNotBlank()) {
-                        put("large_image", vrcPresence.currentAvatarThumbnailUrl)
-                        put("large_text", vrcPresence.displayName)
-                    }
-                    if (showWorldDetails && vrcPresence.currentAvatarThumbnailUrl.isNotBlank()) {
-                        put("small_image", vrcPresence.currentAvatarThumbnailUrl)
-                        put("small_text", vrcPresence.displayName)
+                    } else {
+                        put("large_image", VRCHAT_LOGO_URL)
+                        put("large_text", "VRChat")
                     }
                 })
             } else {
                 put("details", "Not in VRChat")
                 put("state", "Using VRC-A")
+                put("assets", JSONObject().apply {
+                    put("large_image", VRCHAT_LOGO_URL)
+                    put("large_text", "VRChat")
+                })
             }
         }
 

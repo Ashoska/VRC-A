@@ -45,9 +45,6 @@ class UserPreferencesRepository(private val context: Context) {
         val PINNED_PRESET_1        = stringPreferencesKey("afk_preset_1")
         val PINNED_PRESET_2        = stringPreferencesKey("afk_preset_2")
         val PINNED_PRESET_3        = stringPreferencesKey("afk_preset_3")
-        val PINNED_PRESET_1_NAME   = stringPreferencesKey("pinned_preset_1_name")
-        val PINNED_PRESET_2_NAME   = stringPreferencesKey("pinned_preset_2_name")
-        val PINNED_PRESET_3_NAME   = stringPreferencesKey("pinned_preset_3_name")
 
         val CYCLE_ENABLED  = booleanPreferencesKey("cycle_enabled")
         val CYCLE_MESSAGES = stringPreferencesKey("cycle_messages")
@@ -55,27 +52,22 @@ class UserPreferencesRepository(private val context: Context) {
 
         val CYCLE_P1_MSG  = stringPreferencesKey("cycle_p1_messages")
         val CYCLE_P1_INT  = intPreferencesKey("cycle_p1_interval")
-        val CYCLE_P1_NAME = stringPreferencesKey("cycle_p1_name")
         val CYCLE_P2_MSG  = stringPreferencesKey("cycle_p2_messages")
         val CYCLE_P2_INT  = intPreferencesKey("cycle_p2_interval")
-        val CYCLE_P2_NAME = stringPreferencesKey("cycle_p2_name")
         val CYCLE_P3_MSG  = stringPreferencesKey("cycle_p3_messages")
         val CYCLE_P3_INT  = intPreferencesKey("cycle_p3_interval")
-        val CYCLE_P3_NAME = stringPreferencesKey("cycle_p3_name")
         val CYCLE_P4_MSG  = stringPreferencesKey("cycle_p4_messages")
         val CYCLE_P4_INT  = intPreferencesKey("cycle_p4_interval")
-        val CYCLE_P4_NAME = stringPreferencesKey("cycle_p4_name")
         val CYCLE_P5_MSG  = stringPreferencesKey("cycle_p5_messages")
         val CYCLE_P5_INT  = intPreferencesKey("cycle_p5_interval")
-        val CYCLE_P5_NAME = stringPreferencesKey("cycle_p5_name")
 
+        val SPOTIFY_ENABLED          = booleanPreferencesKey("spotify_enabled")
         val SPOTIFY_PRESET           = intPreferencesKey("spotify_preset")
         val PINNED_PRESETS_COLLAPSED = booleanPreferencesKey("afk_presets_collapsed")
         val CYCLE_PRESETS_COLLAPSED  = booleanPreferencesKey("cycle_presets_collapsed")
         val TIME_ENABLED             = booleanPreferencesKey("time_enabled")
         val TIME_MODE                = stringPreferencesKey("time_mode")
         val CARD_ORDER               = stringPreferencesKey("card_order")
-        val DIVIDER_CONFIG           = stringPreferencesKey("divider_config")
 
         val NOTIF_FRIEND_REQUEST     = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_FRIEND_REQUEST)
         val NOTIF_INVITE             = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_INVITE)
@@ -126,9 +118,6 @@ class UserPreferencesRepository(private val context: Context) {
     val pinnedPreset1:        Flow<String>  = context.dataStore.data.map { it[Keys.PINNED_PRESET_1]        ?: "" }
     val pinnedPreset2:        Flow<String>  = context.dataStore.data.map { it[Keys.PINNED_PRESET_2]        ?: "" }
     val pinnedPreset3:        Flow<String>  = context.dataStore.data.map { it[Keys.PINNED_PRESET_3]        ?: "" }
-    val pinnedPreset1Name:    Flow<String>  = context.dataStore.data.map { it[Keys.PINNED_PRESET_1_NAME]   ?: "Preset 1" }
-    val pinnedPreset2Name:    Flow<String>  = context.dataStore.data.map { it[Keys.PINNED_PRESET_2_NAME]   ?: "Preset 2" }
-    val pinnedPreset3Name:    Flow<String>  = context.dataStore.data.map { it[Keys.PINNED_PRESET_3_NAME]   ?: "Preset 3" }
 
     val cycleEnabled:  Flow<Boolean> = context.dataStore.data.map { it[Keys.CYCLE_ENABLED]  ?: false }
     val cycleMessages: Flow<String>  = context.dataStore.data.map { it[Keys.CYCLE_MESSAGES] ?: "" }
@@ -136,27 +125,21 @@ class UserPreferencesRepository(private val context: Context) {
 
     val cyclePreset1Messages: Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_P1_MSG]  ?: "" }
     val cyclePreset1Interval: Flow<Int>    = context.dataStore.data.map { it[Keys.CYCLE_P1_INT]  ?: 10 }
-    val cyclePreset1Name:     Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_P1_NAME] ?: "Preset 1" }
     val cyclePreset2Messages: Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_P2_MSG]  ?: "" }
     val cyclePreset2Interval: Flow<Int>    = context.dataStore.data.map { it[Keys.CYCLE_P2_INT]  ?: 10 }
-    val cyclePreset2Name:     Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_P2_NAME] ?: "Preset 2" }
     val cyclePreset3Messages: Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_P3_MSG]  ?: "" }
     val cyclePreset3Interval: Flow<Int>    = context.dataStore.data.map { it[Keys.CYCLE_P3_INT]  ?: 10 }
-    val cyclePreset3Name:     Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_P3_NAME] ?: "Preset 3" }
     val cyclePreset4Messages: Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_P4_MSG]  ?: "" }
     val cyclePreset4Interval: Flow<Int>    = context.dataStore.data.map { it[Keys.CYCLE_P4_INT]  ?: 10 }
-    val cyclePreset4Name:     Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_P4_NAME] ?: "Preset 4" }
     val cyclePreset5Messages: Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_P5_MSG]  ?: "" }
     val cyclePreset5Interval: Flow<Int>    = context.dataStore.data.map { it[Keys.CYCLE_P5_INT]  ?: 10 }
-    val cyclePreset5Name:     Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_P5_NAME] ?: "Preset 5" }
 
+    val spotifyEnabled:        Flow<Boolean> = context.dataStore.data.map { it[Keys.SPOTIFY_ENABLED] ?: false }
     val spotifyPreset:         Flow<Int>     = context.dataStore.data.map { (it[Keys.SPOTIFY_PRESET] ?: 1).coerceIn(1, 5) }
     val pinnedPresetsCollapsed: Flow<Boolean> = context.dataStore.data.map { it[Keys.PINNED_PRESETS_COLLAPSED] ?: true }
     val cyclePresetsCollapsed:  Flow<Boolean> = context.dataStore.data.map { it[Keys.CYCLE_PRESETS_COLLAPSED]  ?: true }
     val timeEnabled:            Flow<Boolean> = context.dataStore.data.map { it[Keys.TIME_ENABLED] ?: false }
     val timeMode:               Flow<String>  = context.dataStore.data.map { it[Keys.TIME_MODE]    ?: "Device" }
-    val dividerConfig:          Flow<String>  = context.dataStore.data.map { it[Keys.DIVIDER_CONFIG] ?: "[]" }
-
     val cardOrder: Flow<List<String>> = context.dataStore.data.map { prefs ->
         val raw = prefs[Keys.CARD_ORDER] ?: "Time,Pinned,Cycle,NowPlaying"
         raw.split(",").map { it.trim().let { k -> if (k == "AFK") "Pinned" else k } }.filter { it.isNotBlank() }
@@ -222,26 +205,23 @@ class UserPreferencesRepository(private val context: Context) {
     suspend fun savePinnedPreset1(v: String)         = context.dataStore.edit { it[Keys.PINNED_PRESET_1]        = v }
     suspend fun savePinnedPreset2(v: String)         = context.dataStore.edit { it[Keys.PINNED_PRESET_2]        = v }
     suspend fun savePinnedPreset3(v: String)         = context.dataStore.edit { it[Keys.PINNED_PRESET_3]        = v }
-    suspend fun savePinnedPreset1Name(v: String)     = context.dataStore.edit { it[Keys.PINNED_PRESET_1_NAME]   = v }
-    suspend fun savePinnedPreset2Name(v: String)     = context.dataStore.edit { it[Keys.PINNED_PRESET_2_NAME]   = v }
-    suspend fun savePinnedPreset3Name(v: String)     = context.dataStore.edit { it[Keys.PINNED_PRESET_3_NAME]   = v }
 
     suspend fun saveCycleEnabled(v: Boolean)  = context.dataStore.edit { it[Keys.CYCLE_ENABLED]  = v }
     suspend fun saveCycleMessages(v: String)  = context.dataStore.edit { it[Keys.CYCLE_MESSAGES] = v }
     suspend fun saveCycleInterval(v: Int)     = context.dataStore.edit { it[Keys.CYCLE_INTERVAL] = v }
-    suspend fun saveCyclePreset1(messages: String, interval: Int, name: String? = null) { context.dataStore.edit { it[Keys.CYCLE_P1_MSG] = messages; it[Keys.CYCLE_P1_INT] = interval; if (name != null) it[Keys.CYCLE_P1_NAME] = name } }
-    suspend fun saveCyclePreset2(messages: String, interval: Int, name: String? = null) { context.dataStore.edit { it[Keys.CYCLE_P2_MSG] = messages; it[Keys.CYCLE_P2_INT] = interval; if (name != null) it[Keys.CYCLE_P2_NAME] = name } }
-    suspend fun saveCyclePreset3(messages: String, interval: Int, name: String? = null) { context.dataStore.edit { it[Keys.CYCLE_P3_MSG] = messages; it[Keys.CYCLE_P3_INT] = interval; if (name != null) it[Keys.CYCLE_P3_NAME] = name } }
-    suspend fun saveCyclePreset4(messages: String, interval: Int, name: String? = null) { context.dataStore.edit { it[Keys.CYCLE_P4_MSG] = messages; it[Keys.CYCLE_P4_INT] = interval; if (name != null) it[Keys.CYCLE_P4_NAME] = name } }
-    suspend fun saveCyclePreset5(messages: String, interval: Int, name: String? = null) { context.dataStore.edit { it[Keys.CYCLE_P5_MSG] = messages; it[Keys.CYCLE_P5_INT] = interval; if (name != null) it[Keys.CYCLE_P5_NAME] = name } }
+    suspend fun saveCyclePreset1(messages: String, interval: Int, name: String? = null) { context.dataStore.edit { it[Keys.CYCLE_P1_MSG] = messages; it[Keys.CYCLE_P1_INT] = interval } }
+    suspend fun saveCyclePreset2(messages: String, interval: Int, name: String? = null) { context.dataStore.edit { it[Keys.CYCLE_P2_MSG] = messages; it[Keys.CYCLE_P2_INT] = interval } }
+    suspend fun saveCyclePreset3(messages: String, interval: Int, name: String? = null) { context.dataStore.edit { it[Keys.CYCLE_P3_MSG] = messages; it[Keys.CYCLE_P3_INT] = interval } }
+    suspend fun saveCyclePreset4(messages: String, interval: Int, name: String? = null) { context.dataStore.edit { it[Keys.CYCLE_P4_MSG] = messages; it[Keys.CYCLE_P4_INT] = interval } }
+    suspend fun saveCyclePreset5(messages: String, interval: Int, name: String? = null) { context.dataStore.edit { it[Keys.CYCLE_P5_MSG] = messages; it[Keys.CYCLE_P5_INT] = interval } }
 
+    suspend fun saveSpotifyEnabled(v: Boolean)           = context.dataStore.edit { it[Keys.SPOTIFY_ENABLED]         = v }
     suspend fun saveSpotifyPreset(v: Int)               = context.dataStore.edit { it[Keys.SPOTIFY_PRESET]           = v.coerceIn(1, 5) }
     suspend fun savePinnedPresetsCollapsed(v: Boolean)  = context.dataStore.edit { it[Keys.PINNED_PRESETS_COLLAPSED] = v }
     suspend fun saveCyclePresetsCollapsed(v: Boolean)   = context.dataStore.edit { it[Keys.CYCLE_PRESETS_COLLAPSED]  = v }
     suspend fun saveTimeEnabled(v: Boolean)             = context.dataStore.edit { it[Keys.TIME_ENABLED] = v }
     suspend fun saveTimeMode(v: String)                 = context.dataStore.edit { it[Keys.TIME_MODE]    = v }
     suspend fun saveCardOrder(order: List<String>)      = context.dataStore.edit { it[Keys.CARD_ORDER]   = order.joinToString(",") }
-    suspend fun saveDividerConfig(json: String)         = context.dataStore.edit { it[Keys.DIVIDER_CONFIG] = json }
 
     suspend fun saveNotifFriendRequest(v: Boolean)     = context.dataStore.edit { it[Keys.NOTIF_FRIEND_REQUEST]     = v }
     suspend fun saveNotifInvite(v: Boolean)            = context.dataStore.edit { it[Keys.NOTIF_INVITE]             = v }
@@ -275,6 +255,7 @@ class UserPreferencesRepository(private val context: Context) {
     val afkPreset2: Flow<String>  get() = pinnedPreset2
     val afkPreset3: Flow<String>  get() = pinnedPreset3
     val afkPresetsCollapsed: Flow<Boolean> get() = pinnedPresetsCollapsed
+    suspend fun saveAfkEnabled(v: Boolean)           = savePinnedMessageEnabled(v)
     suspend fun saveAfkMessage(v: String)           = savePinnedMessage(v)
     suspend fun saveAfkPreset1(v: String)           = savePinnedPreset1(v)
     suspend fun saveAfkPreset2(v: String)           = savePinnedPreset2(v)
