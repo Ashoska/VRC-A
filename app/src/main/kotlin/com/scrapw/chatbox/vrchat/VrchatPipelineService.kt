@@ -170,7 +170,12 @@ class VrchatPipelineService : Service() {
         wsJob?.cancel()
         wsJob = serviceScope.launch {
             // Validate session (also refreshes cookies if expired)
-            val valid = VrchatAuthManager.validateSession(this@VrchatPipelineService)
+            var valid = VrchatAuthManager.validateSession(this@VrchatPipelineService)
+            if (!valid && VrchatAuthManager.hasSavedCredentials(this@VrchatPipelineService)) {
+                Log.i(TAG, "Session invalid, attempting auto re-login...")
+                updatePersistentNotif("Session expired - re-logging in...")
+                valid = VrchatAuthManager.autoRelogin(this@VrchatPipelineService)
+            }
             if (!valid) {
                 updatePersistentNotif("Not logged in to VRChat - tap to sign in")
                 VrchatPipelineState.isConnected = false

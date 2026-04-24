@@ -308,9 +308,13 @@ class ChatboxViewModel(
     }
 
     /**
-     * IMPORTANT: Admin build does NOT self-sync to avoid UID tug-of-war with Public build.
+     * IMPORTANT: Admin build does NOT self-sync user data to avoid UID tug-of-war,
+     * but it DOES run heartbeat so the admin shows as online in the dashboard.
      */
     private fun startSelfSyncLoopIfNeeded() {
+        // Always start heartbeat for BOTH admin and public builds
+        startHeartbeatLoopIfNeeded()
+
         if (BuildConfig.IS_ADMIN_BUILD) return
 
         // Debounced trigger: cancel any pending debounce and start a new one
@@ -320,15 +324,26 @@ class ChatboxViewModel(
             performSelfSync()
         }
 
-        // Heartbeat loop: start once, always writes online status + timestamp
+        // Full sync loop (public build only)
         if (selfSyncJob != null) return
         selfSyncJob = viewModelScope.launch {
-            performHeartbeat()
             performSelfSync()
             while (true) {
                 delay(SELF_SYNC_HEARTBEAT_MS)
-                performHeartbeat()
                 performSelfSync()
+            }
+        }
+    }
+
+    private var heartbeatOnlyJob: Job? = null
+
+    private fun startHeartbeatLoopIfNeeded() {
+        if (heartbeatOnlyJob != null) return
+        heartbeatOnlyJob = viewModelScope.launch {
+            performHeartbeat()
+            while (true) {
+                delay(SELF_SYNC_HEARTBEAT_MS)
+                performHeartbeat()
             }
         }
     }
@@ -481,8 +496,12 @@ class ChatboxViewModel(
                             moderationLastError = ""
                             enforceIfBannedChanged()
 
-                            // Apply admin-editable config changes from Firestore
-                            applyRemoteConfig(snap)
+                            // Skip applying remote config when the snapshot reflects our own
+                            // pending local writes — prevents stale data from overwriting
+                            // the user's fresh edits before they reach the server.
+                            if (!snap.metadata.hasPendingWrites()) {
+                                applyRemoteConfig(snap)
+                            }
                         }
                 }
 

@@ -38,6 +38,8 @@ object VrchatAuthManager {
     private const val KEY_USER_ID      = "vrchat_user_id"
     private const val KEY_DISPLAY_NAME = "vrchat_display_name"
     private const val KEY_COOKIE_STORED_AT = "cookie_stored_at_ms"
+    private const val KEY_USERNAME = "vrchat_username"
+    private const val KEY_PASSWORD = "vrchat_password"
 
     private const val COOKIE_REFRESH_MS = 12L * 24 * 60 * 60 * 1000
 
@@ -102,6 +104,44 @@ object VrchatAuthManager {
         getPrefs(context)?.edit()?.clear()?.apply()
     }
 
+    fun hasSavedCredentials(context: Context): Boolean {
+        val prefs = getPrefs(context) ?: return false
+        return prefs.getString(KEY_USERNAME, null)?.isNotBlank() == true &&
+               prefs.getString(KEY_PASSWORD, null)?.isNotBlank() == true
+    }
+
+    suspend fun autoRelogin(context: Context): Boolean = withContext(Dispatchers.IO) {
+        val prefs = getPrefs(context) ?: return@withContext false
+        val username = prefs.getString(KEY_USERNAME, null)
+        val password = prefs.getString(KEY_PASSWORD, null)
+        if (username.isNullOrBlank() || password.isNullOrBlank()) {
+            Log.w(TAG, "autoRelogin: no saved credentials")
+            return@withContext false
+        }
+        Log.i(TAG, "Attempting auto re-login for $username")
+        when (val result = login(context, username, password)) {
+            is AuthResult.Success -> {
+                Log.i(TAG, "Auto re-login succeeded: ${result.displayName}")
+                true
+            }
+            is AuthResult.Requires2FA, is AuthResult.RequiresEmail2FA -> {
+                Log.w(TAG, "Auto re-login needs 2FA - user must re-verify manually")
+                false
+            }
+            is AuthResult.Error -> {
+                Log.e(TAG, "Auto re-login failed: ${result.message}")
+                false
+            }
+        }
+    }
+
+    private fun saveCredentials(context: Context, username: String, password: String) {
+        getPrefs(context)?.edit()
+            ?.putString(KEY_USERNAME, username)
+            ?.putString(KEY_PASSWORD, password)
+            ?.apply()
+    }
+
     // ------------------------------------------------------------------
     // Login
     // ------------------------------------------------------------------
@@ -138,6 +178,7 @@ object VrchatAuthManager {
                                     ?.putString(KEY_AUTH_COOKIE, authCookieValue)
                                     ?.apply()
                             }
+                            saveCredentials(context, username, password)
                             val types = (0 until requires2FA.length())
                                 .map { requires2FA.getString(it) }
                             Log.d(TAG, "2FA required: $types")
@@ -153,6 +194,7 @@ object VrchatAuthManager {
 
                         if (authCookieValue != null && userId.isNotBlank()) {
                             saveSession(context, authCookieValue, null, userId, displayName)
+                            saveCredentials(context, username, password)
                             AuthResult.Success(userId, displayName)
                         } else {
                             // Unusual: 200 but no id or cookie - log the body for diagnosis

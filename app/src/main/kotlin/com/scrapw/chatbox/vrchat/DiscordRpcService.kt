@@ -133,6 +133,20 @@ class DiscordRpcService : Service() {
     private fun disconnect() {
         heartbeatJob?.cancel()
         presenceJob?.cancel()
+        // Clear presence from Discord profile before disconnecting
+        try {
+            val clearPresence = JSONObject().apply {
+                put("op", 3)
+                put("d", JSONObject().apply {
+                    put("since", JSONObject.NULL)
+                    put("activities", JSONArray())
+                    put("status", "online")
+                    put("afk", false)
+                })
+            }
+            ws?.send(clearPresence.toString())
+            Log.i(TAG, "Sent empty activities to clear Discord presence")
+        } catch (_: Throwable) {}
         try { ws?.close(1000, "Service stopping") } catch (_: Throwable) {}
         ws = null
         isRunning = false
@@ -289,26 +303,18 @@ class DiscordRpcService : Service() {
                     if (showWorldDetails && vrcPresence.worldImageUrl.isNotBlank()) {
                         put("large_image", vrcPresence.worldImageUrl)
                         put("large_text", vrcPresence.worldName)
-                    } else {
-                        put("large_image", "vrchat")
-                        put("large_text", "VRChat")
+                    } else if (vrcPresence.currentAvatarThumbnailUrl.isNotBlank()) {
+                        put("large_image", vrcPresence.currentAvatarThumbnailUrl)
+                        put("large_text", vrcPresence.displayName)
                     }
-                    val smallKey = when (vrcPresence.status) {
-                        "ask me" -> "type-orange"
-                        "busy" -> "type-red"
-                        "join me" -> "type-blue"
-                        else -> "type-green"
+                    if (showWorldDetails && vrcPresence.currentAvatarThumbnailUrl.isNotBlank()) {
+                        put("small_image", vrcPresence.currentAvatarThumbnailUrl)
+                        put("small_text", vrcPresence.displayName)
                     }
-                    put("small_image", smallKey)
-                    put("small_text", statusText)
                 })
             } else {
                 put("details", "Not in VRChat")
                 put("state", "Using VRC-A")
-                put("assets", JSONObject().apply {
-                    put("large_image", "vrchat")
-                    put("large_text", "VRChat")
-                })
             }
         }
 
