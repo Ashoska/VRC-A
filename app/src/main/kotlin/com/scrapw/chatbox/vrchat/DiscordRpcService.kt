@@ -33,7 +33,7 @@ class DiscordRpcService : Service() {
         private const val TAG = "DiscordRPC"
         private const val GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
         private const val VRCHAT_APP_ID = "438274841678872576"
-        private const val VRCHAT_LOGO_URL = "https://cdn.cloudflare.steamstatic.com/steam/apps/438100/header.jpg"
+        private const val VRCHAT_LOGO_URL = "https://cdn.discordapp.com/app-icons/438274841678872576/3a4ba3db48f89e73c1b40069aa79f219.png"
         private const val NOTIF_CHANNEL = "vrca_pipeline"
         private const val NOTIF_ID = 1001
 

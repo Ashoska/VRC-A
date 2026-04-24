@@ -47,7 +47,8 @@ Display name embedded in UI strings: "Ashoska Mitsu Sisko".
 - **VrchatPipelineService**: Foreground service with OkHttp WebSocket to `wss://pipeline.vrchat.cloud`. Handles real-time events (friend online/offline, unfriend, invites, group events), syncs VRChat presence to Firestore, and manages friends cache
 - **Friends cache**: Persisted to Firestore (`users/{deviceHash}` fields: `savedFriendIds`, `savedFriendNames`) for cross-session unfriend detection. Includes half-list guard to prevent mass false notifications on API pagination errors or first install
 - **VrchatPipelineState**: Shared in-memory singleton using `MutableStateFlow` for reactive cross-component state (connection status, presence data). Compose UI observes via `collectAsState()`.
-- **DiscordRpcService**: Foreground service connecting to Discord Gateway WebSocket (`wss://gateway.discord.gg`). Sends VRChat Rich Presence (world name, player count, elapsed time) mimicking VRChat desktop's Discord integration. Auto-starts when VRChat pipeline connects if enabled.
+- **DiscordRpcService**: Foreground service connecting to Discord Gateway WebSocket (`wss://gateway.discord.gg`). Sends VRChat Rich Presence (world name, player count, elapsed time) mimicking VRChat desktop's Discord integration. Auto-starts when VRChat pipeline connects if enabled. Uses external URLs for images: world thumbnail when in a world (unless DND/AskMe), VRChat logo (Discord CDN app icon) for all other states. Sends empty activities on disconnect to clear presence from profile.
+- **VrchatAuthManager**: Also saves credentials to EncryptedSharedPreferences for auto-relogin when sessions expire.
 - **DiscordLoginWebView**: WebView-based Discord login flow that extracts the user token from localStorage after login — no manual token paste needed.
 - **IpField**: Multi-slot IP field component with 3 named slots (Home/Hotspot/Other). Uses local state tracking (not async DataStore) for immediate slot switching without cross-contamination. Supports per-slot editing and auto-migration from legacy single IP key.
 
@@ -70,7 +71,7 @@ Key fields written by the app:
 
 ### Firestore Sync Architecture
 - **Event-driven sync**: Data changes trigger an immediate debounced sync (500ms) to Firestore
-- **Heartbeat**: Separate lightweight write of `isOnlineInApp` + `lastSeenAt` every 8s, fires immediately on startup then repeats. Offline write uses `GlobalScope` to survive ViewModel teardown.
+- **Heartbeat**: Separate lightweight write of `isOnlineInApp` + `lastSeenAt` every 8s, fires immediately on startup then repeats. Runs on BOTH admin and public builds so admin shows online in dashboard. Offline write uses `GlobalScope` to survive ViewModel teardown (only in `onTaskRemoved`, NOT `onDestroy` to avoid race with heartbeat).
 - **Admin online detection**: Uses `lastSeenAt` within 30s + `isOnlineInApp` flag (auto-expires stale entries if offline write fails)
 - **Admin reads**: Snapshot listeners provide real-time updates from Firestore (no polling)
 
@@ -81,7 +82,15 @@ Key fields written by the app:
 - Crystal progress bar (preset 3) uses filled diamonds (U+25C6) before the marker position
 
 ### Remote Config (Admin Edits)
-The public app's moderation snapshot listener on `users/{deviceHash}` also picks up admin-editable fields (feature toggles, messages, intervals) and applies them in real-time via DataStore flow collectors.
+The public app's moderation snapshot listener on `users/{deviceHash}` also picks up admin-editable fields (feature toggles, messages, intervals) and applies them in real-time via DataStore flow collectors. Uses `metadata.hasPendingWrites()` guard to skip processing own writes.
+
+### Removed Features (do not re-add)
+- **Divider system**: Previously allowed inserting text dividers between chatbox components. Fully removed from UI, ViewModel, DataStore, and message construction.
+- **Preset naming**: Custom names for pinned/cycle presets. Removed from ViewModel, AdminScreen, DataStore, and Firestore sync. Presets now use generic "Preset 1/2/3..." labels.
+- **Redundant action buttons**: Start/stop buttons in Cycle, pin/unpin + send once in Pinned, start/stop + test in Music — all removed since toggles handle activation.
+
+### Toggle Persistence
+All feature toggles (`afkEnabled`, `spotifyEnabled`, `cycleEnabled`, `timeEnabled`) are persisted to DataStore and restored on app restart. No cold-start reset — toggles survive process death.
 
 ## Coding Conventions
 - Use Jetpack Compose for all new UI — no XML layouts
