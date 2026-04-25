@@ -541,21 +541,56 @@ class ChatboxViewModel(
      * existing flow collectors to update ViewModel state). Fields without DataStore
      * backing are set directly on the ViewModel.
      */
+    private var initialSnapshotProcessed = false
+
     private fun applyRemoteConfig(snap: com.google.firebase.firestore.DocumentSnapshot) {
         viewModelScope.launch {
+            // Skip the first snapshot entirely: it contains our own stale data from
+            // the last session. Toggles should start OFF, content should come from
+            // DataStore (which has the latest local edits). Subsequent snapshots
+            // are admin edits — apply those in real-time.
+            if (!initialSnapshotProcessed) {
+                initialSnapshotProcessed = true
+                return@launch
+            }
+
+            // Toggles (admin can control in real-time)
             snap.getBoolean("afkEnabled")?.let { remote ->
                 if (remote != afkEnabled) {
-                    userPreferencesRepository.saveAfkEnabled(remote)
-                }
-            }
-            snap.getString("afkMessage")?.let { remote ->
-                if (remote.trim() != afkMessage.trim()) {
-                    userPreferencesRepository.saveAfkMessage(remote.trim())
+                    afkEnabled = remote
+                    rebuildCombinedPreviewOnly()
+                    if (!remote) stopAfkSender(clearFromChatbox = true)
+                    startSelfSyncLoopIfNeeded()
                 }
             }
             snap.getBoolean("cycleEnabled")?.let { remote ->
                 if (remote != cycleEnabled) {
-                    userPreferencesRepository.saveCycleEnabled(remote)
+                    cycleEnabled = remote
+                    rebuildCombinedPreviewOnly()
+                    if (!remote) stopCycle(clearFromChatbox = true)
+                    if (remote) lastCyclePreviewAdvanceMs = 0L
+                    startSelfSyncLoopIfNeeded()
+                }
+            }
+            snap.getBoolean("spotifyEnabled")?.let { remote ->
+                if (remote != spotifyEnabled) {
+                    spotifyEnabled = remote
+                    rebuildCombinedPreviewOnly()
+                    if (!remote) stopNowPlayingSender(clearFromChatbox = true)
+                    startSelfSyncLoopIfNeeded()
+                }
+            }
+            snap.getBoolean("timeEnabled")?.let { remote ->
+                if (remote != timeEnabled) {
+                    timeEnabled = remote
+                    rebuildCombinedPreviewOnly()
+                    startSelfSyncLoopIfNeeded()
+                }
+            }
+
+            snap.getString("afkMessage")?.let { remote ->
+                if (remote.trim() != afkMessage.trim()) {
+                    userPreferencesRepository.saveAfkMessage(remote.trim())
                 }
             }
             snap.getLong("cycleIntervalSeconds")?.let { remote ->
@@ -568,16 +603,6 @@ class ChatboxViewModel(
                 val currentText = cycleLines.joinToString("\n")
                 if (remote.trim() != currentText.trim()) {
                     userPreferencesRepository.saveCycleMessages(remote.trim())
-                }
-            }
-            snap.getBoolean("spotifyEnabled")?.let { remote ->
-                if (remote != spotifyEnabled) {
-                    userPreferencesRepository.saveSpotifyEnabled(remote)
-                }
-            }
-            snap.getBoolean("timeEnabled")?.let { remote ->
-                if (remote != timeEnabled) {
-                    userPreferencesRepository.saveTimeEnabled(remote)
                 }
             }
             // Pinned (AFK) presets (admin can edit preset contents + names)
@@ -832,7 +857,6 @@ class ChatboxViewModel(
     fun updateTimeEnabled(enabled: Boolean) {
         if (isBanned) return
         timeEnabled = enabled
-        viewModelScope.launch { userPreferencesRepository.saveTimeEnabled(enabled) }
         rebuildCombinedPreviewOnly()
         startSelfSyncLoopIfNeeded()
     }
@@ -985,37 +1009,9 @@ class ChatboxViewModel(
         // Public build: attach moderation listeners once deviceHash + auth are available.
         attachModerationListenersLoopOnce()
 
-        if (!BuildConfig.IS_ADMIN_BUILD) {
-            viewModelScope.launch {
-                userPreferencesRepository.afkEnabled.collect {
-                    afkEnabled = it
-                    rebuildCombinedPreviewOnly()
-                    if (!it) stopAfkSender(clearFromChatbox = true)
-                    startSelfSyncLoopIfNeeded()
-                }
-            }
-
-            viewModelScope.launch {
-                userPreferencesRepository.spotifyEnabled.collect {
-                    spotifyEnabled = it
-                    rebuildCombinedPreviewOnly()
-                    if (!it) stopNowPlayingSender(clearFromChatbox = true)
-                    startSelfSyncLoopIfNeeded()
-                }
-            }
-        }
-
         viewModelScope.launch {
             userPreferencesRepository.afkMessage.collect {
                 afkMessage = it
-                rebuildCombinedPreviewOnly()
-                startSelfSyncLoopIfNeeded()
-            }
-        }
-
-        viewModelScope.launch {
-            userPreferencesRepository.cycleEnabled.collect {
-                cycleEnabled = it
                 rebuildCombinedPreviewOnly()
                 startSelfSyncLoopIfNeeded()
             }
@@ -1070,13 +1066,6 @@ class ChatboxViewModel(
                 val valid = migrated.filter { it in validComponents }.distinct()
                 val full = valid + DEFAULT_CARD_ORDER.filter { it !in valid }
                 cardOrder = full
-                rebuildCombinedPreviewOnly()
-            }
-        }
-
-        viewModelScope.launch {
-            userPreferencesRepository.timeEnabled.collect {
-                timeEnabled = it
                 rebuildCombinedPreviewOnly()
             }
         }
@@ -1295,7 +1284,6 @@ class ChatboxViewModel(
     fun setAfkEnabledFlag(enabled: Boolean) {
         if (isBanned) return
         afkEnabled = enabled
-        viewModelScope.launch { userPreferencesRepository.saveAfkEnabled(enabled) }
         rebuildCombinedPreviewOnly()
         if (!enabled) stopAfkSender(clearFromChatbox = true)
         startSelfSyncLoopIfNeeded()
@@ -1304,7 +1292,6 @@ class ChatboxViewModel(
     fun setCycleEnabledFlag(enabled: Boolean) {
         if (isBanned) return
         cycleEnabled = enabled
-        viewModelScope.launch { userPreferencesRepository.saveCycleEnabled(enabled) }
         rebuildCombinedPreviewOnly()
         if (!enabled) stopCycle(clearFromChatbox = true)
         if (enabled) lastCyclePreviewAdvanceMs = 0L
@@ -1314,7 +1301,6 @@ class ChatboxViewModel(
     fun setSpotifyEnabledFlag(enabled: Boolean) {
         if (isBanned) return
         spotifyEnabled = enabled
-        viewModelScope.launch { userPreferencesRepository.saveSpotifyEnabled(enabled) }
         rebuildCombinedPreviewOnly()
         if (!enabled) stopNowPlayingSender(clearFromChatbox = true)
         startSelfSyncLoopIfNeeded()
@@ -1537,7 +1523,6 @@ class ChatboxViewModel(
         val msgs = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(10)
         if (!cycleEnabled || msgs.isEmpty()) return
 
-        viewModelScope.launch { userPreferencesRepository.saveCycleEnabled(true) }
         persistCycleLinesPreserve()
         viewModelScope.launch { userPreferencesRepository.saveCycleInterval(cycleIntervalSeconds) }
 

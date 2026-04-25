@@ -33,7 +33,6 @@ class DiscordRpcService : Service() {
         private const val TAG = "DiscordRPC"
         private const val GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
         private const val VRCHAT_APP_ID = "438274841678872576"
-        private const val VRCHAT_LOGO_URL = "https://cdn.discordapp.com/app-icons/438274841678872576/3a4ba3db48f89e73c1b40069aa79f219.png"
         private const val NOTIF_CHANNEL = "vrca_pipeline"
         private const val NOTIF_ID = 1001
 
@@ -246,11 +245,6 @@ class DiscordRpcService : Service() {
         }
     }
 
-    private fun toMpExternal(url: String): String {
-        val stripped = url.removePrefix("https://").removePrefix("http://")
-        return "mp:external/$stripped"
-    }
-
     private fun buildPresenceData(): JSONObject {
         val vrcPresence = VrchatPipelineState.presence
         val isOnline = vrcPresence?.isOnlineInVRChat == true
@@ -306,19 +300,14 @@ class DiscordRpcService : Service() {
                 }
 
                 put("assets", JSONObject().apply {
-                    if (showWorldDetails && vrcPresence.worldImageUrl.isNotBlank()) {
-                        put("large_image", toMpExternal(vrcPresence.worldImageUrl))
-                        put("large_text", vrcPresence.worldName)
-                    } else {
-                        put("large_image", toMpExternal(VRCHAT_LOGO_URL))
-                        put("large_text", "VRChat")
-                    }
+                    put("large_image", "vrchat")
+                    put("large_text", if (showWorldDetails) vrcPresence.worldName else "VRChat")
                 })
             } else {
                 put("details", "Not in VRChat")
                 put("state", "Using VRC-A")
                 put("assets", JSONObject().apply {
-                    put("large_image", toMpExternal(VRCHAT_LOGO_URL))
+                    put("large_image", "vrchat")
                     put("large_text", "VRChat")
                 })
             }
