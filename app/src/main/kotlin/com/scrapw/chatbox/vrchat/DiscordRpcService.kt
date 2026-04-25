@@ -52,6 +52,11 @@ class DiscordRpcService : Service() {
 
     private var onlineStartEpochMs = 0L
 
+    private val assetResolver = DiscordExternalAssetResolver(
+        applicationId = VRCHAT_APP_ID,
+        tokenProvider = { token }
+    )
+
     private val client by lazy {
         OkHttpClient.Builder()
             .pingInterval(30, TimeUnit.SECONDS)
@@ -245,6 +250,18 @@ class DiscordRpcService : Service() {
         }
     }
 
+    /**
+     * Returns a cached `mp:external/...` reference if available; otherwise
+     * kicks off async resolution and returns the `"vrchat"` asset key as
+     * a fallback. The next presence loop tick (5s later) will pick up the
+     * resolved value once it lands in the cache.
+     */
+    private fun resolveOrFallback(url: String): String {
+        assetResolver.peekCached(url)?.let { return it }
+        scope.launch { assetResolver.resolve(url) }
+        return "vrchat"
+    }
+
     private fun buildPresenceData(): JSONObject {
         val vrcPresence = VrchatPipelineState.presence
         val isOnline = vrcPresence?.isOnlineInVRChat == true
@@ -300,7 +317,12 @@ class DiscordRpcService : Service() {
                 }
 
                 put("assets", JSONObject().apply {
-                    put("large_image", "vrchat")
+                    val largeImage = if (showWorldDetails && vrcPresence.worldImageUrl.isNotBlank()) {
+                        resolveOrFallback(vrcPresence.worldImageUrl)
+                    } else {
+                        "vrchat"
+                    }
+                    put("large_image", largeImage)
                     put("large_text", if (showWorldDetails) vrcPresence.worldName else "VRChat")
                 })
             } else {
