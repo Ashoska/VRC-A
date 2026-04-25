@@ -187,23 +187,24 @@ class VrchatPipelineService : Service() {
 
             if (!friendsCacheLoaded) {
                 restoreFriendsCache()
+                // Snapshot from Firestore (last persisted friends list) is what
+                // the diff compares against. Captured BEFORE the first fresh API
+                // call so offline-unfriends (people removed since last session)
+                // are detected with their correct display names.
+                val previousIds = friendsCache.keys.toSet()
+                val previousNames = friendsCache.toMap()
                 loadFriendsCache()
                 friendsFetchCount++
 
-                // Snapshot captured AFTER the first fresh API call so we're
-                // comparing "friends at connect time" vs "friends 60s later",
-                // not stale Firestore data (potentially hours old) vs fresh.
-                val snapshotIds = friendsCache.keys.toSet()
-                val snapshotNames = friendsCache.toMap()
-
                 // Schedule a delayed second fetch + diff after 60s grace period.
-                // This avoids false positives from incomplete API results on first connect.
-                if (snapshotIds.isNotEmpty()) {
+                // The second fetch lets the API stabilize (incomplete results on
+                // first connect would otherwise produce false unfriends).
+                if (previousIds.isNotEmpty()) {
                     serviceScope.launch {
                         delay(60_000)
                         loadFriendsCache()
                         friendsFetchCount++
-                        diffFriendsCache(snapshotIds, snapshotNames)
+                        diffFriendsCache(previousIds, previousNames)
                     }
                 }
             }
@@ -340,9 +341,15 @@ class VrchatPipelineService : Service() {
 
                 "friend-delete" -> {
                     val userId = content?.optString("userId") ?: return
-                    val displayName = friendsCache.remove(userId) ?: "Someone"
+                    // If the user is in our cache, this is a real-time unfriend
+                    // during an active session — fire immediately with the name.
+                    // If they aren't (e.g. queued event for an offline unfriend
+                    // that already got removed by loadFriendsCache), skip and let
+                    // the offline diff fire later with the correct name from the
+                    // Firestore-restored snapshot.
+                    val displayName = friendsCache.remove(userId)
                     persistFriendsCache()
-                    if (notifiedUnfriendIds.add(userId)) {
+                    if (displayName != null && notifiedUnfriendIds.add(userId)) {
                         fireEventNotification(
                             id = "unfriend_$userId".hashCode(),
                             title = "Unfriended",
