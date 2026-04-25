@@ -187,20 +187,23 @@ class VrchatPipelineService : Service() {
 
             if (!friendsCacheLoaded) {
                 restoreFriendsCache()
-                val previousIds = friendsCache.keys.toSet()
-                val previousNames = friendsCache.toMap()
                 loadFriendsCache()
                 friendsFetchCount++
 
+                // Snapshot captured AFTER the first fresh API call so we're
+                // comparing "friends at connect time" vs "friends 60s later",
+                // not stale Firestore data (potentially hours old) vs fresh.
+                val snapshotIds = friendsCache.keys.toSet()
+                val snapshotNames = friendsCache.toMap()
+
                 // Schedule a delayed second fetch + diff after 60s grace period.
                 // This avoids false positives from incomplete API results on first connect.
-                if (previousIds.isNotEmpty()) {
+                if (snapshotIds.isNotEmpty()) {
                     serviceScope.launch {
                         delay(60_000)
-                        val snapshotBeforeRefresh = friendsCache.toMap()
                         loadFriendsCache()
                         friendsFetchCount++
-                        diffFriendsCache(previousIds, previousNames)
+                        diffFriendsCache(snapshotIds, snapshotNames)
                     }
                 }
             }
@@ -559,8 +562,11 @@ class VrchatPipelineService : Service() {
             val ids = doc.get("savedFriendIds") as? List<String> ?: return
             @Suppress("UNCHECKED_CAST")
             val names = doc.get("savedFriendNames") as? List<String> ?: return
-            if (ids.size != names.size) return
-            ids.zip(names).forEach { (id, name) -> friendsCache[id] = name }
+            if (ids.size != names.size) {
+                Log.w(TAG, "Friends cache size mismatch: ids=${ids.size} vs names=${names.size}, using available data")
+            }
+            val usable = minOf(ids.size, names.size)
+            ids.take(usable).zip(names.take(usable)).forEach { (id, name) -> friendsCache[id] = name }
             friendsCacheLoaded = friendsCache.isNotEmpty()
         } catch (e: Exception) {
             Log.w(TAG, "Could not restore friends cache from Firestore", e)
