@@ -220,6 +220,52 @@ class ChatboxViewModel(
     }
 
     /**
+     * Mirror of computeSelfFingerprint that reads from a Firestore snapshot
+     * instead of ViewModel state. Used to detect snapshot echoes from our own
+     * self-sync writes so they don't get re-applied (which would clobber any
+     * fresh local edits made after the write started).
+     */
+    private fun computeFingerprintFromSnap(
+        snap: com.google.firebase.firestore.DocumentSnapshot,
+        authUid: String,
+        deviceHash: String
+    ): String {
+        @Suppress("UNCHECKED_CAST")
+        val cycleSnap = (snap.get("cycleLines") as? List<String>).orEmpty()
+            .map { it.trim() }.take(10)
+        val afkPSnap = (1..3).joinToString("|") {
+            (snap.getString("afkPreset$it") ?: "").trim()
+        }
+        val cycPSnap = (1..5).joinToString("|") {
+            (snap.getString("cyclePreset$it") ?: "").trim()
+        }
+        val cycInt = (snap.getLong("cycleIntervalSeconds") ?: 0L).toInt().coerceAtLeast(2)
+
+        return listOf(
+            "doc=$deviceHash",
+            "dev=$deviceHash",
+            "auth=$authUid",
+            "afkE=${snap.getBoolean("afkEnabled") ?: false}",
+            "afkM=${(snap.getString("afkMessage") ?: "").trim()}",
+            "cycE=${snap.getBoolean("cycleEnabled") ?: false}",
+            "cycI=$cycInt",
+            "cycL=${cycleSnap.joinToString("\\n")}",
+            "spE=${snap.getBoolean("spotifyEnabled") ?: false}",
+            "spD=${snap.getBoolean("spotifyDemoEnabled") ?: false}",
+            "spP=${(snap.getLong("spotifyPreset") ?: 1L).toInt()}",
+            "npDet=${snap.getBoolean("nowPlayingDetected") ?: false}",
+            "npPlay=${snap.getBoolean("nowPlayingIsPlaying") ?: false}",
+            "npT=${(snap.getString("nowPlayingTitle") ?: "").trim()}",
+            "npA=${(snap.getString("nowPlayingArtist") ?: "").trim()}",
+            "prev=${(snap.getString("combinedPreviewText") ?: "").trim()}",
+            "afkP=$afkPSnap",
+            "cycP=$cycPSnap",
+            "timeE=${snap.getBoolean("timeEnabled") ?: false}",
+            "timeM=${snap.getString("timeMode") ?: ""}"
+        ).joinToString("||")
+    }
+
+    /**
      * \u2705 Full snapshot for users/{deviceHash}
      * Must stay inside your Firestore rules' selfMutableKeys() list.
      */
@@ -379,19 +425,31 @@ class ChatboxViewModel(
             val fp = computeSelfFingerprint(authUid, deviceHash)
             if (fp == lastSelfSyncFingerprint) return@runCatching
 
-            db.collection(COL_USERS).document(deviceHash)
-                .set(buildUserSnapshot(authUid, deviceHash), SetOptions.merge())
-                .await()
-
-            runCatching {
-                db.collection(COL_USERS_BY_ID).document(authUid)
-                    .set(buildUsersByIdLink(authUid, deviceHash), SetOptions.merge())
-                    .await()
-            }
-
-            lastSelfSyncAtMs = System.currentTimeMillis()
+            // Set the fingerprint BEFORE the write so the snapshot listener
+            // (which can fire concurrently with the write completing) can
+            // recognize its own echo and skip applying it. If the write
+            // fails we restore the previous value so the next iteration of
+            // the sync loop will retry.
+            val previousFp = lastSelfSyncFingerprint
             lastSelfSyncFingerprint = fp
-            lastSelfSyncError = ""
+
+            try {
+                db.collection(COL_USERS).document(deviceHash)
+                    .set(buildUserSnapshot(authUid, deviceHash), SetOptions.merge())
+                    .await()
+
+                runCatching {
+                    db.collection(COL_USERS_BY_ID).document(authUid)
+                        .set(buildUsersByIdLink(authUid, deviceHash), SetOptions.merge())
+                        .await()
+                }
+
+                lastSelfSyncAtMs = System.currentTimeMillis()
+                lastSelfSyncError = ""
+            } catch (e: Throwable) {
+                lastSelfSyncFingerprint = previousFp
+                throw e
+            }
         }.onFailure { e ->
             lastSelfSyncError = (e.message ?: e.toString()).take(4000)
         }
@@ -560,6 +618,19 @@ class ChatboxViewModel(
             if (!initialSnapshotProcessed) {
                 initialSnapshotProcessed = true
                 return@launch
+            }
+
+            // Echo suppression: if the snapshot's fingerprint matches what we
+            // last wrote ourselves, this is just our own self-sync echoing back.
+            // Re-applying it would clobber any local edits the user made after
+            // the write was sent (e.g. typing while the previous keystroke is
+            // still being persisted). Skip silently. Real admin edits produce
+            // a different fingerprint and fall through to the apply logic.
+            val authUid = ensureAnonAuth()
+            val deviceHash = readDeviceHashFromPrefs()
+            if (authUid != null && isValidDeviceHash(deviceHash)) {
+                val snapFp = computeFingerprintFromSnap(snap, authUid, deviceHash)
+                if (snapFp == lastSelfSyncFingerprint) return@launch
             }
 
             // Toggles (admin can control in real-time)
