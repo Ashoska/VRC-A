@@ -155,6 +155,12 @@ class ChatboxViewModel(
     private var lastSelfSyncFingerprint: String = ""
     private var lastSelfSyncError: String = ""
 
+    // Gate self-sync until DataStore has provided its initial values. Without this
+    // gate, an immediate sync on cold start writes the empty default ViewModel
+    // state to Firestore, which then echoes back via the snapshot listener and
+    // wipes the user's saved content from DataStore.
+    @Volatile private var initialDataLoaded = false
+
     private fun prefs() = app.getSharedPreferences(REMOTE_PREFS_FILE, Context.MODE_PRIVATE)
 
     private fun readDeviceHashFromPrefs(): String =
@@ -315,10 +321,11 @@ class ChatboxViewModel(
             performSelfSync()
         }
 
-        // Full sync loop (public build only)
+        // Full sync loop (public build only). Don't run an immediate sync here:
+        // performSelfSync is gated by initialDataLoaded, but skipping the
+        // immediate call also avoids burning a no-op write at cold start.
         if (selfSyncJob != null) return
         selfSyncJob = viewModelScope.launch {
-            performSelfSync()
             while (true) {
                 delay(SELF_SYNC_HEARTBEAT_MS)
                 performSelfSync()
@@ -358,6 +365,7 @@ class ChatboxViewModel(
     }
 
     private suspend fun performSelfSync() {
+        if (!initialDataLoaded) return
         runCatching {
             val authUid = ensureAnonAuth() ?: return@runCatching
 
@@ -1008,6 +1016,32 @@ class ChatboxViewModel(
 
         // Public build: attach moderation listeners once deviceHash + auth are available.
         attachModerationListenersLoopOnce()
+
+        // Block self-sync until DataStore has provided initial values for all
+        // user-content fields AND those values have been assigned into ViewModel
+        // state. Otherwise the cold-start sync writes empty ViewModel state to
+        // Firestore, the snapshot listener echoes it back, and the user's saved
+        // presets/messages get wiped from DataStore. We assign directly here
+        // (rather than relying on the collectors below) to remove any race
+        // between collector dispatch and the flag flip.
+        viewModelScope.launch {
+            runCatching {
+                afkMessage = userPreferencesRepository.afkMessage.first()
+                cycleIntervalSeconds = userPreferencesRepository.cycleInterval.first().coerceAtLeast(2)
+                setCycleLinesFromTextPreserve(userPreferencesRepository.cycleMessages.first())
+                afkPresetTexts[0] = userPreferencesRepository.afkPreset1.first()
+                afkPresetTexts[1] = userPreferencesRepository.afkPreset2.first()
+                afkPresetTexts[2] = userPreferencesRepository.afkPreset3.first()
+                cyclePresetMessages[0] = userPreferencesRepository.cyclePreset1Messages.first()
+                cyclePresetMessages[1] = userPreferencesRepository.cyclePreset2Messages.first()
+                cyclePresetMessages[2] = userPreferencesRepository.cyclePreset3Messages.first()
+                cyclePresetMessages[3] = userPreferencesRepository.cyclePreset4Messages.first()
+                cyclePresetMessages[4] = userPreferencesRepository.cyclePreset5Messages.first()
+                spotifyPreset = userPreferencesRepository.spotifyPreset.first().coerceIn(1, 5)
+                timeMode = userPreferencesRepository.timeMode.first()
+            }
+            initialDataLoaded = true
+        }
 
         viewModelScope.launch {
             userPreferencesRepository.afkMessage.collect {
