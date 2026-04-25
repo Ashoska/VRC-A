@@ -43,12 +43,13 @@ Display name embedded in UI strings: "Ashoska Mitsu Sisko".
 - APK distribution: GitHub Releases
 
 ### VRChat Integration
-- **VrchatAuthManager**: Singleton handling VRChat API auth (Basic auth + 2FA), cookie storage via EncryptedSharedPreferences, presence fetching, and friends list retrieval
-- **VrchatPipelineService**: Foreground service with OkHttp WebSocket to `wss://pipeline.vrchat.cloud`. Handles real-time events (friend online/offline, unfriend, invites, group events), syncs VRChat presence to Firestore, and manages friends cache
-- **Friends cache**: Persisted to Firestore (`users/{deviceHash}` fields: `savedFriendIds`, `savedFriendNames`) for cross-session unfriend detection. Includes half-list guard to prevent mass false notifications on API pagination errors or first install
+- **VrchatAuthManager**: Singleton handling VRChat API auth (Basic auth + 2FA), cookie storage via EncryptedSharedPreferences, presence fetching, and friends list retrieval. Also saves credentials to EncryptedSharedPreferences for auto-relogin when sessions expire.
+- **VrchatPipelineService**: Foreground service with OkHttp WebSocket to `wss://pipeline.vrchat.cloud`. Handles real-time events (friend online/offline, unfriend, invites, group events), syncs VRChat presence to Firestore every 5s, and manages friends cache. Presence sync interval is intentionally aligned with the Discord RPC tick rate so world thumbnails and the RPC presence stay in lockstep.
+- **Friends cache**: Persisted to Firestore (`users/{deviceHash}` fields: `savedFriendIds`, `savedFriendNames`) for cross-session unfriend detection. Includes 80% half-list guard to skip the diff if the fresh API list is < 80% of the previous (likely pagination error). Restore is resilient to size mismatches between the two arrays — uses the available paired entries instead of dropping everything.
+- **Unfriend notification logic**: Two sources cooperate via a `notifiedUnfriendIds` dedup set. (1) Real-time `friend-delete` from the WebSocket fires immediately for unfriends during an active session — but is **skipped if the userId isn't in the cache** (queued event for an offline unfriend gets handled later with a correct name). (2) Offline diff runs 60s after pipeline connect, comparing the Firestore-restored snapshot against the latest fetch — fires with the display name from the restored snapshot. The dedup set ensures at most one notification per userId per session.
 - **VrchatPipelineState**: Shared in-memory singleton using `MutableStateFlow` for reactive cross-component state (connection status, presence data). Compose UI observes via `collectAsState()`.
-- **DiscordRpcService**: Foreground service connecting to Discord Gateway WebSocket (`wss://gateway.discord.gg`). Sends VRChat Rich Presence (world name, player count, elapsed time) mimicking VRChat desktop's Discord integration. Auto-starts when VRChat pipeline connects if enabled. Uses external URLs for images: world thumbnail when in a world (unless DND/AskMe), VRChat logo (Discord CDN app icon) for all other states. Sends empty activities on disconnect to clear presence from profile.
-- **VrchatAuthManager**: Also saves credentials to EncryptedSharedPreferences for auto-relogin when sessions expire.
+- **DiscordRpcService**: Foreground service connecting to Discord Gateway WebSocket (`wss://gateway.discord.gg`). Sends VRChat Rich Presence (world name, player count, elapsed time) mimicking VRChat desktop's Discord integration. Auto-starts when VRChat pipeline connects if enabled. Presence loop tick is 5s. Default image is a hosted VRChat logo (`https://raw.githubusercontent.com/shadowash321rulse-lab/VRChat-rpc-display/main/vrchat-1102x620.jpg`) resolved through Discord's external-assets endpoint. World thumbnails use the same resolver. On disconnect, sends an empty-activities op-3 payload then `Thread.sleep(1500)` (synchronous, blocking) before closing the WebSocket so the clear flushes before Android kills the process on swipe-away.
+- **DiscordExternalAssetResolver**: Posts URLs to `https://discord.com/api/v10/applications/{app_id}/external-assets` to mint stable `mp:external/...` references that work in `activity.assets.large_image`. Bounded in-memory `LruCache` (64 entries), 60s negative-cache TTL for failed URLs, mutex-guarded `inFlight` set to dedup concurrent resolutions of the same URL. The default-image reference is also persisted to DataStore (`discord_default_image_ref`) and pre-populated into the resolver cache on service start, so the proper logo renders immediately on every launch after the first resolve.
 - **DiscordLoginWebView**: WebView-based Discord login flow that extracts the user token from localStorage after login — no manual token paste needed.
 - **IpField**: Multi-slot IP field component with 3 named slots (Home/Hotspot/Other). Uses local state tracking (not async DataStore) for immediate slot switching without cross-contamination. Supports per-slot editing and auto-migration from legacy single IP key.
 
@@ -70,8 +71,12 @@ Key fields written by the app:
 - Admin: Full page accessed via gavel icon in top app bar (admin build only). Includes targeted APK push per user and release retraction.
 
 ### Firestore Sync Architecture
-- **Event-driven sync**: Data changes trigger an immediate debounced sync (500ms) to Firestore
-- **Heartbeat**: Separate lightweight write of `isOnlineInApp` + `lastSeenAt` every 8s, fires immediately on startup then repeats. Runs on BOTH admin and public builds so admin shows online in dashboard. Offline write uses `GlobalScope` to survive ViewModel teardown (only in `onTaskRemoved`, NOT `onDestroy` to avoid race with heartbeat).
+- **Event-driven sync**: Data changes trigger an immediate debounced sync (500ms) to Firestore. Periodic safety sync also runs every 8s in case the debounce was suppressed.
+- **Initial-data gate (`initialDataLoaded`)**: `performSelfSync` returns early until a loader coroutine has awaited the first emission of every user-content DataStore field and assigned each value directly into ViewModel state. Without this gate, the cold-start sync would write empty default ViewModel state to Firestore, and the snapshot listener would echo that back and wipe the user's saved presets/messages from DataStore.
+- **First-snapshot skip (`initialSnapshotProcessed`)**: The very first Firestore snapshot after listener attach is dropped without processing. DataStore is the source of truth on cold start; any admin edits made while the user was offline land via subsequent snapshots (or get overwritten on next self-sync — see below).
+- **Echo suppression (`lastSelfSyncFingerprint`)**: Each self-sync write sets a fingerprint of what it's about to write **before** awaiting the Firestore call (so it's already in place when the echo arrives concurrently). The snapshot listener computes the same fingerprint from incoming snaps via `computeFingerprintFromSnap`; matching = our own echo, skip. Real admin edits produce a different fingerprint and fall through to apply normally. On write failure the previous fingerprint is restored so the next loop iteration retries.
+- **Offline editing**: User-content edits land in DataStore immediately and survive process death. On reconnect, the next self-sync writes the local state to Firestore. Last-writer-wins semantics in the offline window: if admin also edited during that period, the user's reconnect-sync overwrites it.
+- **Heartbeat**: Separate lightweight write of `isOnlineInApp` + `lastSeenAt` every 8s, fires immediately on startup then repeats. Runs on BOTH admin and public builds so admin shows online in dashboard. Offline write uses `GlobalScope` to survive ViewModel teardown (only in `onTaskRemoved`, NOT `onDestroy` to avoid race with heartbeat). Heartbeat is not gated by `initialDataLoaded` — only the data-sync path is.
 - **Admin online detection**: Uses `lastSeenAt` within 30s + `isOnlineInApp` flag (auto-expires stale entries if offline write fails)
 - **Admin reads**: Snapshot listeners provide real-time updates from Firestore (no polling)
 
@@ -82,7 +87,12 @@ Key fields written by the app:
 - Crystal progress bar (preset 3) uses filled diamonds (U+25C6) before the marker position
 
 ### Remote Config (Admin Edits)
-The public app's moderation snapshot listener on `users/{deviceHash}` also picks up admin-editable fields (feature toggles, messages, intervals) and applies them in real-time via DataStore flow collectors. Uses `metadata.hasPendingWrites()` guard to skip processing own writes.
+The public app's moderation snapshot listener on `users/{deviceHash}` also picks up admin-editable fields (feature toggles, messages, intervals, presets) and applies them in real-time. Each incoming snapshot is filtered by:
+1. `metadata.hasPendingWrites()` — skip if it reflects our own pending local write
+2. `initialSnapshotProcessed` — drop the very first snapshot (DataStore wins cold start)
+3. Fingerprint match against `lastSelfSyncFingerprint` — skip our own confirmed echo
+
+After those filters, the snapshot's content fields (afkMessage, cycleLines, presets) are written to DataStore so existing flow collectors propagate them into ViewModel state. Toggles are set directly on the ViewModel (they don't persist — see below).
 
 ### Removed Features (do not re-add)
 - **Divider system**: Previously allowed inserting text dividers between chatbox components. Fully removed from UI, ViewModel, DataStore, and message construction.
@@ -90,7 +100,7 @@ The public app's moderation snapshot listener on `users/{deviceHash}` also picks
 - **Redundant action buttons**: Start/stop buttons in Cycle, pin/unpin + send once in Pinned, start/stop + test in Music — all removed since toggles handle activation.
 
 ### Toggle Persistence
-All feature toggles (`afkEnabled`, `spotifyEnabled`, `cycleEnabled`, `timeEnabled`) are persisted to DataStore and restored on app restart. No cold-start reset — toggles survive process death.
+Feature toggles (`afkEnabled`, `spotifyEnabled`, `cycleEnabled`, `timeEnabled`) **do not** persist across app restarts — they always start OFF on app open. The DataStore keys, collectors, and `saveX` calls were intentionally removed from the toggle setters. Content (messages, intervals, presets) DOES persist via DataStore as normal. Admin can still flip toggles in real-time via the Firestore snapshot listener, which writes directly to ViewModel state without touching DataStore.
 
 ## Coding Conventions
 - Use Jetpack Compose for all new UI — no XML layouts
