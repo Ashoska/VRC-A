@@ -48,6 +48,12 @@ class DiscordExternalAssetResolver(
         return cache.get(url)
     }
 
+    /** Seeds the in-memory cache from an external persistent store. */
+    fun prePopulate(url: String, ref: String) {
+        if (url.isBlank() || ref.isBlank()) return
+        cache.put(url, ref)
+    }
+
     /**
      * Resolves the URL via Discord's external-assets endpoint.
      * Returns the `mp:external/...` reference, or null on failure.

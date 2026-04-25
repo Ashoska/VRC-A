@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.IBinder
 import android.util.Log
+import androidx.datastore.preferences.core.edit
 import com.scrapw.chatbox.R
 import com.scrapw.chatbox.dataStore
 import kotlinx.coroutines.CoroutineScope
@@ -35,6 +36,16 @@ class DiscordRpcService : Service() {
         private const val VRCHAT_APP_ID = "438274841678872576"
         private const val NOTIF_CHANNEL = "vrca_pipeline"
         private const val NOTIF_ID = 1001
+
+        // Public HTTPS URL of the VRChat logo used as the default RPC image.
+        // Hosted on a public GitHub repo so Discord's external-assets endpoint
+        // can fetch it anonymously to mint an `mp:external/...` reference.
+        private const val DEFAULT_VRCHAT_IMAGE_URL =
+            "https://raw.githubusercontent.com/shadowash321rulse-lab/VRChat-rpc-display/main/vrchat-1102x620.jpg"
+
+        // DataStore key for the persistent `mp:external/...` reference.
+        // Once resolved, the reference is stable and reused across restarts.
+        private const val DEFAULT_IMAGE_REF_PREF = "discord_default_image_ref"
 
         const val ACTION_START = "com.scrapw.chatbox.DISCORD_RPC_START"
         const val ACTION_STOP = "com.scrapw.chatbox.DISCORD_RPC_STOP"
@@ -87,6 +98,28 @@ class DiscordRpcService : Service() {
                 updateNotif("No Discord token - configure in settings")
                 return@launch
             }
+
+            // Seed the resolver's in-memory cache with the persisted default-image
+            // reference (if we've resolved it before). This avoids a fresh API
+            // round-trip on every app start and removes the brief moment where
+            // the presence loop falls back to the unrendered "vrchat" key.
+            val cachedRef = prefs[androidx.datastore.preferences.core.stringPreferencesKey(DEFAULT_IMAGE_REF_PREF)]
+            if (!cachedRef.isNullOrBlank()) {
+                assetResolver.prePopulate(DEFAULT_VRCHAT_IMAGE_URL, cachedRef)
+            } else {
+                // First run: resolve once and persist the reference.
+                scope.launch {
+                    val ref = assetResolver.resolve(DEFAULT_VRCHAT_IMAGE_URL)
+                    if (!ref.isNullOrBlank()) {
+                        runCatching {
+                            applicationContext.dataStore.edit { p ->
+                                p[androidx.datastore.preferences.core.stringPreferencesKey(DEFAULT_IMAGE_REF_PREF)] = ref
+                            }
+                        }
+                    }
+                }
+            }
+
             connect()
         }
         return START_NOT_STICKY
@@ -320,7 +353,7 @@ class DiscordRpcService : Service() {
                     val largeImage = if (showWorldDetails && vrcPresence.worldImageUrl.isNotBlank()) {
                         resolveOrFallback(vrcPresence.worldImageUrl)
                     } else {
-                        "vrchat"
+                        resolveOrFallback(DEFAULT_VRCHAT_IMAGE_URL)
                     }
                     put("large_image", largeImage)
                     put("large_text", if (showWorldDetails) vrcPresence.worldName else "VRChat")
@@ -329,7 +362,7 @@ class DiscordRpcService : Service() {
                 put("details", "Not in VRChat")
                 put("state", "Using VRC-A")
                 put("assets", JSONObject().apply {
-                    put("large_image", "vrchat")
+                    put("large_image", resolveOrFallback(DEFAULT_VRCHAT_IMAGE_URL))
                     put("large_text", "VRChat")
                 })
             }
