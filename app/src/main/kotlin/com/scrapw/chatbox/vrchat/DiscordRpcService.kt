@@ -168,26 +168,34 @@ class DiscordRpcService : Service() {
         })
     }
 
+    @Suppress("OPT_IN_USAGE")
     private fun disconnect() {
         heartbeatJob?.cancel()
         presenceJob?.cancel()
-        // Clear presence from Discord profile before disconnecting
-        try {
-            val clearPresence = JSONObject().apply {
-                put("op", 3)
-                put("d", JSONObject().apply {
-                    put("since", JSONObject.NULL)
-                    put("activities", JSONArray())
-                    put("status", "online")
-                    put("afk", false)
-                })
-            }
-            ws?.send(clearPresence.toString())
-            Log.i(TAG, "Sent empty activities to clear Discord presence")
-        } catch (_: Throwable) {}
-        try { ws?.close(1000, "Service stopping") } catch (_: Throwable) {}
+        val socket = ws
         ws = null
         isRunning = false
+        if (socket == null) return
+        // Clear presence and give Discord a moment to process before closing.
+        // Uses GlobalScope because the service's own scope may be cancelled
+        // immediately after this returns (onDestroy → scope.cancel()).
+        kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
+            try {
+                val clearPresence = JSONObject().apply {
+                    put("op", 3)
+                    put("d", JSONObject().apply {
+                        put("since", JSONObject.NULL)
+                        put("activities", JSONArray())
+                        put("status", "online")
+                        put("afk", false)
+                    })
+                }
+                socket.send(clearPresence.toString())
+                Log.i(TAG, "Sent empty activities to clear Discord presence")
+                delay(1500)
+            } catch (_: Throwable) {}
+            try { socket.close(1000, "Service stopping") } catch (_: Throwable) {}
+        }
     }
 
     private fun scheduleReconnect() {

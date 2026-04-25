@@ -92,6 +92,9 @@ class VrchatPipelineService : Service() {
     private var friendsCacheLoaded = false
     private var friendsFetchCount = 0
     private var lastUnfriendDiffMs = 0L
+    // Tracks user IDs for which an unfriend notification has already been fired
+    // this session, so the real-time and offline-diff handlers don't both fire.
+    private val notifiedUnfriendIds = mutableSetOf<String>()
     private var pipelineConnectedAtMs = 0L
     private var presenceRefreshJob: Job? = null
 
@@ -214,7 +217,7 @@ class VrchatPipelineService : Service() {
         presenceRefreshJob?.cancel()
         presenceRefreshJob = serviceScope.launch {
             while (true) {
-                delay(15_000)
+                delay(5_000)
                 try {
                     syncPresenceToFirestore()
                 } catch (e: Exception) {
@@ -334,16 +337,17 @@ class VrchatPipelineService : Service() {
 
                 "friend-delete" -> {
                     val userId = content?.optString("userId") ?: return
-                    // Look up cached display name - after deletion the API won't return them
                     val displayName = friendsCache.remove(userId) ?: "Someone"
                     persistFriendsCache()
-                    fireEventNotification(
-                        id = "unfriend_$userId".hashCode(),
-                        title = "Unfriended",
-                        text = "$displayName removed you as a friend",
-                        profileUrl = "https://vrchat.com/home/user/$userId",
-                        channelKey = VrchatNotificationPrefs.KEY_NOTIF_UNFRIEND
-                    )
+                    if (notifiedUnfriendIds.add(userId)) {
+                        fireEventNotification(
+                            id = "unfriend_$userId".hashCode(),
+                            title = "Unfriended",
+                            text = "$displayName removed you as a friend",
+                            profileUrl = "https://vrchat.com/home/user/$userId",
+                            channelKey = VrchatNotificationPrefs.KEY_NOTIF_UNFRIEND
+                        )
+                    }
                 }
 
                 "friend-online" -> {
@@ -524,14 +528,16 @@ class VrchatPipelineService : Service() {
         lastUnfriendDiffMs = now
         val removedIds = previousIds - friendsCache.keys
         removedIds.forEach { userId ->
-            val displayName = previousNames[userId] ?: "Someone"
-            fireEventNotification(
-                id = "unfriend_offline_$userId".hashCode(),
-                title = "Unfriended while offline",
-                text = "$displayName removed you as a friend",
-                profileUrl = "https://vrchat.com/home/user/$userId",
-                channelKey = VrchatNotificationPrefs.KEY_NOTIF_UNFRIEND
-            )
+            if (notifiedUnfriendIds.add(userId)) {
+                val displayName = previousNames[userId] ?: "Someone"
+                fireEventNotification(
+                    id = "unfriend_offline_$userId".hashCode(),
+                    title = "Unfriended while offline",
+                    text = "$displayName removed you as a friend",
+                    profileUrl = "https://vrchat.com/home/user/$userId",
+                    channelKey = VrchatNotificationPrefs.KEY_NOTIF_UNFRIEND
+                )
+            }
         }
         if (removedIds.isNotEmpty()) {
             Log.i(TAG, "Unfriend diff: ${removedIds.size} removed (prev=${previousIds.size}, now=${friendsCache.size})")
