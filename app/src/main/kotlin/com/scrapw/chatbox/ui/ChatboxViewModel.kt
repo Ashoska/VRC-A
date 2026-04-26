@@ -153,6 +153,7 @@ class ChatboxViewModel(
     private var syncTriggerJob: Job? = null
     private var lastSelfSyncAtMs: Long = 0L
     private var lastSelfSyncFingerprint: String = ""
+    @Volatile private var previousSelfSyncFingerprint: String = ""
     private var lastSelfSyncError: String = ""
 
     // Gate self-sync until DataStore has provided its initial values. Without this
@@ -385,9 +386,10 @@ class ChatboxViewModel(
         if (heartbeatOnlyJob != null) return
         heartbeatOnlyJob = viewModelScope.launch {
             performHeartbeat()
+            delay(SELF_SYNC_HEARTBEAT_MS / 2)
             while (true) {
-                delay(SELF_SYNC_HEARTBEAT_MS)
                 performHeartbeat()
+                delay(SELF_SYNC_HEARTBEAT_MS)
             }
         }
     }
@@ -425,12 +427,14 @@ class ChatboxViewModel(
             val fp = computeSelfFingerprint(authUid, deviceHash)
             if (fp == lastSelfSyncFingerprint) return@runCatching
 
-            // Set the fingerprint BEFORE the write so the snapshot listener
-            // (which can fire concurrently with the write completing) can
-            // recognize its own echo and skip applying it. If the write
-            // fails we restore the previous value so the next iteration of
-            // the sync loop will retry.
-            val previousFp = lastSelfSyncFingerprint
+            // Keep the previous fingerprint so the snapshot listener can
+            // recognise BOTH the echo of the current write AND stale
+            // snapshots triggered by heartbeat merges that arrive during
+            // the write window (when lastSelfSyncFingerprint has already
+            // been advanced to the new value but Firestore still has the
+            // old content).
+            val savedPrevious = lastSelfSyncFingerprint
+            previousSelfSyncFingerprint = lastSelfSyncFingerprint
             lastSelfSyncFingerprint = fp
 
             try {
@@ -447,7 +451,8 @@ class ChatboxViewModel(
                 lastSelfSyncAtMs = System.currentTimeMillis()
                 lastSelfSyncError = ""
             } catch (e: Throwable) {
-                lastSelfSyncFingerprint = previousFp
+                lastSelfSyncFingerprint = savedPrevious
+                previousSelfSyncFingerprint = ""
                 throw e
             }
         }.onFailure { e ->
@@ -620,17 +625,21 @@ class ChatboxViewModel(
                 return@launch
             }
 
-            // Echo suppression: if the snapshot's fingerprint matches what we
-            // last wrote ourselves, this is just our own self-sync echoing back.
-            // Re-applying it would clobber any local edits the user made after
-            // the write was sent (e.g. typing while the previous keystroke is
-            // still being persisted). Skip silently. Real admin edits produce
-            // a different fingerprint and fall through to the apply logic.
+            // Echo suppression: skip snapshots whose content fingerprint matches
+            // what we last wrote (lastSelfSyncFingerprint) OR what we wrote the
+            // time before that (previousSelfSyncFingerprint). The second check
+            // handles the race where a heartbeat merge triggers a snapshot
+            // during a self-sync write: lastSelfSyncFingerprint was already
+            // advanced to the new value, but the snapshot still has the old
+            // content that matches previousSelfSyncFingerprint. Without this,
+            // stale heartbeat-triggered snapshots would revert the user's edits.
             val authUid = ensureAnonAuth()
             val deviceHash = readDeviceHashFromPrefs()
             if (authUid != null && isValidDeviceHash(deviceHash)) {
                 val snapFp = computeFingerprintFromSnap(snap, authUid, deviceHash)
                 if (snapFp == lastSelfSyncFingerprint) return@launch
+                val prevFp = previousSelfSyncFingerprint
+                if (prevFp.isNotEmpty() && snapFp == prevFp) return@launch
             }
 
             // Toggles (admin can control in real-time)
