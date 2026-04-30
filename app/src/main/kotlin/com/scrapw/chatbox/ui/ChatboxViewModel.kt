@@ -38,6 +38,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
@@ -96,7 +97,11 @@ class ChatboxViewModel(
 
         // Firestore sync throttles
         private const val SELF_SYNC_DEBOUNCE_MS = 500L
-        private const val SELF_SYNC_HEARTBEAT_MS = 8_000L
+        // Live-mode write interval — only used when an admin is watching.
+        // No constant background heartbeat: app-open and app-close writes
+        // (the latter from VrchatPipelineService.onTaskRemoved) maintain
+        // online/offline state with two writes per session.
+        private const val LIVE_SYNC_INTERVAL_MS = 500L
 
         // Moderation attach retry
         private const val MOD_ATTACH_RETRY_MS = 1_250L
@@ -135,11 +140,30 @@ class ChatboxViewModel(
 
     override fun onCleared() {
         uiTickJob?.cancel()
-        selfSyncJob?.cancel()
+        syncTriggerJob?.cancel()
+        liveSyncJob?.cancel()
         moderationAttachJob?.cancel()
         moderationUserReg?.remove()
         moderationDeviceReg?.remove()
         stopAll(clearFromChatbox = false)
+        // Best-effort close-write fallback: VrchatPipelineService.onTaskRemoved
+        // is the primary path, but if that service isn't running we still want
+        // the user to be marked offline. GlobalScope is intentional — we need
+        // the write to outlive ViewModel teardown.
+        @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+        kotlinx.coroutines.GlobalScope.launch {
+            runCatching {
+                val deviceHash = readDeviceHashFromPrefs()
+                if (isValidDeviceHash(deviceHash)) {
+                    db.collection(COL_USERS).document(deviceHash)
+                        .set(mapOf(
+                            "isOnlineInApp" to false,
+                            "lastSeenAt" to FieldValue.serverTimestamp()
+                        ), SetOptions.merge())
+                        .await()
+                }
+            }
+        }
         super.onCleared()
     }
 
@@ -149,7 +173,6 @@ class ChatboxViewModel(
     private val auth: FirebaseAuth by lazy { FirebaseAuth.getInstance() }
     private val db: FirebaseFirestore by lazy { FirebaseFirestore.getInstance() }
 
-    private var selfSyncJob: Job? = null
     private var syncTriggerJob: Job? = null
     private var lastSelfSyncAtMs: Long = 0L
     private var lastSelfSyncFingerprint: String = ""
@@ -196,12 +219,9 @@ class ChatboxViewModel(
     }
 
     private fun computeSelfFingerprint(authUid: String, deviceHash: String): String {
-        val cycleClean = cycleLines.map { it.trim() }.take(10)
+        val cycleClean = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(10)
         val afkP = (1..3).joinToString("|") { getAfkPresetPreview(it) }
         val cycP = (1..5).joinToString("|") { getCyclePresetPreview(it) }
-
-        val npTitle = lastNowPlayingTitle.trim()
-        val npArtist = lastNowPlayingArtist.trim()
 
         return listOf(
             "doc=$deviceHash",
@@ -215,11 +235,6 @@ class ChatboxViewModel(
             "spE=$spotifyEnabled",
             "spD=$spotifyDemoEnabled",
             "spP=$spotifyPreset",
-            "npDet=$nowPlayingDetected",
-            "npPlay=$nowPlayingIsPlaying",
-            "npT=$npTitle",
-            "npA=$npArtist",
-            "prev=${combinedPreviewText.trim()}",
             "afkP=$afkP",
             "cycP=$cycP",
             "timeE=$timeEnabled",
@@ -228,8 +243,10 @@ class ChatboxViewModel(
     }
 
     /**
-     * \u2705 Full snapshot for users/{deviceHash}
-     * Must stay inside your Firestore rules' selfMutableKeys() list.
+     * Content snapshot for users/{deviceHash} \u2014 written on app open and on
+     * debounced user edits. Excludes live/volatile fields (nowPlaying, preview,
+     * lastReportedTime) which are only synced when an admin is watching this
+     * user via the live-sync loop. See [buildLivePayload].
      */
     private fun buildUserSnapshot(authUid: String, deviceHash: String): Map<String, Any> {
         val cycleClean = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(10)
@@ -263,19 +280,8 @@ class ChatboxViewModel(
             "spotifyDemoEnabled" to spotifyDemoEnabled,
             "spotifyPreset" to spotifyPreset,
 
-            "nowPlayingDetected" to nowPlayingDetected,
-            "nowPlayingIsPlaying" to nowPlayingIsPlaying,
-            "nowPlayingTitle" to lastNowPlayingTitle.takeIf { it != "(blank)" }?.trim().orEmpty(),
-            "nowPlayingArtist" to lastNowPlayingArtist.takeIf { it != "(blank)" }?.trim().orEmpty(),
-            "activePackage" to activePackage,
-
-            "combinedPreviewText" to combinedPreviewText.trim(),
-            "cycleTrimWarning" to cycleTrimWarning.trim(),
-
             "timeEnabled" to timeEnabled,
-            "timeMode" to timeMode,
-            "lastReportedTime" to if (timeEnabled) currentTimeString() else "",
-            "lastTimeUpdateAt" to FieldValue.serverTimestamp()
+            "timeMode" to timeMode
         )
 
         data["afkPreset1"] = getAfkPresetPreview(1)
@@ -298,6 +304,25 @@ class ChatboxViewModel(
     }
 
     /**
+     * Live/volatile payload \u2014 only written when an admin is watching this user
+     * (see [AdminWatchState]). These fields change too frequently to write on
+     * every edit; gating them behind the watch flag keeps Firestore traffic
+     * near zero when nobody is looking.
+     */
+    private fun buildLivePayload(): Map<String, Any> = mapOf(
+        "nowPlayingDetected" to nowPlayingDetected,
+        "nowPlayingIsPlaying" to nowPlayingIsPlaying,
+        "nowPlayingTitle" to lastNowPlayingTitle.takeIf { it != "(blank)" }?.trim().orEmpty(),
+        "nowPlayingArtist" to lastNowPlayingArtist.takeIf { it != "(blank)" }?.trim().orEmpty(),
+        "activePackage" to activePackage,
+        "combinedPreviewText" to combinedPreviewText.trim(),
+        "cycleTrimWarning" to cycleTrimWarning.trim(),
+        "lastReportedTime" to if (timeEnabled) currentTimeString() else "",
+        "lastTimeUpdateAt" to FieldValue.serverTimestamp(),
+        "lastSeenAt" to FieldValue.serverTimestamp()
+    )
+
+    /**
      * \u2705 UID mapping per YOUR RULES:
      * usersById/{uid} keys must be ONLY:
      *   deviceHash, authUid, appId, adminBuild, updatedAt
@@ -313,45 +338,54 @@ class ChatboxViewModel(
     }
 
     /**
-     * IMPORTANT: Admin build does NOT self-sync user data to avoid UID tug-of-war,
-     * but it DOES run heartbeat so the admin shows as online in the dashboard.
+     * Schedules a debounced self-sync write. No periodic loops — content
+     * is only written when something actually changes (toggles, edits) or
+     * once at app open. Live/volatile fields are handled separately by the
+     * watcher-gated live loop ([startLiveSyncWatcher]).
      */
     private fun startSelfSyncLoopIfNeeded() {
-        // Always start heartbeat for BOTH admin and public builds
-        startHeartbeatLoopIfNeeded()
-
         if (BuildConfig.IS_ADMIN_BUILD) return
 
-        // Debounced trigger: cancel any pending debounce and start a new one
         syncTriggerJob?.cancel()
         syncTriggerJob = viewModelScope.launch {
             delay(SELF_SYNC_DEBOUNCE_MS)
             performSelfSync()
         }
+    }
 
-        // Full sync loop (public build only). Don't run an immediate sync here:
-        // performSelfSync is gated by initialDataLoaded, but skipping the
-        // immediate call also avoids burning a no-op write at cold start.
-        if (selfSyncJob != null) return
-        selfSyncJob = viewModelScope.launch {
-            while (true) {
-                delay(SELF_SYNC_HEARTBEAT_MS)
-                performSelfSync()
+    /**
+     * Live-mode loop: writes volatile fields (nowPlaying, preview, etc.)
+     * every few seconds, but ONLY while [AdminWatchState.isWatched] is true.
+     * Started once from init and self-gates internally — flipping the watch
+     * flag toggles the loop on/off without any extra Firestore reads.
+     */
+    private var liveSyncJob: Job? = null
+
+    private fun startLiveSyncWatcher() {
+        if (BuildConfig.IS_ADMIN_BUILD) return
+        if (liveSyncJob != null) return
+        liveSyncJob = viewModelScope.launch {
+            // collectLatest auto-cancels the previous block when isWatched changes,
+            // so flipping the flag to false stops the inner write loop instantly.
+            com.scrapw.chatbox.sync.AdminWatchState.isWatched.collectLatest { watched ->
+                if (watched) {
+                    while (true) {
+                        performLiveSync()
+                        delay(LIVE_SYNC_INTERVAL_MS)
+                    }
+                }
             }
         }
     }
 
-    private var heartbeatOnlyJob: Job? = null
-
-    private fun startHeartbeatLoopIfNeeded() {
-        if (heartbeatOnlyJob != null) return
-        heartbeatOnlyJob = viewModelScope.launch {
-            performHeartbeat()
-            delay(SELF_SYNC_HEARTBEAT_MS / 2)
-            while (true) {
-                performHeartbeat()
-                delay(SELF_SYNC_HEARTBEAT_MS)
-            }
+    private suspend fun performLiveSync() {
+        if (!initialDataLoaded) return
+        val deviceHash = readDeviceHashFromPrefs()
+        if (!isValidDeviceHash(deviceHash)) return
+        runCatching {
+            db.collection(COL_USERS).document(deviceHash)
+                .set(buildLivePayload(), SetOptions.merge())
+                .await()
         }
     }
 
@@ -374,24 +408,6 @@ class ChatboxViewModel(
         "cyclePreset4" to (cyclePresetMessages.getOrNull(3)?.trim().orEmpty()),
         "cyclePreset5" to (cyclePresetMessages.getOrNull(4)?.trim().orEmpty()),
     )
-
-    private suspend fun performHeartbeat() {
-        runCatching {
-            val deviceHash = readDeviceHashFromPrefs()
-            if (!isValidDeviceHash(deviceHash)) {
-                Log.w("ChatboxViewModel", "Heartbeat skipped: invalid deviceHash")
-                return@runCatching
-            }
-            db.collection(COL_USERS).document(deviceHash)
-                .set(mapOf(
-                    "isOnlineInApp" to true,
-                    "lastSeenAt" to FieldValue.serverTimestamp()
-                ), SetOptions.merge())
-                .await()
-        }.onFailure { e ->
-            Log.e("ChatboxViewModel", "Heartbeat write failed", e)
-        }
-    }
 
     private suspend fun performSelfSync() {
         if (!initialDataLoaded) return
@@ -590,6 +606,16 @@ class ChatboxViewModel(
     private var initialSnapshotProcessed = false
 
     private fun applyRemoteConfig(snap: com.google.firebase.firestore.DocumentSnapshot) {
+        // Watcher detection runs on EVERY snapshot (even the first). Admins
+        // refresh `watcherActiveAt` from the admin panel; if recent enough
+        // we flip [AdminWatchState.isWatched] to true and the live-sync
+        // loop starts streaming volatile fields. No traffic when nobody
+        // is watching.
+        val watcherActiveAtMs = runCatching {
+            snap.getTimestamp("watcherActiveAt")?.toDate()?.time
+        }.getOrNull()
+        com.scrapw.chatbox.sync.AdminWatchState.updateFromTimestampMs(watcherActiveAtMs)
+
         viewModelScope.launch {
             if (!initialSnapshotProcessed) {
                 initialSnapshotProcessed = true
@@ -1050,12 +1076,12 @@ class ChatboxViewModel(
     )
 
     init {
-        // Public build: start periodic self sync (rules-compatible).
-        // Admin build: startSelfSyncLoopIfNeeded() is a no-op (prevents UID tug-of-war).
-        startSelfSyncLoopIfNeeded()
-
-        // Public build: attach moderation listeners once deviceHash + auth are available.
+        // Public build: attach moderation listeners (also drives watcher detection
+        // and remote-config snapshots). Admin build skips self-sync entirely.
         attachModerationListenersLoopOnce()
+
+        // Live-mode loop: idle until an admin starts watching.
+        startLiveSyncWatcher()
 
         // Block self-sync until DataStore has provided initial values for all
         // user-content fields AND those values have been assigned into ViewModel
@@ -1081,6 +1107,11 @@ class ChatboxViewModel(
                 timeMode = userPreferencesRepository.timeMode.first()
             }
             initialDataLoaded = true
+            // One-shot app-open write: marks the user online and pushes the
+            // current content snapshot so admins see the latest state. No
+            // periodic loop after this — content writes are event-driven
+            // (debounced) and live writes only run while watched.
+            performSelfSync()
         }
 
         viewModelScope.launch {
@@ -1158,7 +1189,6 @@ class ChatboxViewModel(
                 tickCyclePreviewOnly()
                 nowPlayingIsPlaying = computeDisplayedPlaying()
                 rebuildCombinedPreviewOnly()
-                startSelfSyncLoopIfNeeded()
                 delay(UI_TICK_MS)
             }
         }

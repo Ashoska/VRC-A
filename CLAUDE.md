@@ -44,8 +44,8 @@ Display name embedded in UI strings: "Ashoska Mitsu Sisko".
 
 ### VRChat Integration
 - **VrchatAuthManager**: Singleton handling VRChat API auth (Basic auth + 2FA), cookie storage via EncryptedSharedPreferences, presence fetching, and friends list retrieval. Also saves credentials to EncryptedSharedPreferences for auto-relogin when sessions expire.
-- **VrchatPipelineService**: Foreground service with OkHttp WebSocket to `wss://pipeline.vrchat.cloud`. Handles real-time events (friend online/offline, unfriend, invites, group events), syncs VRChat presence to Firestore every 5s, and manages friends cache. Presence sync interval is intentionally aligned with the Discord RPC tick rate so world thumbnails and the RPC presence stay in lockstep.
-- **Friends cache**: Persisted to Firestore (`users/{deviceHash}` fields: `savedFriendIds`, `savedFriendNames`) for cross-session unfriend detection. Includes 80% half-list guard to skip the diff if the fresh API list is < 80% of the previous (likely pagination error). Restore is resilient to size mismatches between the two arrays — uses the available paired entries instead of dropping everything.
+- **VrchatPipelineService**: Foreground service with OkHttp WebSocket to `wss://pipeline.vrchat.cloud`. Handles real-time events (friend online/offline, unfriend, invites, group events) and manages friends cache. Writes VRChat presence to Firestore **only while an admin is watching** this user (gated by `AdminWatchState.isWatched`); when unwatched, in-app presence still updates locally via WebSocket events but no traffic hits Firestore. When watched, presence polls every 500ms.
+- **Friends cache**: Persisted **locally** in SharedPreferences (`vrca_friends_cache` / `friends_json`) via `FriendsCacheStore`. No Firestore involvement — friends data is only used by the user's own app for unfriend notifications and is meaningless to admins. Old `savedFriendIds`/`savedFriendNames` fields in user docs are removed via `FieldValue.delete()` on every offline write so legacy data doesn't linger.
 - **Unfriend notification logic**: Two sources cooperate via a `notifiedUnfriendIds` dedup set. (1) Real-time `friend-delete` from the WebSocket fires immediately for unfriends during an active session — but is **skipped if the userId isn't in the cache** (queued event for an offline unfriend gets handled later with a correct name). (2) Offline diff runs 60s after pipeline connect, comparing the Firestore-restored snapshot against the latest fetch — fires with the display name from the restored snapshot. The dedup set ensures at most one notification per userId per session.
 - **VrchatPipelineState**: Shared in-memory singleton using `MutableStateFlow` for reactive cross-component state (connection status, presence data). Compose UI observes via `collectAsState()`.
 - **DiscordRpcService**: Foreground service connecting to Discord Gateway WebSocket (`wss://gateway.discord.gg`). Sends VRChat Rich Presence (world name, player count, elapsed time) mimicking VRChat desktop's Discord integration. Auto-starts when VRChat pipeline connects if enabled. Presence loop tick is 5s. Default image is a hosted VRChat logo (`https://raw.githubusercontent.com/shadowash321rulse-lab/VRChat-rpc-display/main/vrchat-1102x620.jpg`) resolved through Discord's external-assets endpoint. World thumbnails use the same resolver. On disconnect, sends an empty-activities op-3 payload then `Thread.sleep(1500)` (synchronous, blocking) before closing the WebSocket so the clear flushes before Android kills the process on swipe-away.
@@ -55,15 +55,16 @@ Display name embedded in UI strings: "Ashoska Mitsu Sisko".
 
 ### Firestore Schema (users/{deviceHash})
 Key fields written by the app:
-- `isOnlineInApp` (bool): Set to `true` by dedicated heartbeat write, `false` on ViewModel cleanup
-- `lastSeenAt` (timestamp): Updated every ~8s by heartbeat (separate from data sync)
-- `savedFriendIds` / `savedFriendNames` (string arrays): Friends cache for unfriend detection
+- `isOnlineInApp` (bool): Set to `true` by the app-open write, `false` by `VrchatPipelineService.onTaskRemoved` and `ChatboxViewModel.onCleared` (GlobalScope fallback)
+- `lastSeenAt` (timestamp): Refreshed on app-open, app-close, content edits, and live-mode writes (when watched)
 - `afkEnabled`, `cycleEnabled`, `spotifyEnabled`, `timeEnabled`: Feature toggles (admin-editable)
 - `warned`, `banned`, `warnReason`, `banReason`: Moderation flags (read by public app via snapshot listener)
 - `targetedUpdateUrl` / `targetedUpdateNotes` (strings): Admin-pushed targeted APK update for specific user
-- VRChat presence fields: `vrchatUserId`, `vrchatDisplayName`, `vrchatState`, `vrchatStatus`, `vrchatLocation`, etc.
+- `watcherActiveAt` (timestamp): **Admin-only write.** Refreshed every ~30s while an admin has this user's detail page open. User app reads it from snapshots and feeds into `AdminWatchState.updateFromTimestampMs` — if within 60s, live-mode loops start.
+- VRChat presence fields (`vrchatUserId`, `vrchatDisplayName`, `vrchatState`, `vrchatLocation`, etc.): Only written while watched.
+- NowPlaying / preview fields (`nowPlayingTitle`, `nowPlayingArtist`, `combinedPreviewText`, `lastReportedTime`): Only written while watched (live-mode loop).
 
-**Firestore rules must include** `savedFriendIds`, `savedFriendNames`, `isOnlineInApp` in the `selfMutableKeys()` allowlist.
+**Friends are no longer in Firestore** — `savedFriendIds`/`savedFriendNames` are deleted via `FieldValue.delete()` on offline write. They live in local SharedPreferences only.
 
 ### Navigation
 - Bottom nav: Home, Automations, Music, VRChat (4 items)
@@ -71,14 +72,31 @@ Key fields written by the app:
 - Admin: Full page accessed via gavel icon in top app bar (admin build only). Includes targeted APK push per user and release retraction.
 
 ### Firestore Sync Architecture
-- **Event-driven sync**: Data changes trigger an immediate debounced sync (500ms) to Firestore. Periodic safety sync also runs every 8s in case the debounce was suppressed.
-- **Initial-data gate (`initialDataLoaded`)**: `performSelfSync` returns early until a loader coroutine has awaited the first emission of every user-content DataStore field and assigned each value directly into ViewModel state. Without this gate, the cold-start sync would write empty default ViewModel state to Firestore, and the snapshot listener would echo that back and wipe the user's saved presets/messages from DataStore.
-- **First-snapshot skip (`initialSnapshotProcessed`)**: The very first Firestore snapshot after listener attach is dropped without processing. DataStore is the source of truth on cold start; any admin edits made while the user was offline land via subsequent snapshots (or get overwritten on next self-sync — see below).
-- **Echo suppression (`lastSyncedValues` map)**: After each successful self-sync write, `captureStateForSync()` snapshots the values we wrote to a `lastSyncedValues` map. The snapshot listener (`applyRemoteConfig`) compares each incoming field against the map value: match → our own echo, skip; differ → genuine admin edit, apply. This per-field approach replaces the earlier fingerprint-based suppression, which was fragile due to empty-line filtering differences between ViewModel and Firestore, volatile fields (time/preview) drifting between sync and snapshot, and race conditions between heartbeat and self-sync writes. Before the first successful sync (`lastSyncedValues` empty), all snapshots are skipped — DataStore is the source of truth during cold start.
-- **Offline editing**: User-content edits land in DataStore immediately and survive process death. On reconnect, the next self-sync writes the local state to Firestore. Last-writer-wins semantics in the offline window: if admin also edited during that period, the user's reconnect-sync overwrites it.
-- **Heartbeat**: Separate lightweight write of `isOnlineInApp` + `lastSeenAt` every 8s, fires immediately on startup then repeats at a 4s offset from the self-sync loop (half-interval stagger) to avoid racing on the same tick. Runs on BOTH admin and public builds so admin shows online in dashboard. Offline write uses `GlobalScope` to survive ViewModel teardown (only in `onTaskRemoved`, NOT `onDestroy` to avoid race with heartbeat). Heartbeat is not gated by `initialDataLoaded` — only the data-sync path is.
-- **Admin online detection**: Uses `lastSeenAt` within 30s + `isOnlineInApp` flag (auto-expires stale entries if offline write fails)
-- **Admin reads**: Snapshot listeners provide real-time updates from Firestore (no polling)
+The sync model is intentionally minimal — Firestore costs money and we only push to it when we have to. Three classes of writes:
+
+1. **App-open write (one)**: After `initialDataLoaded` flips, `performSelfSync` runs once with the full content snapshot (toggles, messages, presets, IP slots, identity, `isOnlineInApp=true`, `lastSeenAt`). This is the only write tied to startup.
+2. **App-close write (one)**: `VrchatPipelineService.onTaskRemoved` writes `isOnlineInApp=false, lastSeenAt`. `ChatboxViewModel.onCleared` does the same via `GlobalScope` as a fallback for cases where the foreground service isn't running.
+3. **Event-driven content writes (debounced 500ms)**: Whenever the user changes a toggle, types in a message, edits a preset, etc., a debounced trigger writes the current content snapshot. No safety net periodic loop — if a write fails, the next user edit picks it up.
+
+**No periodic heartbeats.** No 8-second sync loop, no idle traffic. The user doc receives one write at app open, one at close, and one per user edit (debounced).
+
+**Live-mode (watcher-gated)**: When an admin opens a specific user's detail page in the admin panel, the admin app refreshes `watcherActiveAt` every ~30s on that user's doc. The user app's snapshot listener feeds the timestamp into `AdminWatchState`; if fresh (within 60s), `isWatched` flips to true and two side-effects start:
+- `ChatboxViewModel.startLiveSyncWatcher` writes `buildLivePayload` (nowPlaying, preview, `lastReportedTime`, `lastSeenAt`) every 500ms
+- `VrchatPipelineService.startPresenceRefreshLoop` writes VRChat presence every 500ms
+
+Both stop instantly when `isWatched` flips back to false (`collectLatest` cancels the inner loop). When nobody is watching, neither loop touches Firestore.
+
+**Force-kill detection limitation**: If the user's app is force-killed (settings → app info → force stop, OR low-memory kill, OR crash), neither `onTaskRemoved` nor `onCleared` fires, so `isOnlineInApp` stays `true` until the next app open. The admin should treat `lastSeenAt` older than ~30 minutes as stale-online. This is the price of having zero idle writes — there's no graceful way to detect process death without periodic traffic.
+
+**Echo suppression** (per-field `lastSyncedValues` map): After each successful content write, `captureStateForSync()` saves the exact values written. `applyRemoteConfig` compares each incoming snapshot field against the map — match means echo (skip), differ means admin edit (apply). Inherently race-free because the map only updates after a successful write.
+
+**Initial-data gate** (`initialDataLoaded`): `performSelfSync` returns early until a loader coroutine has read every user-content DataStore field into ViewModel state. Prevents cold-start sync from writing empty defaults.
+
+**First-snapshot skip** (`initialSnapshotProcessed`): The very first Firestore snapshot after listener attach is dropped — DataStore is the source of truth on cold start.
+
+**Offline editing**: User-content edits land in DataStore immediately and survive process death. On reconnect, the next debounced write or app-close write pushes them to Firestore. Last-writer-wins on conflict with admin edits during the offline window.
+
+**Admin online detection**: Reads `isOnlineInApp` + `lastSeenAt` from snapshot listeners on user docs. Stale-online (`lastSeenAt > N minutes`) indicates probable force-kill.
 
 ### NowPlaying
 - Ad/DJ detection restricted to Spotify only (`com.spotify.music`) to prevent false positives on regular songs

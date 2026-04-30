@@ -18,6 +18,7 @@ import com.google.firebase.firestore.SetOptions
 import com.scrapw.chatbox.MainActivity
 import com.scrapw.chatbox.R
 import com.scrapw.chatbox.dataStore
+import com.scrapw.chatbox.sync.AdminWatchState
 import com.scrapw.chatbox.vrchat.VrchatNotificationPrefs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -28,6 +29,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -37,7 +39,6 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
-import com.google.android.gms.tasks.Tasks
 import java.util.concurrent.TimeUnit
 
 /**
@@ -158,7 +159,10 @@ class VrchatPipelineService : Service() {
                     .collection("users").document(deviceHash)
                     .set(mapOf(
                         "isOnlineInApp" to false,
-                        "lastSeenAt" to FieldValue.serverTimestamp()
+                        "lastSeenAt" to FieldValue.serverTimestamp(),
+                        // Drop any legacy friends data still lingering on the doc.
+                        "savedFriendIds" to FieldValue.delete(),
+                        "savedFriendNames" to FieldValue.delete()
                     ), SetOptions.merge())
             } catch (_: Throwable) {}
         }
@@ -187,10 +191,10 @@ class VrchatPipelineService : Service() {
 
             if (!friendsCacheLoaded) {
                 restoreFriendsCache()
-                // Snapshot from Firestore (last persisted friends list) is what
-                // the diff compares against. Captured BEFORE the first fresh API
-                // call so offline-unfriends (people removed since last session)
-                // are detected with their correct display names.
+                // Snapshot from the local cache (last persisted friends list) is
+                // what the diff compares against. Captured BEFORE the first fresh
+                // API call so offline-unfriends (people removed since last
+                // session) are detected with their correct display names.
                 val previousIds = friendsCache.keys.toSet()
                 val previousNames = friendsCache.toMap()
                 loadFriendsCache()
@@ -219,13 +223,21 @@ class VrchatPipelineService : Service() {
 
     private fun startPresenceRefreshLoop() {
         presenceRefreshJob?.cancel()
+        // Only poll VRChat presence + write to Firestore while an admin is
+        // watching this user. When unwatched, in-app presence still updates
+        // via WebSocket pipeline events; the polling loop is purely for
+        // keeping Firestore fresh for the admin panel.
         presenceRefreshJob = serviceScope.launch {
-            while (true) {
-                delay(5_000)
-                try {
-                    syncPresenceToFirestore()
-                } catch (e: Exception) {
-                    Log.w(TAG, "Presence refresh failed", e)
+            AdminWatchState.isWatched.collectLatest { watched ->
+                if (watched) {
+                    while (true) {
+                        delay(500)
+                        try {
+                            syncPresenceToFirestore()
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Presence refresh failed", e)
+                        }
+                    }
                 }
             }
         }
@@ -506,18 +518,8 @@ class VrchatPipelineService : Service() {
     }
 
     private fun persistFriendsCache() {
-        if (deviceHash.isBlank()) return
         try {
-            val ids = friendsCache.keys.toList()
-            val names = friendsCache.values.toList()
-            FirebaseFirestore.getInstance()
-                .collection("users")
-                .document(deviceHash)
-                .set(mapOf(
-                    "savedFriendIds" to ids,
-                    "savedFriendNames" to names
-                ), SetOptions.merge())
-                .addOnFailureListener { e -> Log.w(TAG, "Failed to persist friends cache", e) }
+            FriendsCacheStore.save(this, friendsCache.toMap())
         } catch (e: Exception) {
             Log.w(TAG, "persistFriendsCache error", e)
         }
@@ -554,29 +556,14 @@ class VrchatPipelineService : Service() {
         }
     }
 
-    private suspend fun restoreFriendsCache() {
-        if (deviceHash.isBlank()) return
+    private fun restoreFriendsCache() {
         try {
-            val doc = withContext(Dispatchers.IO) {
-                Tasks.await(
-                    FirebaseFirestore.getInstance()
-                        .collection("users")
-                        .document(deviceHash)
-                        .get()
-                )
-            }
-            @Suppress("UNCHECKED_CAST")
-            val ids = doc.get("savedFriendIds") as? List<String> ?: return
-            @Suppress("UNCHECKED_CAST")
-            val names = doc.get("savedFriendNames") as? List<String> ?: return
-            if (ids.size != names.size) {
-                Log.w(TAG, "Friends cache size mismatch: ids=${ids.size} vs names=${names.size}, using available data")
-            }
-            val usable = minOf(ids.size, names.size)
-            ids.take(usable).zip(names.take(usable)).forEach { (id, name) -> friendsCache[id] = name }
+            val saved = FriendsCacheStore.load(this)
+            saved.forEach { (id, name) -> friendsCache[id] = name }
             friendsCacheLoaded = friendsCache.isNotEmpty()
+            Log.i(TAG, "Restored ${friendsCache.size} friends from local cache")
         } catch (e: Exception) {
-            Log.w(TAG, "Could not restore friends cache from Firestore", e)
+            Log.w(TAG, "Could not restore friends cache from local store", e)
         }
     }
 
@@ -587,6 +574,15 @@ class VrchatPipelineService : Service() {
     private suspend fun syncPresenceToFirestore() {
         if (deviceHash.isBlank()) return
         val presence = VrchatAuthManager.fetchPresence(this) ?: return
+
+        // Always update in-app state so the user's own UI stays current.
+        VrchatPipelineState.presence = presence
+
+        // Skip the Firestore write entirely when no admin is watching this
+        // user — admins only see live VRChat data while they have the user
+        // selected, and writing every state change to Firestore for every
+        // user 24/7 is what blew through the free quota.
+        if (!AdminWatchState.isWatched.value) return
 
         val updates = mapOf(
             "vrchatUserId" to presence.userId,
@@ -604,7 +600,6 @@ class VrchatPipelineService : Service() {
             "vrchatIsOnline" to presence.isOnlineInVRChat,
             "vrchatAuthCookieValid" to true,
             "vrchatLastSyncAt" to FieldValue.serverTimestamp(),
-            "isOnlineInApp" to true,
             "lastSeenAt" to FieldValue.serverTimestamp()
         )
 
@@ -618,9 +613,6 @@ class VrchatPipelineService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "syncPresenceToFirestore error", e)
         }
-
-        // Update state object for in-app display (always, even if Firestore fails)
-        VrchatPipelineState.presence = presence
     }
 
     // ------------------------------------------------------------------
