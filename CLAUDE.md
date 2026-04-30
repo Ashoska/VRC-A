@@ -11,6 +11,10 @@ Display name embedded in UI strings: "Ashoska Mitsu Sisko".
 - Admin vs public build separation: `BuildConfig.IS_ADMIN_BUILD`
 - CI workflow: `.github/workflows/android.yml`
 - Firebase config: `google-services.json`
+- Firestore rules: `firestore.rules`
+- Firestore indexes: `firestore.indexes.json`
+- Cloud Functions: `functions/` (Node.js 18, deployed via `firebase deploy --only functions`)
+- Firebase project config: `firebase.json`
 
 ## Build Commands
 ```bash
@@ -86,7 +90,9 @@ The sync model is intentionally minimal — Firestore costs money and we only pu
 
 Both stop instantly when `isWatched` flips back to false (`collectLatest` cancels the inner loop). When nobody is watching, neither loop touches Firestore.
 
-**Force-kill detection limitation**: If the user's app is force-killed (settings → app info → force stop, OR low-memory kill, OR crash), neither `onTaskRemoved` nor `onCleared` fires, so `isOnlineInApp` stays `true` until the next app open. The admin should treat `lastSeenAt` older than ~30 minutes as stale-online. This is the price of having zero idle writes — there's no graceful way to detect process death without periodic traffic.
+**Force-kill detection**: If the user's app is force-killed, neither `onTaskRemoved` nor `onCleared` fires, so `isOnlineInApp` stays `true`. A **Cloud Function** (`functions/index.js`) runs every 5 minutes, queries users with `isOnlineInApp=true AND lastSeenAt < 5 minutes ago`, and batch-updates them to offline. Requires a composite index on `(isOnlineInApp ASC, lastSeenAt ASC)` — defined in `firestore.indexes.json`. Deploy with `firebase deploy --only functions`.
+
+**Admin watcher heartbeat**: When an admin selects a user in the admin panel's detail view, a `LaunchedEffect` writes `watcherActiveAt = serverTimestamp()` to that user's doc every 30 seconds. When the admin navigates away or selects a different user, the coroutine is cancelled automatically. The user app reads `watcherActiveAt` from its snapshot listener and feeds it into `AdminWatchState.updateFromTimestampMs()` — if within 60s, live-mode starts.
 
 **Echo suppression** (per-field `lastSyncedValues` map): After each successful content write, `captureStateForSync()` saves the exact values written. `applyRemoteConfig` compares each incoming snapshot field against the map — match means echo (skip), differ means admin edit (apply). Inherently race-free because the map only updates after a successful write.
 
@@ -96,7 +102,7 @@ Both stop instantly when `isWatched` flips back to false (`collectLatest` cancel
 
 **Offline editing**: User-content edits land in DataStore immediately and survive process death. On reconnect, the next debounced write or app-close write pushes them to Firestore. Last-writer-wins on conflict with admin edits during the offline window.
 
-**Admin online detection**: Reads `isOnlineInApp` + `lastSeenAt` from snapshot listeners on user docs. Stale-online (`lastSeenAt > N minutes`) indicates probable force-kill.
+**Admin online detection**: Dashboard counter and user list badges both check `isOnlineInApp == true AND lastSeenAt within 5 minutes`. Stale-online users (force-killed) are automatically cleaned up by the Cloud Function every 5 minutes.
 
 ### NowPlaying
 - Ad/DJ detection restricted to Spotify only (`com.spotify.music`) to prevent false positives on regular songs

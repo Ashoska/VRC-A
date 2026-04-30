@@ -1,0 +1,180 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ───────────────────────────────────────────────────────
+    // Helper: is the caller an admin (email/password auth)?
+    // ───────────────────────────────────────────────────────
+    function isAdmin() {
+      return request.auth != null
+          && request.auth.token.firebase.sign_in_provider == 'password';
+    }
+
+    // ───────────────────────────────────────────────────────
+    // Helper: is the caller an anonymous user?
+    // ───────────────────────────────────────────────────────
+    function isAnon() {
+      return request.auth != null
+          && request.auth.token.firebase.sign_in_provider == 'anonymous';
+    }
+
+    // ───────────────────────────────────────────────────────
+    // Fields the public (anon) app may write on its own doc.
+    // ───────────────────────────────────────────────────────
+    function selfMutableKeys() {
+      return [
+        // identity / debug
+        'docId', 'docIdType', 'authUid', 'uid', 'currentUid',
+        'deviceHash', 'appId', 'adminBuild',
+        'versionName', 'versionCode',
+
+        // activity markers
+        'isOnlineInApp', 'lastSeenAt', 'updatedAt',
+
+        // pinned (formerly AFK)
+        'afkEnabled', 'afkMessage',
+        'afkPreset1', 'afkPreset2', 'afkPreset3',
+
+        // cycle
+        'cycleEnabled', 'cycleIntervalSeconds',
+        'cycleLines', 'cycleLinesText',
+        'cyclePreset1', 'cyclePreset2', 'cyclePreset3',
+        'cyclePreset4', 'cyclePreset5',
+
+        // spotify / music
+        'spotifyEnabled', 'spotifyDemoEnabled', 'spotifyPreset',
+
+        // time
+        'timeEnabled', 'timeMode',
+
+        // multi-IP slots
+        'activeIpSlot',
+
+        // live-mode volatile fields (only written when watched)
+        'nowPlayingDetected', 'nowPlayingIsPlaying',
+        'nowPlayingTitle', 'nowPlayingArtist', 'activePackage',
+        'combinedPreviewText', 'cycleTrimWarning',
+        'lastReportedTime', 'lastTimeUpdateAt',
+
+        // VRChat presence (written by VrchatPipelineService when watched)
+        'displayName',
+        'vrchatUserId', 'vrchatDisplayName',
+        'vrchatState', 'vrchatStatus', 'vrchatStatusDescription',
+        'vrchatWorld', 'vrchatLocation',
+        'vrchatInstancePlayerCount', 'vrchatInstanceCapacity',
+        'vrchatPlatform', 'vrchatAvatarThumb',
+        'vrchatIsOnline', 'vrchatAuthCookieValid',
+        'vrchatLastSyncAt'
+      ];
+    }
+
+    // ───────────────────────────────────────────────────────
+    // Fields ONLY admins (or Cloud Functions) may write.
+    // ───────────────────────────────────────────────────────
+    function adminOnlyKeys() {
+      return [
+        'warned', 'banned', 'warnReason', 'banReason',
+        'warnedAt', 'bannedAt',
+        'watcherActiveAt',
+        'targetedUpdateUrl', 'targetedUpdateNotes'
+      ];
+    }
+
+    // ───────────────────────────────────────────────────────
+    // users/{deviceHash}
+    // ───────────────────────────────────────────────────────
+    match /users/{deviceHash} {
+      // Anyone authenticated can read (admin reads all, public reads own).
+      allow read: if request.auth != null;
+
+      // Public (anon) user writing their own doc.
+      allow create, update: if isAnon()
+        && request.resource.data.deviceHash == deviceHash
+        && request.resource.data.authUid == request.auth.uid
+        && request.resource.data.diff(resource == null ? {} : resource.data)
+             .affectedKeys()
+             .hasOnly(selfMutableKeys());
+
+      // Admins can write any field (toggles, moderation, watcher, targeted updates).
+      allow create, update: if isAdmin();
+
+      // Allow delete of legacy fields via merge-set (FieldValue.delete).
+      // Firestore treats field deletion as an update, covered above.
+
+      // No public delete of the entire doc.
+      allow delete: if isAdmin();
+    }
+
+    // ───────────────────────────────────────────────────────
+    // usersById/{uid} — lightweight UID→deviceHash mapping
+    // ───────────────────────────────────────────────────────
+    match /usersById/{uid} {
+      allow read: if request.auth != null;
+
+      allow create, update: if isAnon()
+        && uid == request.auth.uid
+        && request.resource.data.keys()
+             .hasOnly(['deviceHash', 'authUid', 'appId', 'adminBuild', 'updatedAt']);
+
+      allow create, update, delete: if isAdmin();
+    }
+
+    // ───────────────────────────────────────────────────────
+    // bannedDevices/{deviceHash}
+    // ───────────────────────────────────────────────────────
+    match /bannedDevices/{deviceHash} {
+      allow read: if request.auth != null;
+      allow write: if isAdmin();
+    }
+
+    // ───────────────────────────────────────────────────────
+    // bannedIdentifiers/{identifier}
+    // ───────────────────────────────────────────────────────
+    match /bannedIdentifiers/{identifier} {
+      allow read: if request.auth != null;
+      allow write: if isAdmin();
+    }
+
+    // ───────────────────────────────────────────────────────
+    // announcements/{id}
+    // ───────────────────────────────────────────────────────
+    match /announcements/{id} {
+      allow read: if request.auth != null;
+      allow write: if isAdmin();
+    }
+
+    // ───────────────────────────────────────────────────────
+    // config/{docId}  (e.g. config/app for ToS)
+    // ───────────────────────────────────────────────────────
+    match /config/{docId} {
+      allow read: if request.auth != null;
+      allow write: if isAdmin();
+    }
+
+    // ───────────────────────────────────────────────────────
+    // releases/{docId}  (e.g. releases/latest)
+    // ───────────────────────────────────────────────────────
+    match /releases/{docId} {
+      allow read: if request.auth != null;
+      allow write: if isAdmin();
+    }
+
+    // ───────────────────────────────────────────────────────
+    // moderationEvents/{id} — audit / ban-evasion events
+    // ───────────────────────────────────────────────────────
+    match /moderationEvents/{id} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null;
+      allow update, delete: if isAdmin();
+    }
+
+    // ───────────────────────────────────────────────────────
+    // actions/{id} — admin audit trail
+    // ───────────────────────────────────────────────────────
+    match /actions/{id} {
+      allow read: if isAdmin();
+      allow create: if isAdmin();
+      allow update, delete: if false;
+    }
+  }
+}

@@ -640,6 +640,23 @@ private fun UsersTab(
         onDispose { reg.remove() }
     }
 
+    // Watcher heartbeat: while an admin has a user selected, refresh
+    // watcherActiveAt every 30s so the user's app enables live-mode.
+    LaunchedEffect(selectedDocId) {
+        val docId = selectedDocId
+        if (docId.isNullOrBlank()) return@LaunchedEffect
+        while (true) {
+            runCatching {
+                db.collection("users").document(docId)
+                    .set(
+                        mapOf("watcherActiveAt" to FieldValue.serverTimestamp()),
+                        SetOptions.merge()
+                    ).await()
+            }
+            delay(30_000L)
+        }
+    }
+
     val selectedRow = remember(selectedDocId, users.size) {
         selectedDocId?.let { id -> users.firstOrNull { it.docId == id } }
     }
@@ -893,7 +910,7 @@ private fun UsersTab(
                             ) { Text("VRC", style = MaterialTheme.typography.labelSmall) }
                         }
                         val isRecentlyOnline = u.isOnlineInApp &&
-                            (u.lastSeenAt?.toDate()?.time ?: 0L) > System.currentTimeMillis() - 30_000
+                            (u.lastSeenAt?.toDate()?.time ?: 0L) > System.currentTimeMillis() - 300_000
                         if (isRecentlyOnline) {
                             androidx.compose.material3.Badge(
                                 containerColor = MaterialTheme.colorScheme.primary
@@ -3065,7 +3082,7 @@ private fun DashboardTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
     var totalUsers  by remember { mutableIntStateOf(0) }
     var bannedCount by remember { mutableIntStateOf(0) }
     var warnedCount by remember { mutableIntStateOf(0) }
-    var onlineCount by remember { mutableIntStateOf(0) } // seen in last 5 min
+    var onlineCount by remember { mutableIntStateOf(0) }
     var loading by remember { mutableStateOf(true) }
     var evasionCount by remember { mutableIntStateOf(0) }
 
@@ -3079,8 +3096,10 @@ private fun DashboardTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
                 totalUsers  = snap.size()
                 bannedCount = snap.documents.count { it.getBoolean("banned") == true }
                 warnedCount = snap.documents.count { it.getBoolean("warned") == true }
+                val cutoff = System.currentTimeMillis() - 300_000
                 onlineCount = snap.documents.count {
-                    it.getBoolean("isOnlineInApp") == true
+                    it.getBoolean("isOnlineInApp") == true &&
+                        (it.getTimestamp("lastSeenAt")?.toDate()?.time ?: 0L) > cutoff
                 }
                 loading = false
             }
