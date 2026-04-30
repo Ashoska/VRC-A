@@ -12,9 +12,6 @@ Display name embedded in UI strings: "Ashoska Mitsu Sisko".
 - CI workflow: `.github/workflows/android.yml`
 - Firebase config: `google-services.json`
 - Firestore rules: `firestore.rules`
-- Firestore indexes: `firestore.indexes.json`
-- Cloud Functions: `functions/` (Node.js 18, deployed via `firebase deploy --only functions`)
-- Firebase project config: `firebase.json`
 
 ## Build Commands
 ```bash
@@ -90,7 +87,7 @@ The sync model is intentionally minimal — Firestore costs money and we only pu
 
 Both stop instantly when `isWatched` flips back to false (`collectLatest` cancels the inner loop). When nobody is watching, neither loop touches Firestore.
 
-**Force-kill detection**: If the user's app is force-killed, neither `onTaskRemoved` nor `onCleared` fires, so `isOnlineInApp` stays `true`. A **Cloud Function** (`functions/index.js`) runs every 5 minutes, queries users with `isOnlineInApp=true AND lastSeenAt < 5 minutes ago`, and batch-updates them to offline. Requires a composite index on `(isOnlineInApp ASC, lastSeenAt ASC)` — defined in `firestore.indexes.json`. Deploy with `firebase deploy --only functions`.
+**Force-kill detection (client-side)**: If the user's app is force-killed, neither `onTaskRemoved` nor `onCleared` fires, so `isOnlineInApp` stays `true` in Firestore. The admin app filters these out **client-side** instead of running a server-side cleanup: dashboard counter and per-user badges check `isOnlineInApp == true AND lastSeenAt within 5 minutes`. A 30-second clock tick (`nowMs`) re-derives the count even when no Firestore changes occur, so stale-online users drop off automatically as time passes. Stale data lingers in Firestore until the user opens the app again (which writes fresh `isOnlineInApp=true, lastSeenAt`); admins never see it because of the staleness filter.
 
 **Admin watcher heartbeat**: When an admin selects a user in the admin panel's detail view, a `LaunchedEffect` writes `watcherActiveAt = serverTimestamp()` to that user's doc every 30 seconds. When the admin navigates away or selects a different user, the coroutine is cancelled automatically. The user app reads `watcherActiveAt` from its snapshot listener and feeds it into `AdminWatchState.updateFromTimestampMs()` — if within 60s, live-mode starts.
 
@@ -102,7 +99,7 @@ Both stop instantly when `isWatched` flips back to false (`collectLatest` cancel
 
 **Offline editing**: User-content edits land in DataStore immediately and survive process death. On reconnect, the next debounced write or app-close write pushes them to Firestore. Last-writer-wins on conflict with admin edits during the offline window.
 
-**Admin online detection**: Dashboard counter and user list badges both check `isOnlineInApp == true AND lastSeenAt within 5 minutes`. Stale-online users (force-killed) are automatically cleaned up by the Cloud Function every 5 minutes.
+**Admin online detection**: Dashboard counter stores online candidates (`isOnlineInApp=true` docs with their `lastSeenAt`) in state, and a 30-second `nowMs` ticker re-derives the count using the current time. User list badges use a 1-second `nowMs` ticker for the same purpose. No server-side cleanup needed — staleness is purely a presentation-layer filter.
 
 ### NowPlaying
 - Ad/DJ detection restricted to Spotify only (`com.spotify.music`) to prevent false positives on regular songs
