@@ -3077,13 +3077,34 @@ private fun ConfigTab(
 private fun DashboardTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
     val scope = rememberCoroutineScope()
 
-    var totalUsers  by remember { mutableIntStateOf(0) }
-    var bannedCount by remember { mutableIntStateOf(0) }
-    var warnedCount by remember { mutableIntStateOf(0) }
     var loading by remember { mutableStateOf(true) }
     var evasionCount by remember { mutableIntStateOf(0) }
 
-    var onlineCount by remember { mutableIntStateOf(0) }
+    // Per-doc snapshot list — keeps the per-flag counts derived from a single
+    // source of truth so they recompose together in lockstep. Without this,
+    // separate `mutableIntStateOf` slots could update out of sync if Compose
+    // skipped recomposition on one of them.
+    data class UserFlags(val banned: Boolean, val warned: Boolean, val onlineInApp: Boolean)
+    val userFlags = remember { mutableStateListOf<UserFlags>() }
+
+    val totalUsers by remember { derivedStateOf { userFlags.size } }
+    val bannedCount by remember { derivedStateOf { userFlags.count { it.banned } } }
+    val warnedCount by remember { derivedStateOf { userFlags.count { it.warned } } }
+    val onlineCount by remember { derivedStateOf { userFlags.count { it.onlineInApp } } }
+
+    suspend fun refreshUsersOnce() {
+        runCatching {
+            val snap = db.collection("users").get().await()
+            val next = snap.documents.map {
+                UserFlags(
+                    banned = it.getBoolean("banned") == true,
+                    warned = it.getBoolean("warned") == true,
+                    onlineInApp = it.getBoolean("isOnlineInApp") == true
+                )
+            }
+            userFlags.clear(); userFlags.addAll(next)
+        }
+    }
 
     DisposableEffect(Unit) {
         setError(null)
@@ -3092,13 +3113,26 @@ private fun DashboardTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
             .addSnapshotListener { snap, e ->
                 if (e != null) { setError(e.message); loading = false; return@addSnapshotListener }
                 if (snap == null) { loading = false; return@addSnapshotListener }
-                totalUsers  = snap.size()
-                bannedCount = snap.documents.count { it.getBoolean("banned") == true }
-                warnedCount = snap.documents.count { it.getBoolean("warned") == true }
-                onlineCount = snap.documents.count { it.getBoolean("isOnlineInApp") == true }
+                val next = snap.documents.map {
+                    UserFlags(
+                        banned = it.getBoolean("banned") == true,
+                        warned = it.getBoolean("warned") == true,
+                        onlineInApp = it.getBoolean("isOnlineInApp") == true
+                    )
+                }
+                userFlags.clear(); userFlags.addAll(next)
                 loading = false
             }
         onDispose { reg.remove() }
+    }
+
+    // Belt-and-braces: force a one-shot refresh every 30 seconds to catch any
+    // missed snapshot updates (e.g., transient connection blips).
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(30_000L)
+            refreshUsersOnce()
+        }
     }
 
     DisposableEffect(Unit) {

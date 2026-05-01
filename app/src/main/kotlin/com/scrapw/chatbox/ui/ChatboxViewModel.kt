@@ -678,6 +678,27 @@ class ChatboxViewModel(
      */
     private var initialSnapshotProcessed = false
 
+    /**
+     * Seed [lastSyncedValues] from a Firestore snapshot. Called on the very
+     * first snapshot AND after [applyRemoteContentBeforeSync] so the snapshot
+     * listener has a baseline to compare admin edits against — without this,
+     * admin toggle/preset writes would be silently dropped during the window
+     * between listener-attach and the first successful [performSelfSync].
+     */
+    private fun seedLastSyncedFromSnapshot(snap: com.google.firebase.firestore.DocumentSnapshot) {
+        snap.getBoolean("afkEnabled")?.let { lastSyncedValues["afkEnabled"] = it }
+        snap.getBoolean("cycleEnabled")?.let { lastSyncedValues["cycleEnabled"] = it }
+        snap.getBoolean("spotifyEnabled")?.let { lastSyncedValues["spotifyEnabled"] = it }
+        snap.getBoolean("timeEnabled")?.let { lastSyncedValues["timeEnabled"] = it }
+        snap.getString("afkMessage")?.let { lastSyncedValues["afkMessage"] = it.trim() }
+        snap.getLong("cycleIntervalSeconds")?.let { lastSyncedValues["cycleIntervalSeconds"] = it.toInt().coerceAtLeast(2) }
+        snap.getString("cycleLinesText")?.let { lastSyncedValues["cycleLinesText"] = it.trim() }
+        for (i in 1..3) snap.getString("afkPreset$i")?.let { lastSyncedValues["afkPreset$i"] = it.trim() }
+        for (i in 1..5) snap.getString("cyclePreset$i")?.let { lastSyncedValues["cyclePreset$i"] = it.trim() }
+        snap.getLong("spotifyPreset")?.let { lastSyncedValues["spotifyPreset"] = it.toInt().coerceIn(1, 5) }
+        snap.getString("timeMode")?.let { lastSyncedValues["timeMode"] = it }
+    }
+
     private fun applyRemoteConfig(snap: com.google.firebase.firestore.DocumentSnapshot) {
         // Watcher detection runs on EVERY snapshot (even the first). Admins
         // refresh `watcherActiveAt` from the admin panel; if recent enough
@@ -692,12 +713,13 @@ class ChatboxViewModel(
         viewModelScope.launch {
             if (!initialSnapshotProcessed) {
                 initialSnapshotProcessed = true
+                // Seed baseline from the first snapshot so admin edits arriving
+                // before the first performSelfSync write can still be detected.
+                // We drop the first snapshot's content (DataStore wins cold start)
+                // but record what's on the doc so subsequent changes are caught.
+                seedLastSyncedFromSnapshot(snap)
                 return@launch
             }
-
-            // No baseline yet — first self-sync hasn't completed, so we can't
-            // tell echoes from admin edits. Skip until we have one.
-            if (lastSyncedValues.isEmpty()) return@launch
 
             // For each field, compare remote value against what we LAST WROTE
             // to Firestore (lastSyncedValues). If it matches our last write,
@@ -737,22 +759,26 @@ class ChatboxViewModel(
                 }
             }
 
+            // For string/int fields we fall back to the current local state when
+            // there's no baseline yet — without this, admin edits that arrive
+            // before performSelfSync's first write are silently dropped.
             snap.getString("afkMessage")?.let { remote ->
-                val synced = lastSyncedValues["afkMessage"] as? String
-                if (synced != null && remote.trim() != synced) {
+                val baseline = (lastSyncedValues["afkMessage"] as? String) ?: afkMessage.trim()
+                if (remote.trim() != baseline) {
                     userPreferencesRepository.saveAfkMessage(remote.trim())
                 }
             }
             snap.getLong("cycleIntervalSeconds")?.let { remote ->
                 val intVal = remote.toInt().coerceAtLeast(2)
-                val synced = lastSyncedValues["cycleIntervalSeconds"] as? Int
-                if (synced != null && intVal != synced) {
+                val baseline = (lastSyncedValues["cycleIntervalSeconds"] as? Int) ?: cycleIntervalSeconds
+                if (intVal != baseline) {
                     userPreferencesRepository.saveCycleInterval(intVal)
                 }
             }
             snap.getString("cycleLinesText")?.let { remote ->
-                val synced = lastSyncedValues["cycleLinesText"] as? String
-                if (synced != null && remote.trim() != synced) {
+                val baseline = (lastSyncedValues["cycleLinesText"] as? String)
+                    ?: cycleLines.joinToString("\n").trim()
+                if (remote.trim() != baseline) {
                     userPreferencesRepository.saveCycleMessages(remote.trim())
                 }
             }
@@ -762,9 +788,10 @@ class ChatboxViewModel(
                 { v -> userPreferencesRepository.saveAfkPreset3(v) }
             )
             for (i in 1..3) {
-                val remoteMsg = snap.getString("afkPreset$i")
-                val synced = lastSyncedValues["afkPreset$i"] as? String
-                if (remoteMsg != null && synced != null && remoteMsg.trim() != synced) {
+                val remoteMsg = snap.getString("afkPreset$i") ?: continue
+                val baseline = (lastSyncedValues["afkPreset$i"] as? String)
+                    ?: afkPresetTexts.getOrNull(i - 1)?.trim().orEmpty()
+                if (remoteMsg.trim() != baseline) {
                     afkPresetSavers[i - 1](remoteMsg.trim())
                 }
             }
@@ -776,9 +803,10 @@ class ChatboxViewModel(
                 userPreferencesRepository::saveCyclePreset5
             )
             for (i in 1..5) {
-                val remoteMsg = snap.getString("cyclePreset$i")
-                val synced = lastSyncedValues["cyclePreset$i"] as? String
-                if (remoteMsg != null && synced != null && remoteMsg.trim() != synced) {
+                val remoteMsg = snap.getString("cyclePreset$i") ?: continue
+                val baseline = (lastSyncedValues["cyclePreset$i"] as? String)
+                    ?: cyclePresetMessages.getOrNull(i - 1)?.trim().orEmpty()
+                if (remoteMsg.trim() != baseline) {
                     val interval = cyclePresetIntervals.getOrElse(i - 1) { 10 }
                     presetSavers[i - 1](remoteMsg.trim(), interval, null)
                 }
