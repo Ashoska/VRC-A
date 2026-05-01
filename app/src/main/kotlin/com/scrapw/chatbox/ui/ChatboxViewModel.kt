@@ -345,6 +345,7 @@ class ChatboxViewModel(
      */
     private fun startSelfSyncLoopIfNeeded() {
         if (BuildConfig.IS_ADMIN_BUILD) return
+        if (!initialDataLoaded) return
 
         syncTriggerJob?.cancel()
         syncTriggerJob = viewModelScope.launch {
@@ -408,6 +409,70 @@ class ChatboxViewModel(
         "cyclePreset4" to (cyclePresetMessages.getOrNull(3)?.trim().orEmpty()),
         "cyclePreset5" to (cyclePresetMessages.getOrNull(4)?.trim().orEmpty()),
     )
+
+    private suspend fun applyRemoteContentBeforeSync() {
+        runCatching {
+            val deviceHash = readDeviceHashFromPrefs()
+            if (!isValidDeviceHash(deviceHash)) return@runCatching
+            val snap = db.collection(COL_USERS).document(deviceHash).get().await()
+            if (snap == null || !snap.exists()) return@runCatching
+
+            snap.getString("afkMessage")?.trim()?.let { remote ->
+                if (remote != afkMessage.trim()) {
+                    afkMessage = remote
+                    userPreferencesRepository.saveAfkMessage(remote)
+                }
+            }
+            snap.getLong("cycleIntervalSeconds")?.toInt()?.coerceAtLeast(2)?.let { remote ->
+                if (remote != cycleIntervalSeconds) {
+                    cycleIntervalSeconds = remote
+                    userPreferencesRepository.saveCycleInterval(remote)
+                }
+            }
+            snap.getString("cycleLinesText")?.trim()?.let { remote ->
+                val local = cycleLines.joinToString("\n").trim()
+                if (remote != local) {
+                    setCycleLinesFromTextPreserve(remote)
+                    userPreferencesRepository.saveCycleMessages(remote)
+                }
+            }
+            val afkPresetSavers = listOf<suspend (String) -> Unit>(
+                { v -> userPreferencesRepository.saveAfkPreset1(v) },
+                { v -> userPreferencesRepository.saveAfkPreset2(v) },
+                { v -> userPreferencesRepository.saveAfkPreset3(v) }
+            )
+            for (i in 1..3) {
+                snap.getString("afkPreset$i")?.trim()?.let { remote ->
+                    if (remote != afkPresetTexts[i - 1].trim()) {
+                        afkPresetTexts[i - 1] = remote
+                        afkPresetSavers[i - 1](remote)
+                    }
+                }
+            }
+            val presetSavers = listOf<suspend (String, Int, String?) -> Unit>(
+                userPreferencesRepository::saveCyclePreset1,
+                userPreferencesRepository::saveCyclePreset2,
+                userPreferencesRepository::saveCyclePreset3,
+                userPreferencesRepository::saveCyclePreset4,
+                userPreferencesRepository::saveCyclePreset5
+            )
+            for (i in 1..5) {
+                snap.getString("cyclePreset$i")?.trim()?.let { remote ->
+                    if (remote != (cyclePresetMessages.getOrNull(i - 1)?.trim().orEmpty())) {
+                        cyclePresetMessages[i - 1] = remote
+                        val interval = cyclePresetIntervals.getOrElse(i - 1) { 10 }
+                        presetSavers[i - 1](remote, interval, null)
+                    }
+                }
+            }
+            snap.getLong("spotifyPreset")?.toInt()?.coerceIn(1, 5)?.let { remote ->
+                if (remote != spotifyPreset) {
+                    spotifyPreset = remote
+                    userPreferencesRepository.saveSpotifyPreset(remote)
+                }
+            }
+        }
+    }
 
     private suspend fun performSelfSync() {
         if (!initialDataLoaded) return
@@ -1107,10 +1172,11 @@ class ChatboxViewModel(
                 timeMode = userPreferencesRepository.timeMode.first()
             }
             initialDataLoaded = true
-            // One-shot app-open write: marks the user online and pushes the
-            // current content snapshot so admins see the latest state. No
-            // periodic loop after this — content writes are event-driven
-            // (debounced) and live writes only run while watched.
+            // Read-before-write: fetch the Firestore doc so admin edits
+            // made while the user was offline aren't clobbered by our
+            // app-open write. Toggles always start OFF per design, so we
+            // only merge content fields (messages, presets, intervals).
+            applyRemoteContentBeforeSync()
             performSelfSync()
         }
 

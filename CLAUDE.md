@@ -75,7 +75,7 @@ Key fields written by the app:
 ### Firestore Sync Architecture
 The sync model is intentionally minimal — Firestore costs money and we only push to it when we have to. Three classes of writes:
 
-1. **App-open write (one)**: After `initialDataLoaded` flips, `performSelfSync` runs once with the full content snapshot (toggles, messages, presets, IP slots, identity, `isOnlineInApp=true`, `lastSeenAt`). This is the only write tied to startup.
+1. **App-open write (one)**: After `initialDataLoaded` flips, `applyRemoteContentBeforeSync()` reads the Firestore doc to pick up any admin edits made while the user was offline (messages, presets, intervals — not toggles, which always start OFF), then `performSelfSync` runs once with the merged state. This is the only write tied to startup.
 2. **App-close write (one)**: `VrchatPipelineService.onTaskRemoved` writes `isOnlineInApp=false, lastSeenAt`. `ChatboxViewModel.onCleared` does the same via `GlobalScope` as a fallback for cases where the foreground service isn't running.
 3. **Event-driven content writes (debounced 500ms)**: Whenever the user changes a toggle, types in a message, edits a preset, etc., a debounced trigger writes the current content snapshot. No safety net periodic loop — if a write fails, the next user edit picks it up.
 
@@ -97,7 +97,7 @@ Both stop instantly when `isWatched` flips back to false (`collectLatest` cancel
 
 **First-snapshot skip** (`initialSnapshotProcessed`): The very first Firestore snapshot after listener attach is dropped — DataStore is the source of truth on cold start.
 
-**Offline editing**: User-content edits land in DataStore immediately and survive process death. On reconnect, the next debounced write or app-close write pushes them to Firestore. Last-writer-wins on conflict with admin edits during the offline window.
+**Offline editing**: User-content edits land in DataStore immediately and survive process death. On reconnect, the next debounced write or app-close write pushes them to Firestore. Admin-content edits are preserved across user restarts via `applyRemoteContentBeforeSync()` (read-before-write on app-open). If both the user and admin edited the same field while the user was offline, the Firestore version (admin's) wins because it's applied before the app-open write.
 
 **Admin online detection**: Dashboard counter stores online candidates (`isOnlineInApp=true` docs with their `lastSeenAt`) in state, and a 30-second `nowMs` ticker re-derives the count using the current time. User list badges use a 1-second `nowMs` ticker for the same purpose. No server-side cleanup needed — staleness is purely a presentation-layer filter.
 
