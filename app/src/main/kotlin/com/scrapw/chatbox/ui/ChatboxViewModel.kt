@@ -294,6 +294,17 @@ class ChatboxViewModel(
         data["cyclePreset4"] = cyclePresetMessages.getOrNull(3)?.trim().orEmpty()
         data["cyclePreset5"] = cyclePresetMessages.getOrNull(4)?.trim().orEmpty()
 
+        // Live output preview — included in every self-sync write (debounced
+        // on edits) so admins can see the user's current chatbox output
+        // without needing to actively "watch" them. Live-mode sync writes a
+        // higher-frequency version (every 500ms) for real-time playback.
+        data["combinedPreviewText"] = combinedPreviewText.trim()
+        data["nowPlayingDetected"] = nowPlayingDetected
+        data["nowPlayingIsPlaying"] = nowPlayingIsPlaying
+        data["nowPlayingTitle"] = lastNowPlayingTitle.takeIf { it != "(blank)" }?.trim().orEmpty()
+        data["nowPlayingArtist"] = lastNowPlayingArtist.takeIf { it != "(blank)" }?.trim().orEmpty()
+        data["activePackage"] = activePackage
+
         // Multi-IP slots
         val activeSlot = runCatching {
             kotlinx.coroutines.runBlocking { userPreferencesRepository.activeIpSlot.first() }

@@ -559,101 +559,116 @@ private fun UsersTab(
         }
     }
 
-    DisposableEffect(liveLimit) {
-        setError(null); setGlobalLoading(true)
-        val reg: ListenerRegistration = db.collection("users")
-            .orderBy("lastSeenAt", Query.Direction.DESCENDING)
-            .limit(liveLimit.toLong())
-            .addSnapshotListener { snap, e ->
-                if (e != null) { setGlobalLoading(false); setError(e.message ?: "Users live update failed"); return@addSnapshotListener }
-                if (snap == null) { setGlobalLoading(false); return@addSnapshotListener }
-                val next = snap.documents.map { d ->
-                    val docId = d.id
-                    val authUid = (d.getString("authUid") ?: d.getString("uid") ?: "").trim()
-                    UserRow(
-                        docId = docId, authUid = authUid,
-                        displayName = (d.getString("displayName") ?: "").trim(),
-                        deviceHash = (d.getString("deviceHash") ?: "").trim(),
-                        warned = d.getBoolean("warned") ?: false,
-                        banned = d.getBoolean("banned") ?: false,
-                        lastSeenAt = d.getTimestamp("lastSeenAt"),
-                        updatedAt = d.getTimestamp("updatedAt"),
-                        vrchatUserId = (d.getString("vrchatUserId") ?: "").trim(),
-                        vrchatDisplayName = (d.getString("vrchatDisplayName") ?: "").trim(),
-                        vrchatState = (d.getString("vrchatState") ?: "").trim(),
-                        vrchatStatus = (d.getString("vrchatStatus") ?: "").trim(),
-                        vrchatIsOnline = d.getBoolean("vrchatIsOnline") ?: false,
-                        vrchatWorld = (d.getString("vrchatWorld") ?: "").trim(),
-                        vrchatPlayerCount = (d.getLong("vrchatInstancePlayerCount") ?: 0).toInt(),
-                        vrchatCapacity = (d.getLong("vrchatInstanceCapacity") ?: 0).toInt(),
-                        vrchatPlatform = (d.getString("vrchatPlatform") ?: "").trim(),
-                        vrchatLastSyncAt = d.getTimestamp("vrchatLastSyncAt"),
-                        isOnlineInApp = d.getBoolean("isOnlineInApp") ?: false
-                    )
-                }
-                users.clear(); users.addAll(next); setGlobalLoading(false)
-            }
-        onDispose { reg.remove() }
+    fun parseUserRow(d: com.google.firebase.firestore.DocumentSnapshot): UserRow {
+        val docId = d.id
+        val authUid = (d.getString("authUid") ?: d.getString("uid") ?: "").trim()
+        return UserRow(
+            docId = docId, authUid = authUid,
+            displayName = (d.getString("displayName") ?: "").trim(),
+            deviceHash = (d.getString("deviceHash") ?: "").trim(),
+            warned = d.getBoolean("warned") ?: false,
+            banned = d.getBoolean("banned") ?: false,
+            lastSeenAt = d.getTimestamp("lastSeenAt"),
+            updatedAt = d.getTimestamp("updatedAt"),
+            vrchatUserId = (d.getString("vrchatUserId") ?: "").trim(),
+            vrchatDisplayName = (d.getString("vrchatDisplayName") ?: "").trim(),
+            vrchatState = (d.getString("vrchatState") ?: "").trim(),
+            vrchatStatus = (d.getString("vrchatStatus") ?: "").trim(),
+            vrchatIsOnline = d.getBoolean("vrchatIsOnline") ?: false,
+            vrchatWorld = (d.getString("vrchatWorld") ?: "").trim(),
+            vrchatPlayerCount = (d.getLong("vrchatInstancePlayerCount") ?: 0).toInt(),
+            vrchatCapacity = (d.getLong("vrchatInstanceCapacity") ?: 0).toInt(),
+            vrchatPlatform = (d.getString("vrchatPlatform") ?: "").trim(),
+            vrchatLastSyncAt = d.getTimestamp("vrchatLastSyncAt"),
+            isOnlineInApp = d.getBoolean("isOnlineInApp") ?: false
+        )
     }
 
-    DisposableEffect(selectedDocId) {
+    fun parseUserDetail(snap: com.google.firebase.firestore.DocumentSnapshot): UserDetail {
+        fun s(key: String) = (snap.getString(key) ?: "").trim()
+        fun b(key: String) = snap.getBoolean(key) ?: false
+        fun l(key: String) = snap.getLong(key) ?: 0L
+        return UserDetail(
+            pinnedEnabled  = b("afkEnabled"), pinnedMessage = s("afkMessage"),
+            pinnedPresets  = listOf(s("afkPreset1"), s("afkPreset2"), s("afkPreset3")),
+            cycleEnabled   = b("cycleEnabled"), cycleIntervalSeconds = l("cycleIntervalSeconds"),
+            cycleLinesText = s("cycleLinesText"),
+            cyclePresets   = listOf(s("cyclePreset1"), s("cyclePreset2"), s("cyclePreset3"), s("cyclePreset4"), s("cyclePreset5")),
+            spotifyEnabled = b("spotifyEnabled"), spotifyDemoEnabled = b("spotifyDemoEnabled"),
+            spotifyPreset  = l("spotifyPreset"),
+            nowPlayingDetected = b("nowPlayingDetected"), nowPlayingIsPlaying = b("nowPlayingIsPlaying"),
+            nowPlayingTitle = s("nowPlayingTitle"), nowPlayingArtist = s("nowPlayingArtist"),
+            nowPlayingPackage = s("activePackage"),
+            combinedPreviewText = s("combinedPreviewText"),
+            warnReason = s("warnReason"), banReason = s("banReason"),
+            versionName = s("versionName"), versionCode = l("versionCode"), appId = s("appId"),
+            adminBuild = b("adminBuild"),
+            vrchatUserId = s("vrchatUserId"), vrchatDisplayName = s("vrchatDisplayName"),
+            vrchatState = s("vrchatState"), vrchatStatus = s("vrchatStatus"),
+            vrchatIsOnline = snap.getBoolean("vrchatIsOnline") ?: false,
+            vrchatStatusDescription = s("vrchatStatusDescription"),
+            vrchatWorld = s("vrchatWorld"), vrchatLocation = s("vrchatLocation"),
+            vrchatPlayerCount = l("vrchatInstancePlayerCount"), vrchatCapacity = l("vrchatInstanceCapacity"),
+            vrchatPlatform = s("vrchatPlatform"),
+            timeEnabled = b("timeEnabled"),
+            vrchatLastSyncAt = snap.getTimestamp("vrchatLastSyncAt")
+        )
+    }
+
+    // Load directory: immediate on mount + every 30s. Admin-build docs are
+    // excluded so a tester running both builds on the same device doesn't
+    // see their own admin doc cluttering the public-user list.
+    LaunchedEffect(liveLimit) {
+        while (true) {
+            runCatching {
+                val snap = db.collection("users")
+                    .orderBy("lastSeenAt", Query.Direction.DESCENDING)
+                    .limit(liveLimit.toLong())
+                    .get().await()
+                val next = snap.documents
+                    .filter { it.getBoolean("adminBuild") != true }
+                    .map { parseUserRow(it) }
+                users.clear(); users.addAll(next)
+            }.onFailure { e -> setError(e.message ?: "Users load failed") }
+            setGlobalLoading(false)
+            delay(30_000L)
+        }
+    }
+
+    // Selected user detail: poll every 500ms for live data + write watcherActiveAt
+    LaunchedEffect(selectedDocId) {
         val docId = selectedDocId
         if (docId.isNullOrBlank()) {
             selectedDetail = null; selectedDetailLoading = false
-            return@DisposableEffect onDispose { }
+            return@LaunchedEffect
         }
-        selectedDetailLoading = true; setError(null)
-        val reg = db.collection("users").document(docId)
-            .addSnapshotListener { snap, e ->
-                if (e != null) { selectedDetailLoading = false; setError(e.message ?: "User detail live update failed"); return@addSnapshotListener }
-                if (snap == null || !snap.exists()) { selectedDetailLoading = false; selectedDetail = null; return@addSnapshotListener }
-                fun s(key: String) = (snap.getString(key) ?: "").trim()
-                fun b(key: String) = snap.getBoolean(key) ?: false
-                fun l(key: String) = snap.getLong(key) ?: 0L
-                selectedDetail = UserDetail(
-                    pinnedEnabled  = b("afkEnabled"), pinnedMessage = s("afkMessage"),
-                    pinnedPresets  = listOf(s("afkPreset1"), s("afkPreset2"), s("afkPreset3")),
-                    cycleEnabled   = b("cycleEnabled"), cycleIntervalSeconds = l("cycleIntervalSeconds"),
-                    cycleLinesText = s("cycleLinesText"),
-                    cyclePresets   = listOf(s("cyclePreset1"), s("cyclePreset2"), s("cyclePreset3"), s("cyclePreset4"), s("cyclePreset5")),
-                    spotifyEnabled = b("spotifyEnabled"), spotifyDemoEnabled = b("spotifyDemoEnabled"),
-                    spotifyPreset  = l("spotifyPreset"),
-                    nowPlayingDetected = b("nowPlayingDetected"), nowPlayingIsPlaying = b("nowPlayingIsPlaying"),
-                    nowPlayingTitle = s("nowPlayingTitle"), nowPlayingArtist = s("nowPlayingArtist"),
-                    nowPlayingPackage = s("activePackage"),
-                    combinedPreviewText = s("combinedPreviewText"),
-                    warnReason = s("warnReason"), banReason = s("banReason"),
-                    versionName = s("versionName"), versionCode = l("versionCode"), appId = s("appId"),
-                    adminBuild = b("adminBuild"),
-                    vrchatUserId = s("vrchatUserId"), vrchatDisplayName = s("vrchatDisplayName"),
-                    vrchatState = s("vrchatState"), vrchatStatus = s("vrchatStatus"),
-                    vrchatIsOnline = snap.getBoolean("vrchatIsOnline") ?: false,
-                    vrchatStatusDescription = s("vrchatStatusDescription"),
-                    vrchatWorld = s("vrchatWorld"), vrchatLocation = s("vrchatLocation"),
-                    vrchatPlayerCount = l("vrchatInstancePlayerCount"), vrchatCapacity = l("vrchatInstanceCapacity"),
-                    vrchatPlatform = s("vrchatPlatform"),
-                    timeEnabled = b("timeEnabled"),
-                    vrchatLastSyncAt = snap.getTimestamp("vrchatLastSyncAt")
-                )
-                selectedDetailLoading = false
-            }
-        onDispose { reg.remove() }
-    }
-
-    // Watcher heartbeat: while an admin has a user selected, refresh
-    // watcherActiveAt every 30s so the user's app enables live-mode.
-    LaunchedEffect(selectedDocId) {
-        val docId = selectedDocId
-        if (docId.isNullOrBlank()) return@LaunchedEffect
+        selectedDetailLoading = true
+        var watcherTick = 0
         while (true) {
             runCatching {
-                db.collection("users").document(docId)
-                    .set(
-                        mapOf("watcherActiveAt" to FieldValue.serverTimestamp()),
-                        SetOptions.merge()
-                    ).await()
+                val snap = db.collection("users").document(docId).get().await()
+                if (snap != null && snap.exists()) {
+                    selectedDetail = parseUserDetail(snap)
+                } else {
+                    selectedDetail = null
+                }
+                selectedDetailLoading = false
+            }.onFailure { e ->
+                setError(e.message ?: "User detail load failed")
+                selectedDetailLoading = false
             }
-            delay(30_000L)
+            // Write watcherActiveAt every 30s (every 60 iterations at 500ms)
+            if (watcherTick % 60 == 0) {
+                runCatching {
+                    db.collection("users").document(docId)
+                        .set(
+                            mapOf("watcherActiveAt" to FieldValue.serverTimestamp()),
+                            SetOptions.merge()
+                        ).await()
+                }
+            }
+            watcherTick++
+            delay(500L)
         }
     }
 
@@ -3075,63 +3090,35 @@ private fun ConfigTab(
 
 @Composable
 private fun DashboardTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
-    val scope = rememberCoroutineScope()
-
+    var totalUsers  by remember { mutableIntStateOf(0) }
+    var onlineCount by remember { mutableIntStateOf(0) }
+    var bannedCount by remember { mutableIntStateOf(0) }
+    var warnedCount by remember { mutableIntStateOf(0) }
     var loading by remember { mutableStateOf(true) }
     var evasionCount by remember { mutableIntStateOf(0) }
 
-    // Per-doc snapshot list — keeps the per-flag counts derived from a single
-    // source of truth so they recompose together in lockstep. Without this,
-    // separate `mutableIntStateOf` slots could update out of sync if Compose
-    // skipped recomposition on one of them.
-    data class UserFlags(val banned: Boolean, val warned: Boolean, val onlineInApp: Boolean)
-    val userFlags = remember { mutableStateListOf<UserFlags>() }
-
-    val totalUsers by remember { derivedStateOf { userFlags.size } }
-    val bannedCount by remember { derivedStateOf { userFlags.count { it.banned } } }
-    val warnedCount by remember { derivedStateOf { userFlags.count { it.warned } } }
-    val onlineCount by remember { derivedStateOf { userFlags.count { it.onlineInApp } } }
-
-    suspend fun refreshUsersOnce() {
+    suspend fun loadStats() {
         runCatching {
             val snap = db.collection("users").get().await()
-            val next = snap.documents.map {
-                UserFlags(
-                    banned = it.getBoolean("banned") == true,
-                    warned = it.getBoolean("warned") == true,
-                    onlineInApp = it.getBoolean("isOnlineInApp") == true
-                )
-            }
-            userFlags.clear(); userFlags.addAll(next)
+            // Exclude admin-build docs — when an admin tester also runs the
+            // public build on the same device, only the public-build doc
+            // should count toward user-facing stats.
+            val publicDocs = snap.documents.filter { it.getBoolean("adminBuild") != true }
+            totalUsers  = publicDocs.size
+            onlineCount = publicDocs.count { it.getBoolean("isOnlineInApp") == true }
+            bannedCount = publicDocs.count { it.getBoolean("banned") == true }
+            warnedCount = publicDocs.count { it.getBoolean("warned") == true }
+            loading = false
+        }.onFailure { e ->
+            setError(e.message); loading = false
         }
     }
 
-    DisposableEffect(Unit) {
-        setError(null)
-        loading = true
-        val reg = db.collection("users")
-            .addSnapshotListener { snap, e ->
-                if (e != null) { setError(e.message); loading = false; return@addSnapshotListener }
-                if (snap == null) { loading = false; return@addSnapshotListener }
-                val next = snap.documents.map {
-                    UserFlags(
-                        banned = it.getBoolean("banned") == true,
-                        warned = it.getBoolean("warned") == true,
-                        onlineInApp = it.getBoolean("isOnlineInApp") == true
-                    )
-                }
-                userFlags.clear(); userFlags.addAll(next)
-                loading = false
-            }
-        onDispose { reg.remove() }
-    }
-
-    // Belt-and-braces: force a one-shot refresh every 30 seconds to catch any
-    // missed snapshot updates (e.g., transient connection blips).
     LaunchedEffect(Unit) {
+        loadStats()
         while (true) {
             delay(30_000L)
-            refreshUsersOnce()
+            loadStats()
         }
     }
 

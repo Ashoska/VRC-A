@@ -63,7 +63,8 @@ Key fields written by the app:
 - `targetedUpdateUrl` / `targetedUpdateNotes` (strings): Admin-pushed targeted APK update for specific user
 - `watcherActiveAt` (timestamp): **Admin-only write.** Refreshed every ~30s while an admin has this user's detail page open. User app reads it from snapshots and feeds into `AdminWatchState.updateFromTimestampMs` — if within 60s, live-mode loops start.
 - VRChat presence fields (`vrchatUserId`, `vrchatDisplayName`, `vrchatState`, `vrchatLocation`, etc.): Only written while watched.
-- NowPlaying / preview fields (`nowPlayingTitle`, `nowPlayingArtist`, `combinedPreviewText`, `lastReportedTime`): Only written while watched (live-mode loop).
+- NowPlaying / preview fields (`nowPlayingTitle`, `nowPlayingArtist`, `combinedPreviewText`, `activePackage`): Now included in **every** self-sync write (debounced) so admins can see the user's current chatbox output without needing to actively watch them. Live-mode writes a higher-frequency version every 500ms.
+- `lastReportedTime`, `cycleTrimWarning`, `lastTimeUpdateAt`: Only written while watched (live-mode loop).
 
 **Friends are no longer in Firestore** — `savedFriendIds`/`savedFriendNames` are deleted via `FieldValue.delete()` on offline write. They live in local SharedPreferences only.
 
