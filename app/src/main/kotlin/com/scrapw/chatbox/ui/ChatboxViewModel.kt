@@ -264,6 +264,9 @@ class ChatboxViewModel(
             "versionName" to BuildConfig.VERSION_NAME,
             "versionCode" to BuildConfig.VERSION_CODE,
 
+            "displayName" to (com.scrapw.chatbox.vrchat.VrchatAuthManager
+                .getStoredDisplayName(app) ?: ""),
+
             "isOnlineInApp" to true,
             "lastSeenAt" to FieldValue.serverTimestamp(),
             "updatedAt" to FieldValue.serverTimestamp(),
