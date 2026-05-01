@@ -35,29 +35,25 @@ service cloud.firestore {
 
     function selfMutableKeys() {
       return [
+        // Identity / debug
         "lastSeenAt", "updatedAt",
         "appId", "adminBuild", "versionName", "versionCode",
         "docId", "docIdType",
-        "authUid", "uid",
-        "currentUid",
+        "authUid", "uid", "currentUid",
         "deviceHash",
         "tosAcceptedVersion", "tosAcceptedAt",
         "displayName",
-        "alias",
 
         // App online status
         "isOnlineInApp",
 
-        // Pinned message (renamed from AFK -- old key names kept for compat)
+        // Pinned message
         "afkEnabled", "afkMessage",
         "afkPreset1", "afkPreset2", "afkPreset3",
-        "afkPreset1Name", "afkPreset2Name", "afkPreset3Name",
 
         // Cycle
         "cycleEnabled", "cycleIntervalSeconds", "cycleLines", "cycleLinesText",
         "cyclePreset1", "cyclePreset2", "cyclePreset3", "cyclePreset4", "cyclePreset5",
-        "cyclePreset1Name", "cyclePreset2Name", "cyclePreset3Name",
-        "cyclePreset4Name", "cyclePreset5Name",
 
         // Now Playing
         "spotifyEnabled", "spotifyDemoEnabled", "spotifyPreset",
@@ -68,20 +64,15 @@ service cloud.firestore {
         "activePackage",
         "combinedPreviewText",
         "cycleTrimWarning",
-        "cardOrder",
-        "dividerConfig",
 
         // Time
         "timeEnabled", "timeMode",
         "lastReportedTime", "lastTimeUpdateAt",
 
-        // Multi-IP slots
-        "ip1Name", "ip1Address",
-        "ip2Name", "ip2Address",
-        "ip3Name", "ip3Address",
+        // Multi-IP slot selector (slot names/addresses are local-only DataStore)
         "activeIpSlot",
 
-        // VRChat identity + presence (written by PipelineService, read by admin)
+        // VRChat identity + presence (written by PipelineService when watched)
         "vrchatUserId", "vrchatDisplayName",
         "vrchatState", "vrchatStatus", "vrchatStatusDescription",
         "vrchatWorld", "vrchatLocation",
@@ -90,14 +81,9 @@ service cloud.firestore {
         "vrchatIsOnline",
         "vrchatLastSyncAt", "vrchatAuthCookieValid",
 
-        // Friends cache (kept for cleanup via FieldValue.delete)
-        "savedFriendIds", "savedFriendNames",
-
-        // Notification preferences (local only, synced for admin visibility)
-        "notifFriendRequest", "notifInvite",
-        "notifFriendOnline", "notifFriendOffline",
-        "notifUnfriend", "notifGroupEvent",
-        "notifGroupAnnouncement"
+        // Friends cache (kept ONLY so FieldValue.delete() cleanup is allowed
+        // by the rules — never written with real data anymore, lives locally)
+        "savedFriendIds", "savedFriendNames"
       ];
     }
 
@@ -141,7 +127,7 @@ service cloud.firestore {
         && request.resource.data.diff(resource.data).changedKeys().hasOnly(selfMutableKeys())
         && !request.resource.data.diff(resource.data).changedKeys().hasAny(ownerOnlyUserKeys());
 
-      // Owner can update any field (ban, warn, edit presets, watcher, targeted updates, etc.)
+      // Owner can update any field (ban, warn, edit presets, watcher, targeted updates).
       allow update: if isOwner()
         && request.resource.data.deviceHash == deviceHash
         && deviceIdentityConsistent(deviceHash);
@@ -150,7 +136,7 @@ service cloud.firestore {
     }
 
     /* =========================
-       USERS BY ID
+       USERS BY ID — UID → deviceHash mapping
        ========================= */
 
     match /usersById/{uid} {
@@ -202,7 +188,7 @@ service cloud.firestore {
     }
 
     /* =========================
-       BAN SYSTEM (new tri-directional model)
+       BAN SYSTEM (tri-directional model)
        ========================= */
 
     match /bannedIdentifiers/{identifier} {
@@ -217,7 +203,7 @@ service cloud.firestore {
     }
 
     /* =========================
-       LEGACY DEVICE BANS (kept for migration, no new writes)
+       LEGACY DEVICE BANS (kept for migration)
        ========================= */
 
     match /bannedDevices/{deviceHash} {
@@ -230,7 +216,7 @@ service cloud.firestore {
     }
 
     /* =========================
-       MODERATION EVENTS
+       MODERATION EVENTS — audit / ban-evasion
        ========================= */
 
     match /moderationEvents/{id} {
@@ -250,7 +236,7 @@ service cloud.firestore {
     }
 
     /* =========================
-       ACTIONS / AUDIT TRAIL
+       ACTIONS — admin audit trail
        ========================= */
 
     match /actions/{id} {
@@ -260,7 +246,7 @@ service cloud.firestore {
     }
 
     /* =========================
-       CONFIG
+       CONFIG — config/app holds ownerUid + ToS
        ========================= */
 
     match /config/{docId} {
@@ -268,14 +254,6 @@ service cloud.firestore {
       allow list: if false;
       allow create, update: if isOwner();
       allow delete: if false;
-    }
-
-    /* =========================
-       DEVICES
-       ========================= */
-
-    match /devices/{id} {
-      allow read, write: if isOwner();
     }
 
     // Default deny
