@@ -622,12 +622,13 @@ class ChatboxViewModel(
                             moderationLastError = ""
                             enforceIfBannedChanged()
 
-                            // Skip applying remote config when the snapshot reflects our own
-                            // pending local writes — prevents stale data from overwriting
-                            // the user's fresh edits before they reach the server.
-                            if (!snap.metadata.hasPendingWrites()) {
-                                applyRemoteConfig(snap)
-                            }
+                            // Apply remote config on every non-echo snapshot.
+                            // Echo suppression is handled inside applyRemoteConfig
+                            // via the per-field lastSyncedValues map — no need to
+                            // gate on hasPendingWrites() which blocks admin edits
+                            // during live-mode (writes every 500ms keep pending
+                            // state almost perpetually true).
+                            applyRemoteConfig(snap)
                         }
                 }
 

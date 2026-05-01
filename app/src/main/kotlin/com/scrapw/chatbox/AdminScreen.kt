@@ -909,9 +909,7 @@ private fun UsersTab(
                                 containerColor = MaterialTheme.colorScheme.tertiary
                             ) { Text("VRC", style = MaterialTheme.typography.labelSmall) }
                         }
-                        val isRecentlyOnline = u.isOnlineInApp &&
-                            (u.lastSeenAt?.toDate()?.time ?: 0L) > nowMs - 300_000
-                        if (isRecentlyOnline) {
+                        if (u.isOnlineInApp) {
                             androidx.compose.material3.Badge(
                                 containerColor = MaterialTheme.colorScheme.primary
                             ) { Text("ONLINE", style = MaterialTheme.typography.labelSmall) }
@@ -3085,20 +3083,7 @@ private fun DashboardTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
     var loading by remember { mutableStateOf(true) }
     var evasionCount by remember { mutableIntStateOf(0) }
 
-    // (isOnlineInApp=true) candidates as (docId, lastSeenAtMs) pairs. The
-    // count of "actually online" users is derived from this list + nowMs so
-    // it stays correct as time passes (force-killed users with stale
-    // lastSeenAt drop off after the staleness window without needing any
-    // server-side cleanup).
-    val onlineCandidates = remember { mutableStateListOf<Pair<String, Long>>() }
-    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) {
-        while (true) { nowMs = System.currentTimeMillis(); delay(30_000L) }
-    }
-    val onlineCount = remember(onlineCandidates.toList(), nowMs) {
-        val cutoff = nowMs - 300_000
-        onlineCandidates.count { it.second > cutoff }
-    }
+    var onlineCount by remember { mutableIntStateOf(0) }
 
     DisposableEffect(Unit) {
         setError(null)
@@ -3110,11 +3095,7 @@ private fun DashboardTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
                 totalUsers  = snap.size()
                 bannedCount = snap.documents.count { it.getBoolean("banned") == true }
                 warnedCount = snap.documents.count { it.getBoolean("warned") == true }
-                val candidates = snap.documents
-                    .filter { it.getBoolean("isOnlineInApp") == true }
-                    .map { it.id to (it.getTimestamp("lastSeenAt")?.toDate()?.time ?: 0L) }
-                onlineCandidates.clear()
-                onlineCandidates.addAll(candidates)
+                onlineCount = snap.documents.count { it.getBoolean("isOnlineInApp") == true }
                 loading = false
             }
         onDispose { reg.remove() }

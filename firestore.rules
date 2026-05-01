@@ -2,179 +2,285 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // ───────────────────────────────────────────────────────
-    // Helper: is the caller an admin (email/password auth)?
-    // ───────────────────────────────────────────────────────
-    function isAdmin() {
-      return request.auth != null
-          && request.auth.token.firebase.sign_in_provider == 'password';
+    /* =========================
+       Helpers
+       ========================= */
+
+    function signedIn() {
+      return request.auth != null;
     }
 
-    // ───────────────────────────────────────────────────────
-    // Helper: is the caller an anonymous user?
-    // ───────────────────────────────────────────────────────
-    function isAnon() {
-      return request.auth != null
-          && request.auth.token.firebase.sign_in_provider == 'anonymous';
+    function ownerUid() {
+      return exists(/databases/$(database)/documents/config/app)
+        ? get(/databases/$(database)/documents/config/app).data.ownerUid
+        : "";
     }
 
-    // ───────────────────────────────────────────────────────
-    // Fields the public (anon) app may write on its own doc.
-    // ───────────────────────────────────────────────────────
+    function isOwner() {
+      return signedIn() && ownerUid() == request.auth.uid;
+    }
+
+    function isValidDeviceHashString(v) {
+      return (v is string) && v.size() >= 16 && v.size() <= 128;
+    }
+
+    function ownerOnlyUserKeys() {
+      return [
+        "warned", "warnReason",
+        "banned", "banReason",
+        "watcherActiveAt",
+        "targetedUpdateUrl", "targetedUpdateNotes"
+      ];
+    }
+
     function selfMutableKeys() {
       return [
-        // identity / debug
-        'docId', 'docIdType', 'authUid', 'uid', 'currentUid',
-        'deviceHash', 'appId', 'adminBuild',
-        'versionName', 'versionCode',
+        "lastSeenAt", "updatedAt",
+        "appId", "adminBuild", "versionName", "versionCode",
+        "docId", "docIdType",
+        "authUid", "uid",
+        "currentUid",
+        "deviceHash",
+        "tosAcceptedVersion", "tosAcceptedAt",
+        "displayName",
+        "alias",
 
-        // activity markers
-        'isOnlineInApp', 'lastSeenAt', 'updatedAt',
+        // App online status
+        "isOnlineInApp",
 
-        // pinned (formerly AFK)
-        'afkEnabled', 'afkMessage',
-        'afkPreset1', 'afkPreset2', 'afkPreset3',
+        // Pinned message (renamed from AFK -- old key names kept for compat)
+        "afkEnabled", "afkMessage",
+        "afkPreset1", "afkPreset2", "afkPreset3",
+        "afkPreset1Name", "afkPreset2Name", "afkPreset3Name",
 
-        // cycle
-        'cycleEnabled', 'cycleIntervalSeconds',
-        'cycleLines', 'cycleLinesText',
-        'cyclePreset1', 'cyclePreset2', 'cyclePreset3',
-        'cyclePreset4', 'cyclePreset5',
+        // Cycle
+        "cycleEnabled", "cycleIntervalSeconds", "cycleLines", "cycleLinesText",
+        "cyclePreset1", "cyclePreset2", "cyclePreset3", "cyclePreset4", "cyclePreset5",
+        "cyclePreset1Name", "cyclePreset2Name", "cyclePreset3Name",
+        "cyclePreset4Name", "cyclePreset5Name",
 
-        // spotify / music
-        'spotifyEnabled', 'spotifyDemoEnabled', 'spotifyPreset',
+        // Now Playing
+        "spotifyEnabled", "spotifyDemoEnabled", "spotifyPreset",
+        "nowPlayingDetected", "nowPlayingIsPlaying",
+        "nowPlayingTitle", "nowPlayingArtist",
 
-        // time
-        'timeEnabled', 'timeMode',
+        // Output
+        "activePackage",
+        "combinedPreviewText",
+        "cycleTrimWarning",
+        "cardOrder",
+        "dividerConfig",
 
-        // multi-IP slots
-        'activeIpSlot',
+        // Time
+        "timeEnabled", "timeMode",
+        "lastReportedTime", "lastTimeUpdateAt",
 
-        // live-mode volatile fields (only written when watched)
-        'nowPlayingDetected', 'nowPlayingIsPlaying',
-        'nowPlayingTitle', 'nowPlayingArtist', 'activePackage',
-        'combinedPreviewText', 'cycleTrimWarning',
-        'lastReportedTime', 'lastTimeUpdateAt',
+        // Multi-IP slots
+        "ip1Name", "ip1Address",
+        "ip2Name", "ip2Address",
+        "ip3Name", "ip3Address",
+        "activeIpSlot",
 
-        // VRChat presence (written by VrchatPipelineService when watched)
-        'displayName',
-        'vrchatUserId', 'vrchatDisplayName',
-        'vrchatState', 'vrchatStatus', 'vrchatStatusDescription',
-        'vrchatWorld', 'vrchatLocation',
-        'vrchatInstancePlayerCount', 'vrchatInstanceCapacity',
-        'vrchatPlatform', 'vrchatAvatarThumb',
-        'vrchatIsOnline', 'vrchatAuthCookieValid',
-        'vrchatLastSyncAt'
+        // VRChat identity + presence (written by PipelineService, read by admin)
+        "vrchatUserId", "vrchatDisplayName",
+        "vrchatState", "vrchatStatus", "vrchatStatusDescription",
+        "vrchatWorld", "vrchatLocation",
+        "vrchatInstancePlayerCount", "vrchatInstanceCapacity",
+        "vrchatPlatform", "vrchatAvatarThumb",
+        "vrchatIsOnline",
+        "vrchatLastSyncAt", "vrchatAuthCookieValid",
+
+        // Friends cache (kept for cleanup via FieldValue.delete)
+        "savedFriendIds", "savedFriendNames",
+
+        // Notification preferences (local only, synced for admin visibility)
+        "notifFriendRequest", "notifInvite",
+        "notifFriendOnline", "notifFriendOffline",
+        "notifUnfriend", "notifGroupEvent",
+        "notifGroupAnnouncement"
       ];
     }
 
-    // ───────────────────────────────────────────────────────
-    // Fields ONLY admins (or Cloud Functions) may write.
-    // ───────────────────────────────────────────────────────
-    function adminOnlyKeys() {
-      return [
-        'warned', 'banned', 'warnReason', 'banReason',
-        'warnedAt', 'bannedAt',
-        'watcherActiveAt',
-        'targetedUpdateUrl', 'targetedUpdateNotes'
-      ];
+    function deviceIdentityConsistent(deviceHash) {
+      return request.resource.data.deviceHash == deviceHash
+        && isValidDeviceHashString(request.resource.data.deviceHash)
+        && (!("docId" in request.resource.data) || request.resource.data.docId == deviceHash)
+        && (!("docIdType" in request.resource.data) || request.resource.data.docIdType in ["deviceHash", "authUid_fallback", "authUid"]);
     }
 
-    // ───────────────────────────────────────────────────────
-    // users/{deviceHash}
-    // ───────────────────────────────────────────────────────
-    match /users/{deviceHash} {
-      // Anyone authenticated can read (admin reads all, public reads own).
-      allow read: if request.auth != null;
-
-      // Public (anon) user writing their own doc.
-      allow create, update: if isAnon()
-        && request.resource.data.deviceHash == deviceHash
+    function publicAuthConsistent() {
+      return request.resource.data.uid == request.auth.uid
         && request.resource.data.authUid == request.auth.uid
-        && request.resource.data.diff(resource == null ? {} : resource.data)
-             .affectedKeys()
-             .hasOnly(selfMutableKeys());
-
-      // Admins can write any field (toggles, moderation, watcher, targeted updates).
-      allow create, update: if isAdmin();
-
-      // Allow delete of legacy fields via merge-set (FieldValue.delete).
-      // Firestore treats field deletion as an update, covered above.
-
-      // No public delete of the entire doc.
-      allow delete: if isAdmin();
+        && (!("currentUid" in request.resource.data) || request.resource.data.currentUid == request.auth.uid);
     }
 
-    // ───────────────────────────────────────────────────────
-    // usersById/{uid} — lightweight UID→deviceHash mapping
-    // ───────────────────────────────────────────────────────
+    function isOwnerOfDeviceDoc(deviceHash) {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(deviceHash))
+        && get(/databases/$(database)/documents/users/$(deviceHash)).data.uid == request.auth.uid;
+    }
+
+    /* =========================
+       USERS (DOC ID = deviceHash)
+       ========================= */
+
+    match /users/{deviceHash} {
+      allow get:  if isOwner() || isOwnerOfDeviceDoc(deviceHash);
+      allow list: if isOwner();
+
+      allow create: if signedIn()
+        && deviceIdentityConsistent(deviceHash)
+        && publicAuthConsistent()
+        && request.resource.data.keys().hasOnly(selfMutableKeys())
+        && !request.resource.data.keys().hasAny(ownerOnlyUserKeys());
+
+      allow update: if signedIn()
+        && resource.data.deviceHash == deviceHash
+        && deviceIdentityConsistent(deviceHash)
+        && publicAuthConsistent()
+        && request.resource.data.diff(resource.data).changedKeys().hasOnly(selfMutableKeys())
+        && !request.resource.data.diff(resource.data).changedKeys().hasAny(ownerOnlyUserKeys());
+
+      // Owner can update any field (ban, warn, edit presets, watcher, targeted updates, etc.)
+      allow update: if isOwner()
+        && request.resource.data.deviceHash == deviceHash
+        && deviceIdentityConsistent(deviceHash);
+
+      allow delete: if false;
+    }
+
+    /* =========================
+       USERS BY ID
+       ========================= */
+
     match /usersById/{uid} {
-      allow read: if request.auth != null;
+      allow get: if signedIn() && uid == request.auth.uid;
+      allow list: if isOwner();
 
-      allow create, update: if isAnon()
+      allow create, update: if signedIn()
         && uid == request.auth.uid
-        && request.resource.data.keys()
-             .hasOnly(['deviceHash', 'authUid', 'appId', 'adminBuild', 'updatedAt']);
+        && request.resource.data.keys().hasOnly([
+          "deviceHash", "authUid", "appId", "adminBuild", "updatedAt"
+        ])
+        && request.resource.data.authUid == request.auth.uid
+        && isValidDeviceHashString(request.resource.data.deviceHash);
 
-      allow create, update, delete: if isAdmin();
+      allow delete: if signedIn()
+        && ("deviceHash" in resource.data)
+        && isValidDeviceHashString(resource.data.deviceHash)
+        && isOwnerOfDeviceDoc(resource.data.deviceHash);
+
+      allow delete: if isOwner();
     }
 
-    // ───────────────────────────────────────────────────────
-    // bannedDevices/{deviceHash}
-    // ───────────────────────────────────────────────────────
-    match /bannedDevices/{deviceHash} {
-      allow read: if request.auth != null;
-      allow write: if isAdmin();
-    }
+    /* =========================
+       ANNOUNCEMENTS
+       ========================= */
 
-    // ───────────────────────────────────────────────────────
-    // bannedIdentifiers/{identifier}
-    // ───────────────────────────────────────────────────────
-    match /bannedIdentifiers/{identifier} {
-      allow read: if request.auth != null;
-      allow write: if isAdmin();
-    }
-
-    // ───────────────────────────────────────────────────────
-    // announcements/{id}
-    // ───────────────────────────────────────────────────────
     match /announcements/{id} {
-      allow read: if request.auth != null;
-      allow write: if isAdmin();
+      allow get, list: if true;
+      allow create, update, delete: if isOwner();
     }
 
-    // ───────────────────────────────────────────────────────
-    // config/{docId}  (e.g. config/app for ToS)
-    // ───────────────────────────────────────────────────────
-    match /config/{docId} {
-      allow read: if request.auth != null;
-      allow write: if isAdmin();
-    }
+    /* =========================
+       RELEASES
+       ========================= */
 
-    // ───────────────────────────────────────────────────────
-    // releases/{docId}  (e.g. releases/latest)
-    // ───────────────────────────────────────────────────────
     match /releases/{docId} {
-      allow read: if request.auth != null;
-      allow write: if isAdmin();
+      allow get:  if true;
+      allow list: if false;
+      allow create, update: if isOwner()
+        && request.resource.data.keys().hasOnly([
+          "versionCode", "versionName", "downloadUrl",
+          "requiredMinCode", "notes",
+          "publishedAt", "publishedByDevice"
+        ])
+        && (request.resource.data.versionCode is int || request.resource.data.versionCode is float)
+        && (request.resource.data.downloadUrl is string)
+        && request.resource.data.downloadUrl.size() > 0;
+      allow delete: if isOwner();
     }
 
-    // ───────────────────────────────────────────────────────
-    // moderationEvents/{id} — audit / ban-evasion events
-    // ───────────────────────────────────────────────────────
+    /* =========================
+       BAN SYSTEM (new tri-directional model)
+       ========================= */
+
+    match /bannedIdentifiers/{identifier} {
+      allow get: if signedIn();
+      allow list: if isOwner();
+      allow create, update, delete: if isOwner();
+    }
+
+    match /bannedRecords/{banId} {
+      allow get, list: if isOwner();
+      allow create, update, delete: if isOwner();
+    }
+
+    /* =========================
+       LEGACY DEVICE BANS (kept for migration, no new writes)
+       ========================= */
+
+    match /bannedDevices/{deviceHash} {
+      allow get: if isOwner()
+        || (signedIn()
+          && exists(/databases/$(database)/documents/users/$(deviceHash))
+          && get(/databases/$(database)/documents/users/$(deviceHash)).data.authUid == request.auth.uid);
+      allow list: if isOwner();
+      allow create, update, delete: if isOwner();
+    }
+
+    /* =========================
+       MODERATION EVENTS
+       ========================= */
+
     match /moderationEvents/{id} {
-      allow read: if request.auth != null;
-      allow create: if request.auth != null;
-      allow update, delete: if isAdmin();
+      allow get, list: if isOwner();
+
+      allow create: if isOwner()
+        && request.resource.data.keys().hasOnly([
+          "uid", "targetUid", "targetDocId", "targetAuthUid",
+          "targetDeviceHash", "action", "reason", "createdAt",
+          "byUid", "byDeviceHash", "byAppId",
+          "banId", "method", "newVrchatId", "newDeviceHash", "newDisplayName"
+        ])
+        && (request.resource.data.action is string)
+        && (request.resource.data.reason is string || !("reason" in request.resource.data));
+
+      allow update, delete: if false;
     }
 
-    // ───────────────────────────────────────────────────────
-    // actions/{id} — admin audit trail
-    // ───────────────────────────────────────────────────────
+    /* =========================
+       ACTIONS / AUDIT TRAIL
+       ========================= */
+
     match /actions/{id} {
-      allow read: if isAdmin();
-      allow create: if isAdmin();
+      allow get, list: if isOwner();
+      allow create: if isOwner();
       allow update, delete: if false;
+    }
+
+    /* =========================
+       CONFIG
+       ========================= */
+
+    match /config/{docId} {
+      allow get: if docId == "app";
+      allow list: if false;
+      allow create, update: if isOwner();
+      allow delete: if false;
+    }
+
+    /* =========================
+       DEVICES
+       ========================= */
+
+    match /devices/{id} {
+      allow read, write: if isOwner();
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }
