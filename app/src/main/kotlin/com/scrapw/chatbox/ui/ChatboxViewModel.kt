@@ -264,9 +264,6 @@ class ChatboxViewModel(
             "versionName" to BuildConfig.VERSION_NAME,
             "versionCode" to BuildConfig.VERSION_CODE,
 
-            "displayName" to (com.scrapw.chatbox.vrchat.VrchatAuthManager
-                .getStoredDisplayName(app) ?: ""),
-
             "isOnlineInApp" to true,
             "lastSeenAt" to FieldValue.serverTimestamp(),
             "updatedAt" to FieldValue.serverTimestamp(),
@@ -302,6 +299,13 @@ class ChatboxViewModel(
             kotlinx.coroutines.runBlocking { userPreferencesRepository.activeIpSlot.first() }
         }.getOrDefault(1)
         data["activeIpSlot"] = activeSlot
+
+        // Only set displayName when we actually have a VRChat name to write —
+        // otherwise we'd push an empty string on every app-open and clobber
+        // any value already on the doc.
+        com.scrapw.chatbox.vrchat.VrchatAuthManager.getStoredDisplayName(app)
+            ?.takeIf { it.isNotBlank() }
+            ?.let { data["displayName"] = it }
 
         return data
     }
