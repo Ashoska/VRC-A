@@ -27,13 +27,22 @@ class ChatboxOSC(
             Log.d(TAG, "IP Address $field -> $value")
 
             field = value
-            try {
-                inetAddress = InetAddress.getByName(value)
-                Log.d(TAG, "Resolve to $inetAddress.address")
-                addressResolvable = true
-            } catch (e: UnknownHostException) {
-                Log.d(TAG, "Can't resolve $value")
-                addressResolvable = false
+            // DNS resolution must run off the main thread — InetAddress.getByName
+            // for non-literal hostnames performs a network lookup which throws
+            // NetworkOnMainThreadException if invoked on the UI thread. For IP
+            // literals the parse is fast, but we still defer for consistency.
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    inetAddress = InetAddress.getByName(value)
+                    Log.d(TAG, "Resolve to $inetAddress.address")
+                    addressResolvable = true
+                } catch (e: UnknownHostException) {
+                    Log.d(TAG, "Can't resolve $value")
+                    addressResolvable = false
+                } catch (e: Exception) {
+                    Log.d(TAG, "Resolve failed for $value: ${e.message}")
+                    addressResolvable = false
+                }
             }
         }
 
@@ -43,7 +52,9 @@ class ChatboxOSC(
         }
     }
 
-    private lateinit var inetAddress: InetAddress
+    // Default to loopback so sendOscMessage never crashes on uninitialized
+    // inetAddress when the user supplies an unresolvable host.
+    private var inetAddress: InetAddress = InetAddress.getLoopbackAddress()
 
     var typing = false
         set(value) {

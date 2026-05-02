@@ -18,7 +18,25 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.scrapw.chatbox.ui.ChatboxViewModel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+
+/**
+ * Returns true if the input is a syntactically valid IPv4 dotted-quad
+ * (each octet 0-255). Hostnames are rejected because the OSC layer can't
+ * resolve them on the LAN without DNS. Empty input is invalid.
+ */
+private fun isValidIpv4(input: String): Boolean {
+    val trimmed = input.trim()
+    if (trimmed.isBlank()) return false
+    val parts = trimmed.split(".")
+    if (parts.size != 4) return false
+    return parts.all { p ->
+        if (p.isEmpty() || p.length > 3) return@all false
+        val n = p.toIntOrNull() ?: return@all false
+        n in 0..255
+    }
+}
 
 @Composable
 fun IpField(
@@ -74,17 +92,65 @@ fun IpField(
 
     var expanded by remember { mutableStateOf(false) }
 
-    // Per-slot edit buffers for the expanded slot editor
-    var nameEdit1 by remember(ip1Name) { mutableStateOf(ip1Name) }
-    var addrEdit1 by remember(ip1Address) { mutableStateOf(ip1Address) }
-    var nameEdit2 by remember(ip2Name) { mutableStateOf(ip2Name) }
-    var addrEdit2 by remember(ip2Address) { mutableStateOf(ip2Address) }
-    var nameEdit3 by remember(ip3Name) { mutableStateOf(ip3Name) }
-    var addrEdit3 by remember(ip3Address) { mutableStateOf(ip3Address) }
+    // Per-slot edit buffers for the expanded slot editor.
+    // Buffers seed from the DataStore value and follow it ONLY when the user
+    // hasn't typed something different. We track the previous flow value so
+    // we can tell "flow changed from X→Y, buffer still equals X" (safe to
+    // adopt Y) apart from "flow changed but buffer holds user's edit"
+    // (don't clobber). This avoids both the "stale Home shown after DataStore
+    // load" race and the "user's typing overwritten by debounced echo" race.
+    var n1 by remember { mutableStateOf(ip1Name) }
+    var a1 by remember { mutableStateOf(ip1Address) }
+    var n2 by remember { mutableStateOf(ip2Name) }
+    var a2 by remember { mutableStateOf(ip2Address) }
+    var n3 by remember { mutableStateOf(ip3Name) }
+    var a3 by remember { mutableStateOf(ip3Address) }
+
+    var prevIp1Name    by remember { mutableStateOf(ip1Name) }
+    var prevIp1Address by remember { mutableStateOf(ip1Address) }
+    var prevIp2Name    by remember { mutableStateOf(ip2Name) }
+    var prevIp2Address by remember { mutableStateOf(ip2Address) }
+    var prevIp3Name    by remember { mutableStateOf(ip3Name) }
+    var prevIp3Address by remember { mutableStateOf(ip3Address) }
+
+    LaunchedEffect(ip1Name)    { if (n1 == prevIp1Name)    n1 = ip1Name;    prevIp1Name    = ip1Name }
+    LaunchedEffect(ip1Address) { if (a1 == prevIp1Address) a1 = ip1Address; prevIp1Address = ip1Address }
+    LaunchedEffect(ip2Name)    { if (n2 == prevIp2Name)    n2 = ip2Name;    prevIp2Name    = ip2Name }
+    LaunchedEffect(ip2Address) { if (a2 == prevIp2Address) a2 = ip2Address; prevIp2Address = ip2Address }
+    LaunchedEffect(ip3Name)    { if (n3 == prevIp3Name)    n3 = ip3Name;    prevIp3Name    = ip3Name }
+    LaunchedEffect(ip3Address) { if (a3 == prevIp3Address) a3 = ip3Address; prevIp3Address = ip3Address }
+
+    // Auto-save edits with a 400ms debounce so the user never has to click
+    // an explicit Save button — typing alone persists the change.
+    LaunchedEffect(n1, a1) {
+        delay(400)
+        val n = n1.trim().ifBlank { "Slot 1" }
+        if (n != ip1Name || a1 != ip1Address) repo.saveIpSlot(1, n, a1)
+    }
+    LaunchedEffect(n2, a2) {
+        delay(400)
+        val n = n2.trim().ifBlank { "Slot 2" }
+        if (n != ip2Name || a2 != ip2Address) repo.saveIpSlot(2, n, a2)
+    }
+    LaunchedEffect(n3, a3) {
+        delay(400)
+        val n = n3.trim().ifBlank { "Slot 3" }
+        if (n != ip3Name || a3 != ip3Address) repo.saveIpSlot(3, n, a3)
+    }
+
+    var invalidIpWarning by remember { mutableStateOf<String?>(null) }
 
     fun applyActiveSlot(addr: String) {
         val trimmed = addr.trim()
-        if (trimmed.isBlank()) return
+        if (trimmed.isBlank()) {
+            invalidIpWarning = "Enter an IP address first."
+            return
+        }
+        if (!isValidIpv4(trimmed)) {
+            invalidIpWarning = "Not a valid IPv4 address (expected 0-255.0-255.0-255.0-255)."
+            return
+        }
+        invalidIpWarning = null
         val slot = currentSlot
         val name = nameForSlot(slot)
         scope.launch {
@@ -95,27 +161,20 @@ fun IpField(
     }
 
     fun switchToSlot(slot: Int, overrideAddr: String? = null) {
-        val addr = overrideAddr ?: dsAddrForSlot(slot)
-        if (addr.isBlank()) return
+        val addr = (overrideAddr ?: dsAddrForSlot(slot)).trim()
+        if (addr.isBlank()) {
+            invalidIpWarning = "That slot is empty — set an IP first."
+            return
+        }
+        if (!isValidIpv4(addr)) {
+            invalidIpWarning = "Slot $slot has an invalid IP — fix it before equipping."
+            return
+        }
+        invalidIpWarning = null
         currentSlot = slot
         editBuffer = addr
         scope.launch { repo.saveActiveIpSlot(slot) }
         chatboxViewModel.ipAddressApplyRuntimeOnly(addr)
-    }
-
-    fun saveSlot(slot: Int, name: String, addr: String, thenSwitch: Boolean = false) {
-        val n = name.trim().ifBlank { "Slot $slot" }
-        val a = addr.trim()
-        scope.launch {
-            repo.saveIpSlot(slot, n, a)
-            if (thenSwitch && a.isNotBlank()) {
-                switchToSlot(slot, a)
-            }
-        }
-        if (!thenSwitch && slot == currentSlot && a.isNotBlank()) {
-            chatboxViewModel.ipAddressApplyRuntimeOnly(a)
-            editBuffer = a
-        }
     }
 
     ElevatedCard(modifier = modifier.fillMaxWidth()) {
@@ -153,7 +212,10 @@ fun IpField(
             ) {
                 OutlinedTextField(
                     value = editBuffer,
-                    onValueChange = { editBuffer = it },
+                    onValueChange = {
+                        editBuffer = it
+                        if (invalidIpWarning != null) invalidIpWarning = null
+                    },
                     modifier = Modifier.weight(1f),
                     singleLine = true,
                     label = { Text(nameForSlot(currentSlot)) },
@@ -171,6 +233,15 @@ fun IpField(
                     onClick = { focusManager.clearFocus(); applyActiveSlot(editBuffer) },
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
                 ) { Text("Apply") }
+            }
+
+            // Inline warning for invalid IP attempts
+            invalidIpWarning?.let { msg ->
+                Text(
+                    msg,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
             }
 
             // Slot switcher chips
@@ -196,21 +267,24 @@ fun IpField(
             AnimatedVisibility(visible = expanded) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Divider()
-                    Text("Saved slots", style = MaterialTheme.typography.labelMedium,
+                    Text("Saved slots (auto-saves as you type)",
+                        style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
 
                     listOf(
-                        Triple(1, nameEdit1, addrEdit1),
-                        Triple(2, nameEdit2, addrEdit2),
-                        Triple(3, nameEdit3, addrEdit3)
+                        Triple(1, n1, a1),
+                        Triple(2, n2, a2),
+                        Triple(3, n3, a3)
                     ).forEach { (slot, nameVal, addrVal) ->
+                        val addrTrimmed = addrVal.trim()
+                        val addrLooksValid = addrTrimmed.isBlank() || isValidIpv4(addrTrimmed)
                         ElevatedCard {
                             Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     OutlinedTextField(
                                         value = nameVal,
                                         onValueChange = { v ->
-                                            when (slot) { 1 -> nameEdit1 = v; 2 -> nameEdit2 = v; 3 -> nameEdit3 = v }
+                                            when (slot) { 1 -> n1 = v; 2 -> n2 = v; 3 -> n3 = v }
                                         },
                                         modifier = Modifier.weight(1f),
                                         singleLine = true,
@@ -219,35 +293,28 @@ fun IpField(
                                     OutlinedTextField(
                                         value = addrVal,
                                         onValueChange = { v ->
-                                            when (slot) { 1 -> addrEdit1 = v; 2 -> addrEdit2 = v; 3 -> addrEdit3 = v }
+                                            when (slot) { 1 -> a1 = v; 2 -> a2 = v; 3 -> a3 = v }
+                                            if (invalidIpWarning != null) invalidIpWarning = null
                                         },
                                         modifier = Modifier.weight(2f),
                                         singleLine = true,
                                         label = { Text("IP Address") },
                                         placeholder = { Text("192.168.1.x") },
+                                        isError = !addrLooksValid,
+                                        supportingText = if (!addrLooksValid) {
+                                            { Text("Invalid IPv4", style = MaterialTheme.typography.bodySmall) }
+                                        } else null,
                                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
                                     )
                                 }
-                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    OutlinedButton(
-                                        onClick = { saveSlot(slot, nameVal, addrVal) },
-                                        modifier = Modifier.weight(1f)
-                                    ) {
-                                        Icon(Icons.Filled.Edit, null, modifier = Modifier.size(16.dp))
-                                        Spacer(Modifier.width(4.dp))
-                                        Text("Save", style = MaterialTheme.typography.labelMedium)
-                                    }
-                                    Button(
-                                        onClick = {
-                                            saveSlot(slot, nameVal, addrVal, thenSwitch = true)
-                                        },
-                                        modifier = Modifier.weight(1f),
-                                        enabled = addrVal.trim().isNotBlank()
-                                    ) {
-                                        Icon(Icons.Filled.Check, null, modifier = Modifier.size(16.dp))
-                                        Spacer(Modifier.width(4.dp))
-                                        Text("Use", style = MaterialTheme.typography.labelMedium)
-                                    }
+                                Button(
+                                    onClick = { switchToSlot(slot, addrTrimmed) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    enabled = addrTrimmed.isNotBlank() && isValidIpv4(addrTrimmed)
+                                ) {
+                                    Icon(Icons.Filled.Check, null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("Use this slot", style = MaterialTheme.typography.labelMedium)
                                 }
                             }
                         }
