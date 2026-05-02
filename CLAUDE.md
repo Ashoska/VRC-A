@@ -134,10 +134,10 @@ Feature toggles (`afkEnabled`, `spotifyEnabled`, `cycleEnabled`, `timeEnabled`) 
 - Keep admin APK and public APK builds fully separated
 
 ## Git & PR Conventions
-- Branch naming: `fix/description`, `feature/description`, `chore/description`
+- **CRITICAL — Default branch for ALL work is `VRC-A-Official`.** Every commit and push must land on `VRC-A-Official`. Do NOT push to `main`, `claude/*`, or any other auto-generated branch. If you find yourself on a different branch (including the `claude/...` branch the harness defaults to), checkout `VRC-A-Official` first, cherry-pick or rebase your work onto it, and push there. Only deviate if the user explicitly names a different target branch in this turn.
 - Commit messages: short, imperative ("Fix NowPlaying pause detection", "Add Releases tab filter")
-- Always open a PR for non-trivial changes rather than pushing directly to main
 - Include a brief description in the PR body of what changed and why
+- Do NOT open pull requests automatically — the user merges `VRC-A-Official` themselves on their own schedule
 
 ## Autonomous Permissions
 Claude is fully authorised to do all of the following without asking for confirmation:
@@ -177,7 +177,7 @@ Claude should update CLAUDE.md in the same commit as the feature it describes, n
 - Update this CLAUDE.md file whenever the architecture, conventions, or features change
 
 ## What Claude Should Never Do
-- Push directly to `main` for large feature additions — always use a PR
+- Push to `main`, `claude/*`, or any branch other than `VRC-A-Official` (always use `VRC-A-Official` unless the user explicitly names a different target this turn)
 - Remove or weaken `bannedDevices` Firestore security rules
 - Mix admin-only UI into the public build
 - Break the existing GitHub Actions CI pipeline without replacing it with something better
