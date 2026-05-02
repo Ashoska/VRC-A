@@ -725,7 +725,8 @@ private fun UsersTab(
     }
 
     // ---- Detail view ----
-    if (selectedRow != null) {
+    val row = selectedRow
+    if (row != null) {
         val d = selectedDetail
         Column(
             modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
@@ -740,24 +741,24 @@ private fun UsersTab(
                                 Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
                             }
                             Column(Modifier.weight(1f)) {
-                                val primaryLabel = selectedRow.vrchatDisplayName.ifBlank {
-                                    selectedRow.displayName.ifBlank { shortId(selectedRow.docId) }
+                                val primaryLabel = row.vrchatDisplayName.ifBlank {
+                                    row.displayName.ifBlank { shortId(row.docId) }
                                 }
                                 Text(
                                     primaryLabel,
                                     style = MaterialTheme.typography.titleMedium,
                                     maxLines = 1, overflow = TextOverflow.Ellipsis
                                 )
-                                if (selectedRow.vrchatUserId.isNotBlank()) {
+                                if (row.vrchatUserId.isNotBlank()) {
                                     Text(
-                                        selectedRow.vrchatUserId,
+                                        row.vrchatUserId,
                                         fontFamily = FontFamily.Monospace,
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.primary
                                     )
                                 }
                                 Text(
-                                    shortId(selectedRow.docId),
+                                    shortId(row.docId),
                                     fontFamily = FontFamily.Monospace,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -765,12 +766,12 @@ private fun UsersTab(
                             }
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            if (selectedRow.banned) {
+                            if (row.banned) {
                                 androidx.compose.material3.Badge(
                                     containerColor = MaterialTheme.colorScheme.error
                                 ) { Text("BANNED", style = MaterialTheme.typography.labelSmall) }
                             }
-                            if (selectedRow.warned) {
+                            if (row.warned) {
                                 androidx.compose.material3.Badge(
                                     containerColor = MaterialTheme.colorScheme.tertiary
                                 ) { Text("WARNED", style = MaterialTheme.typography.labelSmall) }
@@ -795,21 +796,21 @@ private fun UsersTab(
                         }
                     }
 
-                    InfoRow("authUid", shortId(selectedRow.authUid.ifBlank { "(blank)" }))
-                    InfoRow("device",  shortId(selectedRow.deviceHash.ifBlank { "(blank)" }))
-                    InfoRow("lastSeen", relativeTime(selectedRow.lastSeenAt, nowMs))
-                    InfoRow("updated",  relativeTime(selectedRow.updatedAt, nowMs))
+                    InfoRow("authUid", shortId(row.authUid.ifBlank { "(blank)" }))
+                    InfoRow("device",  shortId(row.deviceHash.ifBlank { "(blank)" }))
+                    InfoRow("lastSeen", relativeTime(row.lastSeenAt, nowMs))
+                    InfoRow("updated",  relativeTime(row.updatedAt, nowMs))
 
                     Divider()
 
                     Button(
                         onClick = {
                             onSendToModeration(ModerationTarget(
-                                docId = selectedRow.docId, authUid = selectedRow.authUid,
-                                deviceHash = selectedRow.deviceHash,
-                                displayName = selectedRow.vrchatDisplayName.ifBlank { selectedRow.displayName },
-                                vrchatUserId = selectedRow.vrchatUserId,
-                                banned = selectedRow.banned, warned = selectedRow.warned,
+                                docId = row.docId, authUid = row.authUid,
+                                deviceHash = row.deviceHash,
+                                displayName = row.vrchatDisplayName.ifBlank { row.displayName },
+                                vrchatUserId = row.vrchatUserId,
+                                banned = row.banned, warned = row.warned,
                                 banReason = selectedDetail?.banReason ?: "",
                                 warnReason = selectedDetail?.warnReason ?: ""
                             ))
