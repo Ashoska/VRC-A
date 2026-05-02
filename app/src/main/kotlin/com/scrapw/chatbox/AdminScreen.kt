@@ -277,6 +277,36 @@ fun AdminScreen() {
     // Compact IDs drawer
     var idsExpanded by rememberSaveable { mutableStateOf(false) }
 
+    // ── Shared user list (drives both Dashboard stats and Users directory) ──
+    // Only polls Firestore while the admin is actually on the Dashboard or Users tab.
+    val sharedUsers = remember { mutableStateListOf<UserRow>() }
+    var sharedLiveLimit by rememberSaveable { mutableIntStateOf(500) }
+    var sharedUsersLoading by remember { mutableStateOf(true) }
+    val needsUsers = tabIndex == 0 || tabIndex == 1
+
+    LaunchedEffect(needsUsers, sharedLiveLimit) {
+        if (!needsUsers) return@LaunchedEffect
+        while (true) {
+            try {
+                val snap = db.collection("users")
+                    .orderBy("lastSeenAt", Query.Direction.DESCENDING)
+                    .limit(sharedLiveLimit.toLong())
+                    .get(Source.SERVER).await()
+                val next = snap.documents
+                    .filter { it.getBoolean("adminBuild") != true }
+                    .map { parseUserRow(it) }
+                sharedUsers.clear(); sharedUsers.addAll(next)
+                sharedUsersLoading = false
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                setErr(e.message ?: "Users load failed")
+                sharedUsersLoading = false
+            }
+            delay(30_000L)
+        }
+    }
+
     Surface {
         Column(
             modifier = Modifier
@@ -374,11 +404,41 @@ fun AdminScreen() {
                     .weight(1f)
             ) {
                 when (tabIndex) {
-                    0 -> DashboardTab(db = db, setError = ::setErr)
+                    0 -> DashboardTab(
+                        db = db,
+                        users = sharedUsers,
+                        usersLoading = sharedUsersLoading,
+                        onRefresh = {
+                            scope.launch {
+                                sharedUsersLoading = true
+                                try {
+                                    val snap = db.collection("users")
+                                        .orderBy("lastSeenAt", Query.Direction.DESCENDING)
+                                        .limit(sharedLiveLimit.toLong())
+                                        .get(Source.SERVER).await()
+                                    val next = snap.documents
+                                        .filter { it.getBoolean("adminBuild") != true }
+                                        .map { parseUserRow(it) }
+                                    sharedUsers.clear(); sharedUsers.addAll(next)
+                                } catch (e: kotlinx.coroutines.CancellationException) {
+                                    throw e
+                                } catch (e: Throwable) {
+                                    setErr(e.message ?: "Refresh failed")
+                                }
+                                sharedUsersLoading = false
+                            }
+                        },
+                        setError = ::setErr
+                    )
 
                     1 -> UsersTab(
                         db = db,
                         myDeviceHash = deviceHash,
+                        users = sharedUsers,
+                        liveLimit = sharedLiveLimit,
+                        onIncreaseLiveLimit = {
+                            sharedLiveLimit = (sharedLiveLimit + 500).coerceAtMost(10000)
+                        },
                         setGlobalLoading = { globalLoading = it },
                         setError = ::setErr,
                         onSendToModeration = { target ->
@@ -516,21 +576,46 @@ private data class ModerationTarget(
     val warned: Boolean = false
 )
 
+private fun parseUserRow(d: com.google.firebase.firestore.DocumentSnapshot): UserRow {
+    val docId = d.id
+    val authUid = (d.getString("authUid") ?: d.getString("uid") ?: "").trim()
+    return UserRow(
+        docId = docId, authUid = authUid,
+        displayName = (d.getString("displayName") ?: "").trim(),
+        deviceHash = (d.getString("deviceHash") ?: "").trim(),
+        warned = d.getBoolean("warned") ?: false,
+        banned = d.getBoolean("banned") ?: false,
+        lastSeenAt = d.getTimestamp("lastSeenAt"),
+        updatedAt = d.getTimestamp("updatedAt"),
+        vrchatUserId = (d.getString("vrchatUserId") ?: "").trim(),
+        vrchatDisplayName = (d.getString("vrchatDisplayName") ?: "").trim(),
+        vrchatState = (d.getString("vrchatState") ?: "").trim(),
+        vrchatStatus = (d.getString("vrchatStatus") ?: "").trim(),
+        vrchatIsOnline = d.getBoolean("vrchatIsOnline") ?: false,
+        vrchatWorld = (d.getString("vrchatWorld") ?: "").trim(),
+        vrchatPlayerCount = (d.getLong("vrchatInstancePlayerCount") ?: 0).toInt(),
+        vrchatCapacity = (d.getLong("vrchatInstanceCapacity") ?: 0).toInt(),
+        vrchatPlatform = (d.getString("vrchatPlatform") ?: "").trim(),
+        vrchatLastSyncAt = d.getTimestamp("vrchatLastSyncAt"),
+        isOnlineInApp = d.getBoolean("isOnlineInApp") ?: false
+    )
+}
+
 @Composable
 private fun UsersTab(
     db: FirebaseFirestore,
     myDeviceHash: String,
+    users: androidx.compose.runtime.snapshots.SnapshotStateList<UserRow>,
+    liveLimit: Int,
+    onIncreaseLiveLimit: () -> Unit,
     setGlobalLoading: (Boolean) -> Unit,
     setError: (String?) -> Unit,
     onSendToModeration: (ModerationTarget) -> Unit
 ) {
-    val users = remember { mutableStateListOf<UserRow>() }
-
     var search       by rememberSaveable { mutableStateOf("") }
     var filterWarned by rememberSaveable { mutableStateOf(false) }
     var filterBanned by rememberSaveable { mutableStateOf(false) }
     var selectedDocId by rememberSaveable { mutableStateOf<String?>(null) }
-    var liveLimit    by rememberSaveable { mutableIntStateOf(500) }
 
     var selectedDetail        by remember { mutableStateOf<UserDetail?>(null) }
     var selectedDetailLoading by remember { mutableStateOf(false) }
@@ -549,7 +634,7 @@ private fun UsersTab(
             u.vrchatWorld.contains(t, true)
     }
 
-    val filteredUsers by remember(search, filterWarned, filterBanned, users.size) {
+    val filteredUsers by remember {
         derivedStateOf {
             val q = search.trim()
             users.asSequence()
@@ -560,30 +645,6 @@ private fun UsersTab(
         }
     }
 
-    fun parseUserRow(d: com.google.firebase.firestore.DocumentSnapshot): UserRow {
-        val docId = d.id
-        val authUid = (d.getString("authUid") ?: d.getString("uid") ?: "").trim()
-        return UserRow(
-            docId = docId, authUid = authUid,
-            displayName = (d.getString("displayName") ?: "").trim(),
-            deviceHash = (d.getString("deviceHash") ?: "").trim(),
-            warned = d.getBoolean("warned") ?: false,
-            banned = d.getBoolean("banned") ?: false,
-            lastSeenAt = d.getTimestamp("lastSeenAt"),
-            updatedAt = d.getTimestamp("updatedAt"),
-            vrchatUserId = (d.getString("vrchatUserId") ?: "").trim(),
-            vrchatDisplayName = (d.getString("vrchatDisplayName") ?: "").trim(),
-            vrchatState = (d.getString("vrchatState") ?: "").trim(),
-            vrchatStatus = (d.getString("vrchatStatus") ?: "").trim(),
-            vrchatIsOnline = d.getBoolean("vrchatIsOnline") ?: false,
-            vrchatWorld = (d.getString("vrchatWorld") ?: "").trim(),
-            vrchatPlayerCount = (d.getLong("vrchatInstancePlayerCount") ?: 0).toInt(),
-            vrchatCapacity = (d.getLong("vrchatInstanceCapacity") ?: 0).toInt(),
-            vrchatPlatform = (d.getString("vrchatPlatform") ?: "").trim(),
-            vrchatLastSyncAt = d.getTimestamp("vrchatLastSyncAt"),
-            isOnlineInApp = d.getBoolean("isOnlineInApp") ?: false
-        )
-    }
 
     fun parseUserDetail(snap: com.google.firebase.firestore.DocumentSnapshot): UserDetail {
         fun s(key: String) = (snap.getString(key) ?: "").trim()
@@ -614,30 +675,6 @@ private fun UsersTab(
             timeEnabled = b("timeEnabled"),
             vrchatLastSyncAt = snap.getTimestamp("vrchatLastSyncAt")
         )
-    }
-
-    // Load directory: immediate on mount + every 30s. Admin-build docs are
-    // excluded so a tester running both builds on the same device doesn't
-    // see their own admin doc cluttering the public-user list.
-    LaunchedEffect(liveLimit) {
-        while (true) {
-            try {
-                val snap = db.collection("users")
-                    .orderBy("lastSeenAt", Query.Direction.DESCENDING)
-                    .limit(liveLimit.toLong())
-                    .get(Source.SERVER).await()
-                val next = snap.documents
-                    .filter { it.getBoolean("adminBuild") != true }
-                    .map { parseUserRow(it) }
-                users.clear(); users.addAll(next)
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Throwable) {
-                setError(e.message ?: "Users load failed")
-            }
-            setGlobalLoading(false)
-            delay(30_000L)
-        }
     }
 
     // Selected user detail: poll every 500ms for live data + write watcherActiveAt
@@ -681,8 +718,10 @@ private fun UsersTab(
         }
     }
 
-    val selectedRow = remember(selectedDocId, users.size) {
-        selectedDocId?.let { id -> users.firstOrNull { it.docId == id } }
+    val selectedRow by remember {
+        derivedStateOf {
+            selectedDocId?.let { id -> users.firstOrNull { it.docId == id } }
+        }
     }
 
     // ---- Detail view ----
@@ -828,7 +867,7 @@ private fun UsersTab(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                             OutlinedButton(
-                                onClick = { liveLimit = (liveLimit + 500).coerceAtMost(10000) },
+                                onClick = onIncreaseLiveLimit,
                                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp)
                             ) { Text("+500", style = MaterialTheme.typography.labelSmall) }
                         }
@@ -3098,38 +3137,18 @@ private fun ConfigTab(
    ========================================================= */
 
 @Composable
-private fun DashboardTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
-    var totalUsers  by remember { mutableIntStateOf(0) }
-    var onlineCount by remember { mutableIntStateOf(0) }
-    var bannedCount by remember { mutableIntStateOf(0) }
-    var warnedCount by remember { mutableIntStateOf(0) }
-    var loading by remember { mutableStateOf(true) }
+private fun DashboardTab(
+    db: FirebaseFirestore,
+    users: List<UserRow>,
+    usersLoading: Boolean,
+    onRefresh: () -> Unit,
+    setError: (String?) -> Unit
+) {
+    val totalUsers  = users.size
+    val onlineCount = users.count { it.isOnlineInApp }
+    val bannedCount = users.count { it.banned }
+    val warnedCount = users.count { it.warned }
     var evasionCount by remember { mutableIntStateOf(0) }
-    val scope = rememberCoroutineScope()
-
-    suspend fun loadStats() {
-        try {
-            val snap = db.collection("users").get(Source.SERVER).await()
-            val publicDocs = snap.documents.filter { it.getBoolean("adminBuild") != true }
-            totalUsers  = publicDocs.size
-            onlineCount = publicDocs.count { it.getBoolean("isOnlineInApp") == true }
-            bannedCount = publicDocs.count { it.getBoolean("banned") == true }
-            warnedCount = publicDocs.count { it.getBoolean("warned") == true }
-            loading = false
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Throwable) {
-            setError(e.message); loading = false
-        }
-    }
-
-    LaunchedEffect(Unit) {
-        loadStats()
-        while (true) {
-            delay(30_000L)
-            loadStats()
-        }
-    }
 
     DisposableEffect(Unit) {
         val reg = db.collection("moderationEvents")
@@ -3145,7 +3164,7 @@ private fun DashboardTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         item {
-            if (loading) {
+            if (usersLoading) {
                 Row(Modifier.padding(8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
                     Text("Loading...")
@@ -3158,7 +3177,7 @@ private fun DashboardTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text("Overview", style = MaterialTheme.typography.titleMedium)
-                        IconButton(onClick = { scope.launch { loading = true; loadStats() } }) {
+                        IconButton(onClick = onRefresh) {
                             Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
                         }
                     }
