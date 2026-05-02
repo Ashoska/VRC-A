@@ -732,14 +732,24 @@ class ChatboxViewModel(
                 return@launch
             }
 
-            // Toggles: compare against current local state. If remote differs
-            // from local, apply (admin wins). If same, nothing to change.
-            // Content fields: compare against lastSyncedValues baseline with
-            // fallback to current local state.
-            // Both paths update lastSyncedValues immediately so the subsequent
-            // self-sync echo is correctly suppressed.
+            // For each field, compare remote value against what we LAST WROTE
+            // to Firestore (lastSyncedValues). If it matches our last write,
+            // the snapshot is just an echo (from self-sync, watcher heartbeat,
+            // or live-mode write) — skip. If it differs, an admin actually
+            // changed the field, so apply.
+            //
+            // Comparing against current local state would break here: when an
+            // admin starts watching and the heartbeat fires, the snapshot
+            // contains the OLD field values (Firestore hasn't received the
+            // user's pending local toggle yet), so `remote != local` would
+            // revert whatever the user just toggled. lastSyncedValues stays
+            // in lock-step with what's actually on the doc, so it's the right
+            // reference for distinguishing echoes from real admin edits.
+            //
+            // Both branches update lastSyncedValues to the snapshot value so
+            // the subsequent self-sync echo is correctly suppressed.
             snap.getBoolean("afkEnabled")?.let { remote ->
-                if (remote != afkEnabled) {
+                if (remote != lastSyncedValues["afkEnabled"]) {
                     afkEnabled = remote
                     lastSyncedValues["afkEnabled"] = remote
                     rebuildCombinedPreviewOnly()
@@ -750,7 +760,7 @@ class ChatboxViewModel(
                 }
             }
             snap.getBoolean("cycleEnabled")?.let { remote ->
-                if (remote != cycleEnabled) {
+                if (remote != lastSyncedValues["cycleEnabled"]) {
                     cycleEnabled = remote
                     lastSyncedValues["cycleEnabled"] = remote
                     rebuildCombinedPreviewOnly()
@@ -762,7 +772,7 @@ class ChatboxViewModel(
                 }
             }
             snap.getBoolean("spotifyEnabled")?.let { remote ->
-                if (remote != spotifyEnabled) {
+                if (remote != lastSyncedValues["spotifyEnabled"]) {
                     spotifyEnabled = remote
                     lastSyncedValues["spotifyEnabled"] = remote
                     rebuildCombinedPreviewOnly()
@@ -773,7 +783,7 @@ class ChatboxViewModel(
                 }
             }
             snap.getBoolean("timeEnabled")?.let { remote ->
-                if (remote != timeEnabled) {
+                if (remote != lastSyncedValues["timeEnabled"]) {
                     timeEnabled = remote
                     lastSyncedValues["timeEnabled"] = remote
                     rebuildCombinedPreviewOnly()
