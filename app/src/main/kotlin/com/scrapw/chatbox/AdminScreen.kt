@@ -77,6 +77,7 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.SetOptions
+import com.google.firebase.firestore.Source
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
@@ -624,7 +625,7 @@ private fun UsersTab(
                 val snap = db.collection("users")
                     .orderBy("lastSeenAt", Query.Direction.DESCENDING)
                     .limit(liveLimit.toLong())
-                    .get().await()
+                    .get(Source.SERVER).await()
                 val next = snap.documents
                     .filter { it.getBoolean("adminBuild") != true }
                     .map { parseUserRow(it) }
@@ -646,7 +647,7 @@ private fun UsersTab(
         var watcherTick = 0
         while (true) {
             runCatching {
-                val snap = db.collection("users").document(docId).get().await()
+                val snap = db.collection("users").document(docId).get(Source.SERVER).await()
                 if (snap != null && snap.exists()) {
                     selectedDetail = parseUserDetail(snap)
                 } else {
@@ -1239,7 +1240,7 @@ private fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, set
             LaunchedEffect(docId) {
                 if (docId.isBlank()) return@LaunchedEffect
                 runCatching {
-                    val snap = db.collection("users").document(docId).get().await()
+                    val snap = db.collection("users").document(docId).get(Source.SERVER).await()
                     val url = snap.getString("targetedUpdateUrl").orEmpty()
                     hasTargeted = url.isNotBlank()
                     if (hasTargeted) { targetUrl = url; targetNotes = snap.getString("targetedUpdateNotes").orEmpty() }
@@ -3096,13 +3097,11 @@ private fun DashboardTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
     var warnedCount by remember { mutableIntStateOf(0) }
     var loading by remember { mutableStateOf(true) }
     var evasionCount by remember { mutableIntStateOf(0) }
+    val scope = rememberCoroutineScope()
 
     suspend fun loadStats() {
         runCatching {
-            val snap = db.collection("users").get().await()
-            // Exclude admin-build docs — when an admin tester also runs the
-            // public build on the same device, only the public-build doc
-            // should count toward user-facing stats.
+            val snap = db.collection("users").get(Source.SERVER).await()
             val publicDocs = snap.documents.filter { it.getBoolean("adminBuild") != true }
             totalUsers  = publicDocs.size
             onlineCount = publicDocs.count { it.getBoolean("isOnlineInApp") == true }
@@ -3147,7 +3146,12 @@ private fun DashboardTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
         item {
             ElevatedCard {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("Overview", style = MaterialTheme.typography.titleMedium)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Overview", style = MaterialTheme.typography.titleMedium)
+                        IconButton(onClick = { scope.launch { loading = true; loadStats() } }) {
+                            Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
+                        }
+                    }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         StatChip(Modifier.weight(1f), "Users", totalUsers.toString())
                         StatChip(Modifier.weight(1f), "Online", onlineCount.toString(),

@@ -732,41 +732,54 @@ class ChatboxViewModel(
                 return@launch
             }
 
-            // For each field, compare remote value against what we LAST WROTE
-            // to Firestore (lastSyncedValues). If it matches our last write,
-            // the snapshot is just an echo (from self-sync or heartbeat) — skip.
-            // If it differs, someone else (admin) changed it — apply.
-
+            // Toggles: compare against current local state. If remote differs
+            // from local, apply (admin wins). If same, nothing to change.
+            // Content fields: compare against lastSyncedValues baseline with
+            // fallback to current local state.
+            // Both paths update lastSyncedValues immediately so the subsequent
+            // self-sync echo is correctly suppressed.
             snap.getBoolean("afkEnabled")?.let { remote ->
-                if (remote != lastSyncedValues["afkEnabled"]) {
+                if (remote != afkEnabled) {
                     afkEnabled = remote
+                    lastSyncedValues["afkEnabled"] = remote
                     rebuildCombinedPreviewOnly()
                     if (!remote) stopAfkSender(clearFromChatbox = true)
                     startSelfSyncLoopIfNeeded()
+                } else {
+                    lastSyncedValues["afkEnabled"] = remote
                 }
             }
             snap.getBoolean("cycleEnabled")?.let { remote ->
-                if (remote != lastSyncedValues["cycleEnabled"]) {
+                if (remote != cycleEnabled) {
                     cycleEnabled = remote
+                    lastSyncedValues["cycleEnabled"] = remote
                     rebuildCombinedPreviewOnly()
                     if (!remote) stopCycle(clearFromChatbox = true)
                     if (remote) lastCyclePreviewAdvanceMs = 0L
                     startSelfSyncLoopIfNeeded()
+                } else {
+                    lastSyncedValues["cycleEnabled"] = remote
                 }
             }
             snap.getBoolean("spotifyEnabled")?.let { remote ->
-                if (remote != lastSyncedValues["spotifyEnabled"]) {
+                if (remote != spotifyEnabled) {
                     spotifyEnabled = remote
+                    lastSyncedValues["spotifyEnabled"] = remote
                     rebuildCombinedPreviewOnly()
                     if (!remote) stopNowPlayingSender(clearFromChatbox = true)
                     startSelfSyncLoopIfNeeded()
+                } else {
+                    lastSyncedValues["spotifyEnabled"] = remote
                 }
             }
             snap.getBoolean("timeEnabled")?.let { remote ->
-                if (remote != lastSyncedValues["timeEnabled"]) {
+                if (remote != timeEnabled) {
                     timeEnabled = remote
+                    lastSyncedValues["timeEnabled"] = remote
                     rebuildCombinedPreviewOnly()
                     startSelfSyncLoopIfNeeded()
+                } else {
+                    lastSyncedValues["timeEnabled"] = remote
                 }
             }
 
@@ -777,6 +790,9 @@ class ChatboxViewModel(
                 val baseline = (lastSyncedValues["afkMessage"] as? String) ?: afkMessage.trim()
                 if (remote.trim() != baseline) {
                     userPreferencesRepository.saveAfkMessage(remote.trim())
+                    lastSyncedValues["afkMessage"] = remote.trim()
+                } else {
+                    lastSyncedValues["afkMessage"] = remote.trim()
                 }
             }
             snap.getLong("cycleIntervalSeconds")?.let { remote ->
@@ -784,6 +800,9 @@ class ChatboxViewModel(
                 val baseline = (lastSyncedValues["cycleIntervalSeconds"] as? Int) ?: cycleIntervalSeconds
                 if (intVal != baseline) {
                     userPreferencesRepository.saveCycleInterval(intVal)
+                    lastSyncedValues["cycleIntervalSeconds"] = intVal
+                } else {
+                    lastSyncedValues["cycleIntervalSeconds"] = intVal
                 }
             }
             snap.getString("cycleLinesText")?.let { remote ->
@@ -791,6 +810,9 @@ class ChatboxViewModel(
                     ?: cycleLines.joinToString("\n").trim()
                 if (remote.trim() != baseline) {
                     userPreferencesRepository.saveCycleMessages(remote.trim())
+                    lastSyncedValues["cycleLinesText"] = remote.trim()
+                } else {
+                    lastSyncedValues["cycleLinesText"] = remote.trim()
                 }
             }
             val afkPresetSavers = listOf<suspend (String) -> Unit>(
@@ -805,6 +827,7 @@ class ChatboxViewModel(
                 if (remoteMsg.trim() != baseline) {
                     afkPresetSavers[i - 1](remoteMsg.trim())
                 }
+                lastSyncedValues["afkPreset$i"] = remoteMsg.trim()
             }
             val presetSavers = listOf<suspend (String, Int, String?) -> Unit>(
                 userPreferencesRepository::saveCyclePreset1,
@@ -821,6 +844,7 @@ class ChatboxViewModel(
                     val interval = cyclePresetIntervals.getOrElse(i - 1) { 10 }
                     presetSavers[i - 1](remoteMsg.trim(), interval, null)
                 }
+                lastSyncedValues["cyclePreset$i"] = remoteMsg.trim()
             }
         }
     }
