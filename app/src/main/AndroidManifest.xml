@@ -74,7 +74,8 @@
             android:name=".MainActivity"
             android:exported="true"
             android:label="VRC-A"
-            android:theme="@style/Theme.Chatbox">
+            android:theme="@style/Theme.Chatbox"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

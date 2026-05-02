@@ -63,6 +63,10 @@ class DiscordRpcService : Service() {
 
     private var onlineStartEpochMs = 0L
 
+    private val rpcPrefs by lazy {
+        applicationContext.getSharedPreferences("discord_rpc_state", Context.MODE_PRIVATE)
+    }
+
     private val assetResolver = DiscordExternalAssetResolver(
         applicationId = VRCHAT_APP_ID,
         tokenProvider = { token }
@@ -97,7 +101,7 @@ class DiscordRpcService : Service() {
             return START_STICKY
         }
 
-        onlineStartEpochMs = 0L
+        onlineStartEpochMs = rpcPrefs.getLong("online_start_epoch", 0L)
 
         scope.launch {
             val prefs = dataStore.data.first()
@@ -185,6 +189,8 @@ class DiscordRpcService : Service() {
         val socket = ws
         ws = null
         isRunning = false
+        onlineStartEpochMs = 0L
+        rpcPrefs.edit().putLong("online_start_epoch", 0L).apply()
         if (socket == null) return
         // Clear presence synchronously so the work finishes before process
         // death. Thread.sleep blocks the caller (~1.5s) which is fine since
@@ -318,8 +324,10 @@ class DiscordRpcService : Service() {
 
         if (isOnline && onlineStartEpochMs == 0L) {
             onlineStartEpochMs = System.currentTimeMillis()
-        } else if (!isOnline) {
+            rpcPrefs.edit().putLong("online_start_epoch", onlineStartEpochMs).apply()
+        } else if (!isOnline && onlineStartEpochMs != 0L) {
             onlineStartEpochMs = 0L
+            rpcPrefs.edit().putLong("online_start_epoch", 0L).apply()
         }
 
         val activity = JSONObject().apply {
