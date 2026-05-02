@@ -123,9 +123,26 @@ class VrchatPipelineService : Service() {
                 return START_NOT_STICKY
             }
             else -> {
-                deviceHash = intent?.getStringExtra(EXTRA_DEVICE_HASH) ?: ""
+                // Prefer deviceHash from the intent extra, but fall back to the
+                // SharedPreferences value so a sticky restart with null intent
+                // (Android killed the service due to memory pressure) still
+                // syncs to the right Firestore doc.
+                val fromIntent = intent?.getStringExtra(EXTRA_DEVICE_HASH).orEmpty()
+                if (fromIntent.isNotBlank()) {
+                    deviceHash = fromIntent
+                } else if (deviceHash.isBlank()) {
+                    deviceHash = applicationContext
+                        .getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
+                        .getString("device_id_hash", "") ?: ""
+                }
                 startForeground(NOTIF_ID_PERSISTENT, buildPersistentNotification("Connecting..."))
-                startPipeline()
+                // If the pipeline is already connected (duplicate ACTION_START
+                // from a reconnect or system restart), don't tear it down and
+                // start over — that's what causes friend caches to flush and
+                // VRChat presence to flicker.
+                if (!VrchatPipelineState.isConnected) {
+                    startPipeline()
+                }
             }
         }
         return START_STICKY  // restart if killed
@@ -223,11 +240,27 @@ class VrchatPipelineService : Service() {
 
     private fun startPresenceRefreshLoop() {
         presenceRefreshJob?.cancel()
-        // Only poll VRChat presence + write to Firestore while an admin is
-        // watching this user. When unwatched, in-app presence still updates
-        // via WebSocket pipeline events; the polling loop is purely for
-        // keeping Firestore fresh for the admin panel.
         presenceRefreshJob = serviceScope.launch {
+            // Always-on slow poll: keeps in-app presence (location, world,
+            // status) fresh even when no admin is watching. The Firestore
+            // write inside syncPresenceToFirestore is gated by AdminWatchState,
+            // so this loop only updates VrchatPipelineState locally and pays
+            // no Firestore traffic when unwatched. Without this loop the
+            // in-app world/location can go stale because VRChat doesn't
+            // always send user-update events when the user changes worlds.
+            launch {
+                while (true) {
+                    try {
+                        syncPresenceToFirestore()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Slow presence refresh failed", e)
+                    }
+                    delay(15_000)
+                }
+            }
+            // Fast poll only while an admin is actively watching this user.
+            // collectLatest cancels the inner loop the moment the watch flag
+            // flips back to false, so Firestore traffic stops instantly.
             AdminWatchState.isWatched.collectLatest { watched ->
                 if (watched) {
                     while (true) {
@@ -378,19 +411,30 @@ class VrchatPipelineService : Service() {
                     val displayName = user?.optString("displayName")
                         ?: friendsCache[userId] ?: userId
                     val location = content.optString("location", "")
+                    // VRChat usually embeds the destination world's metadata in
+                    // `world` (or under `user.worldId` -> `world` block) on
+                    // friend-online events. Use that name when we have it
+                    // before falling back to generic strings — the previous
+                    // code always rendered every public/friends instance as
+                    // "VRChat" or "a private world".
+                    val worldName = content.optJSONObject("world")?.optString("name").orEmpty()
+                        .ifBlank { user?.optString("worldName").orEmpty() }
+                        .ifBlank { user?.optJSONObject("world")?.optString("name").orEmpty() }
                     friendsCache[userId] = displayName
                     persistFriendsCache()
-                    val locationText = when {
-                        location.isBlank() || location == "private" -> "a private world"
-                        location == "traveling" -> "traveling between worlds"
-                        else -> "VRChat"
+                    val notifText = when {
+                        location == "traveling" -> "$displayName is traveling between worlds"
+                        location == "private" -> "$displayName is now online in a private instance"
+                        worldName.isNotBlank() -> "$displayName is now online in $worldName"
+                        location.startsWith("wrld_") -> "$displayName is now online"
+                        else -> "$displayName is now online"
                     }
                     // Cancel any pending offline notification -- they hopped worlds
                     pendingOffline.remove(userId)
                     fireEventNotification(
                         id = "online_$userId".hashCode(),
                         title = "Friend online",
-                        text = "$displayName is now online in $locationText",
+                        text = notifText,
                         profileUrl = "https://vrchat.com/home/user/$userId",
                         channelKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_ONLINE
                     )
@@ -572,16 +616,18 @@ class VrchatPipelineService : Service() {
     // ------------------------------------------------------------------
 
     private suspend fun syncPresenceToFirestore() {
-        if (deviceHash.isBlank()) return
         val presence = VrchatAuthManager.fetchPresence(this) ?: return
 
-        // Always update in-app state so the user's own UI stays current.
+        // Always update in-app state so the user's own UI stays current —
+        // this happens regardless of deviceHash or watch status, since the
+        // in-app VRChat tab reads from VrchatPipelineState.
         VrchatPipelineState.presence = presence
 
-        // Skip the Firestore write entirely when no admin is watching this
-        // user — admins only see live VRChat data while they have the user
-        // selected, and writing every state change to Firestore for every
+        // Firestore write is gated by both deviceHash availability AND admin
+        // watch status. Admins only see live VRChat data while they have the
+        // user selected; writing every state change to Firestore for every
         // user 24/7 is what blew through the free quota.
+        if (deviceHash.isBlank()) return
         if (!AdminWatchState.isWatched.value) return
 
         val updates = mapOf(

@@ -621,7 +621,7 @@ private fun UsersTab(
     // see their own admin doc cluttering the public-user list.
     LaunchedEffect(liveLimit) {
         while (true) {
-            runCatching {
+            try {
                 val snap = db.collection("users")
                     .orderBy("lastSeenAt", Query.Direction.DESCENDING)
                     .limit(liveLimit.toLong())
@@ -630,7 +630,11 @@ private fun UsersTab(
                     .filter { it.getBoolean("adminBuild") != true }
                     .map { parseUserRow(it) }
                 users.clear(); users.addAll(next)
-            }.onFailure { e -> setError(e.message ?: "Users load failed") }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                setError(e.message ?: "Users load failed")
+            }
             setGlobalLoading(false)
             delay(30_000L)
         }
@@ -646,7 +650,7 @@ private fun UsersTab(
         selectedDetailLoading = true
         var watcherTick = 0
         while (true) {
-            runCatching {
+            try {
                 val snap = db.collection("users").document(docId).get(Source.SERVER).await()
                 if (snap != null && snap.exists()) {
                     selectedDetail = parseUserDetail(snap)
@@ -654,19 +658,23 @@ private fun UsersTab(
                     selectedDetail = null
                 }
                 selectedDetailLoading = false
-            }.onFailure { e ->
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
                 setError(e.message ?: "User detail load failed")
                 selectedDetailLoading = false
             }
             // Write watcherActiveAt every 30s (every 60 iterations at 500ms)
             if (watcherTick % 60 == 0) {
-                runCatching {
+                try {
                     db.collection("users").document(docId)
                         .set(
                             mapOf("watcherActiveAt" to FieldValue.serverTimestamp()),
                             SetOptions.merge()
                         ).await()
-                }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Throwable) {}
             }
             watcherTick++
             delay(500L)
@@ -3100,7 +3108,7 @@ private fun DashboardTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
     val scope = rememberCoroutineScope()
 
     suspend fun loadStats() {
-        runCatching {
+        try {
             val snap = db.collection("users").get(Source.SERVER).await()
             val publicDocs = snap.documents.filter { it.getBoolean("adminBuild") != true }
             totalUsers  = publicDocs.size
@@ -3108,7 +3116,9 @@ private fun DashboardTab(db: FirebaseFirestore, setError: (String?) -> Unit) {
             bannedCount = publicDocs.count { it.getBoolean("banned") == true }
             warnedCount = publicDocs.count { it.getBoolean("warned") == true }
             loading = false
-        }.onFailure { e ->
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
             setError(e.message); loading = false
         }
     }

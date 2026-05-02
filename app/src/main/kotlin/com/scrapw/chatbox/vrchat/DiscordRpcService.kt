@@ -88,6 +88,15 @@ class DiscordRpcService : Service() {
         ensureChannel()
         startForeground(NOTIF_ID, buildNotif("Connected + Discord RPC starting..."))
 
+        // If the service is already running and connected, treat duplicate
+        // ACTION_START intents as a no-op. Resetting onlineStartEpochMs and
+        // re-launching connect() here would zero out the elapsed-time counter
+        // that Discord shows in the user's activity card — which is exactly
+        // the bug users reported as "RPC time counter resetting".
+        if (isRunning && ws != null) {
+            return START_STICKY
+        }
+
         onlineStartEpochMs = 0L
 
         scope.launch {
@@ -122,7 +131,9 @@ class DiscordRpcService : Service() {
 
             connect()
         }
-        return START_NOT_STICKY
+        // START_STICKY so Android restarts the service if killed; the duplicate
+        // intent guard above handles the resulting null-intent restart.
+        return START_STICKY
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
