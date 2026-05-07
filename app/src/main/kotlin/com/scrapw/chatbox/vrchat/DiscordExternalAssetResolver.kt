@@ -10,6 +10,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.TimeUnit
 
 /**
@@ -95,6 +96,16 @@ class DiscordExternalAssetResolver(
         } finally {
             mutex.withLock { inFlight.remove(url) }
         }
+    }
+
+    /**
+     * Returns cached ref instantly, or awaits resolution up to [timeoutMs].
+     * Falls back to [fallback] if resolution fails or times out.
+     */
+    suspend fun resolveOrTimeout(url: String, timeoutMs: Long = 1500, fallback: String? = null): String? {
+        if (url.isBlank()) return fallback
+        peekCached(url)?.let { return it }
+        return withTimeoutOrNull(timeoutMs) { resolve(url) } ?: fallback
     }
 
     private fun postExternalAssets(url: String, token: String): String? {

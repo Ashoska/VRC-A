@@ -17,6 +17,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
@@ -186,6 +187,7 @@ class DiscordRpcService : Service() {
     private fun disconnect() {
         heartbeatJob?.cancel()
         presenceJob?.cancel()
+        presenceWatchJob?.cancel()
         val socket = ws
         ws = null
         isRunning = false
@@ -217,6 +219,7 @@ class DiscordRpcService : Service() {
         isRunning = false
         heartbeatJob?.cancel()
         presenceJob?.cancel()
+        presenceWatchJob?.cancel()
         scope.launch {
             delay(5000)
             if (token.isNotBlank()) connect()
@@ -270,55 +273,76 @@ class DiscordRpcService : Service() {
     }
 
     private fun sendIdentify(webSocket: WebSocket) {
-        val presence = buildPresenceData()
-        val identify = JSONObject().apply {
-            put("op", 2)
-            put("d", JSONObject().apply {
-                put("token", token)
-                put("intents", 0)
-                put("properties", JSONObject().apply {
-                    put("os", "Windows")
-                    put("browser", "Discord Client")
-                    put("device", "")
+        scope.launch {
+            val presence = buildPresenceData()
+            val identify = JSONObject().apply {
+                put("op", 2)
+                put("d", JSONObject().apply {
+                    put("token", token)
+                    put("intents", 0)
+                    put("properties", JSONObject().apply {
+                        put("os", "Windows")
+                        put("browser", "Discord Client")
+                        put("device", "")
+                    })
+                    put("presence", presence)
                 })
-                put("presence", presence)
-            })
+            }
+            webSocket.send(identify.toString())
         }
-        webSocket.send(identify.toString())
     }
+
+    private var lastOp3SentMs = 0L
+    private var presenceWatchJob: Job? = null
 
     private fun startPresenceLoop(webSocket: WebSocket) {
         presenceJob?.cancel()
+        presenceWatchJob?.cancel()
+
+        // Event-driven: immediately send Op-3 whenever VRChat presence changes.
+        presenceWatchJob = scope.launch {
+            VrchatPipelineState.presenceFlow.collectLatest {
+                // Debounce: wait at least 1.5s since last Op-3 to avoid spam.
+                val elapsed = System.currentTimeMillis() - lastOp3SentMs
+                if (elapsed < 1500) delay(1500 - elapsed)
+                sendPresenceUpdate(webSocket)
+            }
+        }
+
+        // Slow backup timer (10s) for keep-alive.
         presenceJob = scope.launch {
             while (true) {
-                delay(5_000)
-                val update = JSONObject().apply {
-                    put("op", 3)
-                    put("d", buildPresenceData())
-                }
-                try {
-                    webSocket.send(update.toString())
-                } catch (e: Exception) {
-                    Log.w(TAG, "Presence update send failed", e)
-                    break
-                }
+                delay(10_000)
+                sendPresenceUpdate(webSocket)
             }
         }
     }
 
-    /**
-     * Returns a cached `mp:external/...` reference if available; otherwise
-     * kicks off async resolution and returns the `"vrchat"` asset key as
-     * a fallback. The next presence loop tick (5s later) will pick up the
-     * resolved value once it lands in the cache.
-     */
-    private fun resolveOrFallback(url: String): String {
-        assetResolver.peekCached(url)?.let { return it }
-        scope.launch { assetResolver.resolve(url) }
-        return "vrchat"
+    private suspend fun sendPresenceUpdate(webSocket: WebSocket) {
+        val update = JSONObject().apply {
+            put("op", 3)
+            put("d", buildPresenceData())
+        }
+        try {
+            webSocket.send(update.toString())
+            lastOp3SentMs = System.currentTimeMillis()
+        } catch (e: Exception) {
+            Log.w(TAG, "Presence update send failed", e)
+        }
     }
 
-    private fun buildPresenceData(): JSONObject {
+    /**
+     * Squashes a VRChat world image URL into a square via weserv.nl proxy.
+     * The default VRChat logo is left unproxied since it's already designed
+     * for the activity-card frame.
+     */
+    private fun squashToSquareUrl(url: String): String {
+        if (url.isBlank() || url == DEFAULT_VRCHAT_IMAGE_URL) return url
+        val encoded = java.net.URLEncoder.encode(url, "UTF-8")
+        return "https://images.weserv.nl/?url=$encoded&w=512&h=512&fit=fill"
+    }
+
+    private suspend fun buildPresenceData(): JSONObject {
         val vrcPresence = VrchatPipelineState.presence
         val isOnline = vrcPresence?.isOnlineInVRChat == true
 
@@ -374,11 +398,13 @@ class DiscordRpcService : Service() {
                     })
                 }
 
+                val defaultRef = assetResolver.peekCached(DEFAULT_VRCHAT_IMAGE_URL) ?: "vrchat"
                 put("assets", JSONObject().apply {
                     val largeImage = if (showWorldDetails && vrcPresence.worldImageUrl.isNotBlank()) {
-                        resolveOrFallback(vrcPresence.worldImageUrl)
+                        val squashed = squashToSquareUrl(vrcPresence.worldImageUrl)
+                        assetResolver.resolveOrTimeout(squashed, 1500, defaultRef) ?: defaultRef
                     } else {
-                        resolveOrFallback(DEFAULT_VRCHAT_IMAGE_URL)
+                        assetResolver.resolveOrTimeout(DEFAULT_VRCHAT_IMAGE_URL, 1500, "vrchat") ?: "vrchat"
                     }
                     put("large_image", largeImage)
                     put("large_text", if (showWorldDetails) vrcPresence.worldName else "VRChat")
@@ -387,7 +413,7 @@ class DiscordRpcService : Service() {
                 put("details", "Not in VRChat")
                 put("state", "Using VRC-A")
                 put("assets", JSONObject().apply {
-                    put("large_image", resolveOrFallback(DEFAULT_VRCHAT_IMAGE_URL))
+                    put("large_image", assetResolver.resolveOrTimeout(DEFAULT_VRCHAT_IMAGE_URL, 1500, "vrchat") ?: "vrchat")
                     put("large_text", "VRChat")
                 })
             }

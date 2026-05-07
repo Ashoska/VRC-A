@@ -279,7 +279,11 @@ fun AdminScreen() {
 
     // ── Shared user list (drives both Dashboard stats and Users directory) ──
     // Only polls Firestore while the admin is actually on the Dashboard or Users tab.
-    val sharedUsers = remember { mutableStateListOf<UserRow>() }
+    // Whole-value assignment to mutableStateOf<List<>> guarantees Compose
+    // recomposes downstream consumers — SnapshotStateList.clear()+addAll()
+    // doesn't always propagate (reported as "Dashboard counter only updates
+    // after switching tabs and back").
+    var sharedUsers by remember { mutableStateOf<List<UserRow>>(emptyList()) }
     var sharedLiveLimit by rememberSaveable { mutableIntStateOf(500) }
     var sharedUsersLoading by remember { mutableStateOf(true) }
     val needsUsers = tabIndex == 0 || tabIndex == 1
@@ -295,7 +299,7 @@ fun AdminScreen() {
                 val next = snap.documents
                     .filter { it.getBoolean("adminBuild") != true }
                     .map { parseUserRow(it) }
-                sharedUsers.clear(); sharedUsers.addAll(next)
+                sharedUsers = next
                 sharedUsersLoading = false
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -303,6 +307,27 @@ fun AdminScreen() {
                 setErr(e.message ?: "Users load failed")
                 sharedUsersLoading = false
             }
+            delay(30_000L)
+        }
+    }
+
+    // Admin browsing heartbeat: while on Dashboard or Users tab, write
+    // config/adminPresence.browsingAt every 30s. Public user apps subscribe
+    // to that doc and run their own 30s lastSeenAt heartbeat only when this
+    // is fresh (within 75s). When admin leaves both tabs, the doc goes
+    // stale and all user apps stop heartbeating — zero idle Firestore
+    // traffic.
+    LaunchedEffect(needsUsers) {
+        if (!needsUsers) return@LaunchedEffect
+        while (true) {
+            try {
+                db.collection("config")
+                    .document("adminPresence")
+                    .set(
+                        mapOf("browsingAt" to FieldValue.serverTimestamp()),
+                        com.google.firebase.firestore.SetOptions.merge()
+                    )
+            } catch (_: Throwable) { /* best-effort */ }
             delay(30_000L)
         }
     }
@@ -419,7 +444,7 @@ fun AdminScreen() {
                                     val next = snap.documents
                                         .filter { it.getBoolean("adminBuild") != true }
                                         .map { parseUserRow(it) }
-                                    sharedUsers.clear(); sharedUsers.addAll(next)
+                                    sharedUsers = next
                                 } catch (e: kotlinx.coroutines.CancellationException) {
                                     throw e
                                 } catch (e: Throwable) {
@@ -576,6 +601,21 @@ private data class ModerationTarget(
     val warned: Boolean = false
 )
 
+/**
+ * A user counts as online only when [UserRow.isOnlineInApp] is true AND
+ * [UserRow.lastSeenAt] is within the staleness window. The user app emits
+ * a 30s heartbeat (writes lastSeenAt) while any admin is browsing the
+ * Dashboard or Users tab; 75s = 2.5x the heartbeat interval, giving one
+ * missed beat of grace before flipping force-killed users to offline.
+ */
+private const val ONLINE_STALENESS_WINDOW_MS = 75_000L
+
+private fun isUserOnline(u: UserRow, nowMs: Long = System.currentTimeMillis()): Boolean {
+    if (!u.isOnlineInApp) return false
+    val seenMs = u.lastSeenAt?.toDate()?.time ?: return false
+    return nowMs - seenMs < ONLINE_STALENESS_WINDOW_MS
+}
+
 private fun parseUserRow(d: com.google.firebase.firestore.DocumentSnapshot): UserRow {
     val docId = d.id
     val authUid = (d.getString("authUid") ?: d.getString("uid") ?: "").trim()
@@ -605,7 +645,7 @@ private fun parseUserRow(d: com.google.firebase.firestore.DocumentSnapshot): Use
 private fun UsersTab(
     db: FirebaseFirestore,
     myDeviceHash: String,
-    users: androidx.compose.runtime.snapshots.SnapshotStateList<UserRow>,
+    users: List<UserRow>,
     liveLimit: Int,
     onIncreaseLiveLimit: () -> Unit,
     setGlobalLoading: (Boolean) -> Unit,
@@ -973,7 +1013,7 @@ private fun UsersTab(
                                 containerColor = MaterialTheme.colorScheme.tertiary
                             ) { Text("VRC", style = MaterialTheme.typography.labelSmall) }
                         }
-                        if (u.isOnlineInApp) {
+                        if (isUserOnline(u, nowMs)) {
                             androidx.compose.material3.Badge(
                                 containerColor = MaterialTheme.colorScheme.primary
                             ) { Text("ONLINE", style = MaterialTheme.typography.labelSmall) }
@@ -2511,41 +2551,62 @@ private suspend fun githubCreateRelease(
     owner: String, repo: String, pat: String,
     tagName: String, releaseName: String, body: String
 ): GithubReleaseResult = withContext(Dispatchers.IO) {
-    val url = URL("https://api.github.com/repos/$owner/$repo/releases")
     val payload = JSONObject().apply {
         put("tag_name", tagName)
         put("name", releaseName)
         put("body", body)
         put("draft", false)
         put("prerelease", false)
-    }.toString()
+    }.toString().toByteArray(Charsets.UTF_8)
 
-    val conn = url.openConnection() as HttpURLConnection
-    conn.requestMethod = "POST"
-    conn.setRequestProperty("Authorization", "Bearer $pat")
-    conn.setRequestProperty("Accept", "application/vnd.github+json")
-    conn.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
-    conn.setRequestProperty("Content-Type", "application/json")
-    conn.doOutput = true
-    conn.connectTimeout = 15_000
-    conn.readTimeout = 30_000
+    var currentUrl = "https://api.github.com/repos/$owner/$repo/releases"
+    var hops = 0
+    while (true) {
+        val conn = URL(currentUrl).openConnection() as HttpURLConnection
+        conn.instanceFollowRedirects = false
+        conn.requestMethod = "POST"
+        conn.setRequestProperty("Authorization", "Bearer $pat")
+        conn.setRequestProperty("Accept", "application/vnd.github+json")
+        conn.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
+        conn.setRequestProperty("Content-Type", "application/json")
+        conn.doOutput = true
+        conn.connectTimeout = 15_000
+        conn.readTimeout = 30_000
 
-    conn.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
+        conn.outputStream.use { it.write(payload) }
 
-    val code = conn.responseCode
-    val responseBody = (if (code in 200..299) conn.inputStream else conn.errorStream)
-        ?.bufferedReader()?.readText().orEmpty()
+        val code = conn.responseCode
+        // 307/308 preserve the method and body — re-POST to the Location.
+        // 301/302/303 also frequently come from GitHub when a repo has been
+        // renamed or moved; treat them the same so the upload doesn't fail.
+        if (code in listOf(301, 302, 303, 307, 308) && hops < 5) {
+            val location = conn.getHeaderField("Location")
+            conn.disconnect()
+            if (location.isNullOrBlank()) {
+                throw Exception("GitHub create release redirect ($code) without Location header")
+            }
+            currentUrl = if (location.startsWith("http")) location
+                         else URL(URL(currentUrl), location).toString()
+            hops++
+            continue
+        }
 
-    if (code !in 200..299) {
-        throw Exception("GitHub create release failed ($code): $responseBody")
+        val responseBody = (if (code in 200..299) conn.inputStream else conn.errorStream)
+            ?.bufferedReader()?.readText().orEmpty()
+
+        if (code !in 200..299) {
+            throw Exception("GitHub create release failed ($code): $responseBody")
+        }
+
+        val json = JSONObject(responseBody)
+        return@withContext GithubReleaseResult(
+            releaseId = json.getLong("id"),
+            uploadUrl = json.getString("upload_url"),
+            htmlUrl   = json.getString("html_url")
+        )
     }
-
-    val json = JSONObject(responseBody)
-    GithubReleaseResult(
-        releaseId = json.getLong("id"),
-        uploadUrl = json.getString("upload_url"),
-        htmlUrl   = json.getString("html_url")
-    )
+    @Suppress("UNREACHABLE_CODE")
+    throw Exception("GitHub create release: too many redirects")
 }
 
 private suspend fun githubUploadAsset(
@@ -2553,48 +2614,64 @@ private suspend fun githubUploadAsset(
     releaseId: Long, fileName: String, apkFile: File,
     onProgress: (Float) -> Unit
 ): String = withContext(Dispatchers.IO) {
-    val uploadUrl = URL(
-        "https://uploads.github.com/repos/$owner/$repo/releases/$releaseId/assets?name=${
-            java.net.URLEncoder.encode(fileName, "UTF-8")
-        }"
-    )
+    val encodedName = java.net.URLEncoder.encode(fileName, "UTF-8")
+    var currentUrl = "https://uploads.github.com/repos/$owner/$repo/releases/$releaseId/assets?name=$encodedName"
+    var hops = 0
 
-    val conn = uploadUrl.openConnection() as HttpURLConnection
-    conn.requestMethod = "POST"
-    conn.setRequestProperty("Authorization", "Bearer $pat")
-    conn.setRequestProperty("Accept", "application/vnd.github+json")
-    conn.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
-    conn.setRequestProperty("Content-Type", "application/vnd.android.package-archive")
-    conn.setRequestProperty("Content-Length", apkFile.length().toString())
-    conn.doOutput = true
-    conn.connectTimeout = 15_000
-    conn.readTimeout = 300_000  // large file upload - 5 min
+    while (true) {
+        val conn = URL(currentUrl).openConnection() as HttpURLConnection
+        conn.instanceFollowRedirects = false
+        conn.requestMethod = "POST"
+        conn.setRequestProperty("Authorization", "Bearer $pat")
+        conn.setRequestProperty("Accept", "application/vnd.github+json")
+        conn.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
+        conn.setRequestProperty("Content-Type", "application/vnd.android.package-archive")
+        conn.setRequestProperty("Content-Length", apkFile.length().toString())
+        conn.doOutput = true
+        conn.connectTimeout = 15_000
+        conn.readTimeout = 300_000
 
-    val totalBytes = apkFile.length().toFloat()
-    var writtenBytes = 0L
-    val buf = ByteArray(64 * 1024)
+        val totalBytes = apkFile.length().toFloat()
+        var writtenBytes = 0L
+        val buf = ByteArray(64 * 1024)
 
-    conn.outputStream.use { out ->
-        apkFile.inputStream().use { inp ->
-            var n: Int
-            while (inp.read(buf).also { n = it } != -1) {
-                out.write(buf, 0, n)
-                writtenBytes += n
-                if (totalBytes > 0f) onProgress(writtenBytes / totalBytes)
+        conn.outputStream.use { out ->
+            apkFile.inputStream().use { inp ->
+                var n: Int
+                while (inp.read(buf).also { n = it } != -1) {
+                    out.write(buf, 0, n)
+                    writtenBytes += n
+                    if (totalBytes > 0f) onProgress(writtenBytes / totalBytes)
+                }
+                out.flush()
             }
-            out.flush()
         }
+
+        val code = conn.responseCode
+        if (code in listOf(301, 302, 303, 307, 308) && hops < 5) {
+            val location = conn.getHeaderField("Location")
+            conn.disconnect()
+            if (location.isNullOrBlank()) {
+                throw Exception("GitHub upload asset redirect ($code) without Location header")
+            }
+            currentUrl = if (location.startsWith("http")) location
+                         else URL(URL(currentUrl), location).toString()
+            hops++
+            onProgress(0f)
+            continue
+        }
+
+        val responseBody = (if (code in 200..299) conn.inputStream else conn.errorStream)
+            ?.bufferedReader()?.readText().orEmpty()
+
+        if (code !in 200..299) {
+            throw Exception("GitHub upload asset failed ($code): $responseBody")
+        }
+
+        return@withContext JSONObject(responseBody).getString("browser_download_url")
     }
-
-    val code = conn.responseCode
-    val responseBody = (if (code in 200..299) conn.inputStream else conn.errorStream)
-        ?.bufferedReader()?.readText().orEmpty()
-
-    if (code !in 200..299) {
-        throw Exception("GitHub upload asset failed ($code): $responseBody")
-    }
-
-    JSONObject(responseBody).getString("browser_download_url")
+    @Suppress("UNREACHABLE_CODE")
+    throw Exception("GitHub upload asset: too many redirects")
 }
 
 // ---- Composable ----
@@ -3145,10 +3222,19 @@ private fun DashboardTab(
     onRefresh: () -> Unit,
     setError: (String?) -> Unit
 ) {
-    val totalUsers  = users.size
-    val onlineCount = users.count { it.isOnlineInApp }
-    val bannedCount = users.count { it.banned }
-    val warnedCount = users.count { it.warned }
+    // Refresh staleness clock every 5s so onlineCount flips users to offline
+    // without needing a new Firestore poll. derivedStateOf re-evaluates each
+    // time `users` or `nowMs` changes, so the counter stays live.
+    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) { nowMs = System.currentTimeMillis(); delay(5_000L) }
+    }
+    val totalUsers  by remember(users) { derivedStateOf { users.size } }
+    val onlineCount by remember(users, nowMs) {
+        derivedStateOf { users.count { isUserOnline(it, nowMs) } }
+    }
+    val bannedCount by remember(users) { derivedStateOf { users.count { it.banned } } }
+    val warnedCount by remember(users) { derivedStateOf { users.count { it.warned } } }
     var evasionCount by remember { mutableIntStateOf(0) }
 
     DisposableEffect(Unit) {

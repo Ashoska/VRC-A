@@ -427,11 +427,19 @@ object VrchatAuthManager {
     // Friends list
     // ------------------------------------------------------------------
 
-    data class VrcFriend(val userId: String, val displayName: String)
+    data class VrcFriend(
+        val userId: String,
+        val displayName: String,
+        val status: String = "",
+        val statusDescription: String = "",
+        val location: String = "",
+        val avatarThumb: String = "",
+        val bio: String = ""
+    )
 
     suspend fun fetchFriends(context: Context): List<VrcFriend> = withContext(Dispatchers.IO) {
         val cookieHeader = getCookieHeader(context) ?: return@withContext emptyList()
-        val seen = mutableMapOf<String, String>()
+        val seen = mutableMapOf<String, VrcFriend>()
         val pageSize = 100
         for (offline in listOf(false, true)) {
             var offset = 0
@@ -456,7 +464,17 @@ object VrchatAuthManager {
                         val obj = arr.getJSONObject(i)
                         val id = obj.optString("id")
                         val name = obj.optString("displayName")
-                        if (id.isNotBlank()) seen[id] = name
+                        if (id.isNotBlank()) {
+                            seen[id] = VrcFriend(
+                                userId = id,
+                                displayName = name,
+                                status = obj.optString("status", ""),
+                                statusDescription = obj.optString("statusDescription", ""),
+                                location = obj.optString("location", ""),
+                                avatarThumb = obj.optString("currentAvatarThumbnailImageUrl", ""),
+                                bio = obj.optString("bio", "")
+                            )
+                        }
                     }
                     if (arr.length() < pageSize) break
                     offset += pageSize
@@ -467,7 +485,7 @@ object VrchatAuthManager {
             }
         }
         Log.i(TAG, "fetchFriends total: ${seen.size}")
-        seen.map { VrcFriend(it.key, it.value) }
+        seen.values.toList()
     }
 
     // ------------------------------------------------------------------

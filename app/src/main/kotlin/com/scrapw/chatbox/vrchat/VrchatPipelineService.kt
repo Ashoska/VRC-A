@@ -18,6 +18,7 @@ import com.google.firebase.firestore.SetOptions
 import com.scrapw.chatbox.MainActivity
 import com.scrapw.chatbox.R
 import com.scrapw.chatbox.dataStore
+import com.scrapw.chatbox.sync.AdminBrowsingState
 import com.scrapw.chatbox.sync.AdminWatchState
 import com.scrapw.chatbox.vrchat.VrchatNotificationPrefs
 import kotlinx.coroutines.CoroutineScope
@@ -66,8 +67,30 @@ class VrchatPipelineService : Service() {
         private const val USER_AGENT = "VRC-A-Companion/1.0 (Android; companion app)"
 
         private const val NOTIF_CHANNEL_PERSISTENT = "vrca_pipeline"
-        private const val NOTIF_CHANNEL_EVENTS = "vrca_vrchat_events"
-        private const val NOTIF_ID_PERSISTENT = 1001
+        // Legacy single-channel ID — kept only so we can delete it on upgrade.
+        private const val NOTIF_CHANNEL_EVENTS_LEGACY = "vrca_vrchat_events"
+        // Category-specific channels: each gets independent Android-level
+        // user control (sound/vibrate/badge per category).
+        private const val NOTIF_CHANNEL_FRIENDS_ACTIVITY = "vrca_friends_activity"
+        private const val NOTIF_CHANNEL_FRIEND_REQUESTS  = "vrca_friend_requests"
+        private const val NOTIF_CHANNEL_FRIEND_REMOVALS  = "vrca_friend_removals"
+        private const val NOTIF_CHANNEL_INVITES          = "vrca_invites"
+        private const val NOTIF_CHANNEL_GROUPS           = "vrca_groups"
+        private const val NOTIF_CHANNEL_CONNECTION       = "vrca_connection"
+        // Group keys for stacking related notifications in the shade.
+        private const val GROUP_KEY_FRIENDS  = "vrca_group_friends"
+        private const val GROUP_KEY_SOCIAL   = "vrca_group_social"
+        private const val GROUP_KEY_INVITES  = "vrca_group_invites"
+        private const val GROUP_KEY_GROUPS   = "vrca_group_groups"
+        // Reserved IDs for stable single-slot notifications.
+        private const val NOTIF_ID_PERSISTENT      = 1001
+        private const val NOTIF_ID_AUTH            = 9998
+        private const val NOTIF_ID_CONNECTION      = 9997
+        // Group summary IDs (stable per group).
+        private const val NOTIF_ID_SUMMARY_FRIENDS = 9000
+        private const val NOTIF_ID_SUMMARY_SOCIAL  = 9001
+        private const val NOTIF_ID_SUMMARY_INVITES = 9002
+        private const val NOTIF_ID_SUMMARY_GROUPS  = 9003
 
         const val ACTION_START = "com.scrapw.chatbox.PIPELINE_START"
         const val ACTION_STOP = "com.scrapw.chatbox.PIPELINE_STOP"
@@ -87,7 +110,7 @@ class VrchatPipelineService : Service() {
     private var webSocket: WebSocket? = null
     private var reconnectAttempt = 0
 
-    private val friendsCache = mutableMapOf<String, String>()
+    private val friendsCache = mutableMapOf<String, FriendCacheEntry>()
     private val pendingOffline = mutableMapOf<String, Long>()
     private val OFFLINE_COOLDOWN_MS = 10 * 60 * 1000L
     private var friendsCacheLoaded = false
@@ -96,8 +119,17 @@ class VrchatPipelineService : Service() {
     // Tracks user IDs for which an unfriend notification has already been fired
     // this session, so the real-time and offline-diff handlers don't both fire.
     private val notifiedUnfriendIds = mutableSetOf<String>()
+    // Per-friend throttle for chatty events (location/avatar/status). One
+    // notification per friend per LOCATION_NOTIF_COOLDOWN_MS prevents spam
+    // when a friend rapidly hops worlds or swaps avatars.
+    private val lastFriendLocationNotifMs = mutableMapOf<String, Long>()
+    private val lastFriendAvatarNotifMs = mutableMapOf<String, Long>()
+    private val lastFriendStatusNotifMs = mutableMapOf<String, Long>()
+    private val LOCATION_NOTIF_COOLDOWN_MS = 60_000L
     private var pipelineConnectedAtMs = 0L
     private var presenceRefreshJob: Job? = null
+    // Tracks last connection notification state so we don't spam connect/disconnect.
+    private var lastConnectionNotifWasUp: Boolean? = null
 
     private val okClient by lazy {
         OkHttpClient.Builder()
@@ -114,6 +146,7 @@ class VrchatPipelineService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannels()
+        attachAdminPresenceListener()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -157,6 +190,8 @@ class VrchatPipelineService : Service() {
     }
 
     override fun onDestroy() {
+        adminPresenceListener?.remove()
+        adminPresenceListener = null
         webSocket?.cancel()
         serviceScope.cancel()
         VrchatPipelineState.isConnected = false
@@ -217,15 +252,20 @@ class VrchatPipelineService : Service() {
                 loadFriendsCache()
                 friendsFetchCount++
 
-                // Schedule a delayed second fetch + diff after 60s grace period.
-                // The second fetch lets the API stabilize (incomplete results on
-                // first connect would otherwise produce false unfriends).
+                // Two-fetch confirmation: candidate removals are IDs absent from
+                // the FIRST fetch. These don't fire notifications yet — only IDs
+                // still missing in the SECOND fetch (60s later) get notified.
+                // Eliminates false positives from VRChat API pagination flaps
+                // where a single fetch occasionally returns an incomplete list.
+                val candidateRemovals = if (previousIds.isNotEmpty())
+                    previousIds - friendsCache.keys else emptySet()
+
                 if (previousIds.isNotEmpty()) {
                     serviceScope.launch {
                         delay(60_000)
                         loadFriendsCache()
                         friendsFetchCount++
-                        diffFriendsCache(previousIds, previousNames)
+                        diffFriendsCache(previousIds, previousNames, candidateRemovals)
                     }
                 }
             }
@@ -258,6 +298,27 @@ class VrchatPipelineService : Service() {
                     delay(15_000)
                 }
             }
+            // Heartbeat: 30s lastSeenAt write while ANY admin is browsing the
+            // dashboard or user directory. AdminBrowsingState is fed by a
+            // snapshot listener on config/adminPresence (attached below).
+            // When admin closes both tabs → flag goes stale → heartbeat
+            // stops → no Firestore traffic. If the user app is force-killed,
+            // no heartbeat fires regardless, so lastSeenAt goes stale and
+            // the admin's staleness filter flips them to offline.
+            launch {
+                AdminBrowsingState.isBrowsing.collectLatest { browsing ->
+                    if (browsing) {
+                        while (true) {
+                            try {
+                                writeHeartbeat()
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Heartbeat write failed", e)
+                            }
+                            delay(30_000)
+                        }
+                    }
+                }
+            }
             // Fast poll only while an admin is actively watching this user.
             // collectLatest cancels the inner loop the moment the watch flag
             // flips back to false, so Firestore traffic stops instantly.
@@ -274,6 +335,34 @@ class VrchatPipelineService : Service() {
                 }
             }
         }
+    }
+
+    private fun writeHeartbeat() {
+        if (deviceHash.isBlank()) return
+        FirebaseFirestore.getInstance()
+            .collection("users")
+            .document(deviceHash)
+            .set(
+                mapOf("lastSeenAt" to FieldValue.serverTimestamp()),
+                SetOptions.merge()
+            )
+    }
+
+    private var adminPresenceListener: com.google.firebase.firestore.ListenerRegistration? = null
+
+    private fun attachAdminPresenceListener() {
+        adminPresenceListener?.remove()
+        adminPresenceListener = FirebaseFirestore.getInstance()
+            .collection("config")
+            .document("adminPresence")
+            .addSnapshotListener { snap, err ->
+                if (err != null || snap == null) {
+                    AdminBrowsingState.updateFromTimestampMs(null)
+                    return@addSnapshotListener
+                }
+                val ms = snap.getTimestamp("browsingAt")?.toDate()?.time
+                AdminBrowsingState.updateFromTimestampMs(ms)
+            }
     }
 
     private suspend fun connectWebSocket() {
@@ -303,6 +392,7 @@ class VrchatPipelineService : Service() {
                     updatePersistentNotif(
                         "Connected as ${VrchatAuthManager.getStoredDisplayName(this@VrchatPipelineService) ?: "VRChat user"}"
                     )
+                    serviceScope.launch { fireConnectionNotification(true) }
                     // Auto-start Discord RPC if enabled
                     serviceScope.launch {
                         try {
@@ -327,12 +417,14 @@ class VrchatPipelineService : Service() {
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                     Log.w(TAG, "Pipeline failure: ${t.message}")
                     VrchatPipelineState.isConnected = false
+                    serviceScope.launch { fireConnectionNotification(false) }
                     scheduleReconnect()
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                     Log.i(TAG, "Pipeline closed: $code $reason")
                     VrchatPipelineState.isConnected = false
+                    serviceScope.launch { fireConnectionNotification(false) }
                     scheduleReconnect()
                 }
             })
@@ -372,35 +464,32 @@ class VrchatPipelineService : Service() {
                     val userId = content?.optString("userId") ?: return
                     val user = content.optJSONObject("user")
                     val displayName = user?.optString("displayName") ?: userId
-                    // Add to cache and persist
-                    friendsCache[userId] = displayName
+                    friendsCache[userId] = entryFromUserJson(user, displayName)
                     persistFriendsCache()
                     fireEventNotification(
-                        id = userId.hashCode(),
+                        id = "newfriend_$userId".hashCode(),
                         title = "New friend",
-                        text = "$displayName accepted your friend request",
+                        text = "You and $displayName are now friends",
                         profileUrl = "https://vrchat.com/home/user/$userId",
-                        channelKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_REQUEST
+                        prefKey = VrchatNotificationPrefs.KEY_NOTIF_NEW_FRIEND,
+                        channelId = NOTIF_CHANNEL_FRIEND_REQUESTS,
+                        groupKey = GROUP_KEY_SOCIAL
                     )
                 }
 
                 "friend-delete" -> {
                     val userId = content?.optString("userId") ?: return
-                    // If the user is in our cache, this is a real-time unfriend
-                    // during an active session — fire immediately with the name.
-                    // If they aren't (e.g. queued event for an offline unfriend
-                    // that already got removed by loadFriendsCache), skip and let
-                    // the offline diff fire later with the correct name from the
-                    // Firestore-restored snapshot.
-                    val displayName = friendsCache.remove(userId)
+                    val cached = friendsCache.remove(userId)
                     persistFriendsCache()
-                    if (displayName != null && notifiedUnfriendIds.add(userId)) {
+                    if (cached != null && notifiedUnfriendIds.add(userId)) {
                         fireEventNotification(
                             id = "unfriend_$userId".hashCode(),
-                            title = "Unfriended",
-                            text = "$displayName removed you as a friend",
+                            title = "Friend removed",
+                            text = "${cached.displayName} is no longer on your friends list",
                             profileUrl = "https://vrchat.com/home/user/$userId",
-                            channelKey = VrchatNotificationPrefs.KEY_NOTIF_UNFRIEND
+                            prefKey = VrchatNotificationPrefs.KEY_NOTIF_UNFRIEND,
+                            channelId = NOTIF_CHANNEL_FRIEND_REMOVALS,
+                            groupKey = GROUP_KEY_SOCIAL
                         )
                     }
                 }
@@ -409,55 +498,75 @@ class VrchatPipelineService : Service() {
                     val userId = content?.optString("userId") ?: return
                     val user = content.optJSONObject("user")
                     val displayName = user?.optString("displayName")
-                        ?: friendsCache[userId] ?: userId
+                        ?: friendsCache[userId]?.displayName ?: userId
                     val location = content.optString("location", "")
-                    // VRChat usually embeds the destination world's metadata in
-                    // `world` (or under `user.worldId` -> `world` block) on
-                    // friend-online events. Use that name when we have it
-                    // before falling back to generic strings — the previous
-                    // code always rendered every public/friends instance as
-                    // "VRChat" or "a private world".
                     val worldName = content.optJSONObject("world")?.optString("name").orEmpty()
                         .ifBlank { user?.optString("worldName").orEmpty() }
                         .ifBlank { user?.optJSONObject("world")?.optString("name").orEmpty() }
-                    friendsCache[userId] = displayName
+                    val previous = friendsCache[userId]
+                    val newStatus = user?.optString("status") ?: previous?.status.orEmpty()
+                    friendsCache[userId] = entryFromUserJson(user, displayName).copy(
+                        location = location,
+                        worldName = worldName
+                    )
                     persistFriendsCache()
                     val notifText = when {
                         location == "traveling" -> "$displayName is traveling between worlds"
                         location == "private" -> "$displayName is now online in a private instance"
                         worldName.isNotBlank() -> "$displayName is now online in $worldName"
-                        location.startsWith("wrld_") -> "$displayName is now online"
                         else -> "$displayName is now online"
                     }
-                    // Cancel any pending offline notification -- they hopped worlds
                     pendingOffline.remove(userId)
                     fireEventNotification(
                         id = "online_$userId".hashCode(),
                         title = "Friend online",
                         text = notifText,
                         profileUrl = "https://vrchat.com/home/user/$userId",
-                        channelKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_ONLINE
+                        prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_ONLINE,
+                        channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
+                        groupKey = GROUP_KEY_FRIENDS
+                    )
+                    maybeFireStatusChange(userId, displayName, previous?.status.orEmpty(), newStatus)
+                }
+
+                "friend-active" -> {
+                    val userId = content?.optString("userId") ?: return
+                    val user = content.optJSONObject("user")
+                    val displayName = user?.optString("displayName")
+                        ?: friendsCache[userId]?.displayName ?: userId
+                    val previous = friendsCache[userId]
+                    friendsCache[userId] = entryFromUserJson(user, displayName).copy(
+                        location = previous?.location.orEmpty(),
+                        worldName = previous?.worldName.orEmpty()
+                    )
+                    persistFriendsCache()
+                    fireEventNotification(
+                        id = "active_$userId".hashCode(),
+                        title = "Friend on the website",
+                        text = "$displayName is active on the VRChat website",
+                        profileUrl = "https://vrchat.com/home/user/$userId",
+                        prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_ACTIVE,
+                        channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
+                        groupKey = GROUP_KEY_FRIENDS
                     )
                 }
 
                 "friend-offline" -> {
                     val userId = content?.optString("userId") ?: return
-                    // Start a 10-minute cooldown -- if they come back online within that
-                    // window (world hop) we cancel the notification. Only fire if they
-                    // stay offline for the full cooldown period.
                     pendingOffline[userId] = System.currentTimeMillis()
                     serviceScope.launch {
                         delay(OFFLINE_COOLDOWN_MS)
-                        // Still pending? They didn't come back online -- fire now
                         if (pendingOffline.containsKey(userId)) {
                             pendingOffline.remove(userId)
-                            val displayName = friendsCache[userId] ?: "A friend"
+                            val displayName = friendsCache[userId]?.displayName ?: "A friend"
                             fireEventNotification(
                                 id = "offline_$userId".hashCode(),
                                 title = "Friend offline",
                                 text = "$displayName went offline",
                                 profileUrl = null,
-                                channelKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_OFFLINE
+                                prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_OFFLINE,
+                                channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
+                                groupKey = GROUP_KEY_FRIENDS
                             )
                         }
                     }
@@ -468,20 +577,52 @@ class VrchatPipelineService : Service() {
                 }
 
                 "friend-location" -> {
-                    // Friend moved to a new world - update cache but no notification by default
                     val userId = content?.optString("userId") ?: return
                     val user = content.optJSONObject("user")
                     val displayName = user?.optString("displayName")
-                    if (displayName != null) friendsCache[userId] = displayName
+                        ?: friendsCache[userId]?.displayName ?: userId
+                    val location = content.optString("location", "")
+                    val worldName = content.optJSONObject("world")?.optString("name").orEmpty()
+                        .ifBlank { user?.optString("worldName").orEmpty() }
+                        .ifBlank { user?.optJSONObject("world")?.optString("name").orEmpty() }
+                    val previous = friendsCache[userId]
+                    val previousWorld = previous?.worldName.orEmpty()
+                    friendsCache[userId] = (previous ?: FriendCacheEntry(displayName)).copy(
+                        displayName = displayName,
+                        location = location,
+                        worldName = worldName
+                    )
+                    persistFriendsCache()
 
-                    // Also sync user presence if it's the logged-in user
+                    // Fire location notification if world actually changed and is non-private.
+                    if (worldName.isNotBlank() && worldName != previousWorld &&
+                        location != "private" && location != "traveling") {
+                        val now = System.currentTimeMillis()
+                        val lastNotif = lastFriendLocationNotifMs[userId] ?: 0L
+                        if (now - lastNotif >= LOCATION_NOTIF_COOLDOWN_MS) {
+                            lastFriendLocationNotifMs[userId] = now
+                            fireEventNotification(
+                                id = "loc_$userId".hashCode(),
+                                title = "Friend moved",
+                                text = "$displayName joined $worldName",
+                                profileUrl = "https://vrchat.com/home/user/$userId",
+                                prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_LOCATION,
+                                channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
+                                groupKey = GROUP_KEY_FRIENDS
+                            )
+                        }
+                    }
+
                     val myId = VrchatAuthManager.getStoredUserId(this@VrchatPipelineService)
                     if (userId == myId) syncPresenceToFirestore()
                 }
 
                 "user-update" -> {
-                    // The logged-in user's profile changed - re-sync presence
                     syncPresenceToFirestore()
+                }
+
+                "friend-update" -> {
+                    handleFriendUpdate(content)
                 }
             }
         } catch (e: Exception) {
@@ -495,6 +636,7 @@ class VrchatPipelineService : Service() {
         val senderUserId = content.optString("senderUserId", "")
         val senderName = content.optString("senderUsername", "someone")
         val message = content.optString("message", "")
+        val notifId = content.optString("id", "")
 
         when {
             notifType == "friendRequest" -> {
@@ -503,46 +645,241 @@ class VrchatPipelineService : Service() {
                     title = "Friend request",
                     text = "$senderName sent you a friend request",
                     profileUrl = "https://vrchat.com/home/user/$senderUserId",
-                    channelKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_REQUEST
+                    prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_REQUEST,
+                    channelId = NOTIF_CHANNEL_FRIEND_REQUESTS,
+                    groupKey = GROUP_KEY_SOCIAL
                 )
             }
-            notifType == "invite" || notifType == "requestInvite" -> {
+            notifType == "invite" -> {
                 val worldName = try {
                     JSONObject(content.optString("details", "{}")).optString("worldName", "a world")
                 } catch (e: Exception) { "a world" }
                 fireEventNotification(
                     id = "inv_$senderUserId".hashCode(),
-                    title = if (notifType == "invite") "Invite received" else "Invite request",
-                    text = if (notifType == "invite") "$senderName invited you to $worldName"
-                           else "$senderName is requesting an invite",
+                    title = "World invite",
+                    text = "$senderName invited you to $worldName",
                     profileUrl = null,
-                    channelKey = VrchatNotificationPrefs.KEY_NOTIF_INVITE
+                    prefKey = VrchatNotificationPrefs.KEY_NOTIF_INVITE,
+                    channelId = NOTIF_CHANNEL_INVITES,
+                    groupKey = GROUP_KEY_INVITES
+                )
+            }
+            notifType == "requestInvite" -> {
+                fireEventNotification(
+                    id = "invreq_$senderUserId".hashCode(),
+                    title = "Invite request",
+                    text = "$senderName is asking for an invite to your instance",
+                    profileUrl = null,
+                    prefKey = VrchatNotificationPrefs.KEY_NOTIF_INVITE,
+                    channelId = NOTIF_CHANNEL_INVITES,
+                    groupKey = GROUP_KEY_INVITES
                 )
             }
             // notification-v2 group events
             type == "notification-v2" -> {
                 val v2Type = content.optString("type", "")
+                val v2Title = content.optString("title", "")
+                val baseId = if (notifId.isNotBlank()) notifId else "$v2Type-${message.hashCode()}"
                 when {
-                    v2Type.startsWith("group.announcement") -> {
+                    v2Type.contains("announcement", true) -> {
                         fireEventNotification(
-                            id = content.optString("id", "ga").hashCode(),
-                            title = "Group announcement",
-                            text = message.take(100).ifBlank { "New group announcement" },
+                            id = baseId.hashCode(),
+                            title = v2Title.ifBlank { "Group announcement" },
+                            text = message.take(140).ifBlank { "New announcement in one of your groups" },
                             profileUrl = null,
-                            channelKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT
+                            prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
+                            channelId = NOTIF_CHANNEL_GROUPS,
+                            groupKey = GROUP_KEY_GROUPS
+                        )
+                    }
+                    v2Type.contains("invite", true) -> {
+                        fireEventNotification(
+                            id = baseId.hashCode(),
+                            title = v2Title.ifBlank { "Group invite" },
+                            text = message.take(140).ifBlank { "You've been invited to join a group" },
+                            profileUrl = null,
+                            prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_INVITE,
+                            channelId = NOTIF_CHANNEL_INVITES,
+                            groupKey = GROUP_KEY_INVITES
+                        )
+                    }
+                    v2Type.contains("queue", true) -> {
+                        fireEventNotification(
+                            id = baseId.hashCode(),
+                            title = v2Title.ifBlank { "Queue ready" },
+                            text = message.take(140).ifBlank { "Your spot in a group instance queue is ready" },
+                            profileUrl = null,
+                            prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_QUEUE,
+                            channelId = NOTIF_CHANNEL_GROUPS,
+                            groupKey = GROUP_KEY_GROUPS
+                        )
+                    }
+                    v2Type.contains("join", true) && v2Type.contains("request", true) -> {
+                        fireEventNotification(
+                            id = baseId.hashCode(),
+                            title = v2Title.ifBlank { "Group join request" },
+                            text = message.take(140).ifBlank { "Someone wants to join one of your groups" },
+                            profileUrl = null,
+                            prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_JOIN_REQUEST,
+                            channelId = NOTIF_CHANNEL_GROUPS,
+                            groupKey = GROUP_KEY_GROUPS
+                        )
+                    }
+                    v2Type.contains("role", true) || v2Type.contains("transfer", true) -> {
+                        fireEventNotification(
+                            id = baseId.hashCode(),
+                            title = v2Title.ifBlank { "Group role updated" },
+                            text = message.take(140).ifBlank { "Your role in a group changed" },
+                            profileUrl = null,
+                            prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ROLE,
+                            channelId = NOTIF_CHANNEL_GROUPS,
+                            groupKey = GROUP_KEY_GROUPS
+                        )
+                    }
+                    v2Type.contains("instance", true) -> {
+                        fireEventNotification(
+                            id = baseId.hashCode(),
+                            title = v2Title.ifBlank { "Group instance opened" },
+                            text = message.take(140).ifBlank { "A new group instance is now joinable" },
+                            profileUrl = null,
+                            prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_INSTANCE,
+                            channelId = NOTIF_CHANNEL_GROUPS,
+                            groupKey = GROUP_KEY_GROUPS
                         )
                     }
                     v2Type.startsWith("group.") -> {
                         fireEventNotification(
-                            id = content.optString("id", "ge").hashCode(),
-                            title = "Group event",
-                            text = message.take(100).ifBlank { "New group activity" },
+                            id = baseId.hashCode(),
+                            title = v2Title.ifBlank { "Group activity" },
+                            text = message.take(140).ifBlank { "New activity in one of your groups" },
                             profileUrl = null,
-                            channelKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT
+                            prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT,
+                            channelId = NOTIF_CHANNEL_GROUPS,
+                            groupKey = GROUP_KEY_GROUPS
                         )
                     }
                 }
             }
+        }
+    }
+
+    /** Build a [FriendCacheEntry] from a VRChat user JSON object. */
+    private fun entryFromUserJson(user: JSONObject?, displayName: String): FriendCacheEntry {
+        if (user == null) return FriendCacheEntry(displayName = displayName)
+        return FriendCacheEntry(
+            displayName = displayName,
+            status = user.optString("status", ""),
+            statusDescription = user.optString("statusDescription", ""),
+            location = user.optString("location", ""),
+            worldName = user.optString("worldName", "")
+                .ifBlank { user.optJSONObject("world")?.optString("name").orEmpty() },
+            avatarThumb = user.optString("currentAvatarThumbnailImageUrl", ""),
+            bio = user.optString("bio", "")
+        )
+    }
+
+    /**
+     * Friend changed VRChat status (Online ↔ Do Not Disturb ↔ Ask Me ↔ Join Me).
+     * Throttled per friend so a chatty friend doesn't spam notifications.
+     */
+    private suspend fun maybeFireStatusChange(
+        userId: String, displayName: String, prevStatus: String, newStatus: String
+    ) {
+        if (newStatus.isBlank() || prevStatus.isBlank() || prevStatus == newStatus) return
+        val now = System.currentTimeMillis()
+        val last = lastFriendStatusNotifMs[userId] ?: 0L
+        if (now - last < LOCATION_NOTIF_COOLDOWN_MS) return
+        lastFriendStatusNotifMs[userId] = now
+        fireEventNotification(
+            id = "status_$userId".hashCode(),
+            title = "Friend status changed",
+            text = "$displayName is now ${prettyStatus(newStatus)}",
+            profileUrl = "https://vrchat.com/home/user/$userId",
+            prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_STATUS,
+            channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
+            groupKey = GROUP_KEY_FRIENDS
+        )
+    }
+
+    private fun prettyStatus(s: String): String = when (s.lowercase()) {
+        "active"  -> "Online"
+        "join me" -> "Join Me"
+        "ask me"  -> "Ask Me"
+        "busy"    -> "Do Not Disturb"
+        "offline" -> "Offline"
+        else      -> s.replaceFirstChar { it.uppercase() }
+    }
+
+    /**
+     * Friend updated their profile — detect specific kinds of change and
+     * fire targeted notifications. Each kind is throttled and individually
+     * toggleable via prefs.
+     */
+    private suspend fun handleFriendUpdate(content: JSONObject?) {
+        if (content == null) return
+        val user = content.optJSONObject("user") ?: return
+        val userId = user.optString("id").ifBlank { content.optString("userId") }
+        if (userId.isBlank()) return
+        val previous = friendsCache[userId] ?: return
+        val newDisplayName = user.optString("displayName", previous.displayName)
+        val newStatus = user.optString("status", previous.status)
+        val newAvatar = user.optString("currentAvatarThumbnailImageUrl", previous.avatarThumb)
+        val newBio = user.optString("bio", previous.bio)
+
+        // Update cache regardless of whether we notify.
+        friendsCache[userId] = previous.copy(
+            displayName = newDisplayName,
+            status = newStatus,
+            avatarThumb = newAvatar,
+            bio = newBio
+        )
+        persistFriendsCache()
+
+        // Display name change.
+        if (newDisplayName != previous.displayName && previous.displayName.isNotBlank()) {
+            fireEventNotification(
+                id = "name_$userId".hashCode(),
+                title = "Friend renamed",
+                text = "${previous.displayName} is now known as $newDisplayName",
+                profileUrl = "https://vrchat.com/home/user/$userId",
+                prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_DISPLAY_NAME,
+                channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
+                groupKey = GROUP_KEY_FRIENDS
+            )
+        }
+
+        // Status change.
+        maybeFireStatusChange(userId, newDisplayName, previous.status, newStatus)
+
+        // Avatar change (throttled per friend).
+        if (newAvatar.isNotBlank() && newAvatar != previous.avatarThumb && previous.avatarThumb.isNotBlank()) {
+            val now = System.currentTimeMillis()
+            val last = lastFriendAvatarNotifMs[userId] ?: 0L
+            if (now - last >= LOCATION_NOTIF_COOLDOWN_MS) {
+                lastFriendAvatarNotifMs[userId] = now
+                fireEventNotification(
+                    id = "avatar_$userId".hashCode(),
+                    title = "Friend changed avatar",
+                    text = "$newDisplayName switched to a new avatar",
+                    profileUrl = "https://vrchat.com/home/user/$userId",
+                    prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_AVATAR,
+                    channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
+                    groupKey = GROUP_KEY_FRIENDS
+                )
+            }
+        }
+
+        // Bio change.
+        if (newBio.isNotBlank() && newBio != previous.bio && previous.bio.isNotBlank()) {
+            fireEventNotification(
+                id = "bio_$userId".hashCode(),
+                title = "Friend updated profile",
+                text = "$newDisplayName updated their bio",
+                profileUrl = "https://vrchat.com/home/user/$userId",
+                prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_BIO,
+                channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
+                groupKey = GROUP_KEY_FRIENDS
+            )
         }
     }
 
@@ -553,10 +890,17 @@ class VrchatPipelineService : Service() {
     private suspend fun loadFriendsCache() {
         val friends = VrchatAuthManager.fetchFriends(this)
         friendsCache.clear()
-        friends.forEach { friendsCache[it.userId] = it.displayName }
+        friends.forEach {
+            friendsCache[it.userId] = FriendCacheEntry(
+                displayName = it.displayName,
+                status = it.status,
+                statusDescription = it.statusDescription,
+                location = it.location,
+                avatarThumb = it.avatarThumb,
+                bio = it.bio
+            )
+        }
         friendsCacheLoaded = true
-
-        // Persist to Firestore so service restarts can diff correctly
         persistFriendsCache()
         Log.i(TAG, "Loaded ${friendsCache.size} friends into cache")
     }
@@ -569,41 +913,48 @@ class VrchatPipelineService : Service() {
         }
     }
 
+    /**
+     * Two-fetch confirmation: only fire unfriend notifications for IDs
+     * absent from BOTH the first fetch (captured into [candidateRemovals])
+     * and the second fetch (this call's [friendsCache]). Eliminates false
+     * positives from VRChat API pagination flaps.
+     */
     private suspend fun diffFriendsCache(
         previousIds: Set<String>,
-        previousNames: Map<String, String>
+        previousNames: Map<String, String>,
+        candidateRemovals: Set<String>
     ) {
         val now = System.currentTimeMillis()
         if (now - lastUnfriendDiffMs < 5 * 60 * 1000L) return
         if (previousIds.isEmpty() || friendsCache.isEmpty()) return
-        // Guard: if fresh list is less than 80% of previous, assume API pagination error
         if (friendsCache.size < previousIds.size * 4 / 5) {
             Log.w(TAG, "Skipping unfriend diff: fresh list (${friendsCache.size}) < 80% of previous (${previousIds.size})")
             return
         }
         lastUnfriendDiffMs = now
-        val removedIds = previousIds - friendsCache.keys
-        removedIds.forEach { userId ->
+        val confirmedRemovals = candidateRemovals.intersect(previousIds - friendsCache.keys)
+        confirmedRemovals.forEach { userId ->
             if (notifiedUnfriendIds.add(userId)) {
                 val displayName = previousNames[userId] ?: "Someone"
                 fireEventNotification(
                     id = "unfriend_offline_$userId".hashCode(),
-                    title = "Unfriended while offline",
-                    text = "$displayName removed you as a friend",
+                    title = "Friend removed",
+                    text = "$displayName is no longer on your friends list",
                     profileUrl = "https://vrchat.com/home/user/$userId",
-                    channelKey = VrchatNotificationPrefs.KEY_NOTIF_UNFRIEND
+                    prefKey = VrchatNotificationPrefs.KEY_NOTIF_UNFRIEND,
+                    channelId = NOTIF_CHANNEL_FRIEND_REMOVALS,
+                    groupKey = GROUP_KEY_SOCIAL
                 )
             }
         }
-        if (removedIds.isNotEmpty()) {
-            Log.i(TAG, "Unfriend diff: ${removedIds.size} removed (prev=${previousIds.size}, now=${friendsCache.size})")
-        }
+        Log.i(TAG, "Unfriend diff: ${confirmedRemovals.size} confirmed removals " +
+            "(prev=${previousIds.size}, candidates=${candidateRemovals.size}, now=${friendsCache.size})")
     }
 
     private fun restoreFriendsCache() {
         try {
             val saved = FriendsCacheStore.load(this)
-            saved.forEach { (id, name) -> friendsCache[id] = name }
+            saved.forEach { (id, entry) -> friendsCache[id] = entry }
             friendsCacheLoaded = friendsCache.isNotEmpty()
             Log.i(TAG, "Restored ${friendsCache.size} friends from local cache")
         } catch (e: Exception) {
@@ -670,11 +1021,12 @@ class VrchatPipelineService : Service() {
         title: String,
         text: String,
         profileUrl: String?,
-        channelKey: String
+        prefKey: String,
+        channelId: String,
+        groupKey: String? = null
     ) {
-        // Check if user has this notification type enabled
         val prefs = dataStore.data.first()
-        val enabled = prefs[booleanPreferencesKey(channelKey)] ?: false
+        val enabled = prefs[booleanPreferencesKey(prefKey)] ?: false
         if (!enabled) return
 
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -693,16 +1045,41 @@ class VrchatPipelineService : Service() {
             )
         }
 
-        val notif = NotificationCompat.Builder(this, NOTIF_CHANNEL_EVENTS)
+        val builder = NotificationCompat.Builder(this, channelId)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle(title)
             .setContentText(text)
             .setContentIntent(tapIntent)
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .build()
 
-        nm.notify(id, notif)
+        if (groupKey != null) {
+            builder.setGroup(groupKey)
+            // Also publish/refresh a group summary so multiple notifs stack.
+            publishGroupSummary(nm, groupKey, channelId)
+        }
+
+        nm.notify(id, builder.build())
+    }
+
+    private fun publishGroupSummary(nm: NotificationManager, groupKey: String, channelId: String) {
+        val (summaryId, summaryText) = when (groupKey) {
+            GROUP_KEY_FRIENDS -> NOTIF_ID_SUMMARY_FRIENDS to "Friends activity"
+            GROUP_KEY_SOCIAL  -> NOTIF_ID_SUMMARY_SOCIAL  to "Friends list updates"
+            GROUP_KEY_INVITES -> NOTIF_ID_SUMMARY_INVITES to "Invites"
+            GROUP_KEY_GROUPS  -> NOTIF_ID_SUMMARY_GROUPS  to "Group activity"
+            else -> return
+        }
+        val summary = NotificationCompat.Builder(this, channelId)
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setContentTitle(summaryText)
+            .setContentText("Multiple updates")
+            .setStyle(NotificationCompat.InboxStyle().setSummaryText(summaryText))
+            .setGroup(groupKey)
+            .setGroupSummary(true)
+            .setAutoCancel(true)
+            .build()
+        nm.notify(summaryId, summary)
     }
 
     private fun fireNotLoggedInNotification() {
@@ -712,7 +1089,7 @@ class VrchatPipelineService : Service() {
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val notif = NotificationCompat.Builder(this, NOTIF_CHANNEL_EVENTS)
+        val notif = NotificationCompat.Builder(this, NOTIF_CHANNEL_CONNECTION)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle("VRC-A: Sign in required")
             .setContentText("Tap to re-sign in to your VRChat account")
@@ -720,7 +1097,37 @@ class VrchatPipelineService : Service() {
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
-        nm.notify(9998, notif)
+        nm.notify(NOTIF_ID_AUTH, notif)
+    }
+
+    /**
+     * Single-slot connection-status notification. Same notification ID is
+     * reused so reconnect cycles update in place rather than stacking.
+     * Skipped if the new state matches the previous fired state.
+     */
+    private suspend fun fireConnectionNotification(connected: Boolean) {
+        if (lastConnectionNotifWasUp == connected) return
+        lastConnectionNotifWasUp = connected
+        val prefs = dataStore.data.first()
+        val enabled = prefs[booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_CONNECTION)] ?: false
+        if (!enabled) return
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val tapIntent = PendingIntent.getActivity(
+            this, NOTIF_ID_CONNECTION,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val notif = NotificationCompat.Builder(this, NOTIF_CHANNEL_CONNECTION)
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setContentTitle(if (connected) "VRChat connected" else "VRChat disconnected")
+            .setContentText(if (connected) "Monitoring VRChat events"
+                            else "Lost connection — attempting to reconnect")
+            .setContentIntent(tapIntent)
+            .setAutoCancel(true)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+        nm.notify(NOTIF_ID_CONNECTION, notif)
     }
 
     private fun updatePersistentNotif(status: String) {
@@ -748,24 +1155,51 @@ class VrchatPipelineService : Service() {
     private fun createNotificationChannels() {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
-        // Silent persistent service channel
-        NotificationChannel(
-            NOTIF_CHANNEL_PERSISTENT,
-            "VRC-A Background",
-            NotificationManager.IMPORTANCE_MIN
-        ).apply {
+        // Drop the legacy single events channel from older installs so users
+        // don't see a ghost "VRChat Events" entry in system notification
+        // settings. Safe to call repeatedly — Android no-ops if absent.
+        try { nm.deleteNotificationChannel(NOTIF_CHANNEL_EVENTS_LEGACY) } catch (_: Throwable) {}
+
+        NotificationChannel(NOTIF_CHANNEL_PERSISTENT, "VRC-A Background",
+            NotificationManager.IMPORTANCE_MIN).apply {
             description = "Shows when VRC-A is monitoring VRChat events in the background"
             setShowBadge(false)
             nm.createNotificationChannel(this)
         }
 
-        // Event notifications channel
-        NotificationChannel(
-            NOTIF_CHANNEL_EVENTS,
-            "VRChat Events",
-            NotificationManager.IMPORTANCE_DEFAULT
-        ).apply {
-            description = "Friend requests, invites, unfriend alerts, and group events"
+        NotificationChannel(NOTIF_CHANNEL_FRIENDS_ACTIVITY, "Friends Activity",
+            NotificationManager.IMPORTANCE_DEFAULT).apply {
+            description = "Friends coming online, going offline, changing worlds, status, or avatar"
+            nm.createNotificationChannel(this)
+        }
+
+        NotificationChannel(NOTIF_CHANNEL_FRIEND_REQUESTS, "Friend Requests",
+            NotificationManager.IMPORTANCE_DEFAULT).apply {
+            description = "Incoming friend requests and new friends added"
+            nm.createNotificationChannel(this)
+        }
+
+        NotificationChannel(NOTIF_CHANNEL_FRIEND_REMOVALS, "Friend Removals",
+            NotificationManager.IMPORTANCE_DEFAULT).apply {
+            description = "Notifications when someone is removed from your friends list"
+            nm.createNotificationChannel(this)
+        }
+
+        NotificationChannel(NOTIF_CHANNEL_INVITES, "Invites",
+            NotificationManager.IMPORTANCE_DEFAULT).apply {
+            description = "World invites, invite requests, and group invites"
+            nm.createNotificationChannel(this)
+        }
+
+        NotificationChannel(NOTIF_CHANNEL_GROUPS, "Groups",
+            NotificationManager.IMPORTANCE_DEFAULT).apply {
+            description = "Group announcements, role changes, queue ready, and other group activity"
+            nm.createNotificationChannel(this)
+        }
+
+        NotificationChannel(NOTIF_CHANNEL_CONNECTION, "Connection Status",
+            NotificationManager.IMPORTANCE_LOW).apply {
+            description = "VRChat pipeline connect/disconnect and sign-in alerts"
             nm.createNotificationChannel(this)
         }
     }

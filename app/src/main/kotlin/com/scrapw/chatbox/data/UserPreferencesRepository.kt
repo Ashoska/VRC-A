@@ -69,15 +69,29 @@ class UserPreferencesRepository(private val context: Context) {
         val TIME_MODE                = stringPreferencesKey("time_mode")
         val CARD_ORDER               = stringPreferencesKey("card_order")
 
-        val NOTIF_FRIEND_REQUEST     = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_FRIEND_REQUEST)
-        val NOTIF_INVITE             = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_INVITE)
-        val NOTIF_FRIEND_ONLINE      = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_FRIEND_ONLINE)
-        val NOTIF_FRIEND_OFFLINE     = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_FRIEND_OFFLINE)
-        val NOTIF_UNFRIEND           = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_UNFRIEND)
-        val NOTIF_GROUP_EVENT        = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT)
-        val NOTIF_GROUP_ANNOUNCEMENT = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT)
-        val NOTIF_APP_UPDATE         = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_APP_UPDATE)
-        val NOTIF_ANNOUNCEMENTS      = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_ANNOUNCEMENTS)
+        val NOTIF_FRIEND_REQUEST       = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_FRIEND_REQUEST)
+        val NOTIF_NEW_FRIEND           = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_NEW_FRIEND)
+        val NOTIF_UNFRIEND             = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_UNFRIEND)
+        val NOTIF_FRIEND_ONLINE        = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_FRIEND_ONLINE)
+        val NOTIF_FRIEND_OFFLINE       = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_FRIEND_OFFLINE)
+        val NOTIF_FRIEND_ACTIVE        = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_FRIEND_ACTIVE)
+        val NOTIF_FRIEND_LOCATION      = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_FRIEND_LOCATION)
+        val NOTIF_FRIEND_STATUS        = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_FRIEND_STATUS)
+        val NOTIF_FRIEND_AVATAR        = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_FRIEND_AVATAR)
+        val NOTIF_FRIEND_BIO           = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_FRIEND_BIO)
+        val NOTIF_FRIEND_DISPLAY_NAME  = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_FRIEND_DISPLAY_NAME)
+        val NOTIF_INVITE               = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_INVITE)
+        val NOTIF_GROUP_INVITE         = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_GROUP_INVITE)
+        val NOTIF_GROUP_ANNOUNCEMENT   = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT)
+        val NOTIF_GROUP_EVENT          = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT)
+        val NOTIF_GROUP_QUEUE          = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_GROUP_QUEUE)
+        val NOTIF_GROUP_JOIN_REQUEST   = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_GROUP_JOIN_REQUEST)
+        val NOTIF_GROUP_ROLE           = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_GROUP_ROLE)
+        val NOTIF_GROUP_INSTANCE       = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_GROUP_INSTANCE)
+        val NOTIF_APP_UPDATE           = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_APP_UPDATE)
+        val NOTIF_ANNOUNCEMENTS        = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_ANNOUNCEMENTS)
+        val NOTIF_CONNECTION           = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_CONNECTION)
+        val NOTIF_AUTH                 = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_AUTH)
 
         val TOS_ACCEPTED_VERSION  = intPreferencesKey("tos_accepted_version")
         val TOS_ACCEPTED_AT_EPOCH = longPreferencesKey("tos_accepted_at_epoch")
@@ -145,15 +159,29 @@ class UserPreferencesRepository(private val context: Context) {
         raw.split(",").map { it.trim().let { k -> if (k == "AFK") "Pinned" else k } }.filter { it.isNotBlank() }
     }
 
-    val notifFriendRequest:     Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_REQUEST]     ?: false }
-    val notifInvite:            Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_INVITE]             ?: false }
-    val notifFriendOnline:      Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_ONLINE]      ?: false }
-    val notifFriendOffline:     Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_OFFLINE]     ?: false }
-    val notifUnfriend:          Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_UNFRIEND]           ?: false }
-    val notifGroupEvent:        Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_EVENT]        ?: false }
-    val notifGroupAnnouncement: Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_ANNOUNCEMENT] ?: false }
-    val notifAppUpdate:         Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_APP_UPDATE]         ?: true }
-    val notifAnnouncements:     Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_ANNOUNCEMENTS]      ?: true }
+    val notifFriendRequest:        Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_REQUEST]        ?: false }
+    val notifNewFriend:            Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_NEW_FRIEND]            ?: false }
+    val notifUnfriend:             Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_UNFRIEND]              ?: false }
+    val notifFriendOnline:         Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_ONLINE]         ?: false }
+    val notifFriendOffline:        Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_OFFLINE]        ?: false }
+    val notifFriendActive:         Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_ACTIVE]         ?: false }
+    val notifFriendLocation:       Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_LOCATION]       ?: false }
+    val notifFriendStatus:         Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_STATUS]         ?: false }
+    val notifFriendAvatar:         Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_AVATAR]         ?: false }
+    val notifFriendBio:            Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_BIO]            ?: false }
+    val notifFriendDisplayName:    Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_DISPLAY_NAME]   ?: false }
+    val notifInvite:               Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_INVITE]                ?: false }
+    val notifGroupInvite:          Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_INVITE]          ?: false }
+    val notifGroupAnnouncement:    Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_ANNOUNCEMENT]    ?: false }
+    val notifGroupEvent:           Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_EVENT]           ?: false }
+    val notifGroupQueue:           Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_QUEUE]           ?: false }
+    val notifGroupJoinRequest:     Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_JOIN_REQUEST]    ?: false }
+    val notifGroupRole:            Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_ROLE]            ?: false }
+    val notifGroupInstance:        Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_INSTANCE]        ?: false }
+    val notifAppUpdate:            Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_APP_UPDATE]            ?: true  }
+    val notifAnnouncements:        Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_ANNOUNCEMENTS]         ?: true  }
+    val notifConnection:           Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_CONNECTION]            ?: false }
+    val notifAuth:                 Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_AUTH]                  ?: true  }
 
     val setupVrchatDone: Flow<Boolean> = context.dataStore.data.map { it[Keys.SETUP_VRCHAT_DONE] ?: false }
     val setupIpDone:     Flow<Boolean> = context.dataStore.data.map { it[Keys.SETUP_IP_DONE]     ?: false }
@@ -223,15 +251,29 @@ class UserPreferencesRepository(private val context: Context) {
     suspend fun saveTimeMode(v: String)                 = context.dataStore.edit { it[Keys.TIME_MODE]    = v }
     suspend fun saveCardOrder(order: List<String>)      = context.dataStore.edit { it[Keys.CARD_ORDER]   = order.joinToString(",") }
 
-    suspend fun saveNotifFriendRequest(v: Boolean)     = context.dataStore.edit { it[Keys.NOTIF_FRIEND_REQUEST]     = v }
-    suspend fun saveNotifInvite(v: Boolean)            = context.dataStore.edit { it[Keys.NOTIF_INVITE]             = v }
-    suspend fun saveNotifFriendOnline(v: Boolean)      = context.dataStore.edit { it[Keys.NOTIF_FRIEND_ONLINE]      = v }
-    suspend fun saveNotifFriendOffline(v: Boolean)     = context.dataStore.edit { it[Keys.NOTIF_FRIEND_OFFLINE]     = v }
-    suspend fun saveNotifUnfriend(v: Boolean)          = context.dataStore.edit { it[Keys.NOTIF_UNFRIEND]           = v }
-    suspend fun saveNotifGroupEvent(v: Boolean)        = context.dataStore.edit { it[Keys.NOTIF_GROUP_EVENT]        = v }
-    suspend fun saveNotifGroupAnnouncement(v: Boolean) = context.dataStore.edit { it[Keys.NOTIF_GROUP_ANNOUNCEMENT] = v }
-    suspend fun saveNotifAppUpdate(v: Boolean)         = context.dataStore.edit { it[Keys.NOTIF_APP_UPDATE]         = v }
-    suspend fun saveNotifAnnouncements(v: Boolean)     = context.dataStore.edit { it[Keys.NOTIF_ANNOUNCEMENTS]      = v }
+    suspend fun saveNotifFriendRequest(v: Boolean)        = context.dataStore.edit { it[Keys.NOTIF_FRIEND_REQUEST]        = v }
+    suspend fun saveNotifNewFriend(v: Boolean)            = context.dataStore.edit { it[Keys.NOTIF_NEW_FRIEND]            = v }
+    suspend fun saveNotifUnfriend(v: Boolean)             = context.dataStore.edit { it[Keys.NOTIF_UNFRIEND]              = v }
+    suspend fun saveNotifFriendOnline(v: Boolean)         = context.dataStore.edit { it[Keys.NOTIF_FRIEND_ONLINE]         = v }
+    suspend fun saveNotifFriendOffline(v: Boolean)        = context.dataStore.edit { it[Keys.NOTIF_FRIEND_OFFLINE]        = v }
+    suspend fun saveNotifFriendActive(v: Boolean)         = context.dataStore.edit { it[Keys.NOTIF_FRIEND_ACTIVE]         = v }
+    suspend fun saveNotifFriendLocation(v: Boolean)       = context.dataStore.edit { it[Keys.NOTIF_FRIEND_LOCATION]       = v }
+    suspend fun saveNotifFriendStatus(v: Boolean)         = context.dataStore.edit { it[Keys.NOTIF_FRIEND_STATUS]         = v }
+    suspend fun saveNotifFriendAvatar(v: Boolean)         = context.dataStore.edit { it[Keys.NOTIF_FRIEND_AVATAR]         = v }
+    suspend fun saveNotifFriendBio(v: Boolean)            = context.dataStore.edit { it[Keys.NOTIF_FRIEND_BIO]            = v }
+    suspend fun saveNotifFriendDisplayName(v: Boolean)    = context.dataStore.edit { it[Keys.NOTIF_FRIEND_DISPLAY_NAME]   = v }
+    suspend fun saveNotifInvite(v: Boolean)               = context.dataStore.edit { it[Keys.NOTIF_INVITE]                = v }
+    suspend fun saveNotifGroupInvite(v: Boolean)          = context.dataStore.edit { it[Keys.NOTIF_GROUP_INVITE]          = v }
+    suspend fun saveNotifGroupAnnouncement(v: Boolean)    = context.dataStore.edit { it[Keys.NOTIF_GROUP_ANNOUNCEMENT]    = v }
+    suspend fun saveNotifGroupEvent(v: Boolean)           = context.dataStore.edit { it[Keys.NOTIF_GROUP_EVENT]           = v }
+    suspend fun saveNotifGroupQueue(v: Boolean)           = context.dataStore.edit { it[Keys.NOTIF_GROUP_QUEUE]           = v }
+    suspend fun saveNotifGroupJoinRequest(v: Boolean)     = context.dataStore.edit { it[Keys.NOTIF_GROUP_JOIN_REQUEST]    = v }
+    suspend fun saveNotifGroupRole(v: Boolean)            = context.dataStore.edit { it[Keys.NOTIF_GROUP_ROLE]            = v }
+    suspend fun saveNotifGroupInstance(v: Boolean)        = context.dataStore.edit { it[Keys.NOTIF_GROUP_INSTANCE]        = v }
+    suspend fun saveNotifAppUpdate(v: Boolean)            = context.dataStore.edit { it[Keys.NOTIF_APP_UPDATE]            = v }
+    suspend fun saveNotifAnnouncements(v: Boolean)        = context.dataStore.edit { it[Keys.NOTIF_ANNOUNCEMENTS]         = v }
+    suspend fun saveNotifConnection(v: Boolean)           = context.dataStore.edit { it[Keys.NOTIF_CONNECTION]            = v }
+    suspend fun saveNotifAuth(v: Boolean)                 = context.dataStore.edit { it[Keys.NOTIF_AUTH]                  = v }
 
     suspend fun saveSetupVrchatDone(v: Boolean) = context.dataStore.edit { it[Keys.SETUP_VRCHAT_DONE] = v }
     suspend fun saveSetupIpDone(v: Boolean)     = context.dataStore.edit { it[Keys.SETUP_IP_DONE]     = v }

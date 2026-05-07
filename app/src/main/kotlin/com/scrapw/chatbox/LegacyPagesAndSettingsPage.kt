@@ -1084,46 +1084,113 @@ private fun NotificationToggleSection(vm: ChatboxViewModel) {
     val scope = rememberCoroutineScope()
     val repo = vm.userPreferencesRepository
 
-    // Collect all notif prefs
-    val friendRequest by repo.notifFriendRequest.collectAsState(initial = false)
-    val invite by repo.notifInvite.collectAsState(initial = false)
-    val friendOnline by repo.notifFriendOnline.collectAsState(initial = false)
-    val friendOffline by repo.notifFriendOffline.collectAsState(initial = false)
-    val unfriend by repo.notifUnfriend.collectAsState(initial = false)
-    val groupEvent by repo.notifGroupEvent.collectAsState(initial = false)
-    val groupAnnouncement by repo.notifGroupAnnouncement.collectAsState(initial = false)
-    val appUpdate by repo.notifAppUpdate.collectAsState(initial = true)
-    val announcements by repo.notifAnnouncements.collectAsState(initial = true)
+    val friendRequest      by repo.notifFriendRequest.collectAsState(initial = false)
+    val newFriend          by repo.notifNewFriend.collectAsState(initial = false)
+    val unfriend           by repo.notifUnfriend.collectAsState(initial = false)
+    val friendOnline       by repo.notifFriendOnline.collectAsState(initial = false)
+    val friendOffline      by repo.notifFriendOffline.collectAsState(initial = false)
+    val friendActive       by repo.notifFriendActive.collectAsState(initial = false)
+    val friendLocation     by repo.notifFriendLocation.collectAsState(initial = false)
+    val friendStatus       by repo.notifFriendStatus.collectAsState(initial = false)
+    val friendAvatar       by repo.notifFriendAvatar.collectAsState(initial = false)
+    val friendBio          by repo.notifFriendBio.collectAsState(initial = false)
+    val friendDisplayName  by repo.notifFriendDisplayName.collectAsState(initial = false)
+    val invite             by repo.notifInvite.collectAsState(initial = false)
+    val groupInvite        by repo.notifGroupInvite.collectAsState(initial = false)
+    val groupAnnouncement  by repo.notifGroupAnnouncement.collectAsState(initial = false)
+    val groupEvent         by repo.notifGroupEvent.collectAsState(initial = false)
+    val groupQueue         by repo.notifGroupQueue.collectAsState(initial = false)
+    val groupJoinRequest   by repo.notifGroupJoinRequest.collectAsState(initial = false)
+    val groupRole          by repo.notifGroupRole.collectAsState(initial = false)
+    val groupInstance      by repo.notifGroupInstance.collectAsState(initial = false)
+    val appUpdate          by repo.notifAppUpdate.collectAsState(initial = true)
+    val announcements      by repo.notifAnnouncements.collectAsState(initial = true)
+    val connection         by repo.notifConnection.collectAsState(initial = false)
+    val auth               by repo.notifAuth.collectAsState(initial = true)
 
     SectionCard(
-        title = "VRChat Notifications",
-        subtitle = "Choose which events send a phone notification."
+        title = "Friend list",
+        subtitle = "Changes to who's on your friends list."
     ) {
-        ToggleRow("Friend requests", friendRequest) {
+        ToggleRow("Friend request received", friendRequest) {
             scope.launch { repo.saveNotifFriendRequest(it) }
         }
-        ToggleRow("Invites received", invite) {
-            scope.launch { repo.saveNotifInvite(it) }
+        ToggleRow("New friend added", newFriend) {
+            scope.launch { repo.saveNotifNewFriend(it) }
         }
+        ToggleRow("Friend removed", unfriend) {
+            scope.launch { repo.saveNotifUnfriend(it) }
+        }
+    }
+
+    SectionCard(
+        title = "Friends activity",
+        subtitle = "What your friends are doing in VRChat."
+    ) {
         ToggleRow("Friend came online", friendOnline) {
             scope.launch { repo.saveNotifFriendOnline(it) }
         }
         ToggleRow("Friend went offline", friendOffline) {
             scope.launch { repo.saveNotifFriendOffline(it) }
         }
-        ToggleRow("Someone unfriended you", unfriend) {
-            scope.launch { repo.saveNotifUnfriend(it) }
+        ToggleRow("Friend on website (not in VR)", friendActive) {
+            scope.launch { repo.saveNotifFriendActive(it) }
         }
-        ToggleRow("Group events", groupEvent) {
-            scope.launch { repo.saveNotifGroupEvent(it) }
+        ToggleRow("Friend changed worlds", friendLocation) {
+            scope.launch { repo.saveNotifFriendLocation(it) }
         }
-        ToggleRow("Group announcements", groupAnnouncement) {
-            scope.launch { repo.saveNotifGroupAnnouncement(it) }
+        ToggleRow("Friend changed status", friendStatus) {
+            scope.launch { repo.saveNotifFriendStatus(it) }
+        }
+        ToggleRow("Friend changed avatar", friendAvatar) {
+            scope.launch { repo.saveNotifFriendAvatar(it) }
+        }
+        ToggleRow("Friend updated bio", friendBio) {
+            scope.launch { repo.saveNotifFriendBio(it) }
+        }
+        ToggleRow("Friend renamed themselves", friendDisplayName) {
+            scope.launch { repo.saveNotifFriendDisplayName(it) }
         }
     }
 
     SectionCard(
-        title = "App Notifications",
+        title = "Invites",
+        subtitle = "World and group invites."
+    ) {
+        ToggleRow("World invites and invite requests", invite) {
+            scope.launch { repo.saveNotifInvite(it) }
+        }
+        ToggleRow("Group invites", groupInvite) {
+            scope.launch { repo.saveNotifGroupInvite(it) }
+        }
+    }
+
+    SectionCard(
+        title = "Groups",
+        subtitle = "Activity in groups you're part of."
+    ) {
+        ToggleRow("Group announcements", groupAnnouncement) {
+            scope.launch { repo.saveNotifGroupAnnouncement(it) }
+        }
+        ToggleRow("Queue ready", groupQueue) {
+            scope.launch { repo.saveNotifGroupQueue(it) }
+        }
+        ToggleRow("New group instance opened", groupInstance) {
+            scope.launch { repo.saveNotifGroupInstance(it) }
+        }
+        ToggleRow("Join requests (group managers)", groupJoinRequest) {
+            scope.launch { repo.saveNotifGroupJoinRequest(it) }
+        }
+        ToggleRow("Group role / rank changes", groupRole) {
+            scope.launch { repo.saveNotifGroupRole(it) }
+        }
+        ToggleRow("Other group activity", groupEvent) {
+            scope.launch { repo.saveNotifGroupEvent(it) }
+        }
+    }
+
+    SectionCard(
+        title = "App and connection",
         subtitle = "VRC-A system alerts."
     ) {
         ToggleRow("New app version available", appUpdate) {
@@ -1131,6 +1198,12 @@ private fun NotificationToggleSection(vm: ChatboxViewModel) {
         }
         ToggleRow("Admin announcements", announcements) {
             scope.launch { repo.saveNotifAnnouncements(it) }
+        }
+        ToggleRow("VRChat connection status", connection) {
+            scope.launch { repo.saveNotifConnection(it) }
+        }
+        ToggleRow("Sign-in required alerts", auth) {
+            scope.launch { repo.saveNotifAuth(it) }
         }
     }
 }
