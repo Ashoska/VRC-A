@@ -931,7 +931,7 @@ class VrchatPipelineService : Service() {
      */
     private suspend fun diffFriendsCache(
         previousIds: Set<String>,
-        previousNames: Map<String, String>,
+        previousNames: Map<String, FriendCacheEntry>,
         candidateRemovals: Set<String>
     ) {
         val now = System.currentTimeMillis()
@@ -945,7 +945,7 @@ class VrchatPipelineService : Service() {
         val confirmedRemovals = candidateRemovals.intersect(previousIds - friendsCache.keys)
         confirmedRemovals.forEach { userId ->
             if (notifiedUnfriendIds.add(userId)) {
-                val displayName = previousNames[userId] ?: "Someone"
+                val displayName = previousNames[userId]?.displayName?.takeIf { it.isNotBlank() } ?: "Someone"
                 fireEventNotification(
                     id = "unfriend_offline_$userId".hashCode(),
                     title = "Friend removed",
