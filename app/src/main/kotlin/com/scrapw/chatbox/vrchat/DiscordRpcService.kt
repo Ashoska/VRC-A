@@ -510,57 +510,108 @@ private const val MODULE_FINDER_JS = """
     try {
         if (window._vrca_dispatcher) return 'ok';
 
-        var chunks = window.webpackChunkdiscord_app;
-        if (!chunks || !chunks.length) return 'no_webpack';
+        var wpChunks = window.webpackChunkdiscord_app;
+        if (!wpChunks || typeof wpChunks.push !== 'function') return 'no_webpack';
 
-        var modules = {};
-        var fakeReq = function(id) { return modules[id] || {}; };
-        fakeReq.c = modules;
-        fakeReq.m = {};
-        fakeReq.d = function(t, k, g) {
-            if (!t.hasOwnProperty(k)) {
-                Object.defineProperty(t, k, { enumerable: true, get: g });
-            }
-        };
-        fakeReq.r = function(t) {};
-        fakeReq.n = function(m) { return function() { return m; }; };
+        // Strategy 1: Hijack webpack push to get the real require function.
+        // This gives us access to Discord's own module cache with fully
+        // initialized exports — no re-evaluation needed.
+        var realRequire = null;
+        try {
+            wpChunks.push([[Symbol()], {}, function(req) { realRequire = req; }]);
+            wpChunks.pop();
+        } catch(e) {}
 
-        for (var i = 0; i < chunks.length; i++) {
-            var chunk = chunks[i];
-            if (!chunk || !chunk[1]) continue;
-            var mods = chunk[1];
-            var keys = Object.keys(mods);
-            for (var j = 0; j < keys.length; j++) {
-                var key = keys[j];
-                if (modules[key]) continue;
-                var m = { exports: {} };
-                try {
-                    mods[key](m, m.exports, fakeReq);
-                    modules[key] = m.exports;
-                } catch(e) {}
+        var moduleCache = null;
+        if (realRequire && realRequire.c) {
+            moduleCache = realRequire.c;
+        }
+
+        // Strategy 2 fallback: manually evaluate with fake require (less reliable).
+        if (!moduleCache) {
+            moduleCache = {};
+            var fakeReq = function(id) { return moduleCache[id] ? moduleCache[id].exports : {}; };
+            fakeReq.c = moduleCache;
+            fakeReq.m = {};
+            fakeReq.d = function(t, k, g) {
+                if (!t.hasOwnProperty(k)) Object.defineProperty(t, k, { enumerable: true, get: g });
+            };
+            fakeReq.r = function(t) {
+                if (typeof Symbol !== 'undefined' && Symbol.toStringTag)
+                    Object.defineProperty(t, Symbol.toStringTag, { value: 'Module' });
+                Object.defineProperty(t, '__esModule', { value: true });
+            };
+            fakeReq.n = function(m) {
+                var getter = m && m.__esModule ? function() { return m.default; } : function() { return m; };
+                fakeReq.d(getter, 'a', getter);
+                return getter;
+            };
+            fakeReq.t = function(v) { return v; };
+            fakeReq.e = function() { return Promise.resolve(); };
+            fakeReq.o = function(o, p) { return Object.prototype.hasOwnProperty.call(o, p); };
+
+            for (var i = 0; i < wpChunks.length; i++) {
+                var chunk = wpChunks[i];
+                if (!chunk || !chunk[1]) continue;
+                var mods = chunk[1];
+                var keys = Object.keys(mods);
+                for (var j = 0; j < keys.length; j++) {
+                    var key = keys[j];
+                    if (moduleCache[key]) continue;
+                    var m = { id: key, loaded: false, exports: {} };
+                    try { mods[key].call(m.exports, m, m.exports, fakeReq); m.loaded = true; } catch(e) {}
+                    moduleCache[key] = m;
+                }
             }
         }
 
+        // Search the module cache for Discord's Flux Dispatcher.
         var dispatcher = null;
-        var mkeys = Object.keys(modules);
-        for (var k = 0; k < mkeys.length; k++) {
-            var exp = modules[mkeys[k]];
+        var cacheKeys = Object.keys(moduleCache);
+        var total = cacheKeys.length;
+        if (total === 0) return 'no_modules(' + (realRequire ? 'real' : 'fake') + ')';
+
+        for (var k = 0; k < cacheKeys.length; k++) {
+            var entry = moduleCache[cacheKeys[k]];
+            var exp = entry && (entry.exports || entry);
             if (!exp) continue;
-            var target = exp.default || exp;
-            if (target && typeof target.dispatch === 'function' &&
-                typeof target.subscribe === 'function' &&
-                typeof target._actionHandlers !== 'undefined') {
-                dispatcher = target;
-                break;
+
+            // Check both default and named exports
+            var targets = [exp.default || exp.Z || exp.ZP, exp];
+            for (var t = 0; t < targets.length; t++) {
+                var target = targets[t];
+                if (!target || typeof target !== 'object') continue;
+
+                // Predicate 1: Flux Dispatcher with _actionHandlers (most reliable)
+                if (typeof target.dispatch === 'function' &&
+                    typeof target.subscribe === 'function' &&
+                    typeof target._actionHandlers !== 'undefined') {
+                    dispatcher = target;
+                    break;
+                }
+                // Predicate 2: Flux Dispatcher with _dependencyGraph (newer builds)
+                if (!dispatcher && typeof target.dispatch === 'function' &&
+                    typeof target.subscribe === 'function' &&
+                    typeof target._dependencyGraph !== 'undefined') {
+                    dispatcher = target;
+                }
+                // Predicate 3: Flux Dispatcher with wait (legacy)
+                if (!dispatcher && typeof target.dispatch === 'function' &&
+                    typeof target.subscribe === 'function' &&
+                    typeof target.wait === 'function') {
+                    dispatcher = target;
+                }
+                // Predicate 4: Broadest — dispatch + subscribe + any private-looking prop
+                if (!dispatcher && typeof target.dispatch === 'function' &&
+                    typeof target.subscribe === 'function' &&
+                    typeof target._interceptors !== 'undefined') {
+                    dispatcher = target;
+                }
             }
-            if (!dispatcher && target && typeof target.dispatch === 'function' &&
-                typeof target.subscribe === 'function' &&
-                typeof target.wait === 'function') {
-                dispatcher = target;
-            }
+            if (dispatcher) break;
         }
 
-        if (!dispatcher) return 'no_dispatcher';
+        if (!dispatcher) return 'no_dispatcher(modules=' + total + ',strategy=' + (realRequire ? 'real' : 'fake') + ')';
         window._vrca_dispatcher = dispatcher;
 
         window.VRCA_setActivity = function(jsonStr) {
