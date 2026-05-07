@@ -539,6 +539,38 @@ object VrchatAuthManager {
             ?.apply()
     }
 
+    /**
+     * Verifies whether the current user is still friends with [userId] by
+     * directly fetching `/users/{userId}` and reading the `isFriend` field.
+     *
+     * Returns:
+     *   true  — confirmed still friends (suppress unfriend notification)
+     *   false — confirmed not friends (fire unfriend notification)
+     *   null  — couldn't verify (network error, rate limit, expired session, etc.)
+     *
+     * Callers should treat null as "fall back to existing heuristic" rather
+     * than silently dropping the notification — we don't want a transient
+     * network blip to mask real unfriends.
+     */
+    suspend fun verifyStillFriend(context: Context, userId: String): Boolean? = withContext(Dispatchers.IO) {
+        if (userId.isBlank()) return@withContext null
+        val cookieHeader = getCookieHeader(context) ?: return@withContext null
+        try {
+            val (code, body, _) = get("$BASE/users/$userId", null, cookieHeader)
+            when {
+                code == 200 -> {
+                    val json = JSONObject(body)
+                    if (json.has("isFriend")) json.optBoolean("isFriend", false) else null
+                }
+                code == 404 -> false  // user blocked us / deleted account → effectively unfriended
+                else -> null  // 401, 429, 5xx, etc. — can't tell
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "verifyStillFriend $userId failed", e)
+            null
+        }
+    }
+
     private fun get(
         url: String,
         authHeader: String?,

@@ -489,19 +489,37 @@ class VrchatPipelineService : Service() {
 
                 "friend-delete" -> {
                     val userId = content?.optString("userId") ?: return
-                    val cached = friendsCache.remove(userId)
-                    persistFriendsCache()
-                    if (cached != null && notifiedUnfriendIds.add(userId)) {
-                        fireEventNotification(
-                            id = "unfriend_$userId".hashCode(),
-                            title = "Friend removed",
-                            text = "${cached.displayName} is no longer on your friends list",
-                            profileUrl = "https://vrchat.com/home/user/$userId",
-                            prefKey = VrchatNotificationPrefs.KEY_NOTIF_UNFRIEND,
-                            channelId = NOTIF_CHANNEL_FRIEND_REMOVALS,
-                            groupKey = GROUP_KEY_SOCIAL
-                        )
+                    val cached = friendsCache[userId] ?: return
+                    if (!notifiedUnfriendIds.add(userId)) {
+                        friendsCache.remove(userId)
+                        persistFriendsCache()
+                        return
                     }
+
+                    // Verify via /users/{id} before notifying. Pipeline events
+                    // are usually accurate, but VRChat has been known to emit
+                    // spurious friend-delete during friend list resyncs. If
+                    // isFriend is still true, treat it as a flap and keep
+                    // them in the cache. If we can't verify, default to the
+                    // historical behavior (remove + notify).
+                    val stillFriend = VrchatAuthManager.verifyStillFriend(this@VrchatPipelineService, userId)
+                    if (stillFriend == true) {
+                        notifiedUnfriendIds.remove(userId)
+                        Log.i(TAG, "friend-delete $userId verified still friends — suppressing")
+                        return
+                    }
+
+                    friendsCache.remove(userId)
+                    persistFriendsCache()
+                    fireEventNotification(
+                        id = "unfriend_$userId".hashCode(),
+                        title = "Friend removed",
+                        text = "${cached.displayName} is no longer on your friends list",
+                        profileUrl = "https://vrchat.com/home/user/$userId",
+                        prefKey = VrchatNotificationPrefs.KEY_NOTIF_UNFRIEND,
+                        channelId = NOTIF_CHANNEL_FRIEND_REMOVALS,
+                        groupKey = GROUP_KEY_SOCIAL
+                    )
                 }
 
                 "friend-online" -> {
@@ -943,22 +961,49 @@ class VrchatPipelineService : Service() {
         }
         lastUnfriendDiffMs = now
         val confirmedRemovals = candidateRemovals.intersect(previousIds - friendsCache.keys)
+        var verifiedTrue = 0
+        var falsePositives = 0
+        var unverifiable = 0
         confirmedRemovals.forEach { userId ->
-            if (notifiedUnfriendIds.add(userId)) {
-                val displayName = previousNames[userId]?.displayName?.takeIf { it.isNotBlank() } ?: "Someone"
-                fireEventNotification(
-                    id = "unfriend_offline_$userId".hashCode(),
-                    title = "Friend removed",
-                    text = "$displayName is no longer on your friends list",
-                    profileUrl = "https://vrchat.com/home/user/$userId",
-                    prefKey = VrchatNotificationPrefs.KEY_NOTIF_UNFRIEND,
-                    channelId = NOTIF_CHANNEL_FRIEND_REMOVALS,
-                    groupKey = GROUP_KEY_SOCIAL
-                )
+            if (!notifiedUnfriendIds.add(userId)) return@forEach
+
+            // Third gate: hit /users/{id} directly. If isFriend == true, the
+            // friends list endpoint flapped; suppress the notification and
+            // re-add to cache so the next offline diff doesn't re-flag them.
+            // If isFriend == false (or 404), confirm the unfriend. If we
+            // can't verify (rate limit, network error, expired session),
+            // fall back to firing the notification — better a rare false
+            // positive than missing a real unfriend.
+            val stillFriend = VrchatAuthManager.verifyStillFriend(this@VrchatPipelineService, userId)
+            when (stillFriend) {
+                true -> {
+                    falsePositives++
+                    notifiedUnfriendIds.remove(userId)
+                    val name = previousNames[userId]?.displayName ?: ""
+                    if (name.isNotBlank()) {
+                        friendsCache[userId] = previousNames[userId]!!
+                    }
+                    Log.i(TAG, "Unfriend diff: $userId verified still friends — suppressing")
+                    return@forEach
+                }
+                false -> verifiedTrue++
+                null -> unverifiable++
             }
+
+            val displayName = previousNames[userId]?.displayName?.takeIf { it.isNotBlank() } ?: "Someone"
+            fireEventNotification(
+                id = "unfriend_offline_$userId".hashCode(),
+                title = "Friend removed",
+                text = "$displayName is no longer on your friends list",
+                profileUrl = "https://vrchat.com/home/user/$userId",
+                prefKey = VrchatNotificationPrefs.KEY_NOTIF_UNFRIEND,
+                channelId = NOTIF_CHANNEL_FRIEND_REMOVALS,
+                groupKey = GROUP_KEY_SOCIAL
+            )
         }
-        Log.i(TAG, "Unfriend diff: ${confirmedRemovals.size} confirmed removals " +
-            "(prev=${previousIds.size}, candidates=${candidateRemovals.size}, now=${friendsCache.size})")
+        Log.i(TAG, "Unfriend diff: ${confirmedRemovals.size} candidates → " +
+            "$verifiedTrue verified, $falsePositives suppressed, $unverifiable unverifiable " +
+            "(prev=${previousIds.size}, now=${friendsCache.size})")
     }
 
     private fun restoreFriendsCache() {
