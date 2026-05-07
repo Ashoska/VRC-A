@@ -1257,7 +1257,11 @@ class ChatboxViewModel(
             // made while the user was offline aren't clobbered by our
             // app-open write. Toggles always start OFF per design, so we
             // only merge content fields (messages, presets, intervals).
-            applyRemoteContentBeforeSync()
+            // Timeout after 5s — DataStore already has the latest local
+            // state, so this is best-effort optimization, not a gate.
+            kotlinx.coroutines.withTimeoutOrNull(5_000L) {
+                applyRemoteContentBeforeSync()
+            }
             performSelfSync()
         }
 

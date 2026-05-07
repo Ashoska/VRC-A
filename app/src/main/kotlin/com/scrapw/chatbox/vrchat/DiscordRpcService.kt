@@ -1,16 +1,21 @@
 package com.scrapw.chatbox.vrchat
 
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
-import androidx.datastore.preferences.core.edit
+import android.webkit.CookieManager
+import android.webkit.WebResourceRequest
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import com.scrapw.chatbox.R
-import com.scrapw.chatbox.dataStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -18,35 +23,19 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
-import okhttp3.WebSocket
-import okhttp3.WebSocketListener
-import org.json.JSONArray
 import org.json.JSONObject
-import java.util.concurrent.TimeUnit
 
 class DiscordRpcService : Service() {
 
     companion object {
         private const val TAG = "DiscordRPC"
-        private const val GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
         private const val VRCHAT_APP_ID = "438274841678872576"
         private const val NOTIF_CHANNEL = "vrca_pipeline"
         private const val NOTIF_ID = 1001
 
-        // Public HTTPS URL of the VRChat logo used as the default RPC image.
-        // Hosted on a public GitHub repo so Discord's external-assets endpoint
-        // can fetch it anonymously to mint an `mp:external/...` reference.
         private const val DEFAULT_VRCHAT_IMAGE_URL =
             "https://raw.githubusercontent.com/shadowash321rulse-lab/VRChat-rpc-display/main/vrchat-1102x620.jpg"
-
-        // DataStore key for the persistent `mp:external/...` reference.
-        // Once resolved, the reference is stable and reused across restarts.
-        private const val DEFAULT_IMAGE_REF_PREF = "discord_default_image_ref"
 
         const val ACTION_START = "com.scrapw.chatbox.DISCORD_RPC_START"
         const val ACTION_STOP = "com.scrapw.chatbox.DISCORD_RPC_STOP"
@@ -56,27 +45,16 @@ class DiscordRpcService : Service() {
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var ws: WebSocket? = null
-    private var heartbeatJob: Job? = null
-    private var presenceJob: Job? = null
-    private var lastSeq: Int? = null
-    private var token = ""
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var webView: WebView? = null
+    private var presenceWatchJob: Job? = null
+    private var presenceTimerJob: Job? = null
+    private var shimReady = false
+    private var shimFailCount = 0
 
     private var onlineStartEpochMs = 0L
-
     private val rpcPrefs by lazy {
         applicationContext.getSharedPreferences("discord_rpc_state", Context.MODE_PRIVATE)
-    }
-
-    private val assetResolver = DiscordExternalAssetResolver(
-        applicationId = VRCHAT_APP_ID,
-        tokenProvider = { token }
-    )
-
-    private val client by lazy {
-        OkHttpClient.Builder()
-            .pingInterval(30, TimeUnit.SECONDS)
-            .build()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -84,265 +62,178 @@ class DiscordRpcService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
-                disconnect()
+                teardown()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return START_NOT_STICKY
             }
         }
         ensureChannel()
-        startForeground(NOTIF_ID, buildNotif("Connected + Discord RPC starting..."))
+        startForeground(NOTIF_ID, buildNotif("Discord RPC starting..."))
 
-        // If the service is already running and connected, treat duplicate
-        // ACTION_START intents as a no-op. Resetting onlineStartEpochMs and
-        // re-launching connect() here would zero out the elapsed-time counter
-        // that Discord shows in the user's activity card — which is exactly
-        // the bug users reported as "RPC time counter resetting".
-        if (isRunning && ws != null) {
+        if (isRunning && webView != null) {
             return START_STICKY
         }
 
         onlineStartEpochMs = rpcPrefs.getLong("online_start_epoch", 0L)
 
-        scope.launch {
-            val prefs = dataStore.data.first()
-            token = prefs[androidx.datastore.preferences.core.stringPreferencesKey("discord_token")] ?: ""
-            if (token.isBlank()) {
-                Log.w(TAG, "No Discord token configured")
-                updateNotif("No Discord token - configure in settings")
-                return@launch
-            }
+        val hasCookies = CookieManager.getInstance()
+            .getCookie("https://discord.com")
+            ?.isNotBlank() == true
 
-            // Seed the resolver's in-memory cache with the persisted default-image
-            // reference (if we've resolved it before). This avoids a fresh API
-            // round-trip on every app start and removes the brief moment where
-            // the presence loop falls back to the unrendered "vrchat" key.
-            val cachedRef = prefs[androidx.datastore.preferences.core.stringPreferencesKey(DEFAULT_IMAGE_REF_PREF)]
-            if (!cachedRef.isNullOrBlank()) {
-                assetResolver.prePopulate(DEFAULT_VRCHAT_IMAGE_URL, cachedRef)
-            } else {
-                // First run: resolve once and persist the reference.
-                scope.launch {
-                    val ref = assetResolver.resolve(DEFAULT_VRCHAT_IMAGE_URL)
-                    if (!ref.isNullOrBlank()) {
-                        runCatching {
-                            applicationContext.dataStore.edit { p ->
-                                p[androidx.datastore.preferences.core.stringPreferencesKey(DEFAULT_IMAGE_REF_PREF)] = ref
-                            }
-                        }
-                    }
-                }
-            }
-
-            connect()
+        if (!hasCookies) {
+            Log.w(TAG, "No Discord cookies — user must log in via WebView first")
+            updateNotif("Not signed into Discord — sign in from settings")
+            return START_STICKY
         }
-        // START_STICKY so Android restarts the service if killed; the duplicate
-        // intent guard above handles the resulting null-intent restart.
+
+        loadWebView()
         return START_STICKY
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        disconnect()
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        clearActivity()
+        mainHandler.postDelayed({
+            teardown()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }, 1500)
         super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
-        disconnect()
+        teardown()
         scope.cancel()
         isRunning = false
         super.onDestroy()
     }
 
-    private fun connect() {
-        val req = Request.Builder().url(GATEWAY_URL).build()
-        ws = client.newWebSocket(req, object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.i(TAG, "Gateway connected")
-                isRunning = true
-            }
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun loadWebView() {
+        mainHandler.post {
+            if (webView != null) return@post
+            val wv = WebView(applicationContext).apply {
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+                settings.databaseEnabled = true
+                settings.userAgentString =
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+                CookieManager.getInstance().setAcceptCookie(true)
+                CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
 
-            override fun onMessage(webSocket: WebSocket, text: String) {
-                try {
-                    handleMessage(webSocket, JSONObject(text))
-                } catch (e: Exception) {
-                    Log.e(TAG, "Message handling error", e)
+                webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        val u = url ?: ""
+                        if (u.contains("discord.com/channels") || u.contains("discord.com/app")) {
+                            injectShimDelayed()
+                        } else if (u.contains("discord.com/login")) {
+                            Log.w(TAG, "Discord session expired — landed on login page")
+                            updateNotif("Discord session expired — sign in again from settings")
+                        }
+                    }
+
+                    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                        return false
+                    }
+                }
+
+                loadUrl("https://discord.com/channels/@me")
+            }
+            webView = wv
+            isRunning = true
+            updateNotif("Discord RPC connecting...")
+        }
+    }
+
+    private fun injectShimDelayed() {
+        mainHandler.postDelayed({
+            injectShim()
+        }, 3000)
+    }
+
+    private fun injectShim() {
+        val wv = webView ?: return
+        wv.evaluateJavascript(MODULE_FINDER_JS) { result ->
+            val ok = result?.trim()?.replace("\"", "") == "ok"
+            if (ok) {
+                Log.i(TAG, "JS shim injected — module finder succeeded")
+                shimReady = true
+                shimFailCount = 0
+                updateNotif("Discord RPC active")
+                startPresenceUpdates()
+            } else {
+                shimFailCount++
+                Log.w(TAG, "JS shim injection failed (attempt $shimFailCount): $result")
+                if (shimFailCount < 5) {
+                    mainHandler.postDelayed({ injectShim() }, 5000)
+                } else {
+                    updateNotif("Discord RPC: module finder failed — needs update")
                 }
             }
-
-            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                Log.i(TAG, "Gateway closing: $code $reason")
-                webSocket.close(1000, null)
-                scheduleReconnect()
-            }
-
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.e(TAG, "Gateway failure", t)
-                scheduleReconnect()
-            }
-        })
+        }
     }
 
-    private fun disconnect() {
-        heartbeatJob?.cancel()
-        presenceJob?.cancel()
+    private fun startPresenceUpdates() {
         presenceWatchJob?.cancel()
-        val socket = ws
-        ws = null
-        isRunning = false
-        onlineStartEpochMs = 0L
-        rpcPrefs.edit().putLong("online_start_epoch", 0L).apply()
-        if (socket == null) return
-        // Clear presence synchronously so the work finishes before process
-        // death. Thread.sleep blocks the caller (~1.5s) which is fine since
-        // the service is shutting down anyway. Android gives onTaskRemoved
-        // several seconds before force-killing the process.
-        try {
-            val clearPresence = JSONObject().apply {
-                put("op", 3)
-                put("d", JSONObject().apply {
-                    put("since", JSONObject.NULL)
-                    put("activities", JSONArray())
-                    put("status", "online")
-                    put("afk", false)
-                })
-            }
-            socket.send(clearPresence.toString())
-            Log.i(TAG, "Sent empty activities to clear Discord presence")
-            Thread.sleep(1500)
-        } catch (_: Throwable) {}
-        try { socket.close(1000, "Service stopping") } catch (_: Throwable) {}
-    }
+        presenceTimerJob?.cancel()
 
-    private fun scheduleReconnect() {
-        isRunning = false
-        heartbeatJob?.cancel()
-        presenceJob?.cancel()
-        presenceWatchJob?.cancel()
-        scope.launch {
-            delay(5000)
-            if (token.isNotBlank()) connect()
-        }
-    }
+        var lastPushMs = 0L
 
-    private fun handleMessage(webSocket: WebSocket, json: JSONObject) {
-        val op = json.optInt("op")
-        if (!json.isNull("s")) lastSeq = json.optInt("s")
-
-        when (op) {
-            10 -> {
-                val interval = json.getJSONObject("d").getLong("heartbeat_interval")
-                startHeartbeat(webSocket, interval)
-                sendIdentify(webSocket)
-            }
-            11 -> { /* Heartbeat ACK */ }
-            0 -> {
-                val event = json.optString("t")
-                if (event == "READY") {
-                    Log.i(TAG, "Discord session ready")
-                    updateNotif("Connected + Discord RPC active")
-                    startPresenceLoop(webSocket)
-                }
-            }
-            7 -> {
-                Log.i(TAG, "Gateway requested reconnect")
-                webSocket.close(4000, "Reconnecting")
-                scheduleReconnect()
-            }
-            9 -> {
-                Log.w(TAG, "Invalid session")
-                webSocket.close(4000, "Invalid session")
-                scheduleReconnect()
-            }
-        }
-    }
-
-    private fun startHeartbeat(webSocket: WebSocket, intervalMs: Long) {
-        heartbeatJob?.cancel()
-        heartbeatJob = scope.launch {
-            while (true) {
-                delay(intervalMs)
-                val payload = JSONObject().apply {
-                    put("op", 1)
-                    put("d", lastSeq ?: JSONObject.NULL)
-                }
-                webSocket.send(payload.toString())
-            }
-        }
-    }
-
-    private fun sendIdentify(webSocket: WebSocket) {
-        scope.launch {
-            val presence = buildPresenceData()
-            val identify = JSONObject().apply {
-                put("op", 2)
-                put("d", JSONObject().apply {
-                    put("token", token)
-                    put("intents", 0)
-                    put("properties", JSONObject().apply {
-                        put("os", "Windows")
-                        put("browser", "Discord Client")
-                        put("device", "")
-                    })
-                    put("presence", presence)
-                })
-            }
-            webSocket.send(identify.toString())
-        }
-    }
-
-    private var lastOp3SentMs = 0L
-    private var presenceWatchJob: Job? = null
-
-    private fun startPresenceLoop(webSocket: WebSocket) {
-        presenceJob?.cancel()
-        presenceWatchJob?.cancel()
-
-        // Event-driven: immediately send Op-3 whenever VRChat presence changes.
         presenceWatchJob = scope.launch {
             VrchatPipelineState.presenceFlow.collectLatest {
-                // Debounce: wait at least 1.5s since last Op-3 to avoid spam.
-                val elapsed = System.currentTimeMillis() - lastOp3SentMs
+                val elapsed = System.currentTimeMillis() - lastPushMs
                 if (elapsed < 1500) delay(1500 - elapsed)
-                sendPresenceUpdate(webSocket)
+                pushActivity()
+                lastPushMs = System.currentTimeMillis()
             }
         }
 
-        // Slow backup timer (10s) for keep-alive.
-        presenceJob = scope.launch {
+        presenceTimerJob = scope.launch {
             while (true) {
                 delay(10_000)
-                sendPresenceUpdate(webSocket)
+                pushActivity()
+                lastPushMs = System.currentTimeMillis()
             }
         }
     }
 
-    private suspend fun sendPresenceUpdate(webSocket: WebSocket) {
-        val update = JSONObject().apply {
-            put("op", 3)
-            put("d", buildPresenceData())
-        }
-        try {
-            webSocket.send(update.toString())
-            lastOp3SentMs = System.currentTimeMillis()
-        } catch (e: Exception) {
-            Log.w(TAG, "Presence update send failed", e)
+    private fun pushActivity() {
+        if (!shimReady) return
+        val wv = webView ?: return
+        val activity = buildActivityJson()
+        val escaped = activity.toString()
+            .replace("\\", "\\\\")
+            .replace("'", "\\'")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+        mainHandler.post {
+            wv.evaluateJavascript("window.VRCA_setActivity('$escaped')") { result ->
+                val ok = result?.trim()?.replace("\"", "") == "ok"
+                if (!ok) {
+                    Log.w(TAG, "pushActivity failed: $result")
+                    shimReady = false
+                    shimFailCount = 0
+                    injectShim()
+                }
+            }
         }
     }
 
-    /**
-     * Squashes a VRChat world image URL into a square via weserv.nl proxy.
-     * The default VRChat logo is left unproxied since it's already designed
-     * for the activity-card frame.
-     */
+    private fun clearActivity() {
+        if (!shimReady) return
+        val wv = webView ?: return
+        mainHandler.post {
+            wv.evaluateJavascript("window.VRCA_clearActivity()") {}
+        }
+    }
+
     private fun squashToSquareUrl(url: String): String {
         if (url.isBlank() || url == DEFAULT_VRCHAT_IMAGE_URL) return url
         val encoded = java.net.URLEncoder.encode(url, "UTF-8")
         return "https://images.weserv.nl/?url=$encoded&w=512&h=512&fit=fill"
     }
 
-    private suspend fun buildPresenceData(): JSONObject {
+    private fun buildActivityJson(): JSONObject {
         val vrcPresence = VrchatPipelineState.presence
         val isOnline = vrcPresence?.isOnlineInVRChat == true
 
@@ -354,7 +245,7 @@ class DiscordRpcService : Service() {
             rpcPrefs.edit().putLong("online_start_epoch", 0L).apply()
         }
 
-        val activity = JSONObject().apply {
+        return JSONObject().apply {
             put("name", "VRChat")
             put("type", 0)
             put("application_id", VRCHAT_APP_ID)
@@ -398,32 +289,42 @@ class DiscordRpcService : Service() {
                     })
                 }
 
-                val defaultRef = assetResolver.peekCached(DEFAULT_VRCHAT_IMAGE_URL) ?: "vrchat"
                 put("assets", JSONObject().apply {
-                    val largeImage = if (showWorldDetails && vrcPresence.worldImageUrl.isNotBlank()) {
-                        val squashed = squashToSquareUrl(vrcPresence.worldImageUrl)
-                        assetResolver.resolveOrTimeout(squashed, 1500, defaultRef) ?: defaultRef
+                    if (showWorldDetails && vrcPresence.worldImageUrl.isNotBlank()) {
+                        put("large_image", squashToSquareUrl(vrcPresence.worldImageUrl))
                     } else {
-                        assetResolver.resolveOrTimeout(DEFAULT_VRCHAT_IMAGE_URL, 1500, "vrchat") ?: "vrchat"
+                        put("large_image", DEFAULT_VRCHAT_IMAGE_URL)
                     }
-                    put("large_image", largeImage)
                     put("large_text", if (showWorldDetails) vrcPresence.worldName else "VRChat")
                 })
             } else {
                 put("details", "Not in VRChat")
                 put("state", "Using VRC-A")
                 put("assets", JSONObject().apply {
-                    put("large_image", assetResolver.resolveOrTimeout(DEFAULT_VRCHAT_IMAGE_URL, 1500, "vrchat") ?: "vrchat")
+                    put("large_image", DEFAULT_VRCHAT_IMAGE_URL)
                     put("large_text", "VRChat")
                 })
             }
         }
+    }
 
-        return JSONObject().apply {
-            put("since", JSONObject.NULL)
-            put("activities", JSONArray().put(activity))
-            put("status", if (isOnline) "online" else "idle")
-            put("afk", false)
+    private fun teardown() {
+        presenceWatchJob?.cancel()
+        presenceTimerJob?.cancel()
+        shimReady = false
+        isRunning = false
+        onlineStartEpochMs = 0L
+        rpcPrefs.edit().putLong("online_start_epoch", 0L).apply()
+        mainHandler.post {
+            webView?.let { wv ->
+                wv.evaluateJavascript("window.VRCA_clearActivity()") {}
+                mainHandler.postDelayed({
+                    wv.stopLoading()
+                    wv.loadUrl("about:blank")
+                    wv.destroy()
+                    webView = null
+                }, 1500)
+            }
         }
     }
 
@@ -454,3 +355,107 @@ class DiscordRpcService : Service() {
         nm.notify(NOTIF_ID, buildNotif(text))
     }
 }
+
+/**
+ * JavaScript injected into the Discord WebView after page load.
+ * Locates Discord's internal Flux dispatcher and activity action types
+ * via webpack module scanning, then exposes bridge functions.
+ *
+ * Returns "ok" if the dispatcher and action types were found.
+ *
+ * window.VRCA_setActivity(jsonString) — dispatches LOCAL_ACTIVITY_UPDATE
+ * window.VRCA_clearActivity() — dispatches with null activity
+ */
+private const val MODULE_FINDER_JS = """
+(function() {
+    try {
+        if (window._vrca_dispatcher) return 'ok';
+
+        var chunks = window.webpackChunkdiscord_app;
+        if (!chunks || !chunks.length) return 'no_webpack';
+
+        var modules = {};
+        var fakeReq = function(id) { return modules[id] || {}; };
+        fakeReq.c = modules;
+        fakeReq.m = {};
+        fakeReq.d = function(t, k, g) {
+            if (!t.hasOwnProperty(k)) {
+                Object.defineProperty(t, k, { enumerable: true, get: g });
+            }
+        };
+        fakeReq.r = function(t) {};
+        fakeReq.n = function(m) { return function() { return m; }; };
+
+        for (var i = 0; i < chunks.length; i++) {
+            var chunk = chunks[i];
+            if (!chunk || !chunk[1]) continue;
+            var mods = chunk[1];
+            var keys = Object.keys(mods);
+            for (var j = 0; j < keys.length; j++) {
+                var key = keys[j];
+                if (modules[key]) continue;
+                var m = { exports: {} };
+                try {
+                    mods[key](m, m.exports, fakeReq);
+                    modules[key] = m.exports;
+                } catch(e) {}
+            }
+        }
+
+        var dispatcher = null;
+        var mkeys = Object.keys(modules);
+        for (var k = 0; k < mkeys.length; k++) {
+            var exp = modules[mkeys[k]];
+            if (!exp) continue;
+            var target = exp.default || exp;
+            if (target && typeof target.dispatch === 'function' &&
+                typeof target.subscribe === 'function' &&
+                typeof target._actionHandlers !== 'undefined') {
+                dispatcher = target;
+                break;
+            }
+            if (!dispatcher && target && typeof target.dispatch === 'function' &&
+                typeof target.subscribe === 'function' &&
+                typeof target.wait === 'function') {
+                dispatcher = target;
+            }
+        }
+
+        if (!dispatcher) return 'no_dispatcher';
+        window._vrca_dispatcher = dispatcher;
+
+        window.VRCA_setActivity = function(jsonStr) {
+            try {
+                var activity = JSON.parse(jsonStr);
+                dispatcher.dispatch({
+                    type: 'LOCAL_ACTIVITY_UPDATE',
+                    activity: activity,
+                    socketId: 'vrca',
+                    pid: 0
+                });
+                return 'ok';
+            } catch(e) {
+                return 'err:' + e.message;
+            }
+        };
+
+        window.VRCA_clearActivity = function() {
+            try {
+                dispatcher.dispatch({
+                    type: 'LOCAL_ACTIVITY_UPDATE',
+                    activity: null,
+                    socketId: 'vrca',
+                    pid: 0
+                });
+                return 'ok';
+            } catch(e) {
+                return 'err:' + e.message;
+            }
+        };
+
+        return 'ok';
+    } catch(e) {
+        return 'err:' + e.message;
+    }
+})();
+"""

@@ -2354,21 +2354,21 @@ private fun VrchatStatusPage(
 
         // -- Discord Rich Presence --
         val discordEnabled by repo.discordRpcEnabled.collectAsState(initial = false)
-        val discordToken by repo.discordToken.collectAsState(initial = "")
+        val discordSeeded by repo.discordSessionSeeded.collectAsState(initial = false)
         var showDiscordLogin by remember { mutableStateOf(false) }
         SectionCard(
             title = "Discord Rich Presence",
             subtitle = "Show VRChat activity on your Discord profile."
         ) {
             Text(
-                "Simulates what VRChat's desktop client sends to Discord. " +
+                "Uses a hidden Discord web session to set your activity. " +
                 "Sign in below to connect your Discord account.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(Modifier.height(4.dp))
 
-            if (discordToken.isNotBlank()) {
+            if (discordSeeded) {
                 Card(colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer)) {
                     Row(Modifier.padding(10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -2394,7 +2394,8 @@ private fun VrchatStatusPage(
                 OutlinedButton(onClick = {
                     scope.launch {
                         repo.saveDiscordRpcEnabled(false)
-                        repo.saveDiscordToken("")
+                        repo.saveDiscordSessionSeeded(false)
+                        android.webkit.CookieManager.getInstance().removeAllCookies(null)
                         val svcIntent = Intent(ctx, com.scrapw.chatbox.vrchat.DiscordRpcService::class.java)
                         svcIntent.action = com.scrapw.chatbox.vrchat.DiscordRpcService.ACTION_STOP
                         ctx.startService(svcIntent)
@@ -2422,9 +2423,9 @@ private fun VrchatStatusPage(
                 text = {
                     Box(Modifier.fillMaxWidth().height(500.dp)) {
                         com.scrapw.chatbox.vrchat.DiscordLoginWebView(
-                            onTokenObtained = { token ->
+                            onLoginComplete = {
                                 scope.launch {
-                                    repo.saveDiscordToken(token)
+                                    repo.saveDiscordSessionSeeded(true)
                                     showDiscordLogin = false
                                 }
                             },

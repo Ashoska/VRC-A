@@ -250,7 +250,7 @@ service cloud.firestore {
        ========================= */
 
     match /config/{docId} {
-      allow get: if docId == "app";
+      allow get: if docId == "app" || (docId == "adminPresence" && signedIn());
       allow list: if false;
       allow create, update: if isOwner();
       allow delete: if false;

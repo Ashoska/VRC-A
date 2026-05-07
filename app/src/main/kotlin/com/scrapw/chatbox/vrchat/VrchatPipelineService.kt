@@ -356,7 +356,17 @@ class VrchatPipelineService : Service() {
             .collection("config")
             .document("adminPresence")
             .addSnapshotListener { snap, err ->
-                if (err != null || snap == null) {
+                if (err != null) {
+                    AdminBrowsingState.updateFromTimestampMs(null)
+                    if (err is com.google.firebase.firestore.FirebaseFirestoreException &&
+                        err.code == com.google.firebase.firestore.FirebaseFirestoreException.Code.PERMISSION_DENIED) {
+                        Log.w(TAG, "adminPresence listener denied — detaching to avoid retry loop")
+                        adminPresenceListener?.remove()
+                        adminPresenceListener = null
+                    }
+                    return@addSnapshotListener
+                }
+                if (snap == null) {
                     AdminBrowsingState.updateFromTimestampMs(null)
                     return@addSnapshotListener
                 }
@@ -398,8 +408,8 @@ class VrchatPipelineService : Service() {
                         try {
                             val prefs = dataStore.data.first()
                             val rpcEnabled = prefs[booleanPreferencesKey("discord_rpc_enabled")] ?: false
-                            val rpcToken = prefs[androidx.datastore.preferences.core.stringPreferencesKey("discord_token")] ?: ""
-                            if (rpcEnabled && rpcToken.isNotBlank() && !DiscordRpcService.isRunning) {
+                            val sessionSeeded = prefs[booleanPreferencesKey("discord_session_seeded")] ?: false
+                            if (rpcEnabled && sessionSeeded && !DiscordRpcService.isRunning) {
                                 val rpcIntent = Intent(this@VrchatPipelineService, DiscordRpcService::class.java)
                                 rpcIntent.action = DiscordRpcService.ACTION_START
                                 startForegroundService(rpcIntent)

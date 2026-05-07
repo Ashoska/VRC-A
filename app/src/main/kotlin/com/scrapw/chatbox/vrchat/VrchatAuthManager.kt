@@ -42,6 +42,8 @@ object VrchatAuthManager {
     private const val KEY_PASSWORD = "vrchat_password"
 
     private const val COOKIE_REFRESH_MS = 12L * 24 * 60 * 60 * 1000
+    private const val KEY_2FA_COOKIE_STORED_AT = "twofa_cookie_stored_at_ms"
+    private const val TWO_FA_COOKIE_MAX_AGE_MS = 30L * 24 * 60 * 60 * 1000
 
     sealed class AuthResult {
         data class Success(val userId: String, val displayName: String) : AuthResult()
@@ -89,9 +91,20 @@ object VrchatAuthManager {
 
     fun getCookieHeader(context: Context): String? {
         val prefs = getPrefs(context) ?: return null
-        val auth  = prefs.getString(KEY_AUTH_COOKIE, null) ?: return null
+        val auth  = prefs.getString(KEY_AUTH_COOKIE, null)
         val twoFa = prefs.getString(KEY_2FA_COOKIE, null)
-        return if (twoFa != null) "$auth; $twoFa" else auth
+        // Drop 2FA cookie if older than 30 days (VRChat's server expiry)
+        val twoFaValid = if (twoFa != null) {
+            val storedAt = prefs.getLong(KEY_2FA_COOKIE_STORED_AT, 0L)
+            storedAt == 0L || System.currentTimeMillis() - storedAt < TWO_FA_COOKIE_MAX_AGE_MS
+        } else false
+        val effectiveTwoFa = if (twoFaValid) twoFa else null
+        return when {
+            auth != null && effectiveTwoFa != null -> "$auth; $effectiveTwoFa"
+            auth != null                           -> auth
+            effectiveTwoFa != null                 -> effectiveTwoFa
+            else                                   -> null
+        }
     }
 
     fun shouldRefreshCookies(context: Context): Boolean {
@@ -155,7 +168,7 @@ object VrchatAuthManager {
                 val (responseCode, body, rawCookies) = get(
                     url = "$BASE/auth/user",
                     authHeader = "Basic $credentials",
-                    cookieHeader = null
+                    cookieHeader = getCookieHeader(context)
                 )
 
                 Log.d(TAG, "login response=$responseCode cookies=${rawCookies.size}")
@@ -513,12 +526,16 @@ object VrchatAuthManager {
         userId: String,
         displayName: String
     ) {
+        val now = System.currentTimeMillis()
         getPrefs(context)?.edit()
             ?.putString(KEY_AUTH_COOKIE, authCookie)
             ?.putString(KEY_2FA_COOKIE, twoFaCookie)
             ?.putString(KEY_USER_ID, userId)
             ?.putString(KEY_DISPLAY_NAME, displayName)
-            ?.putLong(KEY_COOKIE_STORED_AT, System.currentTimeMillis())
+            ?.putLong(KEY_COOKIE_STORED_AT, now)
+            ?.apply {
+                if (twoFaCookie != null) putLong(KEY_2FA_COOKIE_STORED_AT, now)
+            }
             ?.apply()
     }
 

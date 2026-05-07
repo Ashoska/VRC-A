@@ -138,8 +138,12 @@ fun ChatboxApp() {
             bootError = null
 
             try {
-                bootstrapFirebaseAndCache(ctx)
+                kotlinx.coroutines.withTimeout(20_000L) {
+                    bootstrapFirebaseAndCache(ctx)
+                }
                 bootOk = true
+            } catch (t: kotlinx.coroutines.TimeoutCancellationException) {
+                bootError = "Couldn't reach server. Check your connection and try again."
             } catch (t: Throwable) {
                 bootError = (t.message ?: t.toString()).take(4000)
             } finally {

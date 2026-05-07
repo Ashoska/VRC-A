@@ -20,50 +20,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import kotlinx.coroutines.delay
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun DiscordLoginWebView(
-    onTokenObtained: (String) -> Unit,
+    onLoginComplete: () -> Unit,
     onDismiss: () -> Unit
 ) {
     var loading by remember { mutableStateOf(true) }
-    var extracting by remember { mutableStateOf(false) }
-    var pageUrl by remember { mutableStateOf("") }
-    var webViewRef by remember { mutableStateOf<WebView?>(null) }
-
-    val extractJs = """
-        (function() {
-            try {
-                var iframe = document.createElement('iframe');
-                iframe.style.display = 'none';
-                document.body.appendChild(iframe);
-                var token = iframe.contentWindow.localStorage.getItem('token');
-                document.body.removeChild(iframe);
-                if (token) {
-                    return token.replace(/^"|"$/g, '');
-                }
-                return '';
-            } catch(e) {
-                return '';
-            }
-        })();
-    """.trimIndent()
-
-    LaunchedEffect(extracting) {
-        if (!extracting) return@LaunchedEffect
-        val wv = webViewRef ?: return@LaunchedEffect
-        repeat(30) {
-            delay(2000)
-            wv.evaluateJavascript(extractJs) { result ->
-                val token = result?.trim()?.replace("\"", "") ?: ""
-                if (token.isNotBlank() && token != "null") {
-                    onTokenObtained(token)
-                }
-            }
-        }
-    }
+    var loggedIn by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize()) {
         TopAppBar(
@@ -102,14 +67,14 @@ fun DiscordLoginWebView(
                         webViewClient = object : WebViewClient() {
                             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                                 loading = true
-                                pageUrl = url ?: ""
                             }
 
                             override fun onPageFinished(view: WebView?, url: String?) {
                                 loading = false
                                 val u = url ?: ""
-                                if (u.contains("discord.com/channels") || u.contains("discord.com/app")) {
-                                    extracting = true
+                                if (!loggedIn && (u.contains("discord.com/channels") || u.contains("discord.com/app"))) {
+                                    loggedIn = true
+                                    onLoginComplete()
                                 }
                             }
 
@@ -150,13 +115,12 @@ fun DiscordLoginWebView(
                         }
 
                         loadUrl("https://discord.com/login")
-                        webViewRef = this
                     }
                 },
                 modifier = Modifier.fillMaxSize()
             )
         }
-        if (extracting) {
+        if (loggedIn) {
             Card(
                 Modifier.fillMaxWidth().padding(12.dp),
                 colors = CardDefaults.cardColors(
@@ -168,9 +132,8 @@ fun DiscordLoginWebView(
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                     Text(
-                        "Logged in! Extracting token...",
+                        "Signed in! Discord cookies saved. You can close this.",
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
