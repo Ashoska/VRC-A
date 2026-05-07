@@ -69,6 +69,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.Divider
 import androidx.compose.material3.DrawerValue
@@ -126,6 +127,8 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.Query
 import com.scrapw.chatbox.vrchat.VrchatAuthManager
+import com.scrapw.chatbox.vrchat.DiscordRpcState
+import com.scrapw.chatbox.vrchat.DiscordRpcStatus
 import com.scrapw.chatbox.vrchat.VrchatPipelineState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -2355,7 +2358,11 @@ private fun VrchatStatusPage(
         // -- Discord Rich Presence --
         val discordEnabled by repo.discordRpcEnabled.collectAsState(initial = false)
         val discordSeeded by repo.discordSessionSeeded.collectAsState(initial = false)
+        val discordRiskAccepted by repo.discordRiskAccepted.collectAsState(initial = false)
+        val discordStatus by DiscordRpcState.statusFlow.collectAsState()
+        val discordFailureMsg by DiscordRpcState.failureMessageFlow.collectAsState()
         var showDiscordLogin by remember { mutableStateOf(false) }
+        var showRiskConsent by remember { mutableStateOf(false) }
         SectionCard(
             title = "Discord Rich Presence",
             subtitle = "Show VRChat activity on your Discord profile."
@@ -2369,25 +2376,61 @@ private fun VrchatStatusPage(
             Spacer(Modifier.height(4.dp))
 
             if (discordSeeded) {
+                // Status indicator
+                val (statusColor, statusLabel) = when (discordStatus) {
+                    DiscordRpcStatus.CONNECTED -> MaterialTheme.colorScheme.primary to "Connected"
+                    DiscordRpcStatus.CONNECTING -> MaterialTheme.colorScheme.tertiary to "Connecting..."
+                    DiscordRpcStatus.RECONNECTING -> MaterialTheme.colorScheme.tertiary to "Reconnecting..."
+                    DiscordRpcStatus.SESSION_EXPIRED -> MaterialTheme.colorScheme.error to "Session Expired"
+                    DiscordRpcStatus.FAILED -> MaterialTheme.colorScheme.error to "Failed"
+                    DiscordRpcStatus.IDLE -> MaterialTheme.colorScheme.onSurfaceVariant to "Idle"
+                }
                 Card(colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer)) {
-                    Row(Modifier.padding(10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Filled.Check, null, tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(18.dp))
-                        Text("Discord account connected", style = MaterialTheme.typography.bodySmall)
+                    containerColor = if (discordStatus == DiscordRpcStatus.SESSION_EXPIRED || discordStatus == DiscordRpcStatus.FAILED)
+                        MaterialTheme.colorScheme.errorContainer
+                    else MaterialTheme.colorScheme.primaryContainer
+                )) {
+                    Column(Modifier.padding(10.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            Canvas(Modifier.size(8.dp)) {
+                                drawCircle(color = statusColor)
+                            }
+                            Text(statusLabel, style = MaterialTheme.typography.bodySmall,
+                                color = statusColor)
+                        }
+                        if (discordFailureMsg != null) {
+                            Text(discordFailureMsg!!, style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer)
+                        }
                     }
                 }
+
+                // Re-login button when session expired
+                if (discordStatus == DiscordRpcStatus.SESSION_EXPIRED) {
+                    Button(onClick = { showDiscordLogin = true },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error
+                        )) {
+                        Text("Sign in again")
+                    }
+                }
+
                 ToggleRow("Enable Discord RPC", discordEnabled) { enabled ->
-                    scope.launch {
-                        repo.saveDiscordRpcEnabled(enabled)
-                        val svcIntent = Intent(ctx, com.scrapw.chatbox.vrchat.DiscordRpcService::class.java)
-                        if (enabled) {
-                            svcIntent.action = com.scrapw.chatbox.vrchat.DiscordRpcService.ACTION_START
-                            ctx.startForegroundService(svcIntent)
-                        } else {
-                            svcIntent.action = com.scrapw.chatbox.vrchat.DiscordRpcService.ACTION_STOP
-                            ctx.startService(svcIntent)
+                    if (enabled && !discordRiskAccepted) {
+                        showRiskConsent = true
+                    } else {
+                        scope.launch {
+                            repo.saveDiscordRpcEnabled(enabled)
+                            val svcIntent = Intent(ctx, com.scrapw.chatbox.vrchat.DiscordRpcService::class.java)
+                            if (enabled) {
+                                svcIntent.action = com.scrapw.chatbox.vrchat.DiscordRpcService.ACTION_START
+                                ctx.startForegroundService(svcIntent)
+                            } else {
+                                svcIntent.action = com.scrapw.chatbox.vrchat.DiscordRpcService.ACTION_STOP
+                                ctx.startService(svcIntent)
+                            }
                         }
                     }
                 }
@@ -2405,7 +2448,13 @@ private fun VrchatStatusPage(
                 }
             } else {
                 Button(
-                    onClick = { showDiscordLogin = true },
+                    onClick = {
+                        if (!discordRiskAccepted) {
+                            showRiskConsent = true
+                        } else {
+                            showDiscordLogin = true
+                        }
+                    },
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("Sign in to Discord") }
             }
@@ -2416,8 +2465,82 @@ private fun VrchatStatusPage(
             )
         }
 
+        // Risk consent dialog
+        if (showRiskConsent) {
+            var riskChecked by remember { mutableStateOf(false) }
+            var confirmEnabled by remember { mutableStateOf(false) }
+            LaunchedEffect(riskChecked) {
+                if (riskChecked) {
+                    confirmEnabled = false
+                    delay(4000)
+                    confirmEnabled = true
+                } else {
+                    confirmEnabled = false
+                }
+            }
+            AlertDialog(
+                onDismissRequest = { showRiskConsent = false },
+                title = { Text("Discord Rich Presence") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            "This feature runs a hidden Discord web session on your device to show " +
+                            "VRChat activity on your Discord profile.",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Text(
+                            "Please be aware:",
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                        Text(
+                            "• A background Discord web session will be active while enabled\n" +
+                            "• This uses additional battery and data\n" +
+                            "• Your Discord session cookies are stored on-device only\n" +
+                            "• While unlikely, Discord could flag unusual client behavior\n" +
+                            "• You can disable this at any time from settings",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.clickable { riskChecked = !riskChecked }) {
+                            Checkbox(checked = riskChecked, onCheckedChange = { riskChecked = it })
+                            Text("I understand and accept these risks",
+                                style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                repo.saveDiscordRiskAccepted(true)
+                                showRiskConsent = false
+                                if (discordSeeded) {
+                                    repo.saveDiscordRpcEnabled(true)
+                                    val svcIntent = Intent(ctx, com.scrapw.chatbox.vrchat.DiscordRpcService::class.java)
+                                    svcIntent.action = com.scrapw.chatbox.vrchat.DiscordRpcService.ACTION_START
+                                    ctx.startForegroundService(svcIntent)
+                                } else {
+                                    showDiscordLogin = true
+                                }
+                            }
+                        },
+                        enabled = confirmEnabled
+                    ) {
+                        Text(if (confirmEnabled) "Continue" else "Please wait...")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showRiskConsent = false }) {
+                        Text("Cancel")
+                    }
+                }
+            )
+        }
+
+        // Discord login dialog
         if (showDiscordLogin) {
-            androidx.compose.material3.AlertDialog(
+            AlertDialog(
                 onDismissRequest = { showDiscordLogin = false },
                 confirmButton = {},
                 text = {

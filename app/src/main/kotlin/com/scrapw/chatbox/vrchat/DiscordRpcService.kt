@@ -22,9 +22,40 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+
+enum class DiscordRpcStatus {
+    IDLE,
+    CONNECTING,
+    CONNECTED,
+    RECONNECTING,
+    SESSION_EXPIRED,
+    FAILED
+}
+
+object DiscordRpcState {
+    private val _status = MutableStateFlow(DiscordRpcStatus.IDLE)
+    val statusFlow: StateFlow<DiscordRpcStatus> = _status.asStateFlow()
+    var status: DiscordRpcStatus
+        get() = _status.value
+        set(value) { _status.value = value }
+
+    private val _failureMessage = MutableStateFlow<String?>(null)
+    val failureMessageFlow: StateFlow<String?> = _failureMessage.asStateFlow()
+    var failureMessage: String?
+        get() = _failureMessage.value
+        set(value) { _failureMessage.value = value }
+
+    fun reset() {
+        status = DiscordRpcStatus.IDLE
+        failureMessage = null
+    }
+}
 
 class DiscordRpcService : Service() {
 
@@ -40,6 +71,14 @@ class DiscordRpcService : Service() {
         const val ACTION_START = "com.scrapw.chatbox.DISCORD_RPC_START"
         const val ACTION_STOP = "com.scrapw.chatbox.DISCORD_RPC_STOP"
 
+        private const val MAX_SHIM_RETRIES = 5
+        private const val MAX_SESSION_RECOVERIES = 3
+        private const val SHIM_RETRY_BASE_DELAY_MS = 3000L
+        private const val PUSH_MIN_INTERVAL_MS = 1500L
+        private const val PUSH_TIMER_INTERVAL_MS = 10_000L
+        private const val SESSION_CHECK_INTERVAL_MS = 30_000L
+        private const val MAX_CONSECUTIVE_PUSH_FAILURES = 5
+
         var isRunning = false
             private set
     }
@@ -49,8 +88,12 @@ class DiscordRpcService : Service() {
     private var webView: WebView? = null
     private var presenceWatchJob: Job? = null
     private var presenceTimerJob: Job? = null
+    private var sessionMonitorJob: Job? = null
     private var shimReady = false
-    private var shimFailCount = 0
+    private var shimRetryCount = 0
+    private var sessionRecoveryCount = 0
+    private var consecutivePushFailures = 0
+    private var lastPushAttemptMs = 0L
 
     private var onlineStartEpochMs = 0L
     private val rpcPrefs by lazy {
@@ -75,7 +118,10 @@ class DiscordRpcService : Service() {
             return START_STICKY
         }
 
+        sessionRecoveryCount = 0
         onlineStartEpochMs = rpcPrefs.getLong("online_start_epoch", 0L)
+        DiscordRpcState.status = DiscordRpcStatus.CONNECTING
+        DiscordRpcState.failureMessage = null
 
         val hasCookies = CookieManager.getInstance()
             .getCookie("https://discord.com")
@@ -84,6 +130,8 @@ class DiscordRpcService : Service() {
         if (!hasCookies) {
             Log.w(TAG, "No Discord cookies — user must log in via WebView first")
             updateNotif("Not signed into Discord — sign in from settings")
+            DiscordRpcState.status = DiscordRpcStatus.SESSION_EXPIRED
+            DiscordRpcState.failureMessage = "Not signed in — open settings to sign in"
             return START_STICKY
         }
 
@@ -111,7 +159,17 @@ class DiscordRpcService : Service() {
     @SuppressLint("SetJavaScriptEnabled")
     private fun loadWebView() {
         mainHandler.post {
-            if (webView != null) return@post
+            webView?.let { old ->
+                old.stopLoading()
+                old.loadUrl("about:blank")
+                old.destroy()
+                webView = null
+            }
+
+            shimReady = false
+            shimRetryCount = 0
+            consecutivePushFailures = 0
+
             val wv = WebView(applicationContext).apply {
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
@@ -128,11 +186,16 @@ class DiscordRpcService : Service() {
                             injectShimDelayed()
                         } else if (u.contains("discord.com/login")) {
                             Log.w(TAG, "Discord session expired — landed on login page")
-                            updateNotif("Discord session expired — sign in again from settings")
+                            onSessionExpired()
                         }
                     }
 
                     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                        val url = request?.url?.toString() ?: return false
+                        if (url.contains("discord.com/login")) {
+                            Log.w(TAG, "Redirect to login detected — session expired")
+                            onSessionExpired()
+                        }
                         return false
                     }
                 }
@@ -145,6 +208,34 @@ class DiscordRpcService : Service() {
         }
     }
 
+    private fun onSessionExpired() {
+        shimReady = false
+        stopPresenceUpdates()
+
+        if (sessionRecoveryCount < MAX_SESSION_RECOVERIES) {
+            sessionRecoveryCount++
+            Log.i(TAG, "Session expired — attempting recovery ($sessionRecoveryCount/$MAX_SESSION_RECOVERIES)")
+            DiscordRpcState.status = DiscordRpcStatus.RECONNECTING
+            DiscordRpcState.failureMessage = "Session expired — reconnecting ($sessionRecoveryCount/$MAX_SESSION_RECOVERIES)"
+            updateNotif("Discord session expired — reconnecting...")
+
+            scope.launch {
+                delay(2000L * sessionRecoveryCount)
+                mainHandler.post {
+                    webView?.let { wv ->
+                        CookieManager.getInstance().flush()
+                        wv.loadUrl("https://discord.com/channels/@me")
+                    }
+                }
+            }
+        } else {
+            Log.w(TAG, "Session expired — max recovery attempts reached")
+            DiscordRpcState.status = DiscordRpcStatus.SESSION_EXPIRED
+            DiscordRpcState.failureMessage = "Discord session expired — sign in again from settings"
+            updateNotif("Discord session expired — sign in again from settings")
+        }
+    }
+
     private fun injectShimDelayed() {
         mainHandler.postDelayed({
             injectShim()
@@ -152,47 +243,89 @@ class DiscordRpcService : Service() {
     }
 
     private fun injectShim() {
+        if (shimRetryCount >= MAX_SHIM_RETRIES) {
+            Log.w(TAG, "Shim injection failed after $MAX_SHIM_RETRIES attempts")
+            DiscordRpcState.status = DiscordRpcStatus.FAILED
+            DiscordRpcState.failureMessage = "Discord module finder failed — app may need update"
+            updateNotif("Discord RPC: module finder failed — needs update")
+            return
+        }
+
         val wv = webView ?: return
         wv.evaluateJavascript(MODULE_FINDER_JS) { result ->
             val ok = result?.trim()?.replace("\"", "") == "ok"
             if (ok) {
                 Log.i(TAG, "JS shim injected — module finder succeeded")
                 shimReady = true
-                shimFailCount = 0
+                shimRetryCount = 0
+                consecutivePushFailures = 0
+                sessionRecoveryCount = 0
+                DiscordRpcState.status = DiscordRpcStatus.CONNECTED
+                DiscordRpcState.failureMessage = null
                 updateNotif("Discord RPC active")
                 startPresenceUpdates()
+                startSessionMonitor()
             } else {
-                shimFailCount++
-                Log.w(TAG, "JS shim injection failed (attempt $shimFailCount): $result")
-                if (shimFailCount < 5) {
-                    mainHandler.postDelayed({ injectShim() }, 5000)
-                } else {
-                    updateNotif("Discord RPC: module finder failed — needs update")
-                }
+                shimRetryCount++
+                Log.w(TAG, "JS shim injection failed (attempt $shimRetryCount/$MAX_SHIM_RETRIES): $result")
+                DiscordRpcState.status = DiscordRpcStatus.RECONNECTING
+                DiscordRpcState.failureMessage = "Injecting module finder ($shimRetryCount/$MAX_SHIM_RETRIES)"
+                val backoffMs = SHIM_RETRY_BASE_DELAY_MS * shimRetryCount
+                mainHandler.postDelayed({ injectShim() }, backoffMs)
             }
         }
     }
 
     private fun startPresenceUpdates() {
-        presenceWatchJob?.cancel()
-        presenceTimerJob?.cancel()
-
-        var lastPushMs = 0L
+        stopPresenceUpdates()
 
         presenceWatchJob = scope.launch {
             VrchatPipelineState.presenceFlow.collectLatest {
-                val elapsed = System.currentTimeMillis() - lastPushMs
-                if (elapsed < 1500) delay(1500 - elapsed)
+                val now = System.currentTimeMillis()
+                val elapsed = now - lastPushAttemptMs
+                if (elapsed < PUSH_MIN_INTERVAL_MS) delay(PUSH_MIN_INTERVAL_MS - elapsed)
                 pushActivity()
-                lastPushMs = System.currentTimeMillis()
             }
         }
 
         presenceTimerJob = scope.launch {
             while (true) {
-                delay(10_000)
+                delay(PUSH_TIMER_INTERVAL_MS)
                 pushActivity()
-                lastPushMs = System.currentTimeMillis()
+            }
+        }
+    }
+
+    private fun stopPresenceUpdates() {
+        presenceWatchJob?.cancel()
+        presenceTimerJob?.cancel()
+        presenceWatchJob = null
+        presenceTimerJob = null
+    }
+
+    private fun startSessionMonitor() {
+        sessionMonitorJob?.cancel()
+        sessionMonitorJob = scope.launch {
+            while (true) {
+                delay(SESSION_CHECK_INTERVAL_MS)
+                if (!shimReady) continue
+
+                mainHandler.post {
+                    val wv = webView ?: return@post
+                    wv.evaluateJavascript(
+                        "(function(){ return window._vrca_dispatcher ? 'alive' : 'dead'; })()"
+                    ) { result ->
+                        val alive = result?.trim()?.replace("\"", "") == "alive"
+                        if (!alive && shimReady) {
+                            Log.w(TAG, "Session monitor: dispatcher reference lost — re-injecting shim")
+                            shimReady = false
+                            shimRetryCount = 0
+                            DiscordRpcState.status = DiscordRpcStatus.RECONNECTING
+                            DiscordRpcState.failureMessage = "Dispatcher lost — re-injecting"
+                            injectShim()
+                        }
+                    }
+                }
             }
         }
     }
@@ -200,6 +333,11 @@ class DiscordRpcService : Service() {
     private fun pushActivity() {
         if (!shimReady) return
         val wv = webView ?: return
+
+        val now = System.currentTimeMillis()
+        if (now - lastPushAttemptMs < PUSH_MIN_INTERVAL_MS) return
+        lastPushAttemptMs = now
+
         val activity = buildActivityJson()
         val escaped = activity.toString()
             .replace("\\", "\\\\")
@@ -209,11 +347,20 @@ class DiscordRpcService : Service() {
         mainHandler.post {
             wv.evaluateJavascript("window.VRCA_setActivity('$escaped')") { result ->
                 val ok = result?.trim()?.replace("\"", "") == "ok"
-                if (!ok) {
-                    Log.w(TAG, "pushActivity failed: $result")
-                    shimReady = false
-                    shimFailCount = 0
-                    injectShim()
+                if (ok) {
+                    consecutivePushFailures = 0
+                } else {
+                    consecutivePushFailures++
+                    Log.w(TAG, "pushActivity failed ($consecutivePushFailures/$MAX_CONSECUTIVE_PUSH_FAILURES): $result")
+                    if (consecutivePushFailures >= MAX_CONSECUTIVE_PUSH_FAILURES) {
+                        Log.w(TAG, "Too many consecutive push failures — re-injecting shim")
+                        shimReady = false
+                        shimRetryCount = 0
+                        consecutivePushFailures = 0
+                        DiscordRpcState.status = DiscordRpcStatus.RECONNECTING
+                        DiscordRpcState.failureMessage = "Activity push failing — reconnecting"
+                        injectShim()
+                    }
                 }
             }
         }
@@ -309,12 +456,14 @@ class DiscordRpcService : Service() {
     }
 
     private fun teardown() {
-        presenceWatchJob?.cancel()
-        presenceTimerJob?.cancel()
+        stopPresenceUpdates()
+        sessionMonitorJob?.cancel()
+        sessionMonitorJob = null
         shimReady = false
         isRunning = false
         onlineStartEpochMs = 0L
         rpcPrefs.edit().putLong("online_start_epoch", 0L).apply()
+        DiscordRpcState.reset()
         mainHandler.post {
             webView?.let { wv ->
                 wv.evaluateJavascript("window.VRCA_clearActivity()") {}
@@ -356,16 +505,6 @@ class DiscordRpcService : Service() {
     }
 }
 
-/**
- * JavaScript injected into the Discord WebView after page load.
- * Locates Discord's internal Flux dispatcher and activity action types
- * via webpack module scanning, then exposes bridge functions.
- *
- * Returns "ok" if the dispatcher and action types were found.
- *
- * window.VRCA_setActivity(jsonString) — dispatches LOCAL_ACTIVITY_UPDATE
- * window.VRCA_clearActivity() — dispatches with null activity
- */
 private const val MODULE_FINDER_JS = """
 (function() {
     try {

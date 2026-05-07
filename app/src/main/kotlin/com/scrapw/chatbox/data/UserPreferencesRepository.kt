@@ -100,6 +100,7 @@ class UserPreferencesRepository(private val context: Context) {
 
         val DISCORD_RPC_ENABLED       = booleanPreferencesKey("discord_rpc_enabled")
         val DISCORD_SESSION_SEEDED    = booleanPreferencesKey("discord_session_seeded")
+        val DISCORD_RISK_ACCEPTED     = booleanPreferencesKey("discord_risk_accepted")
     }
 
     val ipAddress: Flow<String> = context.dataStore.data.map { prefs ->
@@ -188,9 +189,11 @@ class UserPreferencesRepository(private val context: Context) {
 
     val discordRpcEnabled:     Flow<Boolean> = context.dataStore.data.map { it[Keys.DISCORD_RPC_ENABLED]    ?: false }
     val discordSessionSeeded:  Flow<Boolean> = context.dataStore.data.map { it[Keys.DISCORD_SESSION_SEEDED] ?: false }
+    val discordRiskAccepted:   Flow<Boolean> = context.dataStore.data.map { it[Keys.DISCORD_RISK_ACCEPTED]  ?: false }
 
     suspend fun saveDiscordRpcEnabled(value: Boolean) = context.dataStore.edit { it[Keys.DISCORD_RPC_ENABLED] = value }
     suspend fun saveDiscordSessionSeeded(value: Boolean) = context.dataStore.edit { it[Keys.DISCORD_SESSION_SEEDED] = value }
+    suspend fun saveDiscordRiskAccepted(value: Boolean) = context.dataStore.edit { it[Keys.DISCORD_RISK_ACCEPTED] = value }
 
     suspend fun savePort(value: Int)              = context.dataStore.edit { it[Keys.PORT] = value.coerceIn(1, 65535) }
     suspend fun saveIsRealtimeMsg(value: Boolean) = context.dataStore.edit { it[Keys.REALTIME]         = value }
