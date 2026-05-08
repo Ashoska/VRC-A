@@ -447,7 +447,8 @@ object VrchatAuthManager {
         val statusDescription: String = "",
         val location: String = "",
         val avatarThumb: String = "",
-        val bio: String = ""
+        val bio: String = "",
+        val trustRank: String = ""
     )
 
     suspend fun fetchFriends(context: Context): List<VrcFriend> = withContext(Dispatchers.IO) {
@@ -485,7 +486,8 @@ object VrchatAuthManager {
                                 statusDescription = obj.optString("statusDescription", ""),
                                 location = obj.optString("location", ""),
                                 avatarThumb = obj.optString("currentAvatarThumbnailImageUrl", ""),
-                                bio = obj.optString("bio", "")
+                                bio = obj.optString("bio", ""),
+                                trustRank = extractTrustRankFromTags(obj.optJSONArray("tags"))
                             )
                         }
                     }
@@ -502,8 +504,86 @@ object VrchatAuthManager {
     }
 
     // ------------------------------------------------------------------
+    // REST helpers for offline notification backfill
+    // ------------------------------------------------------------------
+
+    suspend fun fetchPendingNotifications(context: Context): org.json.JSONArray? = withContext(Dispatchers.IO) {
+        val cookieHeader = getCookieHeader(context) ?: return@withContext null
+        try {
+            val (code, body, _) = get(
+                "$BASE/auth/user/notifications?type=all&hidden=false&n=100",
+                null, cookieHeader
+            )
+            if (code == 200) org.json.JSONArray(body) else null
+        } catch (e: Exception) {
+            Log.w(TAG, "fetchPendingNotifications failed", e)
+            null
+        }
+    }
+
+    suspend fun fetchPendingNotificationsV2(context: Context): org.json.JSONArray? = withContext(Dispatchers.IO) {
+        val cookieHeader = getCookieHeader(context) ?: return@withContext null
+        try {
+            val (code, body, _) = get(
+                "$BASE/auth/user/notifications/v2?n=50",
+                null, cookieHeader
+            )
+            if (code == 200) org.json.JSONArray(body) else null
+        } catch (e: Exception) {
+            Log.w(TAG, "fetchPendingNotificationsV2 failed", e)
+            null
+        }
+    }
+
+    suspend fun fetchUserGroups(context: Context): org.json.JSONArray? = withContext(Dispatchers.IO) {
+        val userId = getStoredUserId(context) ?: return@withContext null
+        val cookieHeader = getCookieHeader(context) ?: return@withContext null
+        try {
+            val (code, body, _) = get(
+                "$BASE/users/$userId/groups?n=50",
+                null, cookieHeader
+            )
+            if (code == 200) org.json.JSONArray(body) else null
+        } catch (e: Exception) {
+            Log.w(TAG, "fetchUserGroups failed", e)
+            null
+        }
+    }
+
+    suspend fun fetchGroupAnnouncement(context: Context, groupId: String): org.json.JSONObject? = withContext(Dispatchers.IO) {
+        val cookieHeader = getCookieHeader(context) ?: return@withContext null
+        try {
+            val (code, body, _) = get(
+                "$BASE/groups/$groupId/announcement",
+                null, cookieHeader
+            )
+            if (code == 200 && body.startsWith("{")) org.json.JSONObject(body) else null
+        } catch (e: Exception) {
+            Log.w(TAG, "fetchGroupAnnouncement($groupId) failed", e)
+            null
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Private helpers
     // ------------------------------------------------------------------
+
+    private fun extractTrustRankFromTags(tags: org.json.JSONArray?): String {
+        if (tags == null) return ""
+        val ranks = listOf(
+            "system_trust_legend",
+            "system_trust_veteran",
+            "system_trust_trusted",
+            "system_trust_known",
+            "system_trust_basic"
+        )
+        for (rank in ranks) {
+            for (i in 0 until tags.length()) {
+                if (tags.optString(i) == rank) return rank
+            }
+        }
+        return ""
+    }
 
     /**
      * Extracts the value of a named cookie from a raw Set-Cookie header string.

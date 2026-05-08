@@ -33,9 +33,18 @@ object VrchatNotificationPrefs {
     const val KEY_NOTIF_GROUP_ROLE              = "notif_group_role"              // Your role/rank changed
     const val KEY_NOTIF_GROUP_INSTANCE          = "notif_group_instance"          // A new group instance opened
 
+    // ── Friends activity (continued) ───────────────────────────────────
+    const val KEY_NOTIF_VOTE_TO_KICK            = "notif_vote_to_kick"            // Vote-to-kick warning received
+    const val KEY_NOTIF_FRIEND_RANK             = "notif_friend_rank"             // Friend trust rank changed
+
+    // ── Friend list (continued) ────────────────────────────────────────
+    const val KEY_NOTIF_VRCHAT_MESSAGE          = "notif_vrchat_message"          // VRChat in-app message received
+
     // ── App / system ────────────────────────────────────────────────────
     const val KEY_NOTIF_APP_UPDATE              = "notif_app_update"              // New VRC-A version available
     const val KEY_NOTIF_ANNOUNCEMENTS           = "notif_announcements"           // Admin announcements
     const val KEY_NOTIF_CONNECTION              = "notif_connection"              // VRChat pipeline connect/disconnect
     const val KEY_NOTIF_AUTH                    = "notif_auth"                    // Sign-in required / session expired
+    const val KEY_NOTIF_VRCHAT_ALERT            = "notif_vrchat_alert"            // VRChat server alert (maintenance, flags)
+    const val KEY_NOTIF_GIFT_RECEIVED           = "notif_gift_received"           // VRChat Plus / credit gift received
 }

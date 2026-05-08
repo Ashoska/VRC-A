@@ -2,7 +2,10 @@ package com.scrapw.chatbox.vrchat
 
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
+import android.os.Handler
+import android.os.Looper
 import android.os.Message
+import android.util.Log
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
@@ -29,6 +32,8 @@ fun DiscordLoginWebView(
 ) {
     var loading by remember { mutableStateOf(true) }
     var loggedIn by remember { mutableStateOf(false) }
+    val handler = remember { Handler(Looper.getMainLooper()) }
+    var dwellRunnable by remember { mutableStateOf<Runnable?>(null) }
 
     Column(Modifier.fillMaxSize()) {
         TopAppBar(
@@ -67,14 +72,34 @@ fun DiscordLoginWebView(
                         webViewClient = object : WebViewClient() {
                             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                                 loading = true
+                                dwellRunnable?.let { handler.removeCallbacks(it) }
+                                dwellRunnable = null
                             }
 
                             override fun onPageFinished(view: WebView?, url: String?) {
                                 loading = false
                                 val u = url ?: ""
-                                if (!loggedIn && (u.contains("discord.com/channels") || u.contains("discord.com/app"))) {
-                                    loggedIn = true
-                                    onLoginComplete()
+                                dwellRunnable?.let { handler.removeCallbacks(it) }
+                                dwellRunnable = null
+                                if (!loggedIn && u.contains("discord.com/channels")) {
+                                    val wv = view ?: return
+                                    val runnable = Runnable {
+                                        val jsProbe = "(function(){" +
+                                            "return typeof window.webpackChunkdiscord_app !== 'undefined' && " +
+                                            "!document.querySelector('input[type=\"password\"], input[type=\"email\"], input[name=\"email\"]');" +
+                                            "})()"
+                                        wv.evaluateJavascript(jsProbe) { result ->
+                                            if (result == "true" && !loggedIn) {
+                                                Log.d("DiscordLogin", "Login confirmed: stable on /channels with no login form")
+                                                loggedIn = true
+                                                onLoginComplete()
+                                            } else {
+                                                Log.d("DiscordLogin", "Dwell probe returned $result — not yet authenticated")
+                                            }
+                                        }
+                                    }
+                                    dwellRunnable = runnable
+                                    handler.postDelayed(runnable, 2000)
                                 }
                             }
 

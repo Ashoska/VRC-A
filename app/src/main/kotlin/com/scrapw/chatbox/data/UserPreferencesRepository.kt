@@ -92,6 +92,15 @@ class UserPreferencesRepository(private val context: Context) {
         val NOTIF_ANNOUNCEMENTS        = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_ANNOUNCEMENTS)
         val NOTIF_CONNECTION           = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_CONNECTION)
         val NOTIF_AUTH                 = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_AUTH)
+        val NOTIF_VOTE_TO_KICK        = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_VOTE_TO_KICK)
+        val NOTIF_FRIEND_RANK         = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_FRIEND_RANK)
+        val NOTIF_VRCHAT_MESSAGE      = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_VRCHAT_MESSAGE)
+        val NOTIF_VRCHAT_ALERT        = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_VRCHAT_ALERT)
+        val NOTIF_GIFT_RECEIVED       = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_GIFT_RECEIVED)
+
+        val NOTIF_SEEN_IDS               = stringPreferencesKey("notif_seen_ids")
+        val NOTIF_GROUP_ANNOUNCEMENT_SEEN = stringPreferencesKey("notif_group_announcement_seen")
+        val NOTIF_GIFT_SEEN_AT           = longPreferencesKey("notif_gift_seen_at")
 
         val TOS_ACCEPTED_VERSION  = intPreferencesKey("tos_accepted_version")
         val TOS_ACCEPTED_AT_EPOCH = longPreferencesKey("tos_accepted_at_epoch")
@@ -183,6 +192,15 @@ class UserPreferencesRepository(private val context: Context) {
     val notifAnnouncements:        Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_ANNOUNCEMENTS]         ?: true  }
     val notifConnection:           Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_CONNECTION]            ?: false }
     val notifAuth:                 Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_AUTH]                  ?: true  }
+    val notifVoteToKick:           Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_VOTE_TO_KICK]          ?: false }
+    val notifFriendRank:           Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_RANK]           ?: false }
+    val notifVrchatMessage:        Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_VRCHAT_MESSAGE]        ?: false }
+    val notifVrchatAlert:          Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_VRCHAT_ALERT]          ?: false }
+    val notifGiftReceived:         Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GIFT_RECEIVED]         ?: false }
+
+    val notifSeenIds:              Flow<String>  = context.dataStore.data.map { it[Keys.NOTIF_SEEN_IDS]              ?: "[]" }
+    val notifGroupAnnouncementSeen: Flow<String> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_ANNOUNCEMENT_SEEN] ?: "{}" }
+    val notifGiftSeenAt:           Flow<Long>    = context.dataStore.data.map { it[Keys.NOTIF_GIFT_SEEN_AT]          ?: 0L }
 
     val setupVrchatDone: Flow<Boolean> = context.dataStore.data.map { it[Keys.SETUP_VRCHAT_DONE] ?: false }
     val setupIpDone:     Flow<Boolean> = context.dataStore.data.map { it[Keys.SETUP_IP_DONE]     ?: false }
@@ -277,6 +295,15 @@ class UserPreferencesRepository(private val context: Context) {
     suspend fun saveNotifAnnouncements(v: Boolean)        = context.dataStore.edit { it[Keys.NOTIF_ANNOUNCEMENTS]         = v }
     suspend fun saveNotifConnection(v: Boolean)           = context.dataStore.edit { it[Keys.NOTIF_CONNECTION]            = v }
     suspend fun saveNotifAuth(v: Boolean)                 = context.dataStore.edit { it[Keys.NOTIF_AUTH]                  = v }
+    suspend fun saveNotifVoteToKick(v: Boolean)           = context.dataStore.edit { it[Keys.NOTIF_VOTE_TO_KICK]          = v }
+    suspend fun saveNotifFriendRank(v: Boolean)           = context.dataStore.edit { it[Keys.NOTIF_FRIEND_RANK]           = v }
+    suspend fun saveNotifVrchatMessage(v: Boolean)        = context.dataStore.edit { it[Keys.NOTIF_VRCHAT_MESSAGE]        = v }
+    suspend fun saveNotifVrchatAlert(v: Boolean)          = context.dataStore.edit { it[Keys.NOTIF_VRCHAT_ALERT]          = v }
+    suspend fun saveNotifGiftReceived(v: Boolean)         = context.dataStore.edit { it[Keys.NOTIF_GIFT_RECEIVED]         = v }
+
+    suspend fun saveNotifSeenIds(v: String)               = context.dataStore.edit { it[Keys.NOTIF_SEEN_IDS]              = v }
+    suspend fun saveNotifGroupAnnouncementSeen(v: String) = context.dataStore.edit { it[Keys.NOTIF_GROUP_ANNOUNCEMENT_SEEN] = v }
+    suspend fun saveNotifGiftSeenAt(v: Long)              = context.dataStore.edit { it[Keys.NOTIF_GIFT_SEEN_AT]          = v }
 
     suspend fun saveSetupVrchatDone(v: Boolean) = context.dataStore.edit { it[Keys.SETUP_VRCHAT_DONE] = v }
     suspend fun saveSetupIpDone(v: Boolean)     = context.dataStore.edit { it[Keys.SETUP_IP_DONE]     = v }

@@ -2318,42 +2318,9 @@ private fun VrchatStatusPage(
             }
         }
 
-        // -- VRChat Notification Toggles --
+        // -- VRChat Notification Toggles (collapsible categories) --
         val repo = vm.userPreferencesRepository
-        val friendRequest by repo.notifFriendRequest.collectAsState(initial = false)
-        val invite by repo.notifInvite.collectAsState(initial = false)
-        val friendOnline by repo.notifFriendOnline.collectAsState(initial = false)
-        val friendOffline by repo.notifFriendOffline.collectAsState(initial = false)
-        val unfriend by repo.notifUnfriend.collectAsState(initial = false)
-        val groupEvent by repo.notifGroupEvent.collectAsState(initial = false)
-        val groupAnnouncement by repo.notifGroupAnnouncement.collectAsState(initial = false)
-
-        SectionCard(
-            title = "VRChat Notifications",
-            subtitle = "Choose which events send a phone notification."
-        ) {
-            ToggleRow("Friend requests", friendRequest) {
-                scope.launch { repo.saveNotifFriendRequest(it) }
-            }
-            ToggleRow("Invites received", invite) {
-                scope.launch { repo.saveNotifInvite(it) }
-            }
-            ToggleRow("Friend came online", friendOnline) {
-                scope.launch { repo.saveNotifFriendOnline(it) }
-            }
-            ToggleRow("Friend went offline", friendOffline) {
-                scope.launch { repo.saveNotifFriendOffline(it) }
-            }
-            ToggleRow("Someone unfriended you", unfriend) {
-                scope.launch { repo.saveNotifUnfriend(it) }
-            }
-            ToggleRow("Group events", groupEvent) {
-                scope.launch { repo.saveNotifGroupEvent(it) }
-            }
-            ToggleRow("Group announcements", groupAnnouncement) {
-                scope.launch { repo.saveNotifGroupAnnouncement(it) }
-            }
-        }
+        NotificationToggleSection(vm = vm)
 
         // -- Discord Rich Presence --
         val discordEnabled by repo.discordRpcEnabled.collectAsState(initial = false)
@@ -2497,6 +2464,9 @@ private fun VrchatStatusPage(
                             "• This uses additional battery and data\n" +
                             "• Your Discord session cookies are stored on-device only\n" +
                             "• While unlikely, Discord could flag unusual client behavior\n" +
+                            "• Disconnecting clears your Discord session — Discord may also " +
+                            "invalidate your sessions on other devices when it detects an " +
+                            "unauthorized client, logging you out everywhere\n" +
                             "• You can disable this at any time from settings",
                             style = MaterialTheme.typography.bodySmall
                         )

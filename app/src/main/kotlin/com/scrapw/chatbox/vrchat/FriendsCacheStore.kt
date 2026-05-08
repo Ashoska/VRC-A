@@ -23,7 +23,8 @@ data class FriendCacheEntry(
     val location: String = "",
     val worldName: String = "",
     val avatarThumb: String = "",
-    val bio: String = ""
+    val bio: String = "",
+    val trustRank: String = ""
 )
 
 object FriendsCacheStore {
@@ -48,7 +49,8 @@ object FriendsCacheStore {
                             location          = v.optString("location", ""),
                             worldName         = v.optString("worldName", ""),
                             avatarThumb       = v.optString("avatarThumb", ""),
-                            bio               = v.optString("bio", "")
+                            bio               = v.optString("bio", ""),
+                            trustRank         = v.optString("trustRank", "")
                         )
                         is String -> FriendCacheEntry(displayName = v)
                         else -> null
@@ -73,6 +75,7 @@ object FriendsCacheStore {
                 if (entry.worldName.isNotBlank())         put("worldName", entry.worldName)
                 if (entry.avatarThumb.isNotBlank())       put("avatarThumb", entry.avatarThumb)
                 if (entry.bio.isNotBlank())               put("bio", entry.bio)
+                if (entry.trustRank.isNotBlank())         put("trustRank", entry.trustRank)
             })
         }
         context.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)

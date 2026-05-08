@@ -4,6 +4,10 @@ import android.content.Context
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -1080,13 +1084,14 @@ private fun vrChatSafePreview(input: String): String {
    ========================= */
 
 @Composable
-private fun NotificationToggleSection(vm: ChatboxViewModel) {
+fun NotificationToggleSection(vm: ChatboxViewModel) {
     val scope = rememberCoroutineScope()
     val repo = vm.userPreferencesRepository
 
     val friendRequest      by repo.notifFriendRequest.collectAsState(initial = false)
     val newFriend          by repo.notifNewFriend.collectAsState(initial = false)
     val unfriend           by repo.notifUnfriend.collectAsState(initial = false)
+    val vrchatMessage      by repo.notifVrchatMessage.collectAsState(initial = false)
     val friendOnline       by repo.notifFriendOnline.collectAsState(initial = false)
     val friendOffline      by repo.notifFriendOffline.collectAsState(initial = false)
     val friendActive       by repo.notifFriendActive.collectAsState(initial = false)
@@ -1095,6 +1100,8 @@ private fun NotificationToggleSection(vm: ChatboxViewModel) {
     val friendAvatar       by repo.notifFriendAvatar.collectAsState(initial = false)
     val friendBio          by repo.notifFriendBio.collectAsState(initial = false)
     val friendDisplayName  by repo.notifFriendDisplayName.collectAsState(initial = false)
+    val voteToKick         by repo.notifVoteToKick.collectAsState(initial = false)
+    val friendRank         by repo.notifFriendRank.collectAsState(initial = false)
     val invite             by repo.notifInvite.collectAsState(initial = false)
     val groupInvite        by repo.notifGroupInvite.collectAsState(initial = false)
     val groupAnnouncement  by repo.notifGroupAnnouncement.collectAsState(initial = false)
@@ -1107,103 +1114,206 @@ private fun NotificationToggleSection(vm: ChatboxViewModel) {
     val announcements      by repo.notifAnnouncements.collectAsState(initial = true)
     val connection         by repo.notifConnection.collectAsState(initial = false)
     val auth               by repo.notifAuth.collectAsState(initial = true)
+    val vrchatAlert        by repo.notifVrchatAlert.collectAsState(initial = false)
+    val giftReceived       by repo.notifGiftReceived.collectAsState(initial = false)
+
+    var friendListExpanded by rememberSaveable { mutableStateOf(false) }
+    var friendsActivityExpanded by rememberSaveable { mutableStateOf(false) }
+    var invitesExpanded by rememberSaveable { mutableStateOf(false) }
+    var groupsExpanded by rememberSaveable { mutableStateOf(false) }
+    var appConnectionExpanded by rememberSaveable { mutableStateOf(false) }
 
     SectionCard(
         title = "Friend list",
-        subtitle = "Changes to who's on your friends list."
+        subtitle = "Changes to who's on your friends list.",
+        actions = {
+            IconButton(onClick = { friendListExpanded = !friendListExpanded }) {
+                Icon(
+                    if (friendListExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                    contentDescription = if (friendListExpanded) "Collapse" else "Expand"
+                )
+            }
+        }
     ) {
-        ToggleRow("Friend request received", friendRequest) {
-            scope.launch { repo.saveNotifFriendRequest(it) }
-        }
-        ToggleRow("New friend added", newFriend) {
-            scope.launch { repo.saveNotifNewFriend(it) }
-        }
-        ToggleRow("Friend removed", unfriend) {
-            scope.launch { repo.saveNotifUnfriend(it) }
+        AnimatedVisibility(
+            visible = friendListExpanded,
+            enter = fadeIn() + slideInVertically(initialOffsetY = { it / 3 }),
+            exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 3 })
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                ToggleRow("Friend request received", friendRequest) {
+                    scope.launch { repo.saveNotifFriendRequest(it) }
+                }
+                ToggleRow("New friend added", newFriend) {
+                    scope.launch { repo.saveNotifNewFriend(it) }
+                }
+                ToggleRow("Friend removed", unfriend) {
+                    scope.launch { repo.saveNotifUnfriend(it) }
+                }
+                ToggleRow("VRChat in-app messages", vrchatMessage) {
+                    scope.launch { repo.saveNotifVrchatMessage(it) }
+                }
+            }
         }
     }
 
     SectionCard(
         title = "Friends activity",
-        subtitle = "What your friends are doing in VRChat."
+        subtitle = "What your friends are doing in VRChat.",
+        actions = {
+            IconButton(onClick = { friendsActivityExpanded = !friendsActivityExpanded }) {
+                Icon(
+                    if (friendsActivityExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                    contentDescription = if (friendsActivityExpanded) "Collapse" else "Expand"
+                )
+            }
+        }
     ) {
-        ToggleRow("Friend came online", friendOnline) {
-            scope.launch { repo.saveNotifFriendOnline(it) }
-        }
-        ToggleRow("Friend went offline", friendOffline) {
-            scope.launch { repo.saveNotifFriendOffline(it) }
-        }
-        ToggleRow("Friend on website (not in VR)", friendActive) {
-            scope.launch { repo.saveNotifFriendActive(it) }
-        }
-        ToggleRow("Friend changed worlds", friendLocation) {
-            scope.launch { repo.saveNotifFriendLocation(it) }
-        }
-        ToggleRow("Friend changed status", friendStatus) {
-            scope.launch { repo.saveNotifFriendStatus(it) }
-        }
-        ToggleRow("Friend changed avatar", friendAvatar) {
-            scope.launch { repo.saveNotifFriendAvatar(it) }
-        }
-        ToggleRow("Friend updated bio", friendBio) {
-            scope.launch { repo.saveNotifFriendBio(it) }
-        }
-        ToggleRow("Friend renamed themselves", friendDisplayName) {
-            scope.launch { repo.saveNotifFriendDisplayName(it) }
+        AnimatedVisibility(
+            visible = friendsActivityExpanded,
+            enter = fadeIn() + slideInVertically(initialOffsetY = { it / 3 }),
+            exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 3 })
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                ToggleRow("Friend came online", friendOnline) {
+                    scope.launch { repo.saveNotifFriendOnline(it) }
+                }
+                ToggleRow("Friend went offline", friendOffline) {
+                    scope.launch { repo.saveNotifFriendOffline(it) }
+                }
+                ToggleRow("Friend on website (not in VR)", friendActive) {
+                    scope.launch { repo.saveNotifFriendActive(it) }
+                }
+                ToggleRow("Friend changed worlds", friendLocation) {
+                    scope.launch { repo.saveNotifFriendLocation(it) }
+                }
+                ToggleRow("Friend changed status", friendStatus) {
+                    scope.launch { repo.saveNotifFriendStatus(it) }
+                }
+                ToggleRow("Friend changed avatar", friendAvatar) {
+                    scope.launch { repo.saveNotifFriendAvatar(it) }
+                }
+                ToggleRow("Friend updated bio", friendBio) {
+                    scope.launch { repo.saveNotifFriendBio(it) }
+                }
+                ToggleRow("Friend renamed themselves", friendDisplayName) {
+                    scope.launch { repo.saveNotifFriendDisplayName(it) }
+                }
+                ToggleRow("Friend trust rank changed", friendRank) {
+                    scope.launch { repo.saveNotifFriendRank(it) }
+                }
+                ToggleRow("Vote-to-kick warnings", voteToKick) {
+                    scope.launch { repo.saveNotifVoteToKick(it) }
+                }
+            }
         }
     }
 
     SectionCard(
         title = "Invites",
-        subtitle = "World and group invites."
-    ) {
-        ToggleRow("World invites and invite requests", invite) {
-            scope.launch { repo.saveNotifInvite(it) }
+        subtitle = "World and group invites.",
+        actions = {
+            IconButton(onClick = { invitesExpanded = !invitesExpanded }) {
+                Icon(
+                    if (invitesExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                    contentDescription = if (invitesExpanded) "Collapse" else "Expand"
+                )
+            }
         }
-        ToggleRow("Group invites", groupInvite) {
-            scope.launch { repo.saveNotifGroupInvite(it) }
+    ) {
+        AnimatedVisibility(
+            visible = invitesExpanded,
+            enter = fadeIn() + slideInVertically(initialOffsetY = { it / 3 }),
+            exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 3 })
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                ToggleRow("World invites and invite requests", invite) {
+                    scope.launch { repo.saveNotifInvite(it) }
+                }
+                ToggleRow("Group invites", groupInvite) {
+                    scope.launch { repo.saveNotifGroupInvite(it) }
+                }
+            }
         }
     }
 
     SectionCard(
         title = "Groups",
-        subtitle = "Activity in groups you're part of."
+        subtitle = "Activity in groups you're part of.",
+        actions = {
+            IconButton(onClick = { groupsExpanded = !groupsExpanded }) {
+                Icon(
+                    if (groupsExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                    contentDescription = if (groupsExpanded) "Collapse" else "Expand"
+                )
+            }
+        }
     ) {
-        ToggleRow("Group announcements", groupAnnouncement) {
-            scope.launch { repo.saveNotifGroupAnnouncement(it) }
-        }
-        ToggleRow("Queue ready", groupQueue) {
-            scope.launch { repo.saveNotifGroupQueue(it) }
-        }
-        ToggleRow("New group instance opened", groupInstance) {
-            scope.launch { repo.saveNotifGroupInstance(it) }
-        }
-        ToggleRow("Join requests (group managers)", groupJoinRequest) {
-            scope.launch { repo.saveNotifGroupJoinRequest(it) }
-        }
-        ToggleRow("Group role / rank changes", groupRole) {
-            scope.launch { repo.saveNotifGroupRole(it) }
-        }
-        ToggleRow("Other group activity", groupEvent) {
-            scope.launch { repo.saveNotifGroupEvent(it) }
+        AnimatedVisibility(
+            visible = groupsExpanded,
+            enter = fadeIn() + slideInVertically(initialOffsetY = { it / 3 }),
+            exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 3 })
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                ToggleRow("Group announcements", groupAnnouncement) {
+                    scope.launch { repo.saveNotifGroupAnnouncement(it) }
+                }
+                ToggleRow("Queue ready", groupQueue) {
+                    scope.launch { repo.saveNotifGroupQueue(it) }
+                }
+                ToggleRow("New group instance opened", groupInstance) {
+                    scope.launch { repo.saveNotifGroupInstance(it) }
+                }
+                ToggleRow("Join requests (group managers)", groupJoinRequest) {
+                    scope.launch { repo.saveNotifGroupJoinRequest(it) }
+                }
+                ToggleRow("Group role / rank changes", groupRole) {
+                    scope.launch { repo.saveNotifGroupRole(it) }
+                }
+                ToggleRow("Other group activity", groupEvent) {
+                    scope.launch { repo.saveNotifGroupEvent(it) }
+                }
+            }
         }
     }
 
     SectionCard(
         title = "App and connection",
-        subtitle = "VRC-A system alerts."
+        subtitle = "VRC-A system alerts.",
+        actions = {
+            IconButton(onClick = { appConnectionExpanded = !appConnectionExpanded }) {
+                Icon(
+                    if (appConnectionExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                    contentDescription = if (appConnectionExpanded) "Collapse" else "Expand"
+                )
+            }
+        }
     ) {
-        ToggleRow("New app version available", appUpdate) {
-            scope.launch { repo.saveNotifAppUpdate(it) }
-        }
-        ToggleRow("Admin announcements", announcements) {
-            scope.launch { repo.saveNotifAnnouncements(it) }
-        }
-        ToggleRow("VRChat connection status", connection) {
-            scope.launch { repo.saveNotifConnection(it) }
-        }
-        ToggleRow("Sign-in required alerts", auth) {
-            scope.launch { repo.saveNotifAuth(it) }
+        AnimatedVisibility(
+            visible = appConnectionExpanded,
+            enter = fadeIn() + slideInVertically(initialOffsetY = { it / 3 }),
+            exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 3 })
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                ToggleRow("New app version available", appUpdate) {
+                    scope.launch { repo.saveNotifAppUpdate(it) }
+                }
+                ToggleRow("Admin announcements", announcements) {
+                    scope.launch { repo.saveNotifAnnouncements(it) }
+                }
+                ToggleRow("VRChat connection status", connection) {
+                    scope.launch { repo.saveNotifConnection(it) }
+                }
+                ToggleRow("Sign-in required alerts", auth) {
+                    scope.launch { repo.saveNotifAuth(it) }
+                }
+                ToggleRow("VRChat server alerts", vrchatAlert) {
+                    scope.launch { repo.saveNotifVrchatAlert(it) }
+                }
+                ToggleRow("VRChat Plus / credit gifts", giftReceived) {
+                    scope.launch { repo.saveNotifGiftReceived(it) }
+                }
+            }
         }
     }
 }
