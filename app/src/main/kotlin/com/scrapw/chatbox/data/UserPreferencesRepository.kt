@@ -81,6 +81,7 @@ class UserPreferencesRepository(private val context: Context) {
         val NOTIF_FRIEND_BIO           = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_FRIEND_BIO)
         val NOTIF_FRIEND_DISPLAY_NAME  = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_FRIEND_DISPLAY_NAME)
         val NOTIF_INVITE               = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_INVITE)
+        val NOTIF_INVITE_REQUEST       = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_INVITE_REQUEST)
         val NOTIF_GROUP_INVITE         = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_GROUP_INVITE)
         val NOTIF_GROUP_ANNOUNCEMENT   = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT)
         val NOTIF_GROUP_EVENT          = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT)
@@ -101,6 +102,7 @@ class UserPreferencesRepository(private val context: Context) {
         val NOTIF_SEEN_IDS               = stringPreferencesKey("notif_seen_ids")
         val NOTIF_GROUP_ANNOUNCEMENT_SEEN = stringPreferencesKey("notif_group_announcement_seen")
         val NOTIF_GIFT_SEEN_AT           = longPreferencesKey("notif_gift_seen_at")
+        val NOTIF_BACKFILL_INITIALIZED   = booleanPreferencesKey("notif_backfill_initialized")
 
         val TOS_ACCEPTED_VERSION  = intPreferencesKey("tos_accepted_version")
         val TOS_ACCEPTED_AT_EPOCH = longPreferencesKey("tos_accepted_at_epoch")
@@ -181,6 +183,13 @@ class UserPreferencesRepository(private val context: Context) {
     val notifFriendBio:            Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_BIO]            ?: false }
     val notifFriendDisplayName:    Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_DISPLAY_NAME]   ?: false }
     val notifInvite:               Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_INVITE]                ?: false }
+    // Auto-mirror legacy combined-invite preference: if user previously enabled
+    // KEY_NOTIF_INVITE (which used to gate both world invites AND invite requests),
+    // treat invite-requests as enabled too until they explicitly toggle the new
+    // KEY_NOTIF_INVITE_REQUEST. After that, the explicit setting takes over.
+    val notifInviteRequest:        Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[Keys.NOTIF_INVITE_REQUEST] ?: (prefs[Keys.NOTIF_INVITE] ?: false)
+    }
     val notifGroupInvite:          Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_INVITE]          ?: false }
     val notifGroupAnnouncement:    Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_ANNOUNCEMENT]    ?: false }
     val notifGroupEvent:           Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_EVENT]           ?: false }
@@ -201,6 +210,7 @@ class UserPreferencesRepository(private val context: Context) {
     val notifSeenIds:              Flow<String>  = context.dataStore.data.map { it[Keys.NOTIF_SEEN_IDS]              ?: "[]" }
     val notifGroupAnnouncementSeen: Flow<String> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_ANNOUNCEMENT_SEEN] ?: "{}" }
     val notifGiftSeenAt:           Flow<Long>    = context.dataStore.data.map { it[Keys.NOTIF_GIFT_SEEN_AT]          ?: 0L }
+    val notifBackfillInitialized:  Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_BACKFILL_INITIALIZED]  ?: false }
 
     val setupVrchatDone: Flow<Boolean> = context.dataStore.data.map { it[Keys.SETUP_VRCHAT_DONE] ?: false }
     val setupIpDone:     Flow<Boolean> = context.dataStore.data.map { it[Keys.SETUP_IP_DONE]     ?: false }
@@ -235,6 +245,22 @@ class UserPreferencesRepository(private val context: Context) {
                 1 -> { prefs[Keys.IP_1_NAME] = name; prefs[Keys.IP_1_ADDRESS] = address; prefs[Keys.IP] = address }
                 2 -> { prefs[Keys.IP_2_NAME] = name; prefs[Keys.IP_2_ADDRESS] = address }
                 3 -> { prefs[Keys.IP_3_NAME] = name; prefs[Keys.IP_3_ADDRESS] = address }
+            }
+        }
+    }
+    /**
+     * Save only the address for a slot. Use from the Apply button and the
+     * slot-1 migration LaunchedEffect — both of which would otherwise read
+     * the slot name from a flow that may still be emitting its placeholder
+     * default ("Home"/"Hotspot"/"Other"), overwriting the user's saved name.
+     * The slot name is owned exclusively by the auto-save debounce in IpField.
+     */
+    suspend fun saveIpSlotAddress(slot: Int, address: String) {
+        context.dataStore.edit { prefs ->
+            when (slot.coerceIn(1, 3)) {
+                1 -> { prefs[Keys.IP_1_ADDRESS] = address; prefs[Keys.IP] = address }
+                2 -> { prefs[Keys.IP_2_ADDRESS] = address }
+                3 -> { prefs[Keys.IP_3_ADDRESS] = address }
             }
         }
     }
@@ -284,6 +310,7 @@ class UserPreferencesRepository(private val context: Context) {
     suspend fun saveNotifFriendBio(v: Boolean)            = context.dataStore.edit { it[Keys.NOTIF_FRIEND_BIO]            = v }
     suspend fun saveNotifFriendDisplayName(v: Boolean)    = context.dataStore.edit { it[Keys.NOTIF_FRIEND_DISPLAY_NAME]   = v }
     suspend fun saveNotifInvite(v: Boolean)               = context.dataStore.edit { it[Keys.NOTIF_INVITE]                = v }
+    suspend fun saveNotifInviteRequest(v: Boolean)        = context.dataStore.edit { it[Keys.NOTIF_INVITE_REQUEST]        = v }
     suspend fun saveNotifGroupInvite(v: Boolean)          = context.dataStore.edit { it[Keys.NOTIF_GROUP_INVITE]          = v }
     suspend fun saveNotifGroupAnnouncement(v: Boolean)    = context.dataStore.edit { it[Keys.NOTIF_GROUP_ANNOUNCEMENT]    = v }
     suspend fun saveNotifGroupEvent(v: Boolean)           = context.dataStore.edit { it[Keys.NOTIF_GROUP_EVENT]           = v }
@@ -304,6 +331,7 @@ class UserPreferencesRepository(private val context: Context) {
     suspend fun saveNotifSeenIds(v: String)               = context.dataStore.edit { it[Keys.NOTIF_SEEN_IDS]              = v }
     suspend fun saveNotifGroupAnnouncementSeen(v: String) = context.dataStore.edit { it[Keys.NOTIF_GROUP_ANNOUNCEMENT_SEEN] = v }
     suspend fun saveNotifGiftSeenAt(v: Long)              = context.dataStore.edit { it[Keys.NOTIF_GIFT_SEEN_AT]          = v }
+    suspend fun saveNotifBackfillInitialized(v: Boolean)  = context.dataStore.edit { it[Keys.NOTIF_BACKFILL_INITIALIZED]  = v }
 
     suspend fun saveSetupVrchatDone(v: Boolean) = context.dataStore.edit { it[Keys.SETUP_VRCHAT_DONE] = v }
     suspend fun saveSetupIpDone(v: Boolean)     = context.dataStore.edit { it[Keys.SETUP_IP_DONE]     = v }
