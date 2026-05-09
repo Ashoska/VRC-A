@@ -246,8 +246,8 @@ class DiscordRpcService : Service() {
         if (shimRetryCount >= MAX_SHIM_RETRIES) {
             Log.w(TAG, "Shim injection failed after $MAX_SHIM_RETRIES attempts")
             DiscordRpcState.status = DiscordRpcStatus.FAILED
-            DiscordRpcState.failureMessage = "Discord module finder failed — app may need update"
-            updateNotif("Discord RPC: module finder failed — needs update")
+            DiscordRpcState.failureMessage = "Discord connection setup failed — app may need update"
+            updateNotif("Discord RPC: connection setup failed — needs update")
             return
         }
 
@@ -269,7 +269,7 @@ class DiscordRpcService : Service() {
                 shimRetryCount++
                 Log.w(TAG, "JS shim injection failed (attempt $shimRetryCount/$MAX_SHIM_RETRIES): $result")
                 DiscordRpcState.status = DiscordRpcStatus.RECONNECTING
-                DiscordRpcState.failureMessage = "Injecting module finder ($shimRetryCount/$MAX_SHIM_RETRIES)"
+                DiscordRpcState.failureMessage = "Setting up Discord connection... ($shimRetryCount/$MAX_SHIM_RETRIES)"
                 val backoffMs = SHIM_RETRY_BASE_DELAY_MS * shimRetryCount
                 mainHandler.postDelayed({ injectShim() }, backoffMs)
             }
@@ -321,7 +321,7 @@ class DiscordRpcService : Service() {
                             shimReady = false
                             shimRetryCount = 0
                             DiscordRpcState.status = DiscordRpcStatus.RECONNECTING
-                            DiscordRpcState.failureMessage = "Dispatcher lost — re-injecting"
+                            DiscordRpcState.failureMessage = "Reconnecting to Discord..."
                             injectShim()
                         }
                     }
