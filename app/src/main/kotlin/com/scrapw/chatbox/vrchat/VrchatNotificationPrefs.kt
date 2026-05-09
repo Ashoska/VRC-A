@@ -22,7 +22,8 @@ object VrchatNotificationPrefs {
     const val KEY_NOTIF_FRIEND_DISPLAY_NAME     = "notif_friend_display_name"     // Friend renamed themselves
 
     // ── Invites ─────────────────────────────────────────────────────────
-    const val KEY_NOTIF_INVITE                  = "notif_invite"                  // World invite + invite request
+    const val KEY_NOTIF_INVITE                  = "notif_invite"                  // World invite (someone invites you to a world)
+    const val KEY_NOTIF_INVITE_REQUEST          = "notif_invite_request"          // Invite request (someone asking for an invite to your instance)
     const val KEY_NOTIF_GROUP_INVITE            = "notif_group_invite"            // Invite to join a group
 
     // ── Groups ──────────────────────────────────────────────────────────
