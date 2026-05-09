@@ -107,6 +107,21 @@ object VrchatAuthManager {
         }
     }
 
+    /**
+     * Cookie header for the Basic-auth re-login path. Sends ONLY the trusted-
+     * device 2FA cookie (if still valid) — never the saved auth cookie. An
+     * expired auth cookie sent alongside Basic credentials can cause VRChat
+     * to reject the request as a session conflict, even though the
+     * twoFactorAuth cookie alone would let the new login skip the 2FA prompt.
+     */
+    private fun getTwoFaOnlyCookieHeader(context: Context): String? {
+        val prefs = getPrefs(context) ?: return null
+        val twoFa = prefs.getString(KEY_2FA_COOKIE, null) ?: return null
+        val storedAt = prefs.getLong(KEY_2FA_COOKIE_STORED_AT, 0L)
+        val valid = storedAt == 0L || System.currentTimeMillis() - storedAt < TWO_FA_COOKIE_MAX_AGE_MS
+        return if (valid) twoFa else null
+    }
+
     fun shouldRefreshCookies(context: Context): Boolean {
         val prefs = getPrefs(context) ?: return false
         val storedAt = prefs.getLong(KEY_COOKIE_STORED_AT, 0L)
@@ -138,7 +153,10 @@ object VrchatAuthManager {
                 true
             }
             is AuthResult.Requires2FA, is AuthResult.RequiresEmail2FA -> {
-                Log.w(TAG, "Auto re-login needs 2FA - user must re-verify manually")
+                val twoFa = prefs.getString(KEY_2FA_COOKIE, null)
+                val storedAt = prefs.getLong(KEY_2FA_COOKIE_STORED_AT, 0L)
+                val ageDays = if (storedAt > 0) (System.currentTimeMillis() - storedAt) / (24L * 60 * 60 * 1000) else -1
+                Log.w(TAG, "Auto re-login needs 2FA — twoFaCookie present=${twoFa != null}, ageDays=$ageDays")
                 false
             }
             is AuthResult.Error -> {
@@ -168,7 +186,7 @@ object VrchatAuthManager {
                 val (responseCode, body, rawCookies) = get(
                     url = "$BASE/auth/user",
                     authHeader = "Basic $credentials",
-                    cookieHeader = getCookieHeader(context)
+                    cookieHeader = getTwoFaOnlyCookieHeader(context)
                 )
 
                 Log.d(TAG, "login response=$responseCode cookies=${rawCookies.size}")
@@ -206,7 +224,17 @@ object VrchatAuthManager {
                         val displayName = json.optString("displayName")
 
                         if (authCookieValue != null && userId.isNotBlank()) {
-                            saveSession(context, authCookieValue, null, userId, displayName)
+                            // Update only the auth cookie + user info — preserve the
+                            // existing 2FA trusted-device cookie and its original
+                            // stored-at timestamp so future auto-relogins after
+                            // subsequent auth-cookie expiries still work.
+                            val now = System.currentTimeMillis()
+                            getPrefs(context)?.edit()
+                                ?.putString(KEY_AUTH_COOKIE, authCookieValue)
+                                ?.putString(KEY_USER_ID, userId)
+                                ?.putString(KEY_DISPLAY_NAME, displayName)
+                                ?.putLong(KEY_COOKIE_STORED_AT, now)
+                                ?.apply()
                             saveCredentials(context, username, password)
                             AuthResult.Success(userId, displayName)
                         } else {
