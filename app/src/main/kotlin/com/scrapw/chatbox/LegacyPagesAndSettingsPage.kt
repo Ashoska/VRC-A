@@ -72,6 +72,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.scrapw.chatbox.data.SettingsStates
 import com.scrapw.chatbox.ui.ChatboxViewModel
@@ -377,6 +378,16 @@ private fun ToggleRow(
         Text(label)
         Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
+}
+
+@Composable
+private fun SubSectionLabel(text: String, topPadding: Dp = 4.dp) {
+    Spacer(Modifier.height(topPadding))
+    Text(
+        text,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
 }
 
 @Composable
@@ -1103,6 +1114,7 @@ fun NotificationToggleSection(vm: ChatboxViewModel) {
     val voteToKick         by repo.notifVoteToKick.collectAsState(initial = false)
     val friendRank         by repo.notifFriendRank.collectAsState(initial = false)
     val invite             by repo.notifInvite.collectAsState(initial = false)
+    val inviteRequest      by repo.notifInviteRequest.collectAsState(initial = false)
     val groupInvite        by repo.notifGroupInvite.collectAsState(initial = false)
     val groupAnnouncement  by repo.notifGroupAnnouncement.collectAsState(initial = false)
     val groupEvent         by repo.notifGroupEvent.collectAsState(initial = false)
@@ -1175,6 +1187,7 @@ fun NotificationToggleSection(vm: ChatboxViewModel) {
             exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 3 })
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                SubSectionLabel("Presence", topPadding = 0.dp)
                 ToggleRow("Friend came online", friendOnline) {
                     scope.launch { repo.saveNotifFriendOnline(it) }
                 }
@@ -1187,6 +1200,8 @@ fun NotificationToggleSection(vm: ChatboxViewModel) {
                 ToggleRow("Friend changed worlds", friendLocation) {
                     scope.launch { repo.saveNotifFriendLocation(it) }
                 }
+
+                SubSectionLabel("Profile changes")
                 ToggleRow("Friend changed status", friendStatus) {
                     scope.launch { repo.saveNotifFriendStatus(it) }
                 }
@@ -1202,6 +1217,8 @@ fun NotificationToggleSection(vm: ChatboxViewModel) {
                 ToggleRow("Friend trust rank changed", friendRank) {
                     scope.launch { repo.saveNotifFriendRank(it) }
                 }
+
+                SubSectionLabel("Alerts")
                 ToggleRow("Vote-to-kick warnings", voteToKick) {
                     scope.launch { repo.saveNotifVoteToKick(it) }
                 }
@@ -1227,8 +1244,11 @@ fun NotificationToggleSection(vm: ChatboxViewModel) {
             exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 3 })
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                ToggleRow("World invites and invite requests", invite) {
+                ToggleRow("World invites", invite) {
                     scope.launch { repo.saveNotifInvite(it) }
+                }
+                ToggleRow("Invite requests (someone asking to join you)", inviteRequest) {
+                    scope.launch { repo.saveNotifInviteRequest(it) }
                 }
                 ToggleRow("Group invites", groupInvite) {
                     scope.launch { repo.saveNotifGroupInvite(it) }
@@ -1255,6 +1275,7 @@ fun NotificationToggleSection(vm: ChatboxViewModel) {
             exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 3 })
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                SubSectionLabel("Updates", topPadding = 0.dp)
                 ToggleRow("Group announcements", groupAnnouncement) {
                     scope.launch { repo.saveNotifGroupAnnouncement(it) }
                 }
@@ -1264,6 +1285,8 @@ fun NotificationToggleSection(vm: ChatboxViewModel) {
                 ToggleRow("New group instance opened", groupInstance) {
                     scope.launch { repo.saveNotifGroupInstance(it) }
                 }
+
+                SubSectionLabel("Management")
                 ToggleRow("Join requests (group managers)", groupJoinRequest) {
                     scope.launch { repo.saveNotifGroupJoinRequest(it) }
                 }
@@ -1295,12 +1318,15 @@ fun NotificationToggleSection(vm: ChatboxViewModel) {
             exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 3 })
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                SubSectionLabel("App", topPadding = 0.dp)
                 ToggleRow("New app version available", appUpdate) {
                     scope.launch { repo.saveNotifAppUpdate(it) }
                 }
                 ToggleRow("Admin announcements", announcements) {
                     scope.launch { repo.saveNotifAnnouncements(it) }
                 }
+
+                SubSectionLabel("VRChat")
                 ToggleRow("VRChat connection status", connection) {
                     scope.launch { repo.saveNotifConnection(it) }
                 }
