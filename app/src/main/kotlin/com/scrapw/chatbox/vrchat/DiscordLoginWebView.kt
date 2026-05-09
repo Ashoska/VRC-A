@@ -34,6 +34,7 @@ fun DiscordLoginWebView(
     var loggedIn by remember { mutableStateOf(false) }
     val handler = remember { Handler(Looper.getMainLooper()) }
     var dwellRunnable by remember { mutableStateOf<Runnable?>(null) }
+    val pendingRetries = remember { mutableListOf<Runnable>() }
 
     Column(Modifier.fillMaxSize()) {
         TopAppBar(
@@ -74,6 +75,8 @@ fun DiscordLoginWebView(
                                 loading = true
                                 dwellRunnable?.let { handler.removeCallbacks(it) }
                                 dwellRunnable = null
+                                pendingRetries.forEach { handler.removeCallbacks(it) }
+                                pendingRetries.clear()
                             }
 
                             override fun onPageFinished(view: WebView?, url: String?) {
@@ -81,23 +84,35 @@ fun DiscordLoginWebView(
                                 val u = url ?: ""
                                 dwellRunnable?.let { handler.removeCallbacks(it) }
                                 dwellRunnable = null
+                                pendingRetries.forEach { handler.removeCallbacks(it) }
+                                pendingRetries.clear()
                                 if (!loggedIn && u.contains("discord.com/channels")) {
                                     val wv = view ?: return
-                                    val runnable = Runnable {
-                                        val jsProbe = "(function(){" +
-                                            "return typeof window.webpackChunkdiscord_app !== 'undefined' && " +
-                                            "!document.querySelector('input[type=\"password\"], input[type=\"email\"], input[name=\"email\"]');" +
-                                            "})()"
+                                    val jsProbe = "(function(){" +
+                                        "return typeof window.webpackChunkdiscord_app !== 'undefined' && " +
+                                        "!document.querySelector('input[type=\"password\"], input[type=\"email\"], input[name=\"email\"]');" +
+                                        "})()"
+                                    var retryCount = 0
+                                    val maxRetries = 4
+                                    fun probe() {
+                                        if (loggedIn) return
                                         wv.evaluateJavascript(jsProbe) { result ->
                                             if (result == "true" && !loggedIn) {
-                                                Log.d("DiscordLogin", "Login confirmed: stable on /channels with no login form")
+                                                Log.d("DiscordLogin", "Login confirmed: webpack loaded, no login form")
                                                 loggedIn = true
                                                 onLoginComplete()
+                                            } else if (retryCount < maxRetries && !loggedIn) {
+                                                retryCount++
+                                                Log.d("DiscordLogin", "Probe returned $result — retry $retryCount/$maxRetries")
+                                                val retry = Runnable { probe() }
+                                                pendingRetries.add(retry)
+                                                handler.postDelayed(retry, 1500)
                                             } else {
-                                                Log.d("DiscordLogin", "Dwell probe returned $result — not yet authenticated")
+                                                Log.d("DiscordLogin", "Probe gave up after $retryCount retries")
                                             }
                                         }
                                     }
+                                    val runnable = Runnable { probe() }
                                     dwellRunnable = runnable
                                     handler.postDelayed(runnable, 2000)
                                 }
