@@ -717,7 +717,7 @@ class VrchatPipelineService : Service() {
                     title = "Invite request",
                     text = "$senderName is asking for an invite to your instance",
                     profileUrl = null,
-                    prefKey = VrchatNotificationPrefs.KEY_NOTIF_INVITE,
+                    prefKey = VrchatNotificationPrefs.KEY_NOTIF_INVITE_REQUEST,
                     channelId = NOTIF_CHANNEL_INVITES,
                     groupKey = GROUP_KEY_INVITES
                 )
@@ -1109,6 +1109,20 @@ class VrchatPipelineService : Service() {
 
     private suspend fun backfillOfflineNotifications() {
         try {
+            // First-run guard: if this is the very first pipeline connect ever
+            // (no prior backfill has run), seed the per-group announcement
+            // timestamps silently and skip firing any V1/V2 notifications.
+            // Otherwise users get a flood of historical group announcements,
+            // pending friend requests, invites, etc. on first install.
+            val initialized = dataStore.data.first()[booleanPreferencesKey("notif_backfill_initialized")] ?: false
+            if (!initialized) {
+                Log.i(TAG, "First-run backfill: seeding announcement timestamps without firing notifications")
+                seedBackfillBaseline()
+                val repo = com.scrapw.chatbox.data.UserPreferencesRepository(this@VrchatPipelineService)
+                repo.saveNotifBackfillInitialized(true)
+                return
+            }
+
             // V1 notifications: friend requests, invites, votetokick, messages
             val v1 = VrchatAuthManager.fetchPendingNotifications(this@VrchatPipelineService)
             if (v1 != null) {
@@ -1150,7 +1164,7 @@ class VrchatPipelineService : Service() {
                             title = "Invite request",
                             text = "$senderName is asking for an invite to your instance",
                             profileUrl = null,
-                            prefKey = VrchatNotificationPrefs.KEY_NOTIF_INVITE,
+                            prefKey = VrchatNotificationPrefs.KEY_NOTIF_INVITE_REQUEST,
                             channelId = NOTIF_CHANNEL_INVITES,
                             groupKey = GROUP_KEY_INVITES,
                             dedupId = notifId.ifBlank { null }
@@ -1293,6 +1307,41 @@ class VrchatPipelineService : Service() {
             Log.i(TAG, "Offline notification backfill completed")
         } catch (e: Exception) {
             Log.w(TAG, "Offline notification backfill failed", e)
+        }
+    }
+
+    /**
+     * First-run baseline: walks the user's groups and records the current
+     * announcement timestamp for each one without firing notifications. Future
+     * backfill runs will only fire announcements newer than these timestamps,
+     * so historical announcements (from before the user installed VRC-A) stay
+     * silent. Pending V1/V2 notifications older than this point are also
+     * silently dropped on the first run — only events that happen after setup
+     * generate notifications.
+     */
+    private suspend fun seedBackfillBaseline() {
+        try {
+            val groups = VrchatAuthManager.fetchUserGroups(this@VrchatPipelineService) ?: return
+            val seenMap = JSONObject()
+            val groupCount = minOf(groups.length(), 50)
+            for (i in 0 until groupCount) {
+                val group = groups.optJSONObject(i) ?: continue
+                val groupId = group.optString("groupId", "").ifBlank { group.optString("id", "") }
+                if (groupId.isBlank()) continue
+                try {
+                    val announcement = VrchatAuthManager.fetchGroupAnnouncement(this@VrchatPipelineService, groupId)
+                    val createdAt = announcement?.optString("createdAt", "") ?: ""
+                    if (createdAt.isNotBlank()) seenMap.put(groupId, createdAt)
+                    delay(250)
+                } catch (e: Exception) {
+                    Log.w(TAG, "seedBackfillBaseline: group $groupId failed", e)
+                }
+            }
+            val repo = com.scrapw.chatbox.data.UserPreferencesRepository(this@VrchatPipelineService)
+            repo.saveNotifGroupAnnouncementSeen(seenMap.toString())
+            Log.i(TAG, "Backfill baseline seeded for ${seenMap.length()} groups")
+        } catch (e: Exception) {
+            Log.w(TAG, "seedBackfillBaseline failed", e)
         }
     }
 
@@ -1451,10 +1500,17 @@ class VrchatPipelineService : Service() {
     private suspend fun fireConnectionNotification(connected: Boolean) {
         if (lastConnectionNotifWasUp == connected) return
         lastConnectionNotifWasUp = connected
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        if (connected) {
+            // No "VRChat connected / Monitoring VRChat events" notification — the
+            // persistent foreground notification already conveys this. Just clear
+            // any leftover disconnect notification from a previous cycle.
+            nm.cancel(NOTIF_ID_CONNECTION)
+            return
+        }
         val prefs = dataStore.data.first()
         val enabled = prefs[booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_CONNECTION)] ?: false
         if (!enabled) return
-        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val tapIntent = PendingIntent.getActivity(
             this, NOTIF_ID_CONNECTION,
             Intent(this, MainActivity::class.java),
@@ -1462,9 +1518,8 @@ class VrchatPipelineService : Service() {
         )
         val notif = NotificationCompat.Builder(this, NOTIF_CHANNEL_CONNECTION)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentTitle(if (connected) "VRChat connected" else "VRChat disconnected")
-            .setContentText(if (connected) "Monitoring VRChat events"
-                            else "Lost connection — attempting to reconnect")
+            .setContentTitle("VRChat disconnected")
+            .setContentText("Lost connection — attempting to reconnect")
             .setContentIntent(tapIntent)
             .setAutoCancel(true)
             .setOnlyAlertOnce(true)
