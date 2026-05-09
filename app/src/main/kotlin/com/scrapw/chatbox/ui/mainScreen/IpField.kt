@@ -68,11 +68,13 @@ fun IpField(
         1 -> ip1Address; 2 -> ip2Address; 3 -> ip3Address; else -> ""
     }
 
-    // Auto-migrate: if slot 1 address is empty but the ViewModel has a saved IP, populate slot 1
+    // Auto-migrate: if slot 1 address is empty but the ViewModel has a saved IP, populate slot 1.
+    // Use saveIpSlotAddress so we don't overwrite the user's saved slot-1 name with the
+    // collectAsState placeholder default ("Home") when DataStore hasn't loaded yet.
     val uiState by chatboxViewModel.messengerUiState.collectAsState()
     LaunchedEffect(ip1Address, uiState.ipAddress) {
         if (ip1Address.isBlank() && uiState.ipAddress.isNotBlank() && uiState.ipAddress != "127.0.0.1") {
-            repo.saveIpSlot(1, ip1Name, uiState.ipAddress)
+            repo.saveIpSlotAddress(1, uiState.ipAddress)
         }
     }
 
@@ -152,9 +154,12 @@ fun IpField(
         }
         invalidIpWarning = null
         val slot = currentSlot
-        val name = nameForSlot(slot)
+        // Address-only save — never touch the slot name. The slot name is owned
+        // exclusively by the auto-save debounce in the expanded slot editor.
+        // Reading nameForSlot(slot) here would risk overwriting the saved name
+        // with the collectAsState placeholder default if DataStore hasn't loaded.
         scope.launch {
-            repo.saveIpSlot(slot, name, trimmed)
+            repo.saveIpSlotAddress(slot, trimmed)
         }
         chatboxViewModel.ipAddressApplyRuntimeOnly(trimmed)
         focusManager.clearFocus()
