@@ -665,7 +665,36 @@ private const val MODULE_FINDER_JS = """
             }
             var fakeCount = Object.keys(fakeCache).length;
             dispatcher = searchForDispatcher(fakeCache);
-            if (!dispatcher) return 'no_dispatcher(cached=' + cachedCount + ',forced=' + forceCount + ',fake=' + fakeCount + ',wp=' + wpName + ')';
+            if (!dispatcher) {
+                // Diagnostic: find ALL objects with a dispatch function and dump their shape
+                var dispInfo = [];
+                function scanForDispatch(cache, label) {
+                    var ks = Object.keys(cache);
+                    for (var si = 0; si < ks.length && dispInfo.length < 5; si++) {
+                        try {
+                            var ent = cache[ks[si]];
+                            var ex = ent && (ent.exports || ent);
+                            if (!ex) continue;
+                            var tgts = [ex];
+                            try { var ek2 = Object.keys(ex); for (var ei = 0; ei < ek2.length && ei < 20; ei++) { try { tgts.push(ex[ek2[ei]]); } catch(e){} } } catch(e){}
+                            for (var ti = 0; ti < tgts.length; ti++) {
+                                try {
+                                    var tg = tgts[ti];
+                                    if (tg && typeof tg === 'object' && typeof tg.dispatch === 'function' && dispInfo.length < 5) {
+                                        var pnames = [];
+                                        try { var pk = Object.keys(tg); for (var pki = 0; pki < pk.length && pki < 15; pki++) { pnames.push(pk[pki]); } } catch(e){}
+                                        var proto = [];
+                                        try { var pp = Object.getOwnPropertyNames(Object.getPrototypeOf(tg)); for (var ppi = 0; ppi < pp.length && ppi < 15; ppi++) { proto.push(pp[ppi]); } } catch(e){}
+                                        dispInfo.push(label + ':own=[' + pnames.join(',') + '],proto=[' + proto.join(',') + ']');
+                                    }
+                                } catch(e) {}
+                            }
+                        } catch(e) {}
+                    }
+                }
+                try { scanForDispatch(realRequire.c, 'c'); } catch(e) {}
+                return 'no_dispatcher(cached=' + cachedCount + ',forced=' + forceCount + ',fake=' + fakeCount + ',dispCandidates=' + dispInfo.length + '|' + dispInfo.join('||') + ')';
+            }
         }
 
         window._vrca_dispatcher = dispatcher;
