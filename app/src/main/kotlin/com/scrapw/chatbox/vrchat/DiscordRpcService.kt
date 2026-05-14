@@ -534,6 +534,45 @@ private const val MODULE_FINDER_JS = """
             wpChunks.pop();
         } catch(e) {}
 
+        function isDispatcher(target) {
+            if (!target || typeof target !== 'object') return false;
+            if (typeof target.dispatch !== 'function') return false;
+
+            // Source-code-based detection (most stable across Discord renames)
+            try {
+                var src = target.dispatch.toString();
+                if (src.indexOf('actionHandlers') !== -1) return true;
+                if (src.indexOf('FluxDispatcher') !== -1) return true;
+                if (src.indexOf('_dispatch') !== -1) return true;
+                if (src.indexOf('dispatchType') !== -1) return true;
+            } catch(e) {}
+
+            // Structural: subscribe/register + internal state
+            var hasReg = typeof target.subscribe === 'function' || typeof target.register === 'function';
+            if (!hasReg) return false;
+
+            if (typeof target._actionHandlers !== 'undefined') return true;
+            if (typeof target._dependencyGraph !== 'undefined') return true;
+            if (typeof target._interceptors !== 'undefined') return true;
+            if (typeof target._currentDispatchActionType !== 'undefined') return true;
+            if (typeof target._processingWaitQueue !== 'undefined') return true;
+            if (typeof target._waitQueue !== 'undefined') return true;
+            if (typeof target.isDispatching === 'function') return true;
+            if (typeof target.wait === 'function') return true;
+            if (typeof target.addInterceptor === 'function') return true;
+
+            // Last-resort: register + any private-looking property
+            if (typeof target.register === 'function') {
+                try {
+                    var pks = Object.keys(target);
+                    for (var pi = 0; pi < pks.length; pi++) {
+                        if (pks[pi].charAt(0) === '_') return true;
+                    }
+                } catch(e) {}
+            }
+            return false;
+        }
+
         function searchForDispatcher(cache) {
             var keys = Object.keys(cache);
             for (var k = 0; k < keys.length; k++) {
@@ -543,33 +582,17 @@ private const val MODULE_FINDER_JS = """
                     if (!exp) continue;
 
                     var targets = [exp, exp.default, exp.Z, exp.ZP];
+                    // Also enumerate top-level properties of exp as possible dispatcher locations
+                    try {
+                        var expKeys = Object.keys(exp);
+                        for (var ek = 0; ek < expKeys.length && ek < 30; ek++) {
+                            try { targets.push(exp[expKeys[ek]]); } catch(e) {}
+                        }
+                    } catch(e) {}
+
                     for (var t = 0; t < targets.length; t++) {
                         try {
-                            var target = targets[t];
-                            if (!target || typeof target !== 'object') continue;
-                            if (typeof target.dispatch !== 'function') continue;
-
-                            if (typeof target.subscribe === 'function' && typeof target._actionHandlers !== 'undefined') {
-                                return target;
-                            }
-                            if (typeof target.subscribe === 'function' && typeof target._dependencyGraph !== 'undefined') {
-                                return target;
-                            }
-                            if (typeof target.subscribe === 'function' && typeof target.wait === 'function') {
-                                return target;
-                            }
-                            if (typeof target.subscribe === 'function' && typeof target._interceptors !== 'undefined') {
-                                return target;
-                            }
-                            if (typeof target.subscribe === 'function' && typeof target.isDispatching === 'function') {
-                                return target;
-                            }
-                            if (typeof target.subscribe === 'function') {
-                                var pks = Object.keys(target);
-                                for (var pi = 0; pi < pks.length; pi++) {
-                                    if (pks[pi].charAt(0) === '_') return target;
-                                }
-                            }
+                            if (isDispatcher(targets[t])) return targets[t];
                         } catch(te) {}
                     }
                 } catch(ke) {}
