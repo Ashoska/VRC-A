@@ -584,29 +584,34 @@ private const val WS_HOOK_JS = """
     window.WebSocket.CLOSING = OrigWS.CLOSING;
     window.WebSocket.CLOSED = OrigWS.CLOSED;
 
-    try {
-        var t = localStorage.getItem('token');
-        if (t) window._vrca_token = JSON.parse(t);
-    } catch(e) {}
-    if (!window._vrca_token) {
-        var origFetch = window.fetch;
-        window.fetch = function(url, init) {
-            if (!window._vrca_token && init && init.headers) {
-                try {
-                    var auth;
-                    if (init.headers instanceof Headers) {
-                        auth = init.headers.get('authorization');
-                    } else if (typeof init.headers === 'object') {
-                        auth = init.headers['Authorization'] || init.headers['authorization'];
-                    }
-                    if (auth && typeof auth === 'string' && !auth.startsWith('Bot ')) {
-                        window._vrca_token = auth;
-                    }
-                } catch(e) {}
+    window._vrca_grabToken = function() {
+        if (window._vrca_token) return;
+        try {
+            var t = localStorage.getItem('token');
+            if (t) {
+                try { window._vrca_token = JSON.parse(t); } catch(e2) { window._vrca_token = t; }
             }
-            return origFetch.apply(this, arguments);
-        };
-    }
+        } catch(e) {}
+    };
+    window._vrca_grabToken();
+
+    var origFetch = window.fetch;
+    window.fetch = function(url, init) {
+        if (!window._vrca_token && init && init.headers) {
+            try {
+                var auth;
+                if (init.headers instanceof Headers) {
+                    auth = init.headers.get('authorization');
+                } else if (typeof init.headers === 'object') {
+                    auth = init.headers['Authorization'] || init.headers['authorization'];
+                }
+                if (auth && typeof auth === 'string' && !auth.startsWith('Bot ')) {
+                    window._vrca_token = auth;
+                }
+            } catch(e) {}
+        }
+        return origFetch.apply(this, arguments);
+    };
 })();
 """
 
@@ -625,9 +630,7 @@ private const val MODULE_FINDER_JS = """
             if (!url) return Promise.resolve(null);
             var cached = window._vrca_asset_cache[url];
             if (cached) return Promise.resolve(cached);
-            if (!window._vrca_token) {
-                try { var t = localStorage.getItem('token'); if (t) window._vrca_token = JSON.parse(t); } catch(e) {}
-            }
+            window._vrca_grabToken();
             var token = window._vrca_token;
             if (!token) return Promise.resolve(null);
             return fetch('/api/v9/applications/438274841678872576/external-assets', {
@@ -637,8 +640,10 @@ private const val MODULE_FINDER_JS = """
             }).then(function(r) { return r.json(); })
             .then(function(data) {
                 if (Array.isArray(data) && data[0] && data[0].external_asset_path) {
-                    window._vrca_asset_cache[url] = data[0].external_asset_path;
-                    return data[0].external_asset_path;
+                    var p = data[0].external_asset_path;
+                    var resolved = p.indexOf('mp:') === 0 ? p : 'mp:' + p;
+                    window._vrca_asset_cache[url] = resolved;
+                    return resolved;
                 }
                 return null;
             }).catch(function() { return null; });
@@ -677,14 +682,20 @@ private const val MODULE_FINDER_JS = """
                         return 'ok';
                     }
                     window._vrca_activity = activity;
-                    window._vrca_sendPresence();
-                    VRCA_resolveAsset(imageUrl).then(function(resolved) {
-                        if (resolved) {
-                            activity.assets.large_image = resolved;
-                            window._vrca_activity = activity;
-                            window._vrca_sendPresence();
-                        }
-                    });
+                    var retries = 0;
+                    var tryResolve = function() {
+                        VRCA_resolveAsset(imageUrl).then(function(resolved) {
+                            if (resolved) {
+                                activity.assets.large_image = resolved;
+                                window._vrca_activity = activity;
+                                window._vrca_sendPresence();
+                            } else if (retries < 10) {
+                                retries++;
+                                setTimeout(tryResolve, 2000);
+                            }
+                        });
+                    };
+                    tryResolve();
                     return 'resolving';
                 }
                 window._vrca_activity = activity;
