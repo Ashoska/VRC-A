@@ -1247,7 +1247,7 @@ fun NotificationToggleSection(vm: ChatboxViewModel) {
                 ToggleRow("World invites", invite) {
                     scope.launch { repo.saveNotifInvite(it) }
                 }
-                ToggleRow("Invite requests (someone asking to join you)", inviteRequest) {
+                ToggleRow("Invite requests", inviteRequest) {
                     scope.launch { repo.saveNotifInviteRequest(it) }
                 }
                 ToggleRow("Group invites", groupInvite) {

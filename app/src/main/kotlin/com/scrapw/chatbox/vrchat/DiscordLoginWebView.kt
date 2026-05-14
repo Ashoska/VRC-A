@@ -86,11 +86,12 @@ fun DiscordLoginWebView(
                                 dwellRunnable = null
                                 pendingRetries.forEach { handler.removeCallbacks(it) }
                                 pendingRetries.clear()
-                                if (!loggedIn && u.contains("discord.com/channels")) {
+                                if (!loggedIn && (u.contains("discord.com/channels") || u.contains("discord.com/app"))) {
                                     val wv = view ?: return
                                     val jsProbe = "(function(){" +
-                                        "return typeof window.webpackChunkdiscord_app !== 'undefined' && " +
-                                        "!document.querySelector('input[type=\"password\"], input[type=\"email\"], input[name=\"email\"]');" +
+                                        "var noLogin = !document.querySelector('input[type=\"password\"], input[type=\"email\"], input[name=\"email\"]');" +
+                                        "var appMounted = (document.getElementById('app-mount')?.childElementCount || 0) > 0;" +
+                                        "return noLogin && appMounted;" +
                                         "})()"
                                     var retryCount = 0
                                     val maxRetries = 4
