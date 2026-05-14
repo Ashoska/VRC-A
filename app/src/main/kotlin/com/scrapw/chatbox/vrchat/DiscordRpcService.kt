@@ -315,7 +315,7 @@ class DiscordRpcService : Service() {
                 mainHandler.post {
                     val wv = webView ?: return@post
                     wv.evaluateJavascript(
-                        "(function(){ return window._vrca_dispatcher ? 'alive' : 'dead'; })()"
+                        "(function(){ return window._vrca_dispatcher && window._vrca_dispatchMethod ? 'alive' : 'dead'; })()"
                     ) { result ->
                         val alive = result?.trim()?.replace("\"", "") == "alive"
                         if (!alive && shimReady) {
@@ -533,176 +533,186 @@ private const val MODULE_FINDER_JS = """
             wpChunks.push([[Symbol()], {}, function(req) { realRequire = req; }]);
             wpChunks.pop();
         } catch(e) {}
+        if (!realRequire) return 'no_require';
 
-        function isDispatcher(target) {
-            if (!target || typeof target !== 'object') return false;
-            if (typeof target.dispatch !== 'function') return false;
+        // Phase 1: Search module factory source code for key strings.
+        // String literals survive minification even when method names don't.
+        var factoryKeys = Object.keys(realRequire.m || {});
+        var activityModuleIds = [];
+        var fluxModuleIds = [];
+        var dispatcherModuleIds = [];
 
-            // Source-code-based detection (most stable across Discord renames)
+        for (var fi = 0; fi < factoryKeys.length; fi++) {
             try {
-                var src = target.dispatch.toString();
-                if (src.indexOf('actionHandlers') !== -1) return true;
-                if (src.indexOf('FluxDispatcher') !== -1) return true;
-                if (src.indexOf('_dispatch') !== -1) return true;
-                if (src.indexOf('dispatchType') !== -1) return true;
+                var src = realRequire.m[factoryKeys[fi]].toString();
+                if (src.indexOf('LOCAL_ACTIVITY_UPDATE') !== -1) {
+                    activityModuleIds.push(factoryKeys[fi]);
+                }
+                if (src.indexOf('FluxDispatcher') !== -1 || src.indexOf('fluxDispatcher') !== -1) {
+                    fluxModuleIds.push(factoryKeys[fi]);
+                }
+                if (src.indexOf('actionHandler') !== -1 && src.indexOf('dispatch') !== -1) {
+                    dispatcherModuleIds.push(factoryKeys[fi]);
+                }
             } catch(e) {}
-
-            // Structural: subscribe/register + internal state
-            var hasReg = typeof target.subscribe === 'function' || typeof target.register === 'function';
-            if (!hasReg) return false;
-
-            if (typeof target._actionHandlers !== 'undefined') return true;
-            if (typeof target._dependencyGraph !== 'undefined') return true;
-            if (typeof target._interceptors !== 'undefined') return true;
-            if (typeof target._currentDispatchActionType !== 'undefined') return true;
-            if (typeof target._processingWaitQueue !== 'undefined') return true;
-            if (typeof target._waitQueue !== 'undefined') return true;
-            if (typeof target.isDispatching === 'function') return true;
-            if (typeof target.wait === 'function') return true;
-            if (typeof target.addInterceptor === 'function') return true;
-
-            // Last-resort: register + any private-looking property
-            if (typeof target.register === 'function') {
-                try {
-                    var pks = Object.keys(target);
-                    for (var pi = 0; pi < pks.length; pi++) {
-                        if (pks[pi].charAt(0) === '_') return true;
-                    }
-                } catch(e) {}
-            }
-            return false;
         }
 
-        function searchForDispatcher(cache) {
-            var keys = Object.keys(cache);
-            for (var k = 0; k < keys.length; k++) {
-                try {
-                    var entry = cache[keys[k]];
-                    var exp = entry && (entry.exports || entry);
-                    if (!exp) continue;
+        // Phase 2: Load the identified modules and find the dispatcher.
+        // The FluxDispatcher module likely exports the dispatcher instance directly.
+        var dispatcher = null;
 
-                    var targets = [exp, exp.default, exp.Z, exp.ZP];
-                    // Also enumerate top-level properties of exp as possible dispatcher locations
+        function findDispatcherInModule(mod) {
+            if (!mod) return null;
+            var targets = [mod, mod.default, mod.Z, mod.ZP];
+            try {
+                var ek = Object.keys(mod);
+                for (var ei = 0; ei < ek.length && ei < 50; ei++) {
+                    try { if (mod[ek[ei]]) targets.push(mod[ek[ei]]); } catch(e) {}
+                }
+            } catch(e) {}
+            for (var ti = 0; ti < targets.length; ti++) {
+                try {
+                    var t = targets[ti];
+                    if (!t || typeof t !== 'object') continue;
+                    // Look for any function that could be dispatch (minified name).
+                    // A Flux dispatcher typically has 5+ methods and some internal state.
+                    var funcs = [];
+                    var allProps = [];
                     try {
-                        var expKeys = Object.keys(exp);
-                        for (var ek = 0; ek < expKeys.length && ek < 30; ek++) {
-                            try { targets.push(exp[expKeys[ek]]); } catch(e) {}
+                        allProps = Object.getOwnPropertyNames(t);
+                    } catch(e) {
+                        try { allProps = Object.keys(t); } catch(e2) {}
+                    }
+                    // Also check prototype
+                    try {
+                        var proto = Object.getPrototypeOf(t);
+                        if (proto && proto !== Object.prototype) {
+                            var protoProps = Object.getOwnPropertyNames(proto);
+                            for (var pp = 0; pp < protoProps.length; pp++) {
+                                if (allProps.indexOf(protoProps[pp]) === -1) allProps.push(protoProps[pp]);
+                            }
                         }
                     } catch(e) {}
-
-                    for (var t = 0; t < targets.length; t++) {
+                    for (var pi = 0; pi < allProps.length; pi++) {
                         try {
-                            if (isDispatcher(targets[t])) return targets[t];
-                        } catch(te) {}
+                            if (typeof t[allProps[pi]] === 'function') funcs.push(allProps[pi]);
+                        } catch(e) {}
                     }
-                } catch(ke) {}
+                    // Dispatcher: many methods (5+), has internal state
+                    if (funcs.length >= 5) {
+                        // Try to find 'dispatch' by checking each function's behavior:
+                        // call it with a test action and see if it doesn't throw
+                        // OR check constructor name
+                        try {
+                            var cname = t.constructor && t.constructor.name;
+                            if (cname && (cname.indexOf('Dispatcher') !== -1 || cname.indexOf('Flux') !== -1)) {
+                                return t;
+                            }
+                        } catch(e) {}
+                        // Check if any method source mentions actionHandler
+                        for (var fni = 0; fni < funcs.length; fni++) {
+                            try {
+                                var fsrc = t[funcs[fni]].toString();
+                                if (fsrc.indexOf('actionHandler') !== -1 || fsrc.indexOf('_dispatch') !== -1) {
+                                    return t;
+                                }
+                            } catch(e) {}
+                        }
+                    }
+                } catch(e) {}
             }
             return null;
         }
 
-        var dispatcher = null;
-        var cachedCount = 0;
-        var forceCount = 0;
-
-        try {
-            if (realRequire && realRequire.c) {
-                cachedCount = Object.keys(realRequire.c).length;
-                dispatcher = searchForDispatcher(realRequire.c);
-            }
-        } catch(e) {}
-
-        if (!dispatcher && realRequire && realRequire.m) {
+        // Try FluxDispatcher modules first (most likely)
+        var searchOrder = fluxModuleIds.concat(dispatcherModuleIds).concat(activityModuleIds);
+        var seen = {};
+        for (var si = 0; si < searchOrder.length; si++) {
+            var mid = searchOrder[si];
+            if (seen[mid]) continue;
+            seen[mid] = true;
             try {
-                var allModKeys = Object.keys(realRequire.m);
-                var forceLoaded = {};
-                for (var mi = 0; mi < allModKeys.length; mi++) {
-                    var mid = allModKeys[mi];
-                    try {
-                        if (realRequire.c && realRequire.c[mid]) continue;
-                        var mod = realRequire(mid);
-                        if (mod) forceLoaded[mid] = { exports: mod };
-                    } catch(e) {}
-                }
-                forceCount = Object.keys(forceLoaded).length;
-                dispatcher = searchForDispatcher(forceLoaded);
+                var mod = realRequire(mid);
+                dispatcher = findDispatcherInModule(mod);
+                if (dispatcher) break;
             } catch(e) {}
         }
 
-        if (!dispatcher) {
-            var fakeCache = {};
-            var fakeReq = function(id) { return fakeCache[id] ? fakeCache[id].exports : {}; };
-            fakeReq.c = fakeCache;
-            fakeReq.m = {};
-            fakeReq.d = function(t, k, g) {
-                if (!t.hasOwnProperty(k)) Object.defineProperty(t, k, { enumerable: true, get: g });
-            };
-            fakeReq.r = function(t) {
-                if (typeof Symbol !== 'undefined' && Symbol.toStringTag)
-                    Object.defineProperty(t, Symbol.toStringTag, { value: 'Module' });
-                Object.defineProperty(t, '__esModule', { value: true });
-            };
-            fakeReq.n = function(m) {
-                var getter = m && m.__esModule ? function() { return m.default; } : function() { return m; };
-                fakeReq.d(getter, 'a', getter);
-                return getter;
-            };
-            fakeReq.t = function(v) { return v; };
-            fakeReq.e = function() { return Promise.resolve(); };
-            fakeReq.o = function(o, p) { return Object.prototype.hasOwnProperty.call(o, p); };
-
-            for (var ci = 0; ci < wpChunks.length; ci++) {
-                var chunk = wpChunks[ci];
-                if (!chunk || !chunk[1]) continue;
-                var mods = chunk[1];
-                var keys = Object.keys(mods);
-                for (var j = 0; j < keys.length; j++) {
-                    var key = keys[j];
-                    if (fakeCache[key]) continue;
-                    var m = { id: key, loaded: false, exports: {} };
-                    try { mods[key].call(m.exports, m, m.exports, fakeReq); m.loaded = true; } catch(e) {}
-                    fakeCache[key] = m;
-                }
-            }
-            var fakeCount = Object.keys(fakeCache).length;
-            dispatcher = searchForDispatcher(fakeCache);
-            if (!dispatcher) {
-                // Diagnostic: find ALL objects with a dispatch function and dump their shape
-                var dispInfo = [];
-                function scanForDispatch(cache, label) {
-                    var ks = Object.keys(cache);
-                    for (var si = 0; si < ks.length && dispInfo.length < 5; si++) {
+        // Phase 3: If still not found, scan ALL cached modules for constructor name
+        if (!dispatcher && realRequire.c) {
+            var ckeys = Object.keys(realRequire.c);
+            for (var ck = 0; ck < ckeys.length; ck++) {
+                try {
+                    var entry = realRequire.c[ckeys[ck]];
+                    var exp = entry && (entry.exports || entry);
+                    if (!exp) continue;
+                    var etgts = [exp, exp.default, exp.Z, exp.ZP];
+                    for (var et = 0; et < etgts.length; et++) {
                         try {
-                            var ent = cache[ks[si]];
-                            var ex = ent && (ent.exports || ent);
-                            if (!ex) continue;
-                            var tgts = [ex];
-                            try { var ek2 = Object.keys(ex); for (var ei = 0; ei < ek2.length && ei < 20; ei++) { try { tgts.push(ex[ek2[ei]]); } catch(e){} } } catch(e){}
-                            for (var ti = 0; ti < tgts.length; ti++) {
-                                try {
-                                    var tg = tgts[ti];
-                                    if (tg && typeof tg === 'object' && typeof tg.dispatch === 'function' && dispInfo.length < 5) {
-                                        var pnames = [];
-                                        try { var pk = Object.keys(tg); for (var pki = 0; pki < pk.length && pki < 15; pki++) { pnames.push(pk[pki]); } } catch(e){}
-                                        var proto = [];
-                                        try { var pp = Object.getOwnPropertyNames(Object.getPrototypeOf(tg)); for (var ppi = 0; ppi < pp.length && ppi < 15; ppi++) { proto.push(pp[ppi]); } } catch(e){}
-                                        dispInfo.push(label + ':own=[' + pnames.join(',') + '],proto=[' + proto.join(',') + ']');
-                                    }
-                                } catch(e) {}
+                            var tg = etgts[et];
+                            if (!tg || typeof tg !== 'object') continue;
+                            var cn = tg.constructor && tg.constructor.name;
+                            if (cn && (cn.indexOf('Dispatcher') !== -1 || cn.indexOf('Flux') !== -1)) {
+                                dispatcher = tg;
+                                break;
                             }
                         } catch(e) {}
                     }
-                }
-                try { scanForDispatch(realRequire.c, 'c'); } catch(e) {}
-                return 'no_dispatcher(cached=' + cachedCount + ',forced=' + forceCount + ',fake=' + fakeCount + ',dispCandidates=' + dispInfo.length + '|' + dispInfo.join('||') + ')';
+                    if (dispatcher) break;
+                } catch(e) {}
             }
+        }
+
+        if (!dispatcher) {
+            return 'no_dispatcher(factories=' + factoryKeys.length +
+                ',flux=' + fluxModuleIds.length +
+                ',actMods=' + activityModuleIds.length +
+                ',dispMods=' + dispatcherModuleIds.length + ')';
         }
 
         window._vrca_dispatcher = dispatcher;
 
+        // Find the actual dispatch method name (it's minified).
+        // Look for a method whose source code references actionHandler or _dispatch.
+        var dispatchMethodName = null;
+        var allMethods = [];
+        try {
+            var ap = Object.getOwnPropertyNames(dispatcher);
+            var proto = Object.getPrototypeOf(dispatcher);
+            if (proto && proto !== Object.prototype) {
+                var pp = Object.getOwnPropertyNames(proto);
+                for (var ppi = 0; ppi < pp.length; ppi++) {
+                    if (ap.indexOf(pp[ppi]) === -1) ap.push(pp[ppi]);
+                }
+            }
+            for (var ai = 0; ai < ap.length; ai++) {
+                try {
+                    if (typeof dispatcher[ap[ai]] === 'function') {
+                        allMethods.push(ap[ai]);
+                        var msrc = dispatcher[ap[ai]].toString();
+                        if (msrc.indexOf('actionHandler') !== -1 || msrc.indexOf('.type') !== -1) {
+                            if (!dispatchMethodName) dispatchMethodName = ap[ai];
+                        }
+                    }
+                } catch(e) {}
+            }
+        } catch(e) {}
+
+        // Fallback: try 'dispatch' in case it exists but wasn't enumerable
+        if (!dispatchMethodName && typeof dispatcher.dispatch === 'function') {
+            dispatchMethodName = 'dispatch';
+        }
+
+        if (!dispatchMethodName) {
+            return 'found_dispatcher_no_dispatch(methods=[' + allMethods.join(',') + '])';
+        }
+
+        window._vrca_dispatchMethod = dispatchMethodName;
+
         window.VRCA_setActivity = function(jsonStr) {
             try {
                 var activity = JSON.parse(jsonStr);
-                dispatcher.dispatch({
+                dispatcher[dispatchMethodName]({
                     type: 'LOCAL_ACTIVITY_UPDATE',
                     activity: activity,
                     socketId: 'vrca',
@@ -716,7 +726,7 @@ private const val MODULE_FINDER_JS = """
 
         window.VRCA_clearActivity = function() {
             try {
-                dispatcher.dispatch({
+                dispatcher[dispatchMethodName]({
                     type: 'LOCAL_ACTIVITY_UPDATE',
                     activity: null,
                     socketId: 'vrca',
