@@ -2,6 +2,7 @@ package com.scrapw.chatbox.vrchat
 
 import android.annotation.SuppressLint
 import android.app.Notification
+import android.graphics.Bitmap
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
@@ -181,6 +182,13 @@ class DiscordRpcService : Service() {
                 CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
 
                 webViewClient = object : WebViewClient() {
+                    override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                        val u = url ?: ""
+                        if (u.contains("discord.com")) {
+                            view?.evaluateJavascript(WS_HOOK_JS, null)
+                        }
+                    }
+
                     override fun onPageFinished(view: WebView?, url: String?) {
                         val u = url ?: ""
                         if (u.contains("discord.com/channels") || u.contains("discord.com/app")) {
@@ -315,7 +323,7 @@ class DiscordRpcService : Service() {
                 mainHandler.post {
                     val wv = webView ?: return@post
                     wv.evaluateJavascript(
-                        "(function(){ return window._vrca_dispatcher && window._vrca_dispatchMethod ? 'alive' : 'dead'; })()"
+                        "(function(){ var ws = window._vrca_gatewayWs; return ws && ws.readyState === 1 ? 'alive' : 'dead'; })()"
                     ) { result ->
                         val alive = result?.trim()?.replace("\"", "") == "alive"
                         if (!alive && shimReady) {
@@ -507,217 +515,52 @@ class DiscordRpcService : Service() {
     }
 }
 
+private const val WS_HOOK_JS = """
+(function() {
+    if (window._vrca_ws_hooked) return;
+    window._vrca_ws_hooked = true;
+    window._vrca_gatewayWs = null;
+    var OrigWS = window.WebSocket;
+    window.WebSocket = function(url, protocols) {
+        var ws = protocols ? new OrigWS(url, protocols) : new OrigWS(url);
+        if (url && (url.indexOf('gateway.discord.gg') !== -1 || url.indexOf('gateway-us-east') !== -1 || url.indexOf('discord.gg/?') !== -1)) {
+            window._vrca_gatewayWs = ws;
+        }
+        return ws;
+    };
+    window.WebSocket.prototype = OrigWS.prototype;
+    window.WebSocket.CONNECTING = OrigWS.CONNECTING;
+    window.WebSocket.OPEN = OrigWS.OPEN;
+    window.WebSocket.CLOSING = OrigWS.CLOSING;
+    window.WebSocket.CLOSED = OrigWS.CLOSED;
+})();
+"""
+
 private const val MODULE_FINDER_JS = """
 (function() {
     try {
-        if (window._vrca_dispatcher) return 'ok';
+        if (window.VRCA_setActivity) return 'ok';
 
-        var wpChunks = null;
-        var wpName = '';
-        var candidates = Object.getOwnPropertyNames(window);
-        for (var i = 0; i < candidates.length; i++) {
-            var name = candidates[i];
-            if (name.indexOf('webpackChunk') === 0) {
-                var val = window[name];
-                if (val && typeof val.push === 'function' && val.length > 0) {
-                    wpChunks = val;
-                    wpName = name;
-                    break;
-                }
-            }
-        }
-        if (!wpChunks) return 'no_webpack(scanned=' + candidates.length + ')';
+        var ws = window._vrca_gatewayWs;
+        if (!ws) return 'no_gateway(hook=' + !!window._vrca_ws_hooked + ')';
+        if (ws.readyState !== 1) return 'gateway_not_open(state=' + ws.readyState + ')';
 
-        var realRequire = null;
-        try {
-            wpChunks.push([[Symbol()], {}, function(req) { realRequire = req; }]);
-            wpChunks.pop();
-        } catch(e) {}
-        if (!realRequire) return 'no_require';
-
-        // Phase 1: Search module factory source code for key strings.
-        // String literals survive minification even when method names don't.
-        var factoryKeys = Object.keys(realRequire.m || {});
-        var activityModuleIds = [];
-        var fluxModuleIds = [];
-        var dispatcherModuleIds = [];
-
-        for (var fi = 0; fi < factoryKeys.length; fi++) {
-            try {
-                var src = realRequire.m[factoryKeys[fi]].toString();
-                if (src.indexOf('LOCAL_ACTIVITY_UPDATE') !== -1) {
-                    activityModuleIds.push(factoryKeys[fi]);
-                }
-                if (src.indexOf('FluxDispatcher') !== -1 || src.indexOf('fluxDispatcher') !== -1) {
-                    fluxModuleIds.push(factoryKeys[fi]);
-                }
-                if (src.indexOf('actionHandler') !== -1 && src.indexOf('dispatch') !== -1) {
-                    dispatcherModuleIds.push(factoryKeys[fi]);
-                }
-            } catch(e) {}
-        }
-
-        // Phase 2: Load the identified modules and find the dispatcher.
-        // The FluxDispatcher module likely exports the dispatcher instance directly.
-        var dispatcher = null;
-
-        function findDispatcherInModule(mod) {
-            if (!mod) return null;
-            var targets = [mod, mod.default, mod.Z, mod.ZP];
-            try {
-                var ek = Object.keys(mod);
-                for (var ei = 0; ei < ek.length && ei < 50; ei++) {
-                    try { if (mod[ek[ei]]) targets.push(mod[ek[ei]]); } catch(e) {}
-                }
-            } catch(e) {}
-            for (var ti = 0; ti < targets.length; ti++) {
-                try {
-                    var t = targets[ti];
-                    if (!t || typeof t !== 'object') continue;
-                    // Look for any function that could be dispatch (minified name).
-                    // A Flux dispatcher typically has 5+ methods and some internal state.
-                    var funcs = [];
-                    var allProps = [];
-                    try {
-                        allProps = Object.getOwnPropertyNames(t);
-                    } catch(e) {
-                        try { allProps = Object.keys(t); } catch(e2) {}
-                    }
-                    // Also check prototype
-                    try {
-                        var proto = Object.getPrototypeOf(t);
-                        if (proto && proto !== Object.prototype) {
-                            var protoProps = Object.getOwnPropertyNames(proto);
-                            for (var pp = 0; pp < protoProps.length; pp++) {
-                                if (allProps.indexOf(protoProps[pp]) === -1) allProps.push(protoProps[pp]);
-                            }
-                        }
-                    } catch(e) {}
-                    for (var pi = 0; pi < allProps.length; pi++) {
-                        try {
-                            if (typeof t[allProps[pi]] === 'function') funcs.push(allProps[pi]);
-                        } catch(e) {}
-                    }
-                    // Dispatcher: many methods (5+), has internal state
-                    if (funcs.length >= 5) {
-                        // Try to find 'dispatch' by checking each function's behavior:
-                        // call it with a test action and see if it doesn't throw
-                        // OR check constructor name
-                        try {
-                            var cname = t.constructor && t.constructor.name;
-                            if (cname && (cname.indexOf('Dispatcher') !== -1 || cname.indexOf('Flux') !== -1)) {
-                                return t;
-                            }
-                        } catch(e) {}
-                        // Check if any method source mentions actionHandler
-                        for (var fni = 0; fni < funcs.length; fni++) {
-                            try {
-                                var fsrc = t[funcs[fni]].toString();
-                                if (fsrc.indexOf('actionHandler') !== -1 || fsrc.indexOf('_dispatch') !== -1) {
-                                    return t;
-                                }
-                            } catch(e) {}
-                        }
-                    }
-                } catch(e) {}
-            }
-            return null;
-        }
-
-        // Try FluxDispatcher modules first (most likely)
-        var searchOrder = fluxModuleIds.concat(dispatcherModuleIds).concat(activityModuleIds);
-        var seen = {};
-        for (var si = 0; si < searchOrder.length; si++) {
-            var mid = searchOrder[si];
-            if (seen[mid]) continue;
-            seen[mid] = true;
-            try {
-                var mod = realRequire(mid);
-                dispatcher = findDispatcherInModule(mod);
-                if (dispatcher) break;
-            } catch(e) {}
-        }
-
-        // Phase 3: If still not found, scan ALL cached modules for constructor name
-        if (!dispatcher && realRequire.c) {
-            var ckeys = Object.keys(realRequire.c);
-            for (var ck = 0; ck < ckeys.length; ck++) {
-                try {
-                    var entry = realRequire.c[ckeys[ck]];
-                    var exp = entry && (entry.exports || entry);
-                    if (!exp) continue;
-                    var etgts = [exp, exp.default, exp.Z, exp.ZP];
-                    for (var et = 0; et < etgts.length; et++) {
-                        try {
-                            var tg = etgts[et];
-                            if (!tg || typeof tg !== 'object') continue;
-                            var cn = tg.constructor && tg.constructor.name;
-                            if (cn && (cn.indexOf('Dispatcher') !== -1 || cn.indexOf('Flux') !== -1)) {
-                                dispatcher = tg;
-                                break;
-                            }
-                        } catch(e) {}
-                    }
-                    if (dispatcher) break;
-                } catch(e) {}
-            }
-        }
-
-        if (!dispatcher) {
-            return 'no_dispatcher(factories=' + factoryKeys.length +
-                ',flux=' + fluxModuleIds.length +
-                ',actMods=' + activityModuleIds.length +
-                ',dispMods=' + dispatcherModuleIds.length + ')';
-        }
-
-        window._vrca_dispatcher = dispatcher;
-
-        // Find the actual dispatch method name (it's minified).
-        // Look for a method whose source code references actionHandler or _dispatch.
-        var dispatchMethodName = null;
-        var allMethods = [];
-        try {
-            var ap = Object.getOwnPropertyNames(dispatcher);
-            var proto = Object.getPrototypeOf(dispatcher);
-            if (proto && proto !== Object.prototype) {
-                var pp = Object.getOwnPropertyNames(proto);
-                for (var ppi = 0; ppi < pp.length; ppi++) {
-                    if (ap.indexOf(pp[ppi]) === -1) ap.push(pp[ppi]);
-                }
-            }
-            for (var ai = 0; ai < ap.length; ai++) {
-                try {
-                    if (typeof dispatcher[ap[ai]] === 'function') {
-                        allMethods.push(ap[ai]);
-                        var msrc = dispatcher[ap[ai]].toString();
-                        if (msrc.indexOf('actionHandler') !== -1 || msrc.indexOf('.type') !== -1) {
-                            if (!dispatchMethodName) dispatchMethodName = ap[ai];
-                        }
-                    }
-                } catch(e) {}
-            }
-        } catch(e) {}
-
-        // Fallback: try 'dispatch' in case it exists but wasn't enumerable
-        if (!dispatchMethodName && typeof dispatcher.dispatch === 'function') {
-            dispatchMethodName = 'dispatch';
-        }
-
-        if (!dispatchMethodName) {
-            return 'found_dispatcher_no_dispatch(methods=[' + allMethods.join(',') + '])';
-        }
-
-        window._vrca_dispatchMethod = dispatchMethodName;
+        window._vrca_dispatcher = true;
 
         window.VRCA_setActivity = function(jsonStr) {
             try {
+                var gw = window._vrca_gatewayWs;
+                if (!gw || gw.readyState !== 1) return 'no_gateway';
                 var activity = JSON.parse(jsonStr);
-                dispatcher[dispatchMethodName]({
-                    type: 'LOCAL_ACTIVITY_UPDATE',
-                    activity: activity,
-                    socketId: 'vrca',
-                    pid: 0
-                });
+                gw.send(JSON.stringify({
+                    op: 3,
+                    d: {
+                        since: 0,
+                        activities: [activity],
+                        status: 'online',
+                        afk: false
+                    }
+                }));
                 return 'ok';
             } catch(e) {
                 return 'err:' + e.message;
@@ -726,12 +569,17 @@ private const val MODULE_FINDER_JS = """
 
         window.VRCA_clearActivity = function() {
             try {
-                dispatcher[dispatchMethodName]({
-                    type: 'LOCAL_ACTIVITY_UPDATE',
-                    activity: null,
-                    socketId: 'vrca',
-                    pid: 0
-                });
+                var gw = window._vrca_gatewayWs;
+                if (!gw || gw.readyState !== 1) return 'no_gateway';
+                gw.send(JSON.stringify({
+                    op: 3,
+                    d: {
+                        since: 0,
+                        activities: [],
+                        status: 'online',
+                        afk: false
+                    }
+                }));
                 return 'ok';
             } catch(e) {
                 return 'err:' + e.message;
