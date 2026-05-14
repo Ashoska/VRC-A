@@ -1539,14 +1539,24 @@ class VrchatPipelineService : Service() {
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
+        val rpcSuffix = if (DiscordRpcService.isRunning) {
+            val rpcStatus = DiscordRpcState.status
+            when (rpcStatus) {
+                DiscordRpcStatus.CONNECTED -> " | Discord RPC active"
+                DiscordRpcStatus.CONNECTING, DiscordRpcStatus.RECONNECTING -> " | Discord RPC connecting..."
+                DiscordRpcStatus.FAILED, DiscordRpcStatus.SESSION_EXPIRED -> " | Discord RPC failed"
+                else -> ""
+            }
+        } else ""
         return NotificationCompat.Builder(this, NOTIF_CHANNEL_PERSISTENT)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle("VRC-A")
-            .setContentText(status)
+            .setContentText(status + rpcSuffix)
             .setContentIntent(tapIntent)
             .setOngoing(true)
             .setSilent(true)
             .setPriority(NotificationCompat.PRIORITY_MIN)
+            .setGroup("vrca_service")
             .build()
     }
 

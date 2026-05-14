@@ -192,6 +192,7 @@ class DiscordRpcService : Service() {
                     override fun onPageFinished(view: WebView?, url: String?) {
                         val u = url ?: ""
                         if (u.contains("discord.com/channels") || u.contains("discord.com/app")) {
+                            view?.evaluateJavascript(WS_HOOK_JS, null)
                             injectShimDelayed()
                         } else if (u.contains("discord.com/login")) {
                             Log.w(TAG, "Discord session expired — landed on login page")
@@ -501,11 +502,19 @@ class DiscordRpcService : Service() {
     }
 
     private fun buildNotif(text: String): Notification {
+        val pipelineStatus = if (VrchatPipelineState.isConnected) {
+            val name = try {
+                VrchatAuthManager.getStoredDisplayName(applicationContext) ?: "VRChat"
+            } catch (e: Exception) { "VRChat" }
+            "Connected as $name"
+        } else ""
+        val combined = if (pipelineStatus.isNotEmpty()) "$pipelineStatus | $text" else text
         return Notification.Builder(this, NOTIF_CHANNEL)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle("VRC-A")
-            .setContentText(text)
+            .setContentText(combined)
             .setOngoing(true)
+            .setGroup("vrca_service")
             .build()
     }
 
@@ -520,10 +529,24 @@ private const val WS_HOOK_JS = """
     if (window._vrca_ws_hooked) return;
     window._vrca_ws_hooked = true;
     window._vrca_gatewayWs = null;
+
+    // Hook 1: Wrap WebSocket.prototype.send — catches existing WebSocket instances
+    // that were created before our hook. When Discord sends its first gateway message,
+    // we capture the WebSocket reference from 'this'.
+    var origSend = WebSocket.prototype.send;
+    WebSocket.prototype.send = function(data) {
+        if (!window._vrca_gatewayWs && this.url &&
+            this.url.indexOf('gateway') !== -1 && this.url.indexOf('discord') !== -1) {
+            window._vrca_gatewayWs = this;
+        }
+        return origSend.call(this, data);
+    };
+
+    // Hook 2: Wrap constructor for future WebSocket connections (reconnects, etc.)
     var OrigWS = window.WebSocket;
     window.WebSocket = function(url, protocols) {
         var ws = protocols ? new OrigWS(url, protocols) : new OrigWS(url);
-        if (url && (url.indexOf('gateway.discord.gg') !== -1 || url.indexOf('gateway-us-east') !== -1 || url.indexOf('discord.gg/?') !== -1)) {
+        if (url && url.indexOf('gateway') !== -1 && url.indexOf('discord') !== -1) {
             window._vrca_gatewayWs = ws;
         }
         return ws;
