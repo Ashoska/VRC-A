@@ -94,6 +94,7 @@ class DiscordRpcService : Service() {
     private var sessionRecoveryCount = 0
     private var consecutivePushFailures = 0
     private var lastPushAttemptMs = 0L
+    private var lastShimResult = ""
 
     private var onlineStartEpochMs = 0L
     private val rpcPrefs by lazy {
@@ -175,7 +176,7 @@ class DiscordRpcService : Service() {
                 settings.domStorageEnabled = true
                 settings.databaseEnabled = true
                 settings.userAgentString =
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
                 CookieManager.getInstance().setAcceptCookie(true)
                 CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
 
@@ -239,22 +240,23 @@ class DiscordRpcService : Service() {
     private fun injectShimDelayed() {
         mainHandler.postDelayed({
             injectShim()
-        }, 3000)
+        }, 5000)
     }
 
     private fun injectShim() {
         if (shimRetryCount >= MAX_SHIM_RETRIES) {
-            Log.w(TAG, "Shim injection failed after $MAX_SHIM_RETRIES attempts")
+            Log.w(TAG, "Shim injection failed after $MAX_SHIM_RETRIES attempts — last: $lastShimResult")
             DiscordRpcState.status = DiscordRpcStatus.FAILED
-            DiscordRpcState.failureMessage = "Discord connection setup failed — app may need update"
+            DiscordRpcState.failureMessage = "Discord setup failed: $lastShimResult"
             updateNotif("Discord RPC: connection setup failed — needs update")
             return
         }
 
         val wv = webView ?: return
         wv.evaluateJavascript(MODULE_FINDER_JS) { result ->
-            val ok = result?.trim()?.replace("\"", "") == "ok"
-            if (ok) {
+            val cleaned = result?.trim()?.replace("\"", "") ?: "null"
+            lastShimResult = cleaned
+            if (cleaned == "ok") {
                 Log.i(TAG, "JS shim injected — module finder succeeded")
                 shimReady = true
                 shimRetryCount = 0
@@ -267,7 +269,7 @@ class DiscordRpcService : Service() {
                 startSessionMonitor()
             } else {
                 shimRetryCount++
-                Log.w(TAG, "JS shim injection failed (attempt $shimRetryCount/$MAX_SHIM_RETRIES): $result")
+                Log.w(TAG, "JS shim injection failed (attempt $shimRetryCount/$MAX_SHIM_RETRIES): $cleaned")
                 DiscordRpcState.status = DiscordRpcStatus.RECONNECTING
                 DiscordRpcState.failureMessage = "Setting up Discord connection... ($shimRetryCount/$MAX_SHIM_RETRIES)"
                 val backoffMs = SHIM_RETRY_BASE_DELAY_MS * shimRetryCount
