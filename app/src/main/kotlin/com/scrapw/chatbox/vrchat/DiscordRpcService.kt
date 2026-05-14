@@ -537,38 +537,42 @@ private const val MODULE_FINDER_JS = """
         function searchForDispatcher(cache) {
             var keys = Object.keys(cache);
             for (var k = 0; k < keys.length; k++) {
-                var entry = cache[keys[k]];
-                var exp = entry && (entry.exports || entry);
-                if (!exp) continue;
+                try {
+                    var entry = cache[keys[k]];
+                    var exp = entry && (entry.exports || entry);
+                    if (!exp) continue;
 
-                var targets = [exp, exp.default, exp.Z, exp.ZP];
-                for (var t = 0; t < targets.length; t++) {
-                    var target = targets[t];
-                    if (!target || typeof target !== 'object') continue;
-                    if (typeof target.dispatch !== 'function') continue;
+                    var targets = [exp, exp.default, exp.Z, exp.ZP];
+                    for (var t = 0; t < targets.length; t++) {
+                        try {
+                            var target = targets[t];
+                            if (!target || typeof target !== 'object') continue;
+                            if (typeof target.dispatch !== 'function') continue;
 
-                    if (typeof target.subscribe === 'function' && typeof target._actionHandlers !== 'undefined') {
-                        return target;
+                            if (typeof target.subscribe === 'function' && typeof target._actionHandlers !== 'undefined') {
+                                return target;
+                            }
+                            if (typeof target.subscribe === 'function' && typeof target._dependencyGraph !== 'undefined') {
+                                return target;
+                            }
+                            if (typeof target.subscribe === 'function' && typeof target.wait === 'function') {
+                                return target;
+                            }
+                            if (typeof target.subscribe === 'function' && typeof target._interceptors !== 'undefined') {
+                                return target;
+                            }
+                            if (typeof target.subscribe === 'function' && typeof target.isDispatching === 'function') {
+                                return target;
+                            }
+                            if (typeof target.subscribe === 'function') {
+                                var pks = Object.keys(target);
+                                for (var pi = 0; pi < pks.length; pi++) {
+                                    if (pks[pi].charAt(0) === '_') return target;
+                                }
+                            }
+                        } catch(te) {}
                     }
-                    if (typeof target.subscribe === 'function' && typeof target._dependencyGraph !== 'undefined') {
-                        return target;
-                    }
-                    if (typeof target.subscribe === 'function' && typeof target.wait === 'function') {
-                        return target;
-                    }
-                    if (typeof target.subscribe === 'function' && typeof target._interceptors !== 'undefined') {
-                        return target;
-                    }
-                    if (typeof target.subscribe === 'function' && typeof target.isDispatching === 'function') {
-                        return target;
-                    }
-                    if (typeof target.subscribe === 'function') {
-                        var pks = Object.keys(target);
-                        for (var pi = 0; pi < pks.length; pi++) {
-                            if (pks[pi].charAt(0) === '_') return target;
-                        }
-                    }
-                }
+                } catch(ke) {}
             }
             return null;
         }
@@ -577,24 +581,28 @@ private const val MODULE_FINDER_JS = """
         var cachedCount = 0;
         var forceCount = 0;
 
-        if (realRequire && realRequire.c) {
-            cachedCount = Object.keys(realRequire.c).length;
-            dispatcher = searchForDispatcher(realRequire.c);
-        }
+        try {
+            if (realRequire && realRequire.c) {
+                cachedCount = Object.keys(realRequire.c).length;
+                dispatcher = searchForDispatcher(realRequire.c);
+            }
+        } catch(e) {}
 
         if (!dispatcher && realRequire && realRequire.m) {
-            var allModKeys = Object.keys(realRequire.m);
-            var forceLoaded = {};
-            for (var mi = 0; mi < allModKeys.length; mi++) {
-                var mid = allModKeys[mi];
-                if (realRequire.c && realRequire.c[mid]) continue;
-                try {
-                    var mod = realRequire(mid);
-                    if (mod) forceLoaded[mid] = { exports: mod };
-                } catch(e) {}
-            }
-            forceCount = Object.keys(forceLoaded).length;
-            dispatcher = searchForDispatcher(forceLoaded);
+            try {
+                var allModKeys = Object.keys(realRequire.m);
+                var forceLoaded = {};
+                for (var mi = 0; mi < allModKeys.length; mi++) {
+                    var mid = allModKeys[mi];
+                    try {
+                        if (realRequire.c && realRequire.c[mid]) continue;
+                        var mod = realRequire(mid);
+                        if (mod) forceLoaded[mid] = { exports: mod };
+                    } catch(e) {}
+                }
+                forceCount = Object.keys(forceLoaded).length;
+                dispatcher = searchForDispatcher(forceLoaded);
+            } catch(e) {}
         }
 
         if (!dispatcher) {
