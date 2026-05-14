@@ -625,6 +625,9 @@ private const val MODULE_FINDER_JS = """
             if (!url) return Promise.resolve(null);
             var cached = window._vrca_asset_cache[url];
             if (cached) return Promise.resolve(cached);
+            if (!window._vrca_token) {
+                try { var t = localStorage.getItem('token'); if (t) window._vrca_token = JSON.parse(t); } catch(e) {}
+            }
             var token = window._vrca_token;
             if (!token) return Promise.resolve(null);
             return fetch('/api/v9/applications/438274841678872576/external-assets', {
@@ -673,11 +676,14 @@ private const val MODULE_FINDER_JS = """
                         window._vrca_sendPresence();
                         return 'ok';
                     }
+                    window._vrca_activity = activity;
+                    window._vrca_sendPresence();
                     VRCA_resolveAsset(imageUrl).then(function(resolved) {
-                        if (resolved) activity.assets.large_image = resolved;
-                        else delete activity.assets.large_image;
-                        window._vrca_activity = activity;
-                        window._vrca_sendPresence();
+                        if (resolved) {
+                            activity.assets.large_image = resolved;
+                            window._vrca_activity = activity;
+                            window._vrca_sendPresence();
+                        }
                     });
                     return 'resolving';
                 }
