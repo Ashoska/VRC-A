@@ -357,8 +357,8 @@ class DiscordRpcService : Service() {
             .replace("\r", "\\r")
         mainHandler.post {
             wv.evaluateJavascript("window.VRCA_setActivity('$escaped')") { result ->
-                val ok = result?.trim()?.replace("\"", "") == "ok"
-                if (ok) {
+                val cleaned = result?.trim()?.replace("\"", "") ?: "null"
+                if (cleaned == "ok" || cleaned == "resolving") {
                     consecutivePushFailures = 0
                 } else {
                     consecutivePushFailures++
@@ -529,20 +529,47 @@ private const val WS_HOOK_JS = """
     if (window._vrca_ws_hooked) return;
     window._vrca_ws_hooked = true;
     window._vrca_gatewayWs = null;
+    window._vrca_activity = null;
+    window._vrca_user_status = 'online';
+    window._vrca_intended_status = 'online';
+    window._vrca_asset_cache = {};
+    window._vrca_token = null;
 
-    // Hook 1: Wrap WebSocket.prototype.send — catches existing WebSocket instances
-    // that were created before our hook. When Discord sends its first gateway message,
-    // we capture the WebSocket reference from 'this'.
     var origSend = WebSocket.prototype.send;
+    window._vrca_origSend = origSend;
+
     WebSocket.prototype.send = function(data) {
-        if (!window._vrca_gatewayWs && this.url &&
-            this.url.indexOf('gateway') !== -1 && this.url.indexOf('discord') !== -1) {
-            window._vrca_gatewayWs = this;
+        if (this.url && this.url.indexOf('gateway') !== -1 &&
+            this.url.indexOf('discord') !== -1) {
+            if (!window._vrca_gatewayWs || window._vrca_gatewayWs.readyState !== 1) {
+                window._vrca_gatewayWs = this;
+            }
+            if (typeof data === 'string') {
+                try {
+                    var parsed = JSON.parse(data);
+                    if (parsed.op === 3 && parsed.d) {
+                        var st = parsed.d.status;
+                        if (st && st !== 'idle') window._vrca_intended_status = st;
+                        if (st === 'idle' && window._vrca_intended_status === 'online') {
+                            parsed.d.status = 'online';
+                            parsed.d.since = 0;
+                        }
+                        window._vrca_user_status = parsed.d.status;
+                        if (window._vrca_activity) {
+                            if (!parsed.d.activities) parsed.d.activities = [];
+                            parsed.d.activities = parsed.d.activities.filter(function(a) {
+                                return a.application_id !== '438274841678872576';
+                            });
+                            parsed.d.activities.push(window._vrca_activity);
+                            return origSend.call(this, JSON.stringify(parsed));
+                        }
+                    }
+                } catch(e) {}
+            }
         }
         return origSend.call(this, data);
     };
 
-    // Hook 2: Wrap constructor for future WebSocket connections (reconnects, etc.)
     var OrigWS = window.WebSocket;
     window.WebSocket = function(url, protocols) {
         var ws = protocols ? new OrigWS(url, protocols) : new OrigWS(url);
@@ -556,6 +583,30 @@ private const val WS_HOOK_JS = """
     window.WebSocket.OPEN = OrigWS.OPEN;
     window.WebSocket.CLOSING = OrigWS.CLOSING;
     window.WebSocket.CLOSED = OrigWS.CLOSED;
+
+    try {
+        var t = localStorage.getItem('token');
+        if (t) window._vrca_token = JSON.parse(t);
+    } catch(e) {}
+    if (!window._vrca_token) {
+        var origFetch = window.fetch;
+        window.fetch = function(url, init) {
+            if (!window._vrca_token && init && init.headers) {
+                try {
+                    var auth;
+                    if (init.headers instanceof Headers) {
+                        auth = init.headers.get('authorization');
+                    } else if (typeof init.headers === 'object') {
+                        auth = init.headers['Authorization'] || init.headers['authorization'];
+                    }
+                    if (auth && typeof auth === 'string' && !auth.startsWith('Bot ')) {
+                        window._vrca_token = auth;
+                    }
+                } catch(e) {}
+            }
+            return origFetch.apply(this, arguments);
+        };
+    }
 })();
 """
 
@@ -570,20 +621,68 @@ private const val MODULE_FINDER_JS = """
 
         window._vrca_dispatcher = true;
 
+        window.VRCA_resolveAsset = function(url) {
+            if (!url) return Promise.resolve(null);
+            var cached = window._vrca_asset_cache[url];
+            if (cached) return Promise.resolve(cached);
+            var token = window._vrca_token;
+            if (!token) return Promise.resolve(null);
+            return fetch('/api/v9/applications/438274841678872576/external-assets', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': token },
+                body: JSON.stringify({ urls: [url] })
+            }).then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (Array.isArray(data) && data[0] && data[0].external_asset_path) {
+                    window._vrca_asset_cache[url] = data[0].external_asset_path;
+                    return data[0].external_asset_path;
+                }
+                return null;
+            }).catch(function() { return null; });
+        };
+
+        window._vrca_sendPresence = function() {
+            var gw = window._vrca_gatewayWs;
+            if (!gw || gw.readyState !== 1) return;
+            var activity = window._vrca_activity;
+            if (!activity) return;
+            var origSend = window._vrca_origSend;
+            if (!origSend) return;
+            origSend.call(gw, JSON.stringify({
+                op: 3,
+                d: {
+                    since: 0,
+                    activities: [activity],
+                    status: window._vrca_user_status || 'online',
+                    afk: false
+                }
+            }));
+        };
+
         window.VRCA_setActivity = function(jsonStr) {
             try {
                 var gw = window._vrca_gatewayWs;
                 if (!gw || gw.readyState !== 1) return 'no_gateway';
                 var activity = JSON.parse(jsonStr);
-                gw.send(JSON.stringify({
-                    op: 3,
-                    d: {
-                        since: 0,
-                        activities: [activity],
-                        status: 'online',
-                        afk: false
+                var imageUrl = activity.assets && activity.assets.large_image;
+                if (imageUrl && imageUrl.indexOf('http') === 0) {
+                    var cached = window._vrca_asset_cache[imageUrl];
+                    if (cached) {
+                        activity.assets.large_image = cached;
+                        window._vrca_activity = activity;
+                        window._vrca_sendPresence();
+                        return 'ok';
                     }
-                }));
+                    VRCA_resolveAsset(imageUrl).then(function(resolved) {
+                        if (resolved) activity.assets.large_image = resolved;
+                        else delete activity.assets.large_image;
+                        window._vrca_activity = activity;
+                        window._vrca_sendPresence();
+                    });
+                    return 'resolving';
+                }
+                window._vrca_activity = activity;
+                window._vrca_sendPresence();
                 return 'ok';
             } catch(e) {
                 return 'err:' + e.message;
@@ -592,14 +691,17 @@ private const val MODULE_FINDER_JS = """
 
         window.VRCA_clearActivity = function() {
             try {
+                window._vrca_activity = null;
                 var gw = window._vrca_gatewayWs;
                 if (!gw || gw.readyState !== 1) return 'no_gateway';
-                gw.send(JSON.stringify({
+                var origSend = window._vrca_origSend;
+                if (!origSend) return 'no_send';
+                origSend.call(gw, JSON.stringify({
                     op: 3,
                     d: {
                         since: 0,
                         activities: [],
-                        status: 'online',
+                        status: window._vrca_user_status || 'online',
                         afk: false
                     }
                 }));
