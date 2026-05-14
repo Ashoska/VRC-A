@@ -534,24 +534,73 @@ private const val MODULE_FINDER_JS = """
             wpChunks.pop();
         } catch(e) {}
 
-        var moduleCache = null;
-        if (realRequire && realRequire.c) {
-            moduleCache = realRequire.c;
-        } else if (realRequire && realRequire.m) {
-            moduleCache = {};
-            var modKeys = Object.keys(realRequire.m);
-            for (var mi = 0; mi < modKeys.length; mi++) {
-                try {
-                    var mod = realRequire(modKeys[mi]);
-                    if (mod) moduleCache[modKeys[mi]] = { exports: mod };
-                } catch(e) {}
+        function searchForDispatcher(cache) {
+            var keys = Object.keys(cache);
+            for (var k = 0; k < keys.length; k++) {
+                var entry = cache[keys[k]];
+                var exp = entry && (entry.exports || entry);
+                if (!exp) continue;
+
+                var targets = [exp, exp.default, exp.Z, exp.ZP];
+                for (var t = 0; t < targets.length; t++) {
+                    var target = targets[t];
+                    if (!target || typeof target !== 'object') continue;
+                    if (typeof target.dispatch !== 'function') continue;
+
+                    if (typeof target.subscribe === 'function' && typeof target._actionHandlers !== 'undefined') {
+                        return target;
+                    }
+                    if (typeof target.subscribe === 'function' && typeof target._dependencyGraph !== 'undefined') {
+                        return target;
+                    }
+                    if (typeof target.subscribe === 'function' && typeof target.wait === 'function') {
+                        return target;
+                    }
+                    if (typeof target.subscribe === 'function' && typeof target._interceptors !== 'undefined') {
+                        return target;
+                    }
+                    if (typeof target.subscribe === 'function' && typeof target.isDispatching === 'function') {
+                        return target;
+                    }
+                    if (typeof target.subscribe === 'function') {
+                        var pks = Object.keys(target);
+                        for (var pi = 0; pi < pks.length; pi++) {
+                            if (pks[pi].charAt(0) === '_') return target;
+                        }
+                    }
+                }
             }
+            return null;
         }
 
-        if (!moduleCache || Object.keys(moduleCache).length === 0) {
-            moduleCache = {};
-            var fakeReq = function(id) { return moduleCache[id] ? moduleCache[id].exports : {}; };
-            fakeReq.c = moduleCache;
+        var dispatcher = null;
+        var cachedCount = 0;
+        var forceCount = 0;
+
+        if (realRequire && realRequire.c) {
+            cachedCount = Object.keys(realRequire.c).length;
+            dispatcher = searchForDispatcher(realRequire.c);
+        }
+
+        if (!dispatcher && realRequire && realRequire.m) {
+            var allModKeys = Object.keys(realRequire.m);
+            var forceLoaded = {};
+            for (var mi = 0; mi < allModKeys.length; mi++) {
+                var mid = allModKeys[mi];
+                if (realRequire.c && realRequire.c[mid]) continue;
+                try {
+                    var mod = realRequire(mid);
+                    if (mod) forceLoaded[mid] = { exports: mod };
+                } catch(e) {}
+            }
+            forceCount = Object.keys(forceLoaded).length;
+            dispatcher = searchForDispatcher(forceLoaded);
+        }
+
+        if (!dispatcher) {
+            var fakeCache = {};
+            var fakeReq = function(id) { return fakeCache[id] ? fakeCache[id].exports : {}; };
+            fakeReq.c = fakeCache;
             fakeReq.m = {};
             fakeReq.d = function(t, k, g) {
                 if (!t.hasOwnProperty(k)) Object.defineProperty(t, k, { enumerable: true, get: g });
@@ -577,57 +626,17 @@ private const val MODULE_FINDER_JS = """
                 var keys = Object.keys(mods);
                 for (var j = 0; j < keys.length; j++) {
                     var key = keys[j];
-                    if (moduleCache[key]) continue;
+                    if (fakeCache[key]) continue;
                     var m = { id: key, loaded: false, exports: {} };
                     try { mods[key].call(m.exports, m, m.exports, fakeReq); m.loaded = true; } catch(e) {}
-                    moduleCache[key] = m;
+                    fakeCache[key] = m;
                 }
             }
+            var fakeCount = Object.keys(fakeCache).length;
+            dispatcher = searchForDispatcher(fakeCache);
+            if (!dispatcher) return 'no_dispatcher(cached=' + cachedCount + ',forced=' + forceCount + ',fake=' + fakeCount + ',wp=' + wpName + ')';
         }
 
-        var dispatcher = null;
-        var cacheKeys = Object.keys(moduleCache);
-        var total = cacheKeys.length;
-        if (total === 0) return 'no_modules(wp=' + wpName + ',strategy=' + (realRequire ? 'real' : 'fake') + ')';
-
-        for (var k = 0; k < cacheKeys.length; k++) {
-            var entry = moduleCache[cacheKeys[k]];
-            var exp = entry && (entry.exports || entry);
-            if (!exp) continue;
-
-            var targets = [exp, exp.default, exp.Z, exp.ZP];
-            for (var t = 0; t < targets.length; t++) {
-                var target = targets[t];
-                if (!target || typeof target !== 'object') continue;
-                if (typeof target.dispatch !== 'function') continue;
-
-                if (typeof target.subscribe === 'function' && typeof target._actionHandlers !== 'undefined') {
-                    dispatcher = target; break;
-                }
-                if (!dispatcher && typeof target.subscribe === 'function' && typeof target._dependencyGraph !== 'undefined') {
-                    dispatcher = target;
-                }
-                if (!dispatcher && typeof target.subscribe === 'function' && typeof target.wait === 'function') {
-                    dispatcher = target;
-                }
-                if (!dispatcher && typeof target.subscribe === 'function' && typeof target._interceptors !== 'undefined') {
-                    dispatcher = target;
-                }
-                if (!dispatcher && typeof target.subscribe === 'function' &&
-                    typeof target.isDispatching === 'function') {
-                    dispatcher = target;
-                }
-                if (!dispatcher && typeof target.subscribe === 'function') {
-                    var pks = Object.keys(target);
-                    for (var pi = 0; pi < pks.length; pi++) {
-                        if (pks[pi].charAt(0) === '_') { dispatcher = target; break; }
-                    }
-                }
-            }
-            if (dispatcher) break;
-        }
-
-        if (!dispatcher) return 'no_dispatcher(modules=' + total + ',wp=' + wpName + ')';
         window._vrca_dispatcher = dispatcher;
 
         window.VRCA_setActivity = function(jsonStr) {
