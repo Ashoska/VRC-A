@@ -1210,7 +1210,7 @@ private fun HomePage(
                             // Component toggle or time row
                             Box(Modifier.weight(1f)) {
                                 when {
-                                    component == "Pinned" || component == "AFK" -> ToggleRow("Pinned", vm.afkEnabled, enabled = !isBanned) { vm.setAfkEnabledFlag(it) }
+                                    component == "Pinned" -> ToggleRow("Pinned", vm.afkEnabled, enabled = !isBanned) { vm.setAfkEnabledFlag(it) }
                                     component == "Cycle" -> ToggleRow("Cycle", vm.cycleEnabled, enabled = !isBanned) { vm.setCycleEnabledFlag(it) }
                                     component == "NowPlaying" -> ToggleRow("Now Playing", vm.spotifyEnabled, enabled = !isBanned) { vm.setSpotifyEnabledFlag(it) }
                                     component == "Time" -> Row(
@@ -1371,7 +1371,7 @@ private fun HomePage(
 
         SectionCard(
             title = "Manual Send",
-            subtitle = "One-off message (doesn't affect AFK/Cycle/Now Playing)."
+            subtitle = "One-off message (doesn't affect Pinned/Cycle/Now Playing)."
         ) {
             Column(Modifier.bringIntoViewRequester(manualSendBring)) {
                 OutlinedTextField(
@@ -1813,7 +1813,7 @@ private fun NowPlayingPage(
             ) { Text("Open Notification Access settings") }
 
             Text(
-                text = "Music refresh: 2 seconds (fixed)",
+                text = "Music refresh: 0.5 seconds (fixed)",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -1914,7 +1914,7 @@ private fun SettingsPage(
             Text(
                 "VRC-A (made by Ashoska Mitsu Sisko)\n\n" +
                 "- Sends OSC chatbox text to your Quest/PC target\n" +
-                "- Includes: AFK, Cycle, Now Playing, Manual Send\n" +
+                "- Includes: Pinned, Cycle, Now Playing, Manual Send\n" +
                 "- Use KILL to stop all senders and clear the VRChat chatbox",
                 style = MaterialTheme.typography.bodyMedium
             )
@@ -1980,7 +1980,7 @@ private fun SettingsPage(
                         Text("OSC Output Preview", style = MaterialTheme.typography.labelMedium)
                         SelectionContainer {
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text("AFK: ${vm.debugLastAfkOsc}", fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                                Text("Pinned: ${vm.debugLastAfkOsc}", fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
                                 Text("Cycle: ${vm.debugLastCycleOsc}", fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
                                 Text("Music: ${vm.debugLastMusicOsc}", fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
                                 Text("Combined: ${vm.debugLastCombinedOsc}", fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)

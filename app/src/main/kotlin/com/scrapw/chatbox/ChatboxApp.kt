@@ -247,6 +247,10 @@ fun ChatboxApp() {
     var banPhase2Reason by remember { mutableStateOf("") }
     var phase2Checking  by remember { mutableStateOf(false) }
 
+    LaunchedEffect(Unit) {
+        VrchatAuthManager.loggedOutSignal.collect { vrcLoginDone = false }
+    }
+
     if (!vrcLoginDone) {
         VrchatLoginScreen(pendingBanId = phase1BanId) { _, _ ->
             // Login succeeded - mark done, LaunchedEffect below will run Phase 2

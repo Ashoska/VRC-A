@@ -510,7 +510,7 @@ class DiscordRpcService : Service() {
         } else ""
         val combined = if (pipelineStatus.isNotEmpty()) "$pipelineStatus | $text" else text
         return Notification.Builder(this, NOTIF_CHANNEL)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("VRC-A")
             .setContentText(combined)
             .setOngoing(true)

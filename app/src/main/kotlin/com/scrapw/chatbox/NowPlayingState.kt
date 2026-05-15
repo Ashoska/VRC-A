@@ -33,12 +33,12 @@ object NowPlayingState {
     private val _state = MutableStateFlow(NowPlayingSnapshot())
     val state: StateFlow<NowPlayingSnapshot> = _state.asStateFlow()
 
-    // Heuristic knobs (tuned for your 2s refresh + common media-session jitter)
+    // Heuristic knobs (tuned for 0.5s refresh + common media-session jitter)
     private const val MOVING_POS_DELTA_MS = 250L     // position must advance by at least this to be "moving"
     private const val STALLED_POS_DELTA_MS = 60L     // treat <= this as "not moving"
     private const val STALLED_TIME_MS = 1400L        // if not moving for >= this, call it paused
 
-    // YouTube-specific stall detection: 2 consecutive 2s cycles with no position movement
+    // YouTube-specific stall detection: 2 consecutive cycles with no position movement
     private val YOUTUBE_PACKAGES = setOf(
         "com.google.android.youtube",
         "com.google.android.apps.youtube.music"

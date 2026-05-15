@@ -155,7 +155,7 @@ class OverlayService : Service() {
             else Notification.Builder(this)
 
         val notif = builder
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("Chatbox running")
             .setContentText("Keeping OSC updates alive while screen is off")
             .setOngoing(true)

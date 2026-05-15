@@ -36,9 +36,9 @@ object VrcaPresetStore {
     fun flow(ctx: Context): Flow<VrcaPresets> {
         return ctx.vrcaPresetDataStore.data.map { p ->
             VrcaPresets(
-                afk1 = p[AFK_1] ?: "AFK",
-                afk2 = p[AFK_2] ?: "AFK - grabbing water",
-                afk3 = p[AFK_3] ?: "AFK - brb",
+                afk1 = p[AFK_1] ?: "Away",
+                afk2 = p[AFK_2] ?: "Away - grabbing water",
+                afk3 = p[AFK_3] ?: "Away - brb",
                 cycle1 = p[CYCLE_1] ?: "",
                 cycle2 = p[CYCLE_2] ?: "",
                 cycle3 = p[CYCLE_3] ?: "",

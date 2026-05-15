@@ -148,8 +148,32 @@ class VrchatPipelineService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        loadSeenNotifIds()
         createNotificationChannels()
         attachAdminPresenceListener()
+
+        // Re-post the persistent foreground notification if it gets swiped.
+        serviceScope.launch {
+            while (true) {
+                delay(10_000)
+                val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                val active = nm.activeNotifications.any { it.id == NOTIF_ID_PERSISTENT }
+                if (!active) {
+                    startForeground(NOTIF_ID_PERSISTENT, buildPersistentNotification(
+                        if (VrchatPipelineState.isConnected) "Connected" else "Running"
+                    ))
+                }
+            }
+        }
+
+        // Refresh persistent notification when Discord RPC status changes.
+        serviceScope.launch {
+            DiscordRpcState.statusFlow.collect {
+                updatePersistentNotif(
+                    if (VrchatPipelineState.isConnected) "Connected" else "Running"
+                )
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -210,15 +234,23 @@ class VrchatPipelineService : Service() {
         }
         if (deviceHash.isNotBlank()) {
             try {
+                val presence = VrchatPipelineState.presence
+                val data = mutableMapOf<String, Any>(
+                    "isOnlineInApp" to false,
+                    "lastSeenAt" to FieldValue.serverTimestamp(),
+                    // Drop any legacy friends data still lingering on the doc.
+                    "savedFriendIds" to FieldValue.delete(),
+                    "savedFriendNames" to FieldValue.delete()
+                )
+                if (presence != null) {
+                    data["vrchatState"] = presence.status
+                    data["vrchatLocation"] = presence.location
+                    data["vrchatWorldName"] = presence.worldName
+                    data["vrchatDisplayName"] = presence.displayName
+                }
                 FirebaseFirestore.getInstance()
                     .collection("users").document(deviceHash)
-                    .set(mapOf(
-                        "isOnlineInApp" to false,
-                        "lastSeenAt" to FieldValue.serverTimestamp(),
-                        // Drop any legacy friends data still lingering on the doc.
-                        "savedFriendIds" to FieldValue.delete(),
-                        "savedFriendNames" to FieldValue.delete()
-                    ), SetOptions.merge())
+                    .set(data, SetOptions.merge())
             } catch (_: Throwable) {}
         }
     }
@@ -597,7 +629,7 @@ class VrchatPipelineService : Service() {
                                 id = "offline_$userId".hashCode(),
                                 title = "Friend offline",
                                 text = "$displayName went offline",
-                                profileUrl = null,
+                                profileUrl = "https://vrchat.com/home/user/$userId",
                                 prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_OFFLINE,
                                 channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
                                 groupKey = GROUP_KEY_FRIENDS
@@ -630,7 +662,7 @@ class VrchatPipelineService : Service() {
 
                     // Fire location notification if world actually changed and is non-private.
                     if (worldName.isNotBlank() && worldName != previousWorld &&
-                        location != "private" && location != "traveling") {
+                        location.isNotBlank() && location != "private" && location != "traveling" && location != "offline") {
                         val now = System.currentTimeMillis()
                         val lastNotif = lastFriendLocationNotifMs[userId] ?: 0L
                         if (now - lastNotif >= LOCATION_NOTIF_COOLDOWN_MS) {
@@ -705,7 +737,7 @@ class VrchatPipelineService : Service() {
                     id = "inv_$senderUserId".hashCode(),
                     title = "World invite",
                     text = "$senderName invited you to $worldName",
-                    profileUrl = null,
+                    profileUrl = "https://vrchat.com/home/notifications",
                     prefKey = VrchatNotificationPrefs.KEY_NOTIF_INVITE,
                     channelId = NOTIF_CHANNEL_INVITES,
                     groupKey = GROUP_KEY_INVITES
@@ -716,7 +748,7 @@ class VrchatPipelineService : Service() {
                     id = "invreq_$senderUserId".hashCode(),
                     title = "Invite request",
                     text = "$senderName is asking for an invite to your instance",
-                    profileUrl = null,
+                    profileUrl = "https://vrchat.com/home/notifications",
                     prefKey = VrchatNotificationPrefs.KEY_NOTIF_INVITE_REQUEST,
                     channelId = NOTIF_CHANNEL_INVITES,
                     groupKey = GROUP_KEY_INVITES
@@ -751,13 +783,17 @@ class VrchatPipelineService : Service() {
                 val v2Type = content.optString("type", "")
                 val v2Title = content.optString("title", "")
                 val baseId = if (notifId.isNotBlank()) notifId else "$v2Type-${message.hashCode()}"
+                val groupId = content.optString("relatedGroupId", "").ifBlank {
+                    content.optString("groupId", "")
+                }
+                val groupUrl = if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId" else null
                 when {
                     v2Type.contains("announcement", true) -> {
                         fireEventNotification(
                             id = baseId.hashCode(),
                             title = v2Title.ifBlank { "Group announcement" },
                             text = message.take(140).ifBlank { "New announcement in one of your groups" },
-                            profileUrl = null,
+                            profileUrl = groupUrl,
                             prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
                             channelId = NOTIF_CHANNEL_GROUPS,
                             groupKey = GROUP_KEY_GROUPS
@@ -768,7 +804,7 @@ class VrchatPipelineService : Service() {
                             id = baseId.hashCode(),
                             title = v2Title.ifBlank { "Group invite" },
                             text = message.take(140).ifBlank { "You've been invited to join a group" },
-                            profileUrl = null,
+                            profileUrl = "https://vrchat.com/home/notifications",
                             prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_INVITE,
                             channelId = NOTIF_CHANNEL_INVITES,
                             groupKey = GROUP_KEY_INVITES
@@ -779,7 +815,7 @@ class VrchatPipelineService : Service() {
                             id = baseId.hashCode(),
                             title = v2Title.ifBlank { "Queue ready" },
                             text = message.take(140).ifBlank { "Your spot in a group instance queue is ready" },
-                            profileUrl = null,
+                            profileUrl = groupUrl,
                             prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_QUEUE,
                             channelId = NOTIF_CHANNEL_GROUPS,
                             groupKey = GROUP_KEY_GROUPS
@@ -790,7 +826,7 @@ class VrchatPipelineService : Service() {
                             id = baseId.hashCode(),
                             title = v2Title.ifBlank { "Group join request" },
                             text = message.take(140).ifBlank { "Someone wants to join one of your groups" },
-                            profileUrl = null,
+                            profileUrl = groupUrl,
                             prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_JOIN_REQUEST,
                             channelId = NOTIF_CHANNEL_GROUPS,
                             groupKey = GROUP_KEY_GROUPS
@@ -801,7 +837,7 @@ class VrchatPipelineService : Service() {
                             id = baseId.hashCode(),
                             title = v2Title.ifBlank { "Group role updated" },
                             text = message.take(140).ifBlank { "Your role in a group changed" },
-                            profileUrl = null,
+                            profileUrl = groupUrl,
                             prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ROLE,
                             channelId = NOTIF_CHANNEL_GROUPS,
                             groupKey = GROUP_KEY_GROUPS
@@ -812,7 +848,7 @@ class VrchatPipelineService : Service() {
                             id = baseId.hashCode(),
                             title = v2Title.ifBlank { "Group instance opened" },
                             text = message.take(140).ifBlank { "A new group instance is now joinable" },
-                            profileUrl = null,
+                            profileUrl = groupUrl,
                             prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_INSTANCE,
                             channelId = NOTIF_CHANNEL_GROUPS,
                             groupKey = GROUP_KEY_GROUPS
@@ -823,7 +859,7 @@ class VrchatPipelineService : Service() {
                             id = baseId.hashCode(),
                             title = v2Title.ifBlank { "Group activity" },
                             text = message.take(140).ifBlank { "New activity in one of your groups" },
-                            profileUrl = null,
+                            profileUrl = groupUrl,
                             prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT,
                             channelId = NOTIF_CHANNEL_GROUPS,
                             groupKey = GROUP_KEY_GROUPS
@@ -890,12 +926,13 @@ class VrchatPipelineService : Service() {
         lastFriendStatusNotifMs[userId] = now
         fireEventNotification(
             id = "status_$userId".hashCode(),
-            title = "Friend status changed",
+            title = "Friend changed presence (expand)",
             text = "$displayName is now ${prettyStatus(newStatus)}",
             profileUrl = "https://vrchat.com/home/user/$userId",
             prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_STATUS,
             channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
-            groupKey = GROUP_KEY_FRIENDS
+            groupKey = GROUP_KEY_FRIENDS,
+            bigText = "$displayName\n\nWas: ${prettyStatus(prevStatus)}\nNow: ${prettyStatus(newStatus)}"
         )
     }
 
@@ -924,6 +961,7 @@ class VrchatPipelineService : Service() {
         val newAvatar = user.optString("currentAvatarThumbnailImageUrl", previous.avatarThumb)
         val newBio = user.optString("bio", previous.bio)
         val newRank = extractTrustRank(user).ifBlank { previous.trustRank }
+        val newLocation = user.optString("location", previous.location)
 
         // Update cache regardless of whether we notify.
         friendsCache[userId] = previous.copy(
@@ -931,7 +969,8 @@ class VrchatPipelineService : Service() {
             status = newStatus,
             avatarThumb = newAvatar,
             bio = newBio,
-            trustRank = newRank
+            trustRank = newRank,
+            location = newLocation
         )
         persistFriendsCache()
 
@@ -939,12 +978,13 @@ class VrchatPipelineService : Service() {
         if (newDisplayName != previous.displayName && previous.displayName.isNotBlank()) {
             fireEventNotification(
                 id = "name_$userId".hashCode(),
-                title = "Friend renamed",
+                title = "Friend renamed (expand)",
                 text = "${previous.displayName} is now known as $newDisplayName",
                 profileUrl = "https://vrchat.com/home/user/$userId",
                 prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_DISPLAY_NAME,
                 channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
-                groupKey = GROUP_KEY_FRIENDS
+                groupKey = GROUP_KEY_FRIENDS,
+                bigText = "Was: ${previous.displayName}\nNow: $newDisplayName"
             )
         }
 
@@ -952,7 +992,7 @@ class VrchatPipelineService : Service() {
         maybeFireStatusChange(userId, newDisplayName, previous.status, newStatus)
 
         // Avatar change (throttled per friend).
-        if (newAvatar.isNotBlank() && newAvatar != previous.avatarThumb && previous.avatarThumb.isNotBlank()) {
+        if (newAvatar.isNotBlank() && newAvatar != previous.avatarThumb && previous.avatarThumb.isNotBlank() && newLocation == previous.location) {
             val now = System.currentTimeMillis()
             val last = lastFriendAvatarNotifMs[userId] ?: 0L
             if (now - last >= LOCATION_NOTIF_COOLDOWN_MS) {
@@ -973,12 +1013,13 @@ class VrchatPipelineService : Service() {
         if (newBio.isNotBlank() && newBio != previous.bio && previous.bio.isNotBlank()) {
             fireEventNotification(
                 id = "bio_$userId".hashCode(),
-                title = "Friend updated profile",
+                title = "Friend updated bio (expand)",
                 text = "$newDisplayName updated their bio",
                 profileUrl = "https://vrchat.com/home/user/$userId",
                 prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_BIO,
                 channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
-                groupKey = GROUP_KEY_FRIENDS
+                groupKey = GROUP_KEY_FRIENDS,
+                bigText = "$newDisplayName\n\nBefore: ${previous.bio}\n\nAfter: $newBio"
             )
         }
 
@@ -1024,6 +1065,21 @@ class VrchatPipelineService : Service() {
             FriendsCacheStore.save(this, friendsCache.toMap())
         } catch (e: Exception) {
             Log.w(TAG, "persistFriendsCache error", e)
+        }
+    }
+
+    private fun loadSeenNotifIds() {
+        val prefs = getSharedPreferences("vrca_seen_notifs", Context.MODE_PRIVATE)
+        val raw = prefs.getStringSet("ids", null) ?: return
+        synchronized(seenNotifIds) {
+            seenNotifIds.addAll(raw)
+        }
+    }
+
+    private fun persistSeenNotifIds() {
+        val prefs = getSharedPreferences("vrca_seen_notifs", Context.MODE_PRIVATE)
+        synchronized(seenNotifIds) {
+            prefs.edit().putStringSet("ids", seenNotifIds.toSet()).apply()
         }
     }
 
@@ -1120,6 +1176,27 @@ class VrchatPipelineService : Service() {
                 seedBackfillBaseline()
                 val repo = com.scrapw.chatbox.data.UserPreferencesRepository(this@VrchatPipelineService)
                 repo.saveNotifBackfillInitialized(true)
+                // Pre-seed V1/V2 notification IDs so they don't fire on first backfill
+                try {
+                    val v1 = VrchatAuthManager.fetchPendingNotifications(this@VrchatPipelineService)
+                    if (v1 != null) {
+                        for (i in 0 until v1.length()) {
+                            val id = v1.optJSONObject(i)?.optString("id", "") ?: ""
+                            if (id.isNotBlank()) synchronized(seenNotifIds) { seenNotifIds.add(id) }
+                        }
+                    }
+                    delay(300)
+                    val v2 = VrchatAuthManager.fetchPendingNotificationsV2(this@VrchatPipelineService)
+                    if (v2 != null) {
+                        for (i in 0 until v2.length()) {
+                            val id = v2.optJSONObject(i)?.optString("id", "") ?: ""
+                            if (id.isNotBlank()) synchronized(seenNotifIds) { seenNotifIds.add(id) }
+                        }
+                    }
+                    persistSeenNotifIds()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to seed V1/V2 notification IDs", e)
+                }
                 return
             }
 
@@ -1152,7 +1229,7 @@ class VrchatPipelineService : Service() {
                                 id = "inv_$senderUserId".hashCode(),
                                 title = "World invite",
                                 text = "$senderName invited you to $worldName",
-                                profileUrl = null,
+                                profileUrl = "https://vrchat.com/home/notifications",
                                 prefKey = VrchatNotificationPrefs.KEY_NOTIF_INVITE,
                                 channelId = NOTIF_CHANNEL_INVITES,
                                 groupKey = GROUP_KEY_INVITES,
@@ -1163,7 +1240,7 @@ class VrchatPipelineService : Service() {
                             id = "invreq_$senderUserId".hashCode(),
                             title = "Invite request",
                             text = "$senderName is asking for an invite to your instance",
-                            profileUrl = null,
+                            profileUrl = "https://vrchat.com/home/notifications",
                             prefKey = VrchatNotificationPrefs.KEY_NOTIF_INVITE_REQUEST,
                             channelId = NOTIF_CHANNEL_INVITES,
                             groupKey = GROUP_KEY_INVITES,
@@ -1204,53 +1281,57 @@ class VrchatPipelineService : Service() {
                     val v2Title = obj.optString("title", "")
                     val message = obj.optString("message", "")
                     val baseId = notifId.ifBlank { "$v2Type-${message.hashCode()}" }
+                    val groupId = obj.optString("relatedGroupId", "").ifBlank {
+                        obj.optString("groupId", "")
+                    }
+                    val groupUrl = if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId" else null
                     when {
                         v2Type.contains("announcement", true) -> fireEventNotification(
                             id = baseId.hashCode(), title = v2Title.ifBlank { "Group announcement" },
                             text = message.take(140).ifBlank { "New announcement in one of your groups" },
-                            profileUrl = null, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
+                            profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
                             channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
                             dedupId = notifId.ifBlank { null }
                         )
                         v2Type.contains("invite", true) -> fireEventNotification(
                             id = baseId.hashCode(), title = v2Title.ifBlank { "Group invite" },
                             text = message.take(140).ifBlank { "You've been invited to join a group" },
-                            profileUrl = null, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_INVITE,
+                            profileUrl = "https://vrchat.com/home/notifications", prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_INVITE,
                             channelId = NOTIF_CHANNEL_INVITES, groupKey = GROUP_KEY_INVITES,
                             dedupId = notifId.ifBlank { null }
                         )
                         v2Type.contains("queue", true) -> fireEventNotification(
                             id = baseId.hashCode(), title = v2Title.ifBlank { "Queue ready" },
                             text = message.take(140).ifBlank { "Your spot in a group instance queue is ready" },
-                            profileUrl = null, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_QUEUE,
+                            profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_QUEUE,
                             channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
                             dedupId = notifId.ifBlank { null }
                         )
                         v2Type.contains("join", true) && v2Type.contains("request", true) -> fireEventNotification(
                             id = baseId.hashCode(), title = v2Title.ifBlank { "Group join request" },
                             text = message.take(140).ifBlank { "Someone wants to join one of your groups" },
-                            profileUrl = null, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_JOIN_REQUEST,
+                            profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_JOIN_REQUEST,
                             channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
                             dedupId = notifId.ifBlank { null }
                         )
                         v2Type.contains("role", true) || v2Type.contains("transfer", true) -> fireEventNotification(
                             id = baseId.hashCode(), title = v2Title.ifBlank { "Group role updated" },
                             text = message.take(140).ifBlank { "Your role in a group changed" },
-                            profileUrl = null, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ROLE,
+                            profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ROLE,
                             channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
                             dedupId = notifId.ifBlank { null }
                         )
                         v2Type.contains("instance", true) -> fireEventNotification(
                             id = baseId.hashCode(), title = v2Title.ifBlank { "Group instance opened" },
                             text = message.take(140).ifBlank { "A new group instance is now joinable" },
-                            profileUrl = null, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_INSTANCE,
+                            profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_INSTANCE,
                             channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
                             dedupId = notifId.ifBlank { null }
                         )
                         v2Type.startsWith("group.") -> fireEventNotification(
                             id = baseId.hashCode(), title = v2Title.ifBlank { "Group activity" },
                             text = message.take(140).ifBlank { "New activity in one of your groups" },
-                            profileUrl = null, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT,
+                            profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT,
                             channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
                             dedupId = notifId.ifBlank { null }
                         )
@@ -1285,7 +1366,7 @@ class VrchatPipelineService : Service() {
                                     id = "ga_${groupId}_${createdAt.hashCode()}".hashCode(),
                                     title = "Announcement: $announcementTitle",
                                     text = announcementText.take(140),
-                                    profileUrl = null,
+                                    profileUrl = "https://vrchat.com/home/group/$groupId",
                                     prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
                                     channelId = NOTIF_CHANNEL_GROUPS,
                                     groupKey = GROUP_KEY_GROUPS,
@@ -1407,7 +1488,8 @@ class VrchatPipelineService : Service() {
         prefKey: String,
         channelId: String,
         groupKey: String? = null,
-        dedupId: String? = null
+        dedupId: String? = null,
+        bigText: String? = null
     ) {
         if (dedupId != null) {
             synchronized(seenNotifIds) {
@@ -1416,6 +1498,7 @@ class VrchatPipelineService : Service() {
                     seenNotifIds.iterator().let { it.next(); it.remove() }
                 }
             }
+            persistSeenNotifIds()
         }
         val prefs = dataStore.data.first()
         val enabled = prefs[booleanPreferencesKey(prefKey)] ?: false
@@ -1438,12 +1521,16 @@ class VrchatPipelineService : Service() {
         }
 
         val builder = NotificationCompat.Builder(this, channelId)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title)
             .setContentText(text)
             .setContentIntent(tapIntent)
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+
+        if (bigText != null) {
+            builder.setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
+        }
 
         if (groupKey != null) {
             builder.setGroup(groupKey)
@@ -1463,7 +1550,7 @@ class VrchatPipelineService : Service() {
             else -> return
         }
         val summary = NotificationCompat.Builder(this, channelId)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(summaryText)
             .setContentText("Multiple updates")
             .setStyle(NotificationCompat.InboxStyle().setSummaryText(summaryText))
@@ -1482,7 +1569,7 @@ class VrchatPipelineService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val notif = NotificationCompat.Builder(this, NOTIF_CHANNEL_CONNECTION)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("VRC-A: Sign in required")
             .setContentText("Tap to re-sign in to your VRChat account")
             .setContentIntent(tapIntent)
@@ -1517,7 +1604,7 @@ class VrchatPipelineService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val notif = NotificationCompat.Builder(this, NOTIF_CHANNEL_CONNECTION)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("VRChat disconnected")
             .setContentText("Lost connection — attempting to reconnect")
             .setContentIntent(tapIntent)
@@ -1549,12 +1636,14 @@ class VrchatPipelineService : Service() {
             }
         } else ""
         return NotificationCompat.Builder(this, NOTIF_CHANNEL_PERSISTENT)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("VRC-A")
             .setContentText(status + rpcSuffix)
             .setContentIntent(tapIntent)
             .setOngoing(true)
             .setSilent(true)
+            .setSound(null)
+            .setVibrate(null)
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .setGroup("vrca_service")
             .build()
@@ -1572,6 +1661,7 @@ class VrchatPipelineService : Service() {
             NotificationManager.IMPORTANCE_MIN).apply {
             description = "Shows when VRC-A is monitoring VRChat events in the background"
             setShowBadge(false)
+            setSound(null, null)
             nm.createNotificationChannel(this)
         }
 

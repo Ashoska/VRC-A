@@ -73,7 +73,7 @@ class MainActivity : ComponentActivity() {
         }
 
         setContent {
-            ChatboxTheme {
+            ChatboxTheme(themeMode = com.scrapw.chatbox.ui.theme.ThemeMode.Dark) {
                 // App routing (ToS gate + Admin-only UI) lives in ChatboxApp.kt
                 ChatboxApp()
 

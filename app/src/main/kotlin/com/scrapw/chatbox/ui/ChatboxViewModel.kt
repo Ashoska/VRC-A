@@ -16,9 +16,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
+import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
@@ -73,19 +75,20 @@ import kotlin.math.min
  */
 class ChatboxViewModel(
     private val app: ChatboxApplication,
-    val userPreferencesRepository: UserPreferencesRepository
+    val userPreferencesRepository: UserPreferencesRepository,
+    private val savedState: SavedStateHandle = SavedStateHandle()
 ) : ViewModel() {
 
     companion object {
         private lateinit var instance: ChatboxViewModel
 
         private const val CYCLE_INTERVAL_SECONDS_LOCKED = 10
-        private const val MUSIC_REFRESH_SECONDS_LOCKED = 2
+        private const val MUSIC_REFRESH_SECONDS_LOCKED = 1
 
         private const val VRC_MAX_CHARS = 144
         private const val VRC_MAX_LINES = 9
 
-        private const val SEND_FLOOR_MS = 2_000L
+        private const val SEND_FLOOR_MS = 500L
 
         private const val META_STABLE_MS = 1_100L
         private const val META_CONFIRM_MOVE_MS = 900L
@@ -124,7 +127,8 @@ class ChatboxViewModel(
                 val application = (this[APPLICATION_KEY] as ChatboxApplication)
                 instance = ChatboxViewModel(
                     app = application,
-                    userPreferencesRepository = application.userPreferencesRepository
+                    userPreferencesRepository = application.userPreferencesRepository,
+                    savedState = createSavedStateHandle()
                 )
                 Log.d("ChatboxViewModel", "Init")
                 instance
@@ -751,6 +755,7 @@ class ChatboxViewModel(
             snap.getBoolean("afkEnabled")?.let { remote ->
                 if (remote != lastSyncedValues["afkEnabled"]) {
                     afkEnabled = remote
+                    savedState["afkEnabled"] = remote
                     lastSyncedValues["afkEnabled"] = remote
                     rebuildCombinedPreviewOnly()
                     if (!remote) stopAfkSender(clearFromChatbox = true)
@@ -762,6 +767,7 @@ class ChatboxViewModel(
             snap.getBoolean("cycleEnabled")?.let { remote ->
                 if (remote != lastSyncedValues["cycleEnabled"]) {
                     cycleEnabled = remote
+                    savedState["cycleEnabled"] = remote
                     lastSyncedValues["cycleEnabled"] = remote
                     rebuildCombinedPreviewOnly()
                     if (!remote) stopCycle(clearFromChatbox = true)
@@ -774,6 +780,7 @@ class ChatboxViewModel(
             snap.getBoolean("spotifyEnabled")?.let { remote ->
                 if (remote != lastSyncedValues["spotifyEnabled"]) {
                     spotifyEnabled = remote
+                    savedState["spotifyEnabled"] = remote
                     lastSyncedValues["spotifyEnabled"] = remote
                     rebuildCombinedPreviewOnly()
                     if (!remote) stopNowPlayingSender(clearFromChatbox = true)
@@ -785,6 +792,7 @@ class ChatboxViewModel(
             snap.getBoolean("timeEnabled")?.let { remote ->
                 if (remote != lastSyncedValues["timeEnabled"]) {
                     timeEnabled = remote
+                    savedState["timeEnabled"] = remote
                     lastSyncedValues["timeEnabled"] = remote
                     rebuildCombinedPreviewOnly()
                     startSelfSyncLoopIfNeeded()
@@ -1020,7 +1028,7 @@ class ChatboxViewModel(
     // =========================
     // AFK
     // =========================
-    var afkEnabled by mutableStateOf(false)
+    var afkEnabled by mutableStateOf(savedState["afkEnabled"] ?: false)
         private set
 
     var afkMessage by mutableStateOf("")
@@ -1032,7 +1040,7 @@ class ChatboxViewModel(
     // =========================
     // Cycle
     // =========================
-    var cycleEnabled by mutableStateOf(false)
+    var cycleEnabled by mutableStateOf(savedState["cycleEnabled"] ?: false)
         private set
 
     var cycleIntervalSeconds by mutableStateOf(CYCLE_INTERVAL_SECONDS_LOCKED)
@@ -1046,7 +1054,7 @@ class ChatboxViewModel(
     // =========================
     // Now Playing
     // =========================
-    var spotifyEnabled by mutableStateOf(false)
+    var spotifyEnabled by mutableStateOf(savedState["spotifyEnabled"] ?: false)
         private set
     var spotifyDemoEnabled by mutableStateOf(false)
         private set
@@ -1067,7 +1075,7 @@ class ChatboxViewModel(
     // =========================
     // Time feature
     // =========================
-    var timeEnabled by mutableStateOf(false)
+    var timeEnabled by mutableStateOf(savedState["timeEnabled"] ?: false)
         private set
 
     // Stored as: "Device", "UTC", "UTC+1".."UTC+14", "UTC-1".."UTC-12"
@@ -1077,6 +1085,7 @@ class ChatboxViewModel(
     fun updateTimeEnabled(enabled: Boolean) {
         if (isBanned) return
         timeEnabled = enabled
+        savedState["timeEnabled"] = enabled
         rebuildCombinedPreviewOnly()
         startSelfSyncLoopIfNeeded()
     }
@@ -1539,6 +1548,7 @@ class ChatboxViewModel(
     fun setAfkEnabledFlag(enabled: Boolean) {
         if (isBanned) return
         afkEnabled = enabled
+        savedState["afkEnabled"] = enabled
         rebuildCombinedPreviewOnly()
         if (!enabled) stopAfkSender(clearFromChatbox = true)
         startSelfSyncLoopIfNeeded()
@@ -1547,6 +1557,7 @@ class ChatboxViewModel(
     fun setCycleEnabledFlag(enabled: Boolean) {
         if (isBanned) return
         cycleEnabled = enabled
+        savedState["cycleEnabled"] = enabled
         rebuildCombinedPreviewOnly()
         if (!enabled) stopCycle(clearFromChatbox = true)
         if (enabled) lastCyclePreviewAdvanceMs = 0L
@@ -1556,6 +1567,7 @@ class ChatboxViewModel(
     fun setSpotifyEnabledFlag(enabled: Boolean) {
         if (isBanned) return
         spotifyEnabled = enabled
+        savedState["spotifyEnabled"] = enabled
         rebuildCombinedPreviewOnly()
         if (!enabled) stopNowPlayingSender(clearFromChatbox = true)
         startSelfSyncLoopIfNeeded()
@@ -1814,7 +1826,7 @@ class ChatboxViewModel(
         nowPlayingJob?.cancel()
         nowPlayingJob = viewModelScope.launch {
             while (spotifyEnabled && !isBanned) {
-                // \u2705 ONLY CHANGE: run on a 2s cadence so OSC updates match public behavior
+                // run on a 0.5s cadence so OSC updates match VRChat's chatbox rate limit
                 rebuildAndMaybeSendCombined(forceSend = true, local = local)
                 delay(SEND_FLOOR_MS)
             }

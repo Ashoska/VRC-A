@@ -83,7 +83,7 @@ import kotlinx.coroutines.launch
 // -------------------------
 
 private enum class AutomationsTab(val title: String) {
-    AFK("AFK"),
+    AFK("Pinned"),
     Cycle("Cycle")
 }
 
@@ -257,7 +257,7 @@ private fun HomePage(vm: ChatboxViewModel) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text("Quick Toggles", style = MaterialTheme.typography.titleSmall)
 
-                    ToggleRow("AFK", vm.afkEnabled) { vm.setAfkEnabledFlag(it) }
+                    ToggleRow("Pinned", vm.afkEnabled) { vm.setAfkEnabledFlag(it) }
                     ToggleRow("Cycle", vm.cycleEnabled) { vm.setCycleEnabledFlag(it) }
                     ToggleRow("Now Playing", vm.spotifyEnabled) { vm.setSpotifyEnabledFlag(it) }
                 }
@@ -352,7 +352,7 @@ private fun HomePage(vm: ChatboxViewModel) {
 
         SectionCard(
             title = "Manual Send",
-            subtitle = "One-off message (doesn't affect AFK/Cycle/Now Playing)."
+            subtitle = "One-off message (doesn't affect Pinned/Cycle/Now Playing)."
         ) {
             OutlinedTextField(
                 value = vm.messageText.value,
@@ -447,9 +447,9 @@ private fun WizardStep(
     }
 }
 
-/* =========================
-   AUTOMATIONS (AFK + Cycle)
-   ========================= */
+/* ==============================
+   AUTOMATIONS (Pinned + Cycle)
+   ============================== */
 
 @Composable
 private fun AutomationsPage(vm: ChatboxViewModel) {
@@ -502,17 +502,17 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
         when (tab) {
             AutomationsTab.AFK -> {
                 SectionCard(
-                    title = "AFK",
-                    subtitle = "AFK always appears above Cycle + Music."
+                    title = "Pinned",
+                    subtitle = "Pinned always appears above Cycle + Music."
                 ) {
-                    ToggleRow("AFK enabled", vm.afkEnabled) { vm.setAfkEnabledFlag(it) }
+                    ToggleRow("Pinned enabled", vm.afkEnabled) { vm.setAfkEnabledFlag(it) }
 
                     OutlinedTextField(
                         value = vm.afkMessage,
                         onValueChange = { vm.updateAfkText(it) },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
-                        label = { Text("AFK text") }
+                        label = { Text("Pinned text") }
                     )
 
                     ElevatedCard {
@@ -530,7 +530,7 @@ private fun AutomationsPage(vm: ChatboxViewModel) {
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Column(Modifier.weight(1f)) {
-                                    Text("AFK Presets (3)", style = MaterialTheme.typography.titleSmall)
+                                    Text("Pinned Presets (3)", style = MaterialTheme.typography.titleSmall)
                                     if (vm.afkPresetsCollapsed) {
                                         Text(
                                             afkPresetsPreview(),
@@ -777,7 +777,7 @@ private fun NowPlayingPage(vm: ChatboxViewModel) {
             ) { Text("Open Notification Access settings") }
 
             Text(
-                text = "Music refresh speed: fixed at 2 seconds",
+                text = "Music refresh speed: fixed at 0.5 seconds",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -868,7 +868,7 @@ private fun DebugPage(vm: ChatboxViewModel) {
         ) {
             SelectionContainer {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("AFK:", style = MaterialTheme.typography.labelLarge)
+                    Text("Pinned:", style = MaterialTheme.typography.labelLarge)
                     Text(vm.debugLastAfkOsc, fontFamily = FontFamily.Monospace)
 
                     Text("Cycle:", style = MaterialTheme.typography.labelLarge)
@@ -974,7 +974,7 @@ fun SettingsPage(
                     title = "UI",
                     subtitle = "These only change how the app looks."
                 ) {
-                    ToggleRow("AFK presets collapsed", vm.afkPresetsCollapsed) { vm.updateAfkPresetsCollapsed(it) }
+                    ToggleRow("Pinned presets collapsed", vm.afkPresetsCollapsed) { vm.updateAfkPresetsCollapsed(it) }
                     ToggleRow("Cycle presets collapsed", vm.cyclePresetsCollapsed) { vm.updateCyclePresetsCollapsed(it) }
                     ToggleRow("Music demo mode", vm.spotifyDemoEnabled) { vm.setSpotifyDemoFlag(it) }
                 }
@@ -1202,7 +1202,7 @@ fun NotificationToggleSection(vm: ChatboxViewModel) {
                 }
 
                 SubSectionLabel("Profile changes")
-                ToggleRow("Friend changed status", friendStatus) {
+                ToggleRow("Friend changed presence", friendStatus) {
                     scope.launch { repo.saveNotifFriendStatus(it) }
                 }
                 ToggleRow("Friend changed avatar", friendAvatar) {

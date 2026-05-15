@@ -1,5 +1,6 @@
 package com.scrapw.chatbox.keepalive
 
+import com.scrapw.chatbox.R
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -116,7 +117,7 @@ class ChatboxKeepAliveService : Service() {
                 Notification.Builder(this, CHANNEL_ID)
                     .setContentTitle("Chatbox running")
                     .setContentText("Keeping OSC updates alive while screen is off")
-                    .setSmallIcon(android.R.drawable.stat_notify_sync)
+                    .setSmallIcon(R.drawable.ic_notification)
                     .setOngoing(true)
                     .build()
             } else {
@@ -124,7 +125,7 @@ class ChatboxKeepAliveService : Service() {
                 Notification.Builder(this)
                     .setContentTitle("Chatbox running")
                     .setContentText("Keeping OSC updates alive while screen is off")
-                    .setSmallIcon(android.R.drawable.stat_notify_sync)
+                    .setSmallIcon(R.drawable.ic_notification)
                     .setOngoing(true)
                     .build()
             }

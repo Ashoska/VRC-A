@@ -28,6 +28,9 @@ import java.util.Base64
  */
 object VrchatAuthManager {
 
+    private val _loggedOutSignal = kotlinx.coroutines.flow.MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val loggedOutSignal: kotlinx.coroutines.flow.SharedFlow<Unit> = _loggedOutSignal
+
     private const val TAG = "VrchatAuth"
     private const val BASE = "https://api.vrchat.cloud/api/1"
     private const val USER_AGENT = "VRC-A-Companion/1.0 (Android; companion app)"
@@ -130,6 +133,7 @@ object VrchatAuthManager {
 
     fun logout(context: Context) {
         getPrefs(context)?.edit()?.clear()?.apply()
+        _loggedOutSignal.tryEmit(Unit)
     }
 
     fun hasSavedCredentials(context: Context): Boolean {
