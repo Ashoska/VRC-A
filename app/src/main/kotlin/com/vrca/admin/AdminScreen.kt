@@ -358,13 +358,14 @@ fun AdminScreen() {
     }
 
     // Admin browsing heartbeat: while on Dashboard or Users tab, write
-    // config/adminPresence.browsingAt every 30s. Public user apps subscribe
-    // to that doc and run their own 30s lastSeenAt heartbeat only when this
-    // is fresh (within 75s). When admin leaves both tabs, the doc goes
-    // stale and all user apps stop heartbeating — zero idle Firestore
-    // traffic.
+    // config/adminPresence.browsingAt every 30s so user apps start their
+    // own lastSeenAt heartbeats. After a 90s grace period, sweep for users
+    // whose isOnlineInApp=true but lastSeenAt is stale — these are
+    // force-killed apps that never wrote their offline state. Force them
+    // offline so the directory stays accurate.
     LaunchedEffect(needsUsers) {
         if (!needsUsers) return@LaunchedEffect
+        val browsingStartedAt = System.currentTimeMillis()
         while (true) {
             try {
                 db.collection("config")
@@ -373,7 +374,26 @@ fun AdminScreen() {
                         mapOf("browsingAt" to FieldValue.serverTimestamp()),
                         com.google.firebase.firestore.SetOptions.merge()
                     )
-            } catch (_: Throwable) { /* best-effort */ }
+            } catch (_: Throwable) {}
+
+            val elapsed = System.currentTimeMillis() - browsingStartedAt
+            if (elapsed > 90_000L) {
+                val now = System.currentTimeMillis()
+                for (u in sharedUsers) {
+                    if (!u.isOnlineInApp) continue
+                    val seenMs = u.lastSeenAt?.toDate()?.time ?: 0L
+                    if (now - seenMs > ONLINE_STALENESS_WINDOW_MS) {
+                        try {
+                            db.collection("users").document(u.docId)
+                                .set(
+                                    mapOf("isOnlineInApp" to false),
+                                    com.google.firebase.firestore.SetOptions.merge()
+                                )
+                        } catch (_: Throwable) {}
+                    }
+                }
+            }
+
             delay(30_000L)
         }
     }

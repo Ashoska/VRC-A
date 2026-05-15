@@ -47,6 +47,7 @@ import com.vrca.discord.DiscordRpcStatus
 import com.vrca.ui.settings.NotificationToggleSection
 import com.vrca.ui.settings.ToggleRow
 import com.vrca.ui.viewmodel.VrcaViewModel
+import com.vrca.vrchat.InAppAlertState
 import com.vrca.vrchat.VrchatAuthManager
 import com.vrca.vrchat.VrchatPipelineService
 import com.vrca.vrchat.VrchatPipelineState
@@ -68,8 +69,13 @@ internal fun VrchatStatusPage(
 
     var showLogoutDialog by remember { mutableStateOf(false) }
 
+    LaunchedEffect(Unit) { InAppAlertState.load(ctx) }
+
     PageContainer {
         VrchatStatusBanner()
+
+        // In-app alerts (persistent until dismissed)
+        InAppAlertCards()
 
         // Connection status header
         ElevatedCard {
@@ -481,5 +487,55 @@ internal fun VrchatStatusPage(
                 TextButton(onClick = { showLogoutDialog = false }) { Text("Cancel") }
             }
         )
+    }
+}
+
+@Composable
+private fun InAppAlertCards() {
+    val ctx = LocalContext.current
+    val alerts by InAppAlertState.alerts.collectAsState()
+    if (alerts.isEmpty()) return
+
+    for (alert in alerts) {
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.tertiaryContainer
+            )
+        ) {
+            Column(
+                Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        alert.title,
+                        style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = { InAppAlertState.dismiss(ctx, alert.id) }) {
+                        Text("Dismiss", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+                Text(
+                    alert.body,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                )
+                if (alert.url != null) {
+                    Text(
+                        text = "Open in VRChat",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.clickable {
+                            ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(alert.url)))
+                        }
+                    )
+                }
+            }
+        }
     }
 }

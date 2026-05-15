@@ -25,7 +25,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -45,13 +44,9 @@ internal fun DashboardTab(
     onRefresh: () -> Unit,
     setError: (String?) -> Unit
 ) {
-    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) {
-        while (true) { nowMs = System.currentTimeMillis(); delay(5_000L) }
-    }
     val totalUsers  = totalUsersCount
-    val onlineCount by remember(users, nowMs) {
-        derivedStateOf { users.count { isUserOnline(it, nowMs) } }
+    val onlineCount by remember(users) {
+        derivedStateOf { users.count { it.isOnlineInApp } }
     }
     val bannedCount = bannedUsersCount
     val warnedCount = warnedUsersCount

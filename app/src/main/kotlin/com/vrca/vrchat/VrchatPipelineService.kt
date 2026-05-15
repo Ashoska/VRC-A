@@ -166,9 +166,6 @@ class VrchatPipelineService : Service() {
 
     private var deviceHash: String = ""
 
-    private var lastUnwatchedPresenceWriteMs: Long = 0L
-    private val UNWATCHED_PRESENCE_INTERVAL_MS: Long = 2 * 60 * 1000L
-
     // ------------------------------------------------------------------
     // Lifecycle
     // ------------------------------------------------------------------
@@ -177,6 +174,7 @@ class VrchatPipelineService : Service() {
         super.onCreate()
         loadSeenNotifIds()
         loadSeenAnnouncementIds()
+        InAppAlertState.load(this)
         createNotificationChannels()
         attachAdminPresenceListener()
         attachAnnouncementsListener()
@@ -889,9 +887,11 @@ class VrchatPipelineService : Service() {
                 val groupId = content.optString("relatedGroupId", "").ifBlank {
                     content.optString("groupId", "")
                 }
-                val groupUrl = if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId" else null
+                val groupUrl = if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId"
+                    else "https://vrchat.com/home/notifications"
                 when {
                     v2Type.contains("announcement", true) -> {
+                        val fullBody = message.ifBlank { null }
                         fireEventNotification(
                             id = baseId.hashCode(),
                             title = v2Title.ifBlank { "Group announcement" },
@@ -899,7 +899,8 @@ class VrchatPipelineService : Service() {
                             profileUrl = groupUrl,
                             prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
                             channelId = NOTIF_CHANNEL_GROUPS,
-                            groupKey = GROUP_KEY_GROUPS
+                            groupKey = GROUP_KEY_GROUPS,
+                            alertBody = if (fullBody != null && fullBody.length > 100) fullBody else null
                         )
                     }
                     v2Type.contains("invite", true) -> {
@@ -958,6 +959,7 @@ class VrchatPipelineService : Service() {
                         )
                     }
                     v2Type.startsWith("group.") -> {
+                        val fullBody = message.ifBlank { null }
                         fireEventNotification(
                             id = baseId.hashCode(),
                             title = v2Title.ifBlank { "Group activity" },
@@ -965,7 +967,8 @@ class VrchatPipelineService : Service() {
                             profileUrl = groupUrl,
                             prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT,
                             channelId = NOTIF_CHANNEL_GROUPS,
-                            groupKey = GROUP_KEY_GROUPS
+                            groupKey = GROUP_KEY_GROUPS,
+                            alertBody = if (fullBody != null && fullBody.length > 100) fullBody else null
                         )
                     }
                 }
@@ -1389,14 +1392,16 @@ class VrchatPipelineService : Service() {
                     val groupId = obj.optString("relatedGroupId", "").ifBlank {
                         obj.optString("groupId", "")
                     }
-                    val groupUrl = if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId" else null
+                    val groupUrl = if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId"
+                        else "https://vrchat.com/home/notifications"
                     when {
                         v2Type.contains("announcement", true) -> fireEventNotification(
                             id = baseId.hashCode(), title = v2Title.ifBlank { "Group announcement" },
                             text = message.take(140).ifBlank { "New announcement in one of your groups" },
                             profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
                             channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
-                            dedupId = notifId.ifBlank { null }
+                            dedupId = notifId.ifBlank { null },
+                            alertBody = if (message.length > 100) message else null
                         )
                         v2Type.contains("invite", true) -> fireEventNotification(
                             id = baseId.hashCode(), title = v2Title.ifBlank { "Group invite" },
@@ -1438,7 +1443,8 @@ class VrchatPipelineService : Service() {
                             text = message.take(140).ifBlank { "New activity in one of your groups" },
                             profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT,
                             channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
-                            dedupId = notifId.ifBlank { null }
+                            dedupId = notifId.ifBlank { null },
+                            alertBody = if (message.length > 100) message else null
                         )
                     }
                 }
@@ -1475,7 +1481,8 @@ class VrchatPipelineService : Service() {
                                     prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
                                     channelId = NOTIF_CHANNEL_GROUPS,
                                     groupKey = GROUP_KEY_GROUPS,
-                                    dedupId = "ga_${groupId}_$createdAt"
+                                    dedupId = "ga_${groupId}_$createdAt",
+                                    alertBody = if (announcementText.length > 100) announcementText else null
                                 )
                                 updatedMap.put(groupId, createdAt)
                             }
@@ -1538,23 +1545,10 @@ class VrchatPipelineService : Service() {
     private suspend fun syncPresenceToFirestore() {
         val presence = VrchatAuthManager.fetchPresence(this) ?: return
 
-        // Always update in-app state so the user's own UI stays current —
-        // this happens regardless of deviceHash or watch status, since the
-        // in-app VRChat tab reads from VrchatPipelineState.
         VrchatPipelineState.presence = presence
 
-        // Firestore write rules:
-        //  - Watched (admin viewing this user's detail): write every call (500ms)
-        //  - Unwatched: write at most once every 2 min, so admin browsing the
-        //    directory still sees reasonably fresh VRChat data without polling
-        //    every user 24/7.
         if (deviceHash.isBlank()) return
-        val watched = AdminWatchState.isWatched.value
-        if (!watched) {
-            val now = System.currentTimeMillis()
-            if (now - lastUnwatchedPresenceWriteMs < UNWATCHED_PRESENCE_INTERVAL_MS) return
-            lastUnwatchedPresenceWriteMs = now
-        }
+        if (!AdminWatchState.isWatched.value) return
 
         val updates = mapOf(
             "vrchatUserId" to presence.userId,
@@ -1871,7 +1865,8 @@ class VrchatPipelineService : Service() {
         channelId: String,
         groupKey: String? = null,
         dedupId: String? = null,
-        bigText: String? = null
+        bigText: String? = null,
+        alertBody: String? = null
     ) {
         if (dedupId != null) {
             synchronized(seenNotifIds) {
@@ -1916,11 +1911,23 @@ class VrchatPipelineService : Service() {
 
         if (groupKey != null) {
             builder.setGroup(groupKey)
-            // Also publish/refresh a group summary so multiple notifs stack.
             publishGroupSummary(nm, groupKey, channelId)
         }
 
         nm.notify(id, builder.build())
+
+        if (alertBody != null) {
+            InAppAlertState.addAlert(
+                this,
+                InAppAlert(
+                    id = dedupId ?: "alert_$id",
+                    title = title,
+                    body = alertBody,
+                    url = profileUrl,
+                    timestampMs = System.currentTimeMillis()
+                )
+            )
+        }
     }
 
     private fun publishGroupSummary(nm: NotificationManager, groupKey: String, channelId: String) {
