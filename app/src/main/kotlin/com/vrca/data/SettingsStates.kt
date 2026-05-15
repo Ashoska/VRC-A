@@ -11,7 +11,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.alorma.compose.settings.storage.datastore.GenericPreferenceDataStoreSettingValueState
-import com.vrca.dataStore
+import com.vrca.data.dataStore
 
 object SettingsStates {
 

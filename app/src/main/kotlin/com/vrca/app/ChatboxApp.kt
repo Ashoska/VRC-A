@@ -1,5 +1,5 @@
 // app/src/main/kotlin/com/vrca/ChatboxApp.kt
-package com.vrca
+package com.vrca.app
 
 import android.content.Context
 import android.content.pm.PackageManager

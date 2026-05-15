@@ -31,7 +31,7 @@ import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
 import com.vrca.BuildConfig
 import com.vrca.ChatboxApplication
-import com.vrca.NowPlayingState
+import com.vrca.nowplaying.NowPlayingState
 import com.vrca.data.UserPreferencesRepository
 import com.vrca.osc.ChatboxOSC
 import com.vrca.ui.mainScreen.ConversationUiState

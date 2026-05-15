@@ -20,9 +20,9 @@ import com.google.firebase.firestore.SetOptions
 import com.vrca.BuildConfig
 import com.vrca.MainActivity
 import com.vrca.R
-import com.vrca.checkFirestoreRelease
-import com.vrca.ReleaseCheckResult
-import com.vrca.dataStore
+import com.vrca.update.checkFirestoreRelease
+import com.vrca.update.ReleaseCheckResult
+import com.vrca.data.dataStore
 import com.vrca.sync.AdminBrowsingState
 import com.vrca.sync.AdminWatchState
 import com.vrca.vrchat.VrchatNotificationPrefs

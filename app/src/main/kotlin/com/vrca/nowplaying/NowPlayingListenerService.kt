@@ -1,5 +1,5 @@
 // app/src/main/kotlin/com/vrca/NowPlayingListenerService.kt
-package com.vrca
+package com.vrca.nowplaying
 
 import android.app.Notification
 import android.media.MediaMetadata

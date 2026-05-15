@@ -1,5 +1,5 @@
 // app/src/main/kotlin/com/vrca/InAppUpdate.kt
-package com.vrca
+package com.vrca.update
 
 import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.tasks.await
