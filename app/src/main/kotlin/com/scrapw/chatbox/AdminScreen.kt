@@ -717,7 +717,7 @@ private fun UsersTab(
         )
     }
 
-    // Selected user detail: poll every 500ms for live data + write watcherActiveAt
+    // Selected user detail: poll every 5s (online) / 10s (offline) + write watcherActiveAt every 30s
     LaunchedEffect(selectedDocId) {
         val docId = selectedDocId
         if (docId.isNullOrBlank()) {
