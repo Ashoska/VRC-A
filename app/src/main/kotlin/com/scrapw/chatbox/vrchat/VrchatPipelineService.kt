@@ -423,13 +423,21 @@ class VrchatPipelineService : Service() {
     }
 
     private suspend fun connectWebSocket() {
-        val cookieHeader = VrchatAuthManager.getCookieHeader(this) ?: return
-        // Extract auth token value from cookie string (auth=authcookie_xxx)
+        val cookieHeader = VrchatAuthManager.getCookieHeader(this)
+        if (cookieHeader == null) {
+            Log.w(TAG, "No VRChat cookie — falling back to startPipeline for session recovery")
+            startPipeline()
+            return
+        }
         val authToken = cookieHeader.split(";")
             .map { it.trim() }
             .firstOrNull { it.startsWith("auth=") }
             ?.removePrefix("auth=")
-            ?: return
+        if (authToken == null) {
+            Log.w(TAG, "No auth token in cookie — falling back to startPipeline for session recovery")
+            startPipeline()
+            return
+        }
 
         val url = "$PIPELINE_URL/?authToken=$authToken"
         val request = Request.Builder()
@@ -495,7 +503,10 @@ class VrchatPipelineService : Service() {
             updatePersistentNotif("Reconnecting in ${backoffMs / 1000}s...")
             delay(backoffMs)
             if (VrchatAuthManager.isLoggedIn(this@VrchatPipelineService)) {
+                updatePersistentNotif("Connecting...")
                 connectWebSocket()
+            } else {
+                startPipeline()
             }
         }
     }
@@ -713,6 +724,15 @@ class VrchatPipelineService : Service() {
                         groupKey = null
                     )
                 }
+
+                "user-location", "see-notification", "hide-notification",
+                "clear-notification", "response-notification", "content-refresh" -> {
+                    // Known pipeline events that don't need user notifications.
+                }
+
+                else -> {
+                    if (type.isNotBlank()) Log.d(TAG, "Unhandled pipeline event: $type")
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to parse pipeline message: $raw", e)
@@ -798,6 +818,30 @@ class VrchatPipelineService : Service() {
                     prefKey = VrchatNotificationPrefs.KEY_NOTIF_GIFT_RECEIVED,
                     channelId = NOTIF_CHANNEL_FRIEND_REQUESTS,
                     groupKey = GROUP_KEY_SOCIAL,
+                    dedupId = notifId.ifBlank { null }
+                )
+            }
+            notifType == "requestInviteResponse" -> {
+                fireEventNotification(
+                    id = "invresp_$senderUserId".hashCode(),
+                    title = "Invite request accepted",
+                    text = "$senderName accepted your invite request",
+                    profileUrl = "https://vrchat.com/home/notifications",
+                    prefKey = VrchatNotificationPrefs.KEY_NOTIF_INVITE_REQUEST,
+                    channelId = NOTIF_CHANNEL_INVITES,
+                    groupKey = GROUP_KEY_INVITES,
+                    dedupId = notifId.ifBlank { null }
+                )
+            }
+            notifType == "inviteResponse" -> {
+                fireEventNotification(
+                    id = "invacpt_$senderUserId".hashCode(),
+                    title = "Invite accepted",
+                    text = "$senderName accepted your invite",
+                    profileUrl = "https://vrchat.com/home/notifications",
+                    prefKey = VrchatNotificationPrefs.KEY_NOTIF_INVITE,
+                    channelId = NOTIF_CHANNEL_INVITES,
+                    groupKey = GROUP_KEY_INVITES,
                     dedupId = notifId.ifBlank { null }
                 )
             }
