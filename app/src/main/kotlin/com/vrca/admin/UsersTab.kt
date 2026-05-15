@@ -216,6 +216,7 @@ internal fun UsersTab(
     var filterWarned by rememberSaveable { mutableStateOf(false) }
     var filterBanned by rememberSaveable { mutableStateOf(false) }
     var selectedDocId by rememberSaveable { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
 
     var selectedDetail        by remember { mutableStateOf<UserDetail?>(null) }
     var selectedDetailLoading by remember { mutableStateOf(false) }
