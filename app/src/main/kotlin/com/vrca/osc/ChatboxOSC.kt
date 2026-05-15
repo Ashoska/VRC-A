@@ -1,0 +1,112 @@
+package com.vrca.osc
+
+import android.util.Log
+import com.illposed.osc.OSCMessage
+import com.illposed.osc.transport.udp.OSCPortOut
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import java.net.InetAddress
+import java.net.UnknownHostException
+
+class ChatboxOSC(
+    ipAddress: String,
+    var port: Int
+) {
+
+    val TAG: String
+        get() = "OSC@$ipAddress:$port"
+
+    var addressResolvable = true
+        private set
+
+    var ipAddress = ipAddress
+        set(value) {
+            Log.d(TAG, "IP Address $field -> $value")
+
+            field = value
+            // DNS resolution must run off the main thread — InetAddress.getByName
+            // for non-literal hostnames performs a network lookup which throws
+            // NetworkOnMainThreadException if invoked on the UI thread. For IP
+            // literals the parse is fast, but we still defer for consistency.
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    inetAddress = InetAddress.getByName(value)
+                    Log.d(TAG, "Resolve to $inetAddress.address")
+                    addressResolvable = true
+                } catch (e: UnknownHostException) {
+                    Log.d(TAG, "Can't resolve $value")
+                    addressResolvable = false
+                } catch (e: Exception) {
+                    Log.d(TAG, "Resolve failed for $value: ${e.message}")
+                    addressResolvable = false
+                }
+            }
+        }
+
+    init {
+        CoroutineScope(Dispatchers.IO).launch {
+            this@ChatboxOSC.ipAddress = ipAddress
+        }
+    }
+
+    // Default to loopback so sendOscMessage never crashes on uninitialized
+    // inetAddress when the user supplies an unresolvable host.
+    private var inetAddress: InetAddress = InetAddress.getLoopbackAddress()
+
+    var typing = false
+        set(value) {
+            field = value
+            sendOscMessage("/chatbox/typing", listOf(value))
+        }
+
+    private fun sendOscMessage(address: String, arguments: List<Any?>, delay: Long = 0) {
+        CoroutineScope(Dispatchers.IO).launch {
+
+            val message = OSCMessage(address, arguments)
+            val sender = OSCPortOut(inetAddress, port)
+            delay(delay)
+            try {
+                sender.send(message)
+                Log.d(TAG, "Message: ${message.address}  ${message.arguments}")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed send Message: $message")
+            }
+            sender.close()
+        }
+    }
+
+    fun sendMessage(text: String, sendImmediately: Boolean, triggerSFX: Boolean) {
+        sendOscMessage("/chatbox/input", listOf(text, sendImmediately, triggerSFX))
+        latestMsgTimestamp = System.currentTimeMillis()
+    }
+
+    private var realtimeMsgJob: Job? = null
+    private var latestMsgTimestamp: Long = 0
+    private var realtimeMsgInterval = 1500
+
+
+    fun sendRealtimeMessage(text: String) {
+        realtimeMsgJob?.cancel()
+
+        Log.d(
+            "Chatbox",
+            "$latestMsgTimestamp  ${System.currentTimeMillis()}  ${(System.currentTimeMillis() - latestMsgTimestamp)}"
+        )
+
+        realtimeMsgJob = CoroutineScope(Dispatchers.IO).launch {
+            val timeStamp = System.currentTimeMillis()
+
+            if (timeStamp - latestMsgTimestamp < realtimeMsgInterval) {
+                delay(realtimeMsgInterval - (timeStamp - latestMsgTimestamp))
+            }
+
+            sendOscMessage("/chatbox/input", listOf(text, true, false))
+            sendOscMessage("/chatbox/typing", listOf(text.isNotEmpty()), 50)
+
+            latestMsgTimestamp = System.currentTimeMillis()
+        }
+    }
+}

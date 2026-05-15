@@ -63,7 +63,7 @@ def computedVersionCode = run
 def computedVersionName = "v${baseMajor}.${baseMinor + minorBump}.${patch}"
 
 android {
-    namespace 'com.scrapw.chatbox'
+    namespace 'com.vrca'
     compileSdk 34
 
     defaultConfig {

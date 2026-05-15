@@ -31,7 +31,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.alorma.compose.settings.storage.base.SettingValueState
-import com.scrapw.chatbox.data.rememberStringSettingState
+import com.vrca.data.rememberStringSettingState
 
 @Composable
 fun SettingsTextFieldString(
