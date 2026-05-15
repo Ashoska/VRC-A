@@ -2616,9 +2616,9 @@ private fun VrchatStatusPage(
         // Info card
         ElevatedCard {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("About VRChat integration", style = MaterialTheme.typography.titleSmall)
+                Text("About", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    "VRC-A connects to VRChat's web API to show your status, detect notifications (friend requests, invites, unfriends, group events), and identify you in the moderation system.\n\nYour password is only used to get a session cookie from VRChat's servers - it is never stored.",
+                    "VRC-A uses VRChat's API for status, notifications, and friend tracking. Discord RPC shows your VRChat activity on your Discord profile via a hidden web session.\n\nYour VRChat password is only used to get a session cookie - it is never stored. Your Discord session stays on-device only.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

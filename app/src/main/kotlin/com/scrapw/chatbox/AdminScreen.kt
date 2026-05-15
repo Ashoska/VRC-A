@@ -91,9 +91,13 @@ import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.material3.LinearProgressIndicator
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
 import org.json.JSONObject
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
+import okio.BufferedSink
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -2541,7 +2545,7 @@ private fun AnnouncementsTab(
        githubRepo=your-repo-name
    ========================================================= */
 
-// ---- GitHub API helpers (no extra dependencies - uses HttpURLConnection) ----
+// ---- GitHub API helpers (uses OkHttp for proper 307/308 redirect handling) ----
 
 private data class GithubReleaseResult(
     val releaseId: Long,
@@ -2553,62 +2557,40 @@ private suspend fun githubCreateRelease(
     owner: String, repo: String, pat: String,
     tagName: String, releaseName: String, body: String
 ): GithubReleaseResult = withContext(Dispatchers.IO) {
+    val client = OkHttpClient.Builder()
+        .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+        .build()
+
     val payload = JSONObject().apply {
         put("tag_name", tagName)
         put("name", releaseName)
         put("body", body)
         put("draft", false)
         put("prerelease", false)
-    }.toString().toByteArray(Charsets.UTF_8)
+    }.toString()
 
-    var currentUrl = "https://api.github.com/repos/$owner/$repo/releases"
-    var hops = 0
-    while (true) {
-        val conn = URL(currentUrl).openConnection() as HttpURLConnection
-        conn.instanceFollowRedirects = false
-        conn.requestMethod = "POST"
-        conn.setRequestProperty("Authorization", "Bearer $pat")
-        conn.setRequestProperty("Accept", "application/vnd.github+json")
-        conn.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
-        conn.setRequestProperty("Content-Type", "application/json")
-        conn.doOutput = true
-        conn.connectTimeout = 15_000
-        conn.readTimeout = 30_000
+    val request = Request.Builder()
+        .url("https://api.github.com/repos/$owner/$repo/releases")
+        .header("Authorization", "Bearer $pat")
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .post(payload.toRequestBody("application/json".toMediaType()))
+        .build()
 
-        conn.outputStream.use { it.write(payload) }
+    val response = client.newCall(request).execute()
+    val responseBody = response.body?.string().orEmpty()
 
-        val code = conn.responseCode
-        // 307/308 preserve the method and body — re-POST to the Location.
-        // 301/302/303 also frequently come from GitHub when a repo has been
-        // renamed or moved; treat them the same so the upload doesn't fail.
-        if (code in listOf(301, 302, 303, 307, 308) && hops < 5) {
-            val location = conn.getHeaderField("Location")
-            conn.disconnect()
-            if (location.isNullOrBlank()) {
-                throw Exception("GitHub create release redirect ($code) without Location header")
-            }
-            currentUrl = if (location.startsWith("http")) location
-                         else URL(URL(currentUrl), location).toString()
-            hops++
-            continue
-        }
-
-        val responseBody = (if (code in 200..299) conn.inputStream else conn.errorStream)
-            ?.bufferedReader()?.readText().orEmpty()
-
-        if (code !in 200..299) {
-            throw Exception("GitHub create release failed ($code): $responseBody")
-        }
-
-        val json = JSONObject(responseBody)
-        return@withContext GithubReleaseResult(
-            releaseId = json.getLong("id"),
-            uploadUrl = json.getString("upload_url"),
-            htmlUrl   = json.getString("html_url")
-        )
+    if (!response.isSuccessful) {
+        throw Exception("GitHub create release failed (${response.code}): $responseBody")
     }
-    @Suppress("UNREACHABLE_CODE")
-    throw Exception("GitHub create release: too many redirects")
+
+    val json = JSONObject(responseBody)
+    GithubReleaseResult(
+        releaseId = json.getLong("id"),
+        uploadUrl = json.getString("upload_url"),
+        htmlUrl   = json.getString("html_url")
+    )
 }
 
 private suspend fun githubUploadAsset(
@@ -2616,64 +2598,50 @@ private suspend fun githubUploadAsset(
     releaseId: Long, fileName: String, apkFile: File,
     onProgress: (Float) -> Unit
 ): String = withContext(Dispatchers.IO) {
+    val client = OkHttpClient.Builder()
+        .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(300, java.util.concurrent.TimeUnit.SECONDS)
+        .writeTimeout(300, java.util.concurrent.TimeUnit.SECONDS)
+        .build()
+
     val encodedName = java.net.URLEncoder.encode(fileName, "UTF-8")
-    var currentUrl = "https://uploads.github.com/repos/$owner/$repo/releases/$releaseId/assets?name=$encodedName"
-    var hops = 0
+    val url = "https://uploads.github.com/repos/$owner/$repo/releases/$releaseId/assets?name=$encodedName"
 
-    while (true) {
-        val conn = URL(currentUrl).openConnection() as HttpURLConnection
-        conn.instanceFollowRedirects = false
-        conn.requestMethod = "POST"
-        conn.setRequestProperty("Authorization", "Bearer $pat")
-        conn.setRequestProperty("Accept", "application/vnd.github+json")
-        conn.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
-        conn.setRequestProperty("Content-Type", "application/vnd.android.package-archive")
-        conn.setRequestProperty("Content-Length", apkFile.length().toString())
-        conn.doOutput = true
-        conn.connectTimeout = 15_000
-        conn.readTimeout = 300_000
-
-        val totalBytes = apkFile.length().toFloat()
-        var writtenBytes = 0L
-        val buf = ByteArray(64 * 1024)
-
-        conn.outputStream.use { out ->
+    val body = object : RequestBody() {
+        override fun contentType() = "application/vnd.android.package-archive".toMediaType()
+        override fun contentLength() = apkFile.length()
+        override fun writeTo(sink: BufferedSink) {
+            val totalBytes = apkFile.length().toFloat()
+            var writtenBytes = 0L
+            val buf = ByteArray(64 * 1024)
             apkFile.inputStream().use { inp ->
-                var n: Int
-                while (inp.read(buf).also { n = it } != -1) {
-                    out.write(buf, 0, n)
+                while (true) {
+                    val n = inp.read(buf)
+                    if (n == -1) break
+                    sink.write(buf, 0, n)
                     writtenBytes += n
                     if (totalBytes > 0f) onProgress(writtenBytes / totalBytes)
                 }
-                out.flush()
             }
         }
-
-        val code = conn.responseCode
-        if (code in listOf(301, 302, 303, 307, 308) && hops < 5) {
-            val location = conn.getHeaderField("Location")
-            conn.disconnect()
-            if (location.isNullOrBlank()) {
-                throw Exception("GitHub upload redirect ($code) without Location header")
-            }
-            currentUrl = if (location.startsWith("http")) location
-                         else URL(URL(currentUrl), location).toString()
-            hops++
-            onProgress(0f)
-            continue
-        }
-
-        val responseBody = (if (code in 200..299) conn.inputStream else conn.errorStream)
-            ?.bufferedReader()?.readText().orEmpty()
-
-        if (code !in 200..299) {
-            throw Exception("GitHub upload asset failed ($code): $responseBody")
-        }
-
-        return@withContext JSONObject(responseBody).getString("browser_download_url")
     }
-    @Suppress("UNREACHABLE_CODE")
-    throw Exception("GitHub upload: too many redirects")
+
+    val request = Request.Builder()
+        .url(url)
+        .header("Authorization", "Bearer $pat")
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .post(body)
+        .build()
+
+    val response = client.newCall(request).execute()
+    val responseBody = response.body?.string().orEmpty()
+
+    if (!response.isSuccessful) {
+        throw Exception("GitHub upload asset failed (${response.code}): $responseBody")
+    }
+
+    JSONObject(responseBody).getString("browser_download_url")
 }
 
 // ---- Composable ----
