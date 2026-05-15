@@ -180,6 +180,7 @@ class ChatboxViewModel(
     private var syncTriggerJob: Job? = null
     private var lastSelfSyncAtMs: Long = 0L
     private var lastSelfSyncFingerprint: String = ""
+    private var usersByIdLinkWritten: Boolean = false
     private var lastSelfSyncError: String = ""
 
     // Per-field snapshot of what we last successfully wrote to Firestore.
@@ -519,10 +520,16 @@ class ChatboxViewModel(
                     .set(buildUserSnapshot(authUid, deviceHash), SetOptions.merge())
                     .await()
 
-                runCatching {
-                    db.collection(COL_USERS_BY_ID).document(authUid)
-                        .set(buildUsersByIdLink(authUid, deviceHash), SetOptions.merge())
-                        .await()
+                // usersById link is static (deviceHash, authUid, appId, adminBuild
+                // never change per device). Write it once per session, not on
+                // every debounced content sync.
+                if (!usersByIdLinkWritten) {
+                    runCatching {
+                        db.collection(COL_USERS_BY_ID).document(authUid)
+                            .set(buildUsersByIdLink(authUid, deviceHash), SetOptions.merge())
+                            .await()
+                        usersByIdLinkWritten = true
+                    }
                 }
 
                 lastSyncedValues.clear()

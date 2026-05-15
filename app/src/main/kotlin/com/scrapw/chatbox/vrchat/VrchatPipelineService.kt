@@ -355,19 +355,22 @@ class VrchatPipelineService : Service() {
     private fun startPresenceRefreshLoop() {
         presenceRefreshJob?.cancel()
         presenceRefreshJob = serviceScope.launch {
-            // Always-on slow poll: keeps in-app presence (location, world,
-            // status) fresh even when no admin is watching. The Firestore
-            // write inside syncPresenceToFirestore is gated by AdminWatchState,
-            // so this loop only updates VrchatPipelineState locally and pays
-            // no Firestore traffic when unwatched. Without this loop the
-            // in-app world/location can go stale because VRChat doesn't
-            // always send user-update events when the user changes worlds.
+            // Slow poll: keeps in-app presence (location, world, status) fresh
+            // even when no admin is watching. The Firestore write inside
+            // syncPresenceToFirestore is gated by AdminWatchState, so this
+            // loop only updates VrchatPipelineState locally and pays no
+            // Firestore traffic when unwatched. Skipped when watched since
+            // the 5s watched-user loop below already refreshes presence —
+            // running both would duplicate VRChat HTTP fetches and Firestore
+            // writes.
             launch {
                 while (true) {
-                    try {
-                        syncPresenceToFirestore()
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Slow presence refresh failed", e)
+                    if (!AdminWatchState.isWatched.value) {
+                        try {
+                            syncPresenceToFirestore()
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Slow presence refresh failed", e)
+                        }
                     }
                     delay(15_000)
                 }
