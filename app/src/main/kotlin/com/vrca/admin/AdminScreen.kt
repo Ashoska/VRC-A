@@ -307,7 +307,6 @@ fun AdminScreen() {
         sharedUsersLoading = true
         val reg = db.collection("users")
             .whereEqualTo("isOnlineInApp", true)
-            .orderBy("lastSeenAt", Query.Direction.DESCENDING)
             .limit(sharedLiveLimit.toLong())
             .addSnapshotListener { snap, err ->
                 if (err != null) {
@@ -319,6 +318,7 @@ fun AdminScreen() {
                     sharedUsers = snap.documents
                         .filter { it.getBoolean("adminBuild") != true }
                         .map { parseUserRow(it) }
+                        .sortedByDescending { it.lastSeenAt?.toDate()?.time ?: 0L }
                     sharedUsersLoading = false
                 }
             }

@@ -160,7 +160,6 @@ class AdminViewModel(
 
     private suspend fun loadAnnouncements() {
         val snap = db.collection(AdminSchema.COL_ANNOUNCEMENTS)
-            .orderBy("priority", com.google.firebase.firestore.Query.Direction.DESCENDING)
             .orderBy("createdAt", com.google.firebase.firestore.Query.Direction.DESCENDING)
             .limit(50)
             .get()
