@@ -708,7 +708,7 @@ private fun UsersTab(
 
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) {
-        while (true) { nowMs = System.currentTimeMillis(); delay(1000L) }
+        while (true) { nowMs = System.currentTimeMillis(); delay(5_000L) }
     }
 
     fun rowMatches(u: UserRow, q: String): Boolean {
