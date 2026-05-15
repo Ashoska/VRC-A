@@ -282,36 +282,78 @@ fun AdminScreen() {
     var idsExpanded by rememberSaveable { mutableStateOf(false) }
 
     // ── Shared user list (drives both Dashboard stats and Users directory) ──
-    // Only polls Firestore while the admin is actually on the Dashboard or Users tab.
-    // Whole-value assignment to mutableStateOf<List<>> guarantees Compose
-    // recomposes downstream consumers — SnapshotStateList.clear()+addAll()
-    // doesn't always propagate (reported as "Dashboard counter only updates
-    // after switching tabs and back").
+    // Uses a Firestore snapshot listener filtered to online users only.
+    // Polling 500 docs every 30s = 1000 reads/min flat regardless of changes.
+    // Snapshot listener: pays N reads on initial attach, then only delta reads
+    // when docs change. Filtering to isOnlineInApp=true further cuts the
+    // initial fetch (typically <50 online vs hundreds total). The listener
+    // also pushes changes in real-time so the dashboard online counter
+    // updates without requiring a tab switch.
     var sharedUsers by remember { mutableStateOf<List<UserRow>>(emptyList()) }
     var sharedLiveLimit by rememberSaveable { mutableIntStateOf(500) }
     var sharedUsersLoading by remember { mutableStateOf(true) }
     val needsUsers = tabIndex == 0 || tabIndex == 1
 
-    LaunchedEffect(needsUsers, sharedLiveLimit) {
+    // Stats from count() aggregations — much cheaper than reading all docs.
+    var totalUsersCount by remember { mutableIntStateOf(0) }
+    var warnedUsersCount by remember { mutableIntStateOf(0) }
+    var bannedUsersCount by remember { mutableIntStateOf(0) }
+
+    DisposableEffect(needsUsers, sharedLiveLimit) {
+        if (!needsUsers) {
+            return@DisposableEffect onDispose { }
+        }
+        sharedUsersLoading = true
+        val reg = db.collection("users")
+            .whereEqualTo("isOnlineInApp", true)
+            .orderBy("lastSeenAt", Query.Direction.DESCENDING)
+            .limit(sharedLiveLimit.toLong())
+            .addSnapshotListener { snap, err ->
+                if (err != null) {
+                    setErr(err.message ?: "Users load failed")
+                    sharedUsersLoading = false
+                    return@addSnapshotListener
+                }
+                if (snap != null) {
+                    sharedUsers = snap.documents
+                        .filter { it.getBoolean("adminBuild") != true }
+                        .map { parseUserRow(it) }
+                    sharedUsersLoading = false
+                }
+            }
+        onDispose { reg.remove() }
+    }
+
+    // Aggregate stats: refresh every 60s while admin is on Dashboard/Users.
+    // count() aggregation costs 1 read per 1000 docs counted (very cheap).
+    LaunchedEffect(needsUsers) {
         if (!needsUsers) return@LaunchedEffect
         while (true) {
             try {
-                val snap = db.collection("users")
-                    .orderBy("lastSeenAt", Query.Direction.DESCENDING)
-                    .limit(sharedLiveLimit.toLong())
-                    .get(Source.SERVER).await()
-                val next = snap.documents
-                    .filter { it.getBoolean("adminBuild") != true }
-                    .map { parseUserRow(it) }
-                sharedUsers = next
-                sharedUsersLoading = false
+                val totalSnap = db.collection("users")
+                    .whereEqualTo("adminBuild", false)
+                    .count()
+                    .get(com.google.firebase.firestore.AggregateSource.SERVER)
+                    .await()
+                totalUsersCount = totalSnap.count.toInt()
+
+                val warnedSnap = db.collection("users")
+                    .whereEqualTo("warned", true)
+                    .count()
+                    .get(com.google.firebase.firestore.AggregateSource.SERVER)
+                    .await()
+                warnedUsersCount = warnedSnap.count.toInt()
+
+                val bannedSnap = db.collection("users")
+                    .whereEqualTo("banned", true)
+                    .count()
+                    .get(com.google.firebase.firestore.AggregateSource.SERVER)
+                    .await()
+                bannedUsersCount = bannedSnap.count.toInt()
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
-            } catch (e: Throwable) {
-                setErr(e.message ?: "Users load failed")
-                sharedUsersLoading = false
-            }
-            delay(30_000L)
+            } catch (_: Throwable) { /* best-effort */ }
+            delay(60_000L)
         }
     }
 
@@ -437,24 +479,24 @@ fun AdminScreen() {
                         db = db,
                         users = sharedUsers,
                         usersLoading = sharedUsersLoading,
+                        totalUsersCount = totalUsersCount,
+                        warnedUsersCount = warnedUsersCount,
+                        bannedUsersCount = bannedUsersCount,
                         onRefresh = {
+                            // Snapshot listener auto-refreshes; refresh only re-triggers stats
                             scope.launch {
-                                sharedUsersLoading = true
                                 try {
-                                    val snap = db.collection("users")
-                                        .orderBy("lastSeenAt", Query.Direction.DESCENDING)
-                                        .limit(sharedLiveLimit.toLong())
-                                        .get(Source.SERVER).await()
-                                    val next = snap.documents
-                                        .filter { it.getBoolean("adminBuild") != true }
-                                        .map { parseUserRow(it) }
-                                    sharedUsers = next
+                                    val totalSnap = db.collection("users")
+                                        .whereEqualTo("adminBuild", false)
+                                        .count()
+                                        .get(com.google.firebase.firestore.AggregateSource.SERVER)
+                                        .await()
+                                    totalUsersCount = totalSnap.count.toInt()
                                 } catch (e: kotlinx.coroutines.CancellationException) {
                                     throw e
                                 } catch (e: Throwable) {
                                     setErr(e.message ?: "Refresh failed")
                                 }
-                                sharedUsersLoading = false
                             }
                         },
                         setError = ::setErr
@@ -721,46 +763,46 @@ private fun UsersTab(
         )
     }
 
-    // Selected user detail: poll every 5s (online) / 10s (offline) + write watcherActiveAt every 30s
-    LaunchedEffect(selectedDocId) {
+    // Selected user detail: snapshot listener for real-time updates + 30s watcherActiveAt heartbeat
+    DisposableEffect(selectedDocId) {
         val docId = selectedDocId
         if (docId.isNullOrBlank()) {
             selectedDetail = null; selectedDetailLoading = false
-            return@LaunchedEffect
+            return@DisposableEffect onDispose { }
         }
         selectedDetailLoading = true
-        var watcherTickMs = 0L
-        while (true) {
-            try {
-                val snap = db.collection("users").document(docId).get(Source.SERVER).await()
+        val reg = db.collection("users").document(docId)
+            .addSnapshotListener { snap, err ->
+                if (err != null) {
+                    setError(err.message ?: "User detail load failed")
+                    selectedDetailLoading = false
+                    return@addSnapshotListener
+                }
                 if (snap != null && snap.exists()) {
                     selectedDetail = parseUserDetail(snap)
                 } else {
                     selectedDetail = null
                 }
                 selectedDetailLoading = false
+            }
+        onDispose { reg.remove() }
+    }
+
+    // Watcher heartbeat: write watcherActiveAt every 30s while a user is selected
+    LaunchedEffect(selectedDocId) {
+        val docId = selectedDocId
+        if (docId.isNullOrBlank()) return@LaunchedEffect
+        while (true) {
+            try {
+                db.collection("users").document(docId)
+                    .set(
+                        mapOf("watcherActiveAt" to FieldValue.serverTimestamp()),
+                        SetOptions.merge()
+                    ).await()
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
-            } catch (e: Throwable) {
-                setError(e.message ?: "User detail load failed")
-                selectedDetailLoading = false
-            }
-            if (watcherTickMs % 30_000L < 5_000L) {
-                try {
-                    db.collection("users").document(docId)
-                        .set(
-                            mapOf("watcherActiveAt" to FieldValue.serverTimestamp()),
-                            SetOptions.merge()
-                        ).await()
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e
-                } catch (_: Throwable) {}
-            }
-            val userRow = users.firstOrNull { it.docId == docId }
-            val isOnline = userRow?.let { isUserOnline(it, System.currentTimeMillis()) } ?: false
-            val pollInterval = if (isOnline) 5_000L else 10_000L
-            watcherTickMs += pollInterval
-            delay(pollInterval)
+            } catch (_: Throwable) {}
+            delay(30_000L)
         }
     }
 
@@ -3229,31 +3271,45 @@ private fun DashboardTab(
     db: FirebaseFirestore,
     users: List<UserRow>,
     usersLoading: Boolean,
+    totalUsersCount: Int,
+    warnedUsersCount: Int,
+    bannedUsersCount: Int,
     onRefresh: () -> Unit,
     setError: (String?) -> Unit
 ) {
-    // Refresh staleness clock every 5s so onlineCount flips users to offline
-    // without needing a new Firestore poll. derivedStateOf re-evaluates each
-    // time `users` or `nowMs` changes, so the counter stays live.
+    // `users` is the live online-only list from a snapshot listener — the
+    // online count is derived from list size since the server-side filter
+    // already includes only isOnlineInApp=true. The 5s ticker still applies
+    // the 75s lastSeenAt staleness gate via isUserOnline() to flip
+    // force-killed users (whose isOnlineInApp stayed true) to offline.
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) {
         while (true) { nowMs = System.currentTimeMillis(); delay(5_000L) }
     }
-    val totalUsers  by remember(users) { derivedStateOf { users.size } }
+    val totalUsers  = totalUsersCount
     val onlineCount by remember(users, nowMs) {
         derivedStateOf { users.count { isUserOnline(it, nowMs) } }
     }
-    val bannedCount by remember(users) { derivedStateOf { users.count { it.banned } } }
-    val warnedCount by remember(users) { derivedStateOf { users.count { it.warned } } }
+    val bannedCount = bannedUsersCount
+    val warnedCount = warnedUsersCount
     var evasionCount by remember { mutableIntStateOf(0) }
 
-    DisposableEffect(Unit) {
-        val reg = db.collection("moderationEvents")
-            .whereEqualTo("action", "ban_evasion_detected")
-            .addSnapshotListener { snap, _ ->
-                evasionCount = snap?.size() ?: 0
-            }
-        onDispose { reg.remove() }
+    // Use count() aggregation instead of loading all docs into a snapshot
+    // listener. count() is 1 read regardless of doc count.
+    LaunchedEffect(Unit) {
+        while (true) {
+            try {
+                val snap = db.collection("moderationEvents")
+                    .whereEqualTo("action", "ban_evasion_detected")
+                    .count()
+                    .get(com.google.firebase.firestore.AggregateSource.SERVER)
+                    .await()
+                evasionCount = snap.count.toInt()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Throwable) {}
+            delay(60_000L)
+        }
     }
 
     LazyColumn(

@@ -104,7 +104,7 @@ class ChatboxViewModel(
         // No constant background heartbeat: app-open and app-close writes
         // (the latter from VrchatPipelineService.onTaskRemoved) maintain
         // online/offline state with two writes per session.
-        private const val LIVE_SYNC_INTERVAL_MS = 500L
+        private const val LIVE_SYNC_INTERVAL_MS = 5_000L
 
         // Moderation attach retry
         private const val MOD_ATTACH_RETRY_MS = 1_250L

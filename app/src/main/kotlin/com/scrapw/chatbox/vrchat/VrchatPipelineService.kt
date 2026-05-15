@@ -399,7 +399,7 @@ class VrchatPipelineService : Service() {
             AdminWatchState.isWatched.collectLatest { watched ->
                 if (watched) {
                     while (true) {
-                        delay(500)
+                        delay(5_000)
                         try {
                             syncPresenceToFirestore()
                         } catch (e: Exception) {
