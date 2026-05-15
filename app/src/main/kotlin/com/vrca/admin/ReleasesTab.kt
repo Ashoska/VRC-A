@@ -210,7 +210,10 @@ internal suspend fun githubUploadAsset(
             val location = response.header("Location")
             response.close()
             if (location.isNullOrBlank()) {
-                throw Exception("GitHub upload redirect ($code) without Location header")
+                hops++
+                onProgress(0f)
+                kotlinx.coroutines.delay(1500L)
+                continue
             }
             currentUrl = if (location.startsWith("http")) location
                          else java.net.URI(currentUrl).resolve(location).toString()

@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Badge
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -420,6 +421,31 @@ internal fun UsersTab(
                         Icon(Icons.Filled.ArrowForward, contentDescription = null)
                         Spacer(Modifier.width(6.dp))
                         Text("Send to Moderation")
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            scope.launch {
+                                setGlobalLoading(true)
+                                runCatching {
+                                    db.collection("users").document(row.docId)
+                                        .set(
+                                            mapOf("killSignal" to com.google.firebase.firestore.FieldValue.serverTimestamp()),
+                                            com.google.firebase.firestore.SetOptions.merge()
+                                        )
+                                        .await()
+                                }.onFailure { e ->
+                                    setError(e.message ?: "Kill failed")
+                                }
+                                setGlobalLoading(false)
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        )
+                    ) {
+                        Text("Kill App (force-quit)")
                     }
                 }
             }

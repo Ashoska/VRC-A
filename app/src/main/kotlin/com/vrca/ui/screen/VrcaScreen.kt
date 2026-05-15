@@ -454,13 +454,13 @@ fun VrcaScreen(
     // Setup wizard: check if VRChat linked and IP set
     val vrcLinked = VrchatAuthManager.isLoggedIn(ctx) &&
         VrchatAuthManager.getStoredUserId(ctx)?.isNotBlank() == true
-    val ipSet = remember { mutableStateOf(false) }
+    val ipSet = remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(Unit) {
         chatboxViewModel.userPreferencesRepository.ipAddress.collect { ip ->
             ipSet.value = ip.isNotBlank() && ip != "127.0.0.1"
         }
     }
-    val showSetupBanner = !vrcLinked || !ipSet.value
+    val showSetupBanner = ipSet.value != null && (!vrcLinked || ipSet.value == false)
 
     Scaffold(
             topBar = {
@@ -523,7 +523,7 @@ fun VrcaScreen(
                 if (showSetupBanner && !isBannedEffective) {
                     SetupIncompleteBanner(
                         vrcLinked = vrcLinked,
-                        ipSet = ipSet.value,
+                        ipSet = ipSet.value == true,
                         onFixVrc = { page = AppPage.VrchatStatus },
                         onFixIp = { page = AppPage.Settings }
                     )

@@ -166,6 +166,9 @@ class VrchatPipelineService : Service() {
 
     private var deviceHash: String = ""
 
+    private var lastUnwatchedPresenceWriteMs: Long = 0L
+    private val UNWATCHED_PRESENCE_INTERVAL_MS: Long = 2 * 60 * 1000L
+
     // ------------------------------------------------------------------
     // Lifecycle
     // ------------------------------------------------------------------
@@ -1540,12 +1543,18 @@ class VrchatPipelineService : Service() {
         // in-app VRChat tab reads from VrchatPipelineState.
         VrchatPipelineState.presence = presence
 
-        // Firestore write is gated by both deviceHash availability AND admin
-        // watch status. Admins only see live VRChat data while they have the
-        // user selected; writing every state change to Firestore for every
-        // user 24/7 is what blew through the free quota.
+        // Firestore write rules:
+        //  - Watched (admin viewing this user's detail): write every call (500ms)
+        //  - Unwatched: write at most once every 2 min, so admin browsing the
+        //    directory still sees reasonably fresh VRChat data without polling
+        //    every user 24/7.
         if (deviceHash.isBlank()) return
-        if (!AdminWatchState.isWatched.value) return
+        val watched = AdminWatchState.isWatched.value
+        if (!watched) {
+            val now = System.currentTimeMillis()
+            if (now - lastUnwatchedPresenceWriteMs < UNWATCHED_PRESENCE_INTERVAL_MS) return
+            lastUnwatchedPresenceWriteMs = now
+        }
 
         val updates = mapOf(
             "vrchatUserId" to presence.userId,

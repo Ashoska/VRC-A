@@ -576,6 +576,16 @@ class VrcaViewModel(
 
     private var lastBanEffective: Boolean = false
 
+    private var killSignalHandled: Boolean = false
+
+    private fun handleAdminKill() {
+        if (killSignalHandled) return
+        killSignalHandled = true
+        try {
+            android.os.Process.killProcess(android.os.Process.myPid())
+        } catch (_: Throwable) { /* nothing to do */ }
+    }
+
     private fun enforceIfBannedChanged() {
         val nowBanned = isBanned
         if (nowBanned == lastBanEffective) return
@@ -646,6 +656,15 @@ class VrcaViewModel(
                             moderationConnected = true
                             moderationLastError = ""
                             enforceIfBannedChanged()
+
+                            val killSignal = snap.getTimestamp("killSignal")
+                            if (killSignal != null) {
+                                val killMs = killSignal.seconds * 1000L + (killSignal.nanoseconds / 1_000_000L)
+                                val ageMs = System.currentTimeMillis() - killMs
+                                if (ageMs in 0L..60_000L) {
+                                    handleAdminKill()
+                                }
+                            }
 
                             // Apply remote config on every non-echo snapshot.
                             // Echo suppression is handled inside applyRemoteConfig
