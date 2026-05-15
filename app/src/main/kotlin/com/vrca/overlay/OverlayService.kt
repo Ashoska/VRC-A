@@ -40,7 +40,7 @@ import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.vrca.R
 import com.vrca.overlay.ui.ButtonOverlay
 import com.vrca.overlay.ui.MessengerOverlay
-import com.vrca.ui.ChatboxViewModel
+import com.vrca.ui.viewmodel.ChatboxViewModel
 import com.vrca.ui.theme.OverlayTheme
 import kotlin.math.roundToInt
 

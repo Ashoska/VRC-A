@@ -1,4 +1,4 @@
-package com.vrca
+package com.vrca.ui.settings
 
 import android.content.Context
 import android.os.PowerManager
@@ -75,7 +75,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.vrca.data.SettingsStates
-import com.vrca.ui.ChatboxViewModel
+import com.vrca.ui.viewmodel.ChatboxViewModel
 import kotlinx.coroutines.launch
 
 // -------------------------

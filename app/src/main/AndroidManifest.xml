@@ -15,7 +15,7 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
-        android:name="com.vrca.ChatboxApplication"
+        android:name="com.vrca.app.ChatboxApplication"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -56,7 +56,7 @@
 
         <!-- Discord Rich Presence service -->
         <service
-            android:name=".vrchat.DiscordRpcService"
+            android:name=".discord.DiscordRpcService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
@@ -71,7 +71,7 @@
         </receiver>
 
         <activity
-            android:name=".MainActivity"
+            android:name=".app.MainActivity"
             android:exported="true"
             android:label="VRC-A"
             android:theme="@style/Theme.Chatbox"

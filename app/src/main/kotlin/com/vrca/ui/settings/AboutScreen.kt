@@ -1,4 +1,4 @@
-package com.vrca.ui.settingsScreen
+package com.vrca.ui.settings
 
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding

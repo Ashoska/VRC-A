@@ -1,5 +1,5 @@
 // app/src/main/kotlin/com/vrca/AdminScreen.kt
-package com.vrca
+package com.vrca.admin
 
 import android.content.Context
 import androidx.compose.animation.AnimatedVisibility

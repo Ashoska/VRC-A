@@ -6,7 +6,7 @@ import android.view.WindowInsetsController
 import android.view.WindowManager
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
-import com.vrca.getActivity
+import com.vrca.app.getActivity
 
 @Composable
 fun SetFullscreen(value: Boolean) {

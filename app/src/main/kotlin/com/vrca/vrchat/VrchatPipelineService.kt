@@ -18,7 +18,7 @@ import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.SetOptions
 import com.vrca.BuildConfig
-import com.vrca.MainActivity
+import com.vrca.app.MainActivity
 import com.vrca.R
 import com.vrca.update.checkFirestoreRelease
 import com.vrca.update.ReleaseCheckResult

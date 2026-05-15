@@ -4,7 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import androidx.core.content.ContextCompat
-import com.vrca.ChatboxApplication
+import com.vrca.app.ChatboxApplication
 
 /**
  * Restarts VrchatPipelineService after device reboot so notifications

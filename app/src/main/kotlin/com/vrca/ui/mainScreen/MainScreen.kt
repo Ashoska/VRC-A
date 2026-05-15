@@ -10,8 +10,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.vrca.data.SettingsStates
-import com.vrca.ui.ChatboxViewModel
-import com.vrca.ui.MessengerUiState
+import com.vrca.ui.viewmodel.ChatboxViewModel
+import com.vrca.ui.viewmodel.MessengerUiState
 
 @Composable
 fun MainScreen(

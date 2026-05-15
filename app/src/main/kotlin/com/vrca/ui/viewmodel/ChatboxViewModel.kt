@@ -1,5 +1,5 @@
 // app/src/main/kotlin/com/vrca/ui/ChatboxViewModel.kt
-package com.vrca.ui
+package com.vrca.ui.viewmodel
 
 import android.content.Context
 import android.content.Intent
@@ -30,7 +30,7 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
 import com.vrca.BuildConfig
-import com.vrca.ChatboxApplication
+import com.vrca.app.ChatboxApplication
 import com.vrca.nowplaying.NowPlayingState
 import com.vrca.data.UserPreferencesRepository
 import com.vrca.osc.ChatboxOSC

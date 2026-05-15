@@ -1,5 +1,5 @@
 // app/src/main/kotlin/com/vrca/MainActivity.kt
-package com.vrca
+package com.vrca.app
 
 import android.Manifest
 import android.content.Context

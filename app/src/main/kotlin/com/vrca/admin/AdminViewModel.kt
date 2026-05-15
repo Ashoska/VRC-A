@@ -1,5 +1,5 @@
 // app/src/main/kotlin/com/vrca/AdminViewModel.kt
-package com.vrca
+package com.vrca.admin
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider

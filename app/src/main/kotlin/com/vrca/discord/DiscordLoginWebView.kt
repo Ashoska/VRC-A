@@ -1,4 +1,4 @@
-package com.vrca.vrchat
+package com.vrca.discord
 
 import android.annotation.SuppressLint
 import android.graphics.Bitmap

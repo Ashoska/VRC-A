@@ -1,4 +1,4 @@
-package com.vrca.ui.settingsScreen
+package com.vrca.ui.settings
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -20,7 +20,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vrca.R
 import com.vrca.data.SettingsStates
-import com.vrca.ui.ChatboxViewModel
+import com.vrca.ui.viewmodel.ChatboxViewModel
 
 @Composable
 fun SettingsScreen(

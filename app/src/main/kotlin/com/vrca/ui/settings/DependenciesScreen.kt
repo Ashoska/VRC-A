@@ -1,4 +1,4 @@
-package com.vrca.ui.settingsScreen
+package com.vrca.ui.settings
 
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable

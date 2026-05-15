@@ -1,5 +1,5 @@
 // app/src/main/kotlin/com/vrca/ChatboxScreen.kt
-package com.vrca
+package com.vrca.ui.screen
 
 import android.content.Context
 import android.content.Context.MODE_PRIVATE
@@ -127,8 +127,8 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.Query
 import com.vrca.vrchat.VrchatAuthManager
-import com.vrca.vrchat.DiscordRpcState
-import com.vrca.vrchat.DiscordRpcStatus
+import com.vrca.discord.DiscordRpcState
+import com.vrca.discord.DiscordRpcStatus
 import com.vrca.vrchat.VrchatPipelineState
 import com.vrca.vrchat.VrchatStatusPageData
 import kotlinx.coroutines.delay
@@ -292,7 +292,7 @@ private object DeviceId {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatboxScreen(
-    chatboxViewModel: com.vrca.ui.ChatboxViewModel
+    chatboxViewModel: com.vrca.ui.viewmodel.ChatboxViewModel
 ) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -996,7 +996,7 @@ private fun SectionCard(
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun HomePage(
-    vm: com.vrca.ui.ChatboxViewModel,
+    vm: com.vrca.ui.viewmodel.ChatboxViewModel,
     snackbarHostState: SnackbarHostState,
     onOpenSettings: () -> Unit,
     announcements: List<AnnouncementUi>,
@@ -1456,7 +1456,7 @@ private fun TutorialStep(
    ========================= */
 
 @Composable
-private fun AutomationsPage(vm: com.vrca.ui.ChatboxViewModel, isBanned: Boolean) {
+private fun AutomationsPage(vm: com.vrca.ui.viewmodel.ChatboxViewModel, isBanned: Boolean) {
     val scope = rememberCoroutineScope()
     var tab by rememberSaveable { mutableStateOf(ChatboxAutomationsTab.Pinned) }
 
@@ -1768,7 +1768,7 @@ private fun AutomationsPage(vm: com.vrca.ui.ChatboxViewModel, isBanned: Boolean)
 
 @Composable
 private fun NowPlayingPage(
-    vm: com.vrca.ui.ChatboxViewModel,
+    vm: com.vrca.ui.viewmodel.ChatboxViewModel,
     isBanned: Boolean,
     onPersistSpotifyEnabled: (Boolean) -> Unit,
     onPersistSpotifyDemo: (Boolean) -> Unit,
@@ -1869,7 +1869,7 @@ private fun NowPlayingPage(
 
 @Composable
 private fun SettingsPage(
-    vm: com.vrca.ui.ChatboxViewModel,
+    vm: com.vrca.ui.viewmodel.ChatboxViewModel,
     lastFirebaseIssue: String?,
     moderationError: String?
 ) {
@@ -2224,7 +2224,7 @@ private fun VrchatStatusBanner() {
 
 @Composable
 private fun VrchatStatusPage(
-    vm: com.vrca.ui.ChatboxViewModel,
+    vm: com.vrca.ui.viewmodel.ChatboxViewModel,
     onOpenLogin: () -> Unit
 ) {
     val ctx = LocalContext.current
@@ -2474,12 +2474,12 @@ private fun VrchatStatusPage(
                     } else {
                         scope.launch {
                             repo.saveDiscordRpcEnabled(enabled)
-                            val svcIntent = Intent(ctx, com.vrca.vrchat.DiscordRpcService::class.java)
+                            val svcIntent = Intent(ctx, com.vrca.discord.DiscordRpcService::class.java)
                             if (enabled) {
-                                svcIntent.action = com.vrca.vrchat.DiscordRpcService.ACTION_START
+                                svcIntent.action = com.vrca.discord.DiscordRpcService.ACTION_START
                                 ctx.startForegroundService(svcIntent)
                             } else {
-                                svcIntent.action = com.vrca.vrchat.DiscordRpcService.ACTION_STOP
+                                svcIntent.action = com.vrca.discord.DiscordRpcService.ACTION_STOP
                                 ctx.startService(svcIntent)
                             }
                         }
@@ -2490,8 +2490,8 @@ private fun VrchatStatusPage(
                         repo.saveDiscordRpcEnabled(false)
                         repo.saveDiscordSessionSeeded(false)
                         android.webkit.CookieManager.getInstance().removeAllCookies(null)
-                        val svcIntent = Intent(ctx, com.vrca.vrchat.DiscordRpcService::class.java)
-                        svcIntent.action = com.vrca.vrchat.DiscordRpcService.ACTION_STOP
+                        val svcIntent = Intent(ctx, com.vrca.discord.DiscordRpcService::class.java)
+                        svcIntent.action = com.vrca.discord.DiscordRpcService.ACTION_STOP
                         ctx.startService(svcIntent)
                     }
                 }, modifier = Modifier.fillMaxWidth()) {
@@ -2571,8 +2571,8 @@ private fun VrchatStatusPage(
                                 showRiskConsent = false
                                 if (discordSeeded) {
                                     repo.saveDiscordRpcEnabled(true)
-                                    val svcIntent = Intent(ctx, com.vrca.vrchat.DiscordRpcService::class.java)
-                                    svcIntent.action = com.vrca.vrchat.DiscordRpcService.ACTION_START
+                                    val svcIntent = Intent(ctx, com.vrca.discord.DiscordRpcService::class.java)
+                                    svcIntent.action = com.vrca.discord.DiscordRpcService.ACTION_START
                                     ctx.startForegroundService(svcIntent)
                                 } else {
                                     showDiscordLogin = true
@@ -2599,7 +2599,7 @@ private fun VrchatStatusPage(
                 confirmButton = {},
                 text = {
                     Box(Modifier.fillMaxWidth().height(500.dp)) {
-                        com.vrca.vrchat.DiscordLoginWebView(
+                        com.vrca.discord.DiscordLoginWebView(
                             onLoginComplete = {
                                 scope.launch {
                                     repo.saveDiscordSessionSeeded(true)

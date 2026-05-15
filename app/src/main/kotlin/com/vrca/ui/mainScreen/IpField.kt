@@ -17,7 +17,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import com.vrca.ui.ChatboxViewModel
+import com.vrca.ui.viewmodel.ChatboxViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
