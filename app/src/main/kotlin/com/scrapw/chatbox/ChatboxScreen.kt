@@ -1394,18 +1394,6 @@ private fun HomePage(
     }
 }
 
-@Composable
-private fun ToggleRow(
-    label: String,
-    checked: Boolean,
-    enabled: Boolean = true,
-    onCheckedChange: (Boolean) -> Unit
-) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label)
-        Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
-    }
-}
 
 @Composable
 private fun TutorialStep(

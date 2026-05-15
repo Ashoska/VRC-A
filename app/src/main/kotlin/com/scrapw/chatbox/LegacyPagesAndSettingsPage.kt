@@ -372,6 +372,7 @@ private fun HomePage(vm: ChatboxViewModel) {
 internal fun ToggleRow(
     label: String,
     checked: Boolean,
+    enabled: Boolean = true,
     onCheckedChange: (Boolean) -> Unit,
     description: String? = null
 ) {
@@ -386,7 +387,7 @@ internal fun ToggleRow(
                 )
             }
         }
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
     }
 }
 
