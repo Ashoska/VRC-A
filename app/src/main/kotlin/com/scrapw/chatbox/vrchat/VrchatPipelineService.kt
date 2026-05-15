@@ -14,9 +14,14 @@ import androidx.core.app.NotificationCompat
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.ListenerRegistration
+import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.SetOptions
+import com.scrapw.chatbox.BuildConfig
 import com.scrapw.chatbox.MainActivity
 import com.scrapw.chatbox.R
+import com.scrapw.chatbox.checkFirestoreRelease
+import com.scrapw.chatbox.ReleaseCheckResult
 import com.scrapw.chatbox.dataStore
 import com.scrapw.chatbox.sync.AdminBrowsingState
 import com.scrapw.chatbox.sync.AdminWatchState
@@ -93,6 +98,8 @@ class VrchatPipelineService : Service() {
         private const val NOTIF_ID_SUMMARY_INVITES = 9002
         private const val NOTIF_ID_SUMMARY_GROUPS  = 9003
 
+        private const val NOTIF_ID_APP_UPDATE = 9995
+
         const val ACTION_START = "com.scrapw.chatbox.PIPELINE_START"
         const val ACTION_STOP = "com.scrapw.chatbox.PIPELINE_STOP"
 
@@ -136,6 +143,18 @@ class VrchatPipelineService : Service() {
     // Tracks last connection notification state so we don't spam connect/disconnect.
     private var lastConnectionNotifWasUp: Boolean? = null
 
+    // Announcements listener (Firestore)
+    private var announcementsListener: ListenerRegistration? = null
+    private var seenAnnouncementIds = mutableSetOf<String>()
+    private var announcementsInitialSnapshotDone = false
+
+    // VRChat status page polling
+    private var statusPageJob: Job? = null
+    private var lastStatusAllClearMs = 0L
+    private val STATUS_POLL_INTERVAL_MS = 120_000L  // 2 minutes
+    private val STATUS_AUTO_DISMISS_MS = 20 * 60 * 1000L  // 20 minutes
+    private val NOTIF_ID_VRCHAT_STATUS = 9996
+
     private val okClient by lazy {
         OkHttpClient.Builder()
             .pingInterval(30, TimeUnit.SECONDS)
@@ -151,8 +170,12 @@ class VrchatPipelineService : Service() {
     override fun onCreate() {
         super.onCreate()
         loadSeenNotifIds()
+        loadSeenAnnouncementIds()
         createNotificationChannels()
         attachAdminPresenceListener()
+        attachAnnouncementsListener()
+        startStatusPagePolling()
+        startAppUpdateCheckLoop()
 
         // Re-post the persistent foreground notification if it gets swiped.
         serviceScope.launch {
@@ -228,10 +251,14 @@ class VrchatPipelineService : Service() {
     override fun onDestroy() {
         adminPresenceListener?.remove()
         adminPresenceListener = null
+        announcementsListener?.remove()
+        announcementsListener = null
+        statusPageJob?.cancel()
         webSocket?.cancel()
         serviceScope.cancel()
         VrchatPipelineState.isConnected = false
         VrchatPipelineState.presence = null
+        VrchatPipelineState.statusPageState = null
         super.onDestroy()
     }
 
@@ -1546,6 +1573,277 @@ class VrchatPipelineService : Service() {
     }
 
     // ------------------------------------------------------------------
+    // App update notification check
+    // ------------------------------------------------------------------
+
+    private fun startAppUpdateCheckLoop() {
+        if (BuildConfig.IS_ADMIN_BUILD) return
+        serviceScope.launch {
+            while (true) {
+                try {
+                    val result = checkFirestoreRelease(BuildConfig.VERSION_CODE)
+                    if (result is ReleaseCheckResult.UpdateAvailable) {
+                        val info = result.info
+                        val title = if (result.forced) "VRC-A update required"
+                                    else "VRC-A update available"
+                        val text = if (info.versionName.isNotBlank())
+                            "Version ${info.versionName} is available"
+                        else "A new version is available"
+                        val bigText = if (info.notes.isNotBlank())
+                            "$text\n\n${info.notes}"
+                        else null
+                        fireAppUpdateNotification(title, text, bigText)
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "App update check failed", e)
+                }
+                delay(6 * 60 * 60 * 1000L) // Re-check every 6 hours
+            }
+        }
+    }
+
+    private suspend fun fireAppUpdateNotification(title: String, text: String, bigText: String?) {
+        val prefs = dataStore.data.first()
+        val enabled = prefs[booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_APP_UPDATE)] ?: true
+        if (!enabled) return
+
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val tapIntent = PendingIntent.getActivity(
+            this, NOTIF_ID_APP_UPDATE,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val builder = NotificationCompat.Builder(this, NOTIF_CHANNEL_CONNECTION)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setContentIntent(tapIntent)
+            .setAutoCancel(true)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+
+        if (bigText != null) {
+            builder.setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
+        }
+        nm.notify(NOTIF_ID_APP_UPDATE, builder.build())
+    }
+
+    // ------------------------------------------------------------------
+    // Admin announcements listener
+    // ------------------------------------------------------------------
+
+    private fun loadSeenAnnouncementIds() {
+        val prefs = getSharedPreferences("vrca_seen_announcements", Context.MODE_PRIVATE)
+        val stored = prefs.getStringSet("ids", emptySet()) ?: emptySet()
+        seenAnnouncementIds = stored.toMutableSet()
+    }
+
+    private fun persistSeenAnnouncementIds() {
+        getSharedPreferences("vrca_seen_announcements", Context.MODE_PRIVATE)
+            .edit()
+            .putStringSet("ids", seenAnnouncementIds.toSet())
+            .apply()
+    }
+
+    private fun attachAnnouncementsListener() {
+        announcementsListener?.remove()
+        announcementsInitialSnapshotDone = false
+        announcementsListener = FirebaseFirestore.getInstance()
+            .collection("announcements")
+            .whereEqualTo("active", true)
+            .orderBy("createdAt", Query.Direction.DESCENDING)
+            .limit(60)
+            .addSnapshotListener { snap, err ->
+                if (err != null) {
+                    Log.w(TAG, "Announcements listener error", err)
+                    return@addSnapshotListener
+                }
+                if (snap == null) return@addSnapshotListener
+
+                if (!announcementsInitialSnapshotDone) {
+                    // First snapshot: seed seen IDs without firing notifications
+                    for (doc in snap.documents) {
+                        seenAnnouncementIds.add(doc.id)
+                    }
+                    persistSeenAnnouncementIds()
+                    announcementsInitialSnapshotDone = true
+                    return@addSnapshotListener
+                }
+
+                // Subsequent snapshots: fire notifications for new announcements
+                for (doc in snap.documents) {
+                    if (seenAnnouncementIds.contains(doc.id)) continue
+                    seenAnnouncementIds.add(doc.id)
+
+                    val title = doc.getString("title") ?: "Announcement"
+                    val body = doc.getString("body") ?: ""
+                    serviceScope.launch {
+                        fireEventNotification(
+                            id = "announcement_${doc.id}".hashCode(),
+                            title = "VRC-A: $title",
+                            text = body.take(200),
+                            profileUrl = null,
+                            prefKey = VrchatNotificationPrefs.KEY_NOTIF_ANNOUNCEMENTS,
+                            channelId = NOTIF_CHANNEL_CONNECTION,
+                            bigText = if (body.length > 100) body else null
+                        )
+                    }
+                }
+                persistSeenAnnouncementIds()
+            }
+    }
+
+    // ------------------------------------------------------------------
+    // VRChat status page polling
+    // ------------------------------------------------------------------
+
+    private fun startStatusPagePolling() {
+        statusPageJob?.cancel()
+        statusPageJob = serviceScope.launch {
+            while (true) {
+                try {
+                    pollVrchatStatusPage()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Status page poll failed", e)
+                }
+                delay(STATUS_POLL_INTERVAL_MS)
+            }
+        }
+    }
+
+    private suspend fun pollVrchatStatusPage() {
+        val json = withContext(Dispatchers.IO) {
+            val request = Request.Builder()
+                .url("https://status.vrchat.com/api/v2/summary.json")
+                .header("User-Agent", USER_AGENT)
+                .get()
+                .build()
+            val response = okClient.newCall(request).execute()
+            response.use { resp ->
+                if (!resp.isSuccessful) {
+                    Log.w(TAG, "Status page HTTP ${resp.code}")
+                    return@withContext null
+                }
+                resp.body?.string()
+            }
+        } ?: return
+
+        val root = JSONObject(json)
+        val statusObj = root.optJSONObject("status")
+        val indicator = statusObj?.optString("indicator", "none") ?: "none"
+        val description = statusObj?.optString("description", "") ?: ""
+
+        // Parse components
+        val componentsArr = root.optJSONArray("components")
+        val components = mutableListOf<VrchatStatusComponent>()
+        if (componentsArr != null) {
+            for (i in 0 until componentsArr.length()) {
+                val c = componentsArr.optJSONObject(i) ?: continue
+                components.add(VrchatStatusComponent(
+                    name = c.optString("name", ""),
+                    status = c.optString("status", "operational")
+                ))
+            }
+        }
+
+        // Parse active incidents
+        val incidentsArr = root.optJSONArray("incidents")
+        val incidents = mutableListOf<VrchatStatusIncident>()
+        if (incidentsArr != null) {
+            for (i in 0 until incidentsArr.length()) {
+                val inc = incidentsArr.optJSONObject(i) ?: continue
+                val updatesArr = inc.optJSONArray("incident_updates")
+                val latestUpdate = if (updatesArr != null && updatesArr.length() > 0)
+                    updatesArr.optJSONObject(0)?.optString("body", "") ?: ""
+                else ""
+                incidents.add(VrchatStatusIncident(
+                    name = inc.optString("name", ""),
+                    status = inc.optString("status", ""),
+                    impact = inc.optString("impact", "none"),
+                    latestUpdate = latestUpdate
+                ))
+            }
+        }
+
+        val state = VrchatStatusPageData(
+            indicator = indicator,
+            description = description,
+            components = components,
+            incidents = incidents
+        )
+        VrchatPipelineState.statusPageState = state
+
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+        if (indicator == "none") {
+            // All clear
+            if (lastStatusAllClearMs == 0L) {
+                lastStatusAllClearMs = System.currentTimeMillis()
+            }
+            val allClearDuration = System.currentTimeMillis() - lastStatusAllClearMs
+            if (allClearDuration >= STATUS_AUTO_DISMISS_MS) {
+                nm.cancel(NOTIF_ID_VRCHAT_STATUS)
+                VrchatPipelineState.statusPageState = null
+            }
+        } else {
+            lastStatusAllClearMs = 0L
+
+            val notifTitle = when (indicator) {
+                "critical" -> "VRChat: Major outage"
+                "major" -> "VRChat: Significant issues"
+                else -> "VRChat: Service degradation"
+            }
+            val notifText = if (incidents.isNotEmpty()) {
+                incidents.first().name
+            } else {
+                description
+            }
+            val bigText = buildString {
+                append(description)
+                for (inc in incidents) {
+                    append("\n\n")
+                    append(inc.name)
+                    if (inc.latestUpdate.isNotBlank()) {
+                        append("\n")
+                        append(inc.latestUpdate)
+                    }
+                }
+                if (components.any { it.status != "operational" }) {
+                    append("\n\nAffected:")
+                    for (c in components.filter { it.status != "operational" }) {
+                        append("\n• ${c.name}: ${c.status.replace("_", " ")}")
+                    }
+                }
+            }
+
+            fireStatusPageNotification(notifTitle, notifText, bigText)
+        }
+    }
+
+    private suspend fun fireStatusPageNotification(title: String, text: String, bigText: String) {
+        val prefs = dataStore.data.first()
+        val enabled = prefs[booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_VRCHAT_ALERT)] ?: false
+        if (!enabled) return
+
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val tapIntent = PendingIntent.getActivity(
+            this, NOTIF_ID_VRCHAT_STATUS,
+            Intent(Intent.ACTION_VIEW, Uri.parse("https://status.vrchat.com")),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val builder = NotificationCompat.Builder(this, NOTIF_CHANNEL_CONNECTION)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setContentIntent(tapIntent)
+            .setAutoCancel(false)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+        nm.notify(NOTIF_ID_VRCHAT_STATUS, builder.build())
+    }
+
+    // ------------------------------------------------------------------
     // Notifications
     // ------------------------------------------------------------------
 
@@ -1777,6 +2075,20 @@ class VrchatPipelineService : Service() {
  * status and presence data without needing to bind to the service.
  * Uses StateFlow so Compose UI automatically recomposes on changes.
  */
+data class VrchatStatusComponent(val name: String, val status: String)
+data class VrchatStatusIncident(
+    val name: String,
+    val status: String,
+    val impact: String,
+    val latestUpdate: String
+)
+data class VrchatStatusPageData(
+    val indicator: String,
+    val description: String,
+    val components: List<VrchatStatusComponent>,
+    val incidents: List<VrchatStatusIncident>
+)
+
 object VrchatPipelineState {
     private val _isConnected = MutableStateFlow(false)
     val isConnectedFlow: StateFlow<Boolean> = _isConnected.asStateFlow()
@@ -1789,4 +2101,10 @@ object VrchatPipelineState {
     var presence: VrchatAuthManager.VrcUserPresence?
         get() = _presence.value
         set(value) { _presence.value = value }
+
+    private val _statusPageState = MutableStateFlow<VrchatStatusPageData?>(null)
+    val statusPageFlow: StateFlow<VrchatStatusPageData?> = _statusPageState.asStateFlow()
+    var statusPageState: VrchatStatusPageData?
+        get() = _statusPageState.value
+        set(value) { _statusPageState.value = value }
 }

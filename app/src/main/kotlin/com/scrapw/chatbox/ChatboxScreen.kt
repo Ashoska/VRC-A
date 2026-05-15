@@ -130,6 +130,7 @@ import com.scrapw.chatbox.vrchat.VrchatAuthManager
 import com.scrapw.chatbox.vrchat.DiscordRpcState
 import com.scrapw.chatbox.vrchat.DiscordRpcStatus
 import com.scrapw.chatbox.vrchat.VrchatPipelineState
+import com.scrapw.chatbox.vrchat.VrchatStatusPageData
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
@@ -1050,6 +1051,9 @@ private fun HomePage(
                 }
             }
         }
+
+        // VRChat server status warning
+        VrchatStatusBanner()
 
         if (moderation.warned && !(moderation.banned || moderation.deviceBanned)) {
             SectionCard(
@@ -2129,6 +2133,96 @@ private fun SetupIncompleteBanner(
    ========================= */
 
 @Composable
+private fun VrchatStatusBanner() {
+    val statusData by VrchatPipelineState.statusPageFlow.collectAsState()
+    val data = statusData ?: return
+
+    if (data.indicator == "none") return
+
+    val bannerColor = when (data.indicator) {
+        "critical" -> MaterialTheme.colorScheme.error
+        "major" -> MaterialTheme.colorScheme.error
+        else -> MaterialTheme.colorScheme.tertiary
+    }
+    val containerColor = when (data.indicator) {
+        "critical" -> MaterialTheme.colorScheme.errorContainer
+        "major" -> MaterialTheme.colorScheme.errorContainer
+        else -> MaterialTheme.colorScheme.tertiaryContainer
+    }
+    val onContainerColor = when (data.indicator) {
+        "critical" -> MaterialTheme.colorScheme.onErrorContainer
+        "major" -> MaterialTheme.colorScheme.onErrorContainer
+        else -> MaterialTheme.colorScheme.onTertiaryContainer
+    }
+
+    val ctx = LocalContext.current
+
+    Card(colors = CardDefaults.cardColors(containerColor = containerColor)) {
+        Column(
+            Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Canvas(Modifier.size(10.dp)) {
+                    drawCircle(color = bannerColor)
+                }
+                Text(
+                    data.description.ifBlank {
+                        when (data.indicator) {
+                            "critical" -> "Major System Outage"
+                            "major" -> "Significant System Issues"
+                            else -> "Service Degraded"
+                        }
+                    },
+                    style = MaterialTheme.typography.titleSmall,
+                    color = onContainerColor
+                )
+            }
+
+            // Show affected components
+            val affected = data.components.filter { it.status != "operational" }
+            if (affected.isNotEmpty()) {
+                for (c in affected) {
+                    Text(
+                        "${c.name}: ${c.status.replace("_", " ")}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = onContainerColor
+                    )
+                }
+            }
+
+            // Show active incidents
+            if (data.incidents.isNotEmpty()) {
+                for (inc in data.incidents.take(2)) {
+                    Text(inc.name, style = MaterialTheme.typography.bodySmall, color = onContainerColor)
+                    if (inc.latestUpdate.isNotBlank()) {
+                        Text(
+                            inc.latestUpdate,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = onContainerColor.copy(alpha = 0.7f)
+                        )
+                    }
+                }
+            }
+
+            Text(
+                "View VRChat Status Page",
+                style = MaterialTheme.typography.labelSmall,
+                color = bannerColor,
+                modifier = Modifier.clickable {
+                    val intent = Intent(Intent.ACTION_VIEW,
+                        Uri.parse("https://status.vrchat.com"))
+                    ctx.startActivity(intent)
+                }
+            )
+        }
+    }
+}
+
+@Composable
 private fun VrchatStatusPage(
     vm: com.scrapw.chatbox.ui.ChatboxViewModel,
     onOpenLogin: () -> Unit
@@ -2144,6 +2238,8 @@ private fun VrchatStatusPage(
     var showLogoutDialog by remember { mutableStateOf(false) }
 
     PageContainer {
+        VrchatStatusBanner()
+
         // Connection status header
         ElevatedCard {
             Row(
