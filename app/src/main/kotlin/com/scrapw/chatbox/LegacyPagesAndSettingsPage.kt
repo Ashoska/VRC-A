@@ -372,10 +372,20 @@ private fun HomePage(vm: ChatboxViewModel) {
 private fun ToggleRow(
     label: String,
     checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
+    onCheckedChange: (Boolean) -> Unit,
+    description: String? = null
 ) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label)
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f).padding(end = 8.dp)) {
+            Text(label)
+            if (description != null) {
+                Text(
+                    description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
         Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
@@ -1153,18 +1163,18 @@ fun NotificationToggleSection(vm: ChatboxViewModel) {
             exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 3 })
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                ToggleRow("Friend request received", friendRequest) {
-                    scope.launch { repo.saveNotifFriendRequest(it) }
-                }
-                ToggleRow("New friend added", newFriend) {
-                    scope.launch { repo.saveNotifNewFriend(it) }
-                }
-                ToggleRow("Friend removed", unfriend) {
-                    scope.launch { repo.saveNotifUnfriend(it) }
-                }
-                ToggleRow("VRChat in-app messages", vrchatMessage) {
-                    scope.launch { repo.saveNotifVrchatMessage(it) }
-                }
+                ToggleRow("Friend request received", friendRequest,
+                    { scope.launch { repo.saveNotifFriendRequest(it) } },
+                    "When someone sends you a friend request")
+                ToggleRow("New friend added", newFriend,
+                    { scope.launch { repo.saveNotifNewFriend(it) } },
+                    "When someone accepts your request or you accept theirs")
+                ToggleRow("Friend removed", unfriend,
+                    { scope.launch { repo.saveNotifUnfriend(it) } },
+                    "When someone is no longer on your friends list")
+                ToggleRow("VRChat in-app messages", vrchatMessage,
+                    { scope.launch { repo.saveNotifVrchatMessage(it) } },
+                    "Direct messages sent through VRChat")
             }
         }
     }
@@ -1188,40 +1198,40 @@ fun NotificationToggleSection(vm: ChatboxViewModel) {
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 SubSectionLabel("Presence", topPadding = 0.dp)
-                ToggleRow("Friend came online", friendOnline) {
-                    scope.launch { repo.saveNotifFriendOnline(it) }
-                }
-                ToggleRow("Friend went offline", friendOffline) {
-                    scope.launch { repo.saveNotifFriendOffline(it) }
-                }
-                ToggleRow("Friend on website (not in VR)", friendActive) {
-                    scope.launch { repo.saveNotifFriendActive(it) }
-                }
-                ToggleRow("Friend changed worlds", friendLocation) {
-                    scope.launch { repo.saveNotifFriendLocation(it) }
-                }
+                ToggleRow("Friend came online", friendOnline,
+                    { scope.launch { repo.saveNotifFriendOnline(it) } },
+                    "When a friend logs into VRChat")
+                ToggleRow("Friend went offline", friendOffline,
+                    { scope.launch { repo.saveNotifFriendOffline(it) } },
+                    "When a friend leaves VRChat (10-min delay)")
+                ToggleRow("Friend on website (not in VR)", friendActive,
+                    { scope.launch { repo.saveNotifFriendActive(it) } },
+                    "When a friend is browsing the VRChat website")
+                ToggleRow("Friend changed worlds", friendLocation,
+                    { scope.launch { repo.saveNotifFriendLocation(it) } },
+                    "When a friend joins a different public world")
 
                 SubSectionLabel("Profile changes")
-                ToggleRow("Friend changed presence", friendStatus) {
-                    scope.launch { repo.saveNotifFriendStatus(it) }
-                }
-                ToggleRow("Friend changed avatar", friendAvatar) {
-                    scope.launch { repo.saveNotifFriendAvatar(it) }
-                }
-                ToggleRow("Friend updated bio", friendBio) {
-                    scope.launch { repo.saveNotifFriendBio(it) }
-                }
-                ToggleRow("Friend renamed themselves", friendDisplayName) {
-                    scope.launch { repo.saveNotifFriendDisplayName(it) }
-                }
-                ToggleRow("Friend trust rank changed", friendRank) {
-                    scope.launch { repo.saveNotifFriendRank(it) }
-                }
+                ToggleRow("Friend changed presence", friendStatus,
+                    { scope.launch { repo.saveNotifFriendStatus(it) } },
+                    "Online, Join Me, Ask Me, or Do Not Disturb")
+                ToggleRow("Friend changed avatar", friendAvatar,
+                    { scope.launch { repo.saveNotifFriendAvatar(it) } },
+                    "When a friend switches to a different avatar")
+                ToggleRow("Friend updated bio", friendBio,
+                    { scope.launch { repo.saveNotifFriendBio(it) } },
+                    "When a friend edits their profile bio")
+                ToggleRow("Friend renamed themselves", friendDisplayName,
+                    { scope.launch { repo.saveNotifFriendDisplayName(it) } },
+                    "When a friend changes their display name")
+                ToggleRow("Friend trust rank changed", friendRank,
+                    { scope.launch { repo.saveNotifFriendRank(it) } },
+                    "Known → Trusted, New User → Known, etc.")
 
                 SubSectionLabel("Alerts")
-                ToggleRow("Vote-to-kick warnings", voteToKick) {
-                    scope.launch { repo.saveNotifVoteToKick(it) }
-                }
+                ToggleRow("Vote-to-kick warnings", voteToKick,
+                    { scope.launch { repo.saveNotifVoteToKick(it) } },
+                    "When a vote-to-kick is started in your instance")
             }
         }
     }
@@ -1244,15 +1254,15 @@ fun NotificationToggleSection(vm: ChatboxViewModel) {
             exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 3 })
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                ToggleRow("World invites", invite) {
-                    scope.launch { repo.saveNotifInvite(it) }
-                }
-                ToggleRow("Invite requests", inviteRequest) {
-                    scope.launch { repo.saveNotifInviteRequest(it) }
-                }
-                ToggleRow("Group invites", groupInvite) {
-                    scope.launch { repo.saveNotifGroupInvite(it) }
-                }
+                ToggleRow("World invites", invite,
+                    { scope.launch { repo.saveNotifInvite(it) } },
+                    "When someone invites you to a world")
+                ToggleRow("Invite requests", inviteRequest,
+                    { scope.launch { repo.saveNotifInviteRequest(it) } },
+                    "When someone asks for an invite to your instance")
+                ToggleRow("Group invites", groupInvite,
+                    { scope.launch { repo.saveNotifGroupInvite(it) } },
+                    "When you're invited to join a group")
             }
         }
     }
@@ -1276,26 +1286,26 @@ fun NotificationToggleSection(vm: ChatboxViewModel) {
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 SubSectionLabel("Updates", topPadding = 0.dp)
-                ToggleRow("Group announcements", groupAnnouncement) {
-                    scope.launch { repo.saveNotifGroupAnnouncement(it) }
-                }
-                ToggleRow("Queue ready", groupQueue) {
-                    scope.launch { repo.saveNotifGroupQueue(it) }
-                }
-                ToggleRow("New group instance opened", groupInstance) {
-                    scope.launch { repo.saveNotifGroupInstance(it) }
-                }
+                ToggleRow("Group announcements", groupAnnouncement,
+                    { scope.launch { repo.saveNotifGroupAnnouncement(it) } },
+                    "Posts from group owners and managers")
+                ToggleRow("Queue ready", groupQueue,
+                    { scope.launch { repo.saveNotifGroupQueue(it) } },
+                    "When your spot in a group instance queue opens")
+                ToggleRow("New group instance opened", groupInstance,
+                    { scope.launch { repo.saveNotifGroupInstance(it) } },
+                    "When a new joinable instance is created for a group")
 
                 SubSectionLabel("Management")
-                ToggleRow("Join requests (group managers)", groupJoinRequest) {
-                    scope.launch { repo.saveNotifGroupJoinRequest(it) }
-                }
-                ToggleRow("Group role / rank changes", groupRole) {
-                    scope.launch { repo.saveNotifGroupRole(it) }
-                }
-                ToggleRow("Other group activity", groupEvent) {
-                    scope.launch { repo.saveNotifGroupEvent(it) }
-                }
+                ToggleRow("Join requests (group managers)", groupJoinRequest,
+                    { scope.launch { repo.saveNotifGroupJoinRequest(it) } },
+                    "When someone wants to join a group you manage")
+                ToggleRow("Group role / rank changes", groupRole,
+                    { scope.launch { repo.saveNotifGroupRole(it) } },
+                    "When your role in a group is changed")
+                ToggleRow("Other group activity", groupEvent,
+                    { scope.launch { repo.saveNotifGroupEvent(it) } },
+                    "Catch-all for other group events")
             }
         }
     }
@@ -1319,26 +1329,26 @@ fun NotificationToggleSection(vm: ChatboxViewModel) {
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 SubSectionLabel("App", topPadding = 0.dp)
-                ToggleRow("New app version available", appUpdate) {
-                    scope.launch { repo.saveNotifAppUpdate(it) }
-                }
-                ToggleRow("Admin announcements", announcements) {
-                    scope.launch { repo.saveNotifAnnouncements(it) }
-                }
+                ToggleRow("New app version available", appUpdate,
+                    { scope.launch { repo.saveNotifAppUpdate(it) } },
+                    "When a new VRC-A update is available")
+                ToggleRow("Admin announcements", announcements,
+                    { scope.launch { repo.saveNotifAnnouncements(it) } },
+                    "Messages from the VRC-A developer")
 
                 SubSectionLabel("VRChat")
-                ToggleRow("VRChat connection status", connection) {
-                    scope.launch { repo.saveNotifConnection(it) }
-                }
-                ToggleRow("Sign-in required alerts", auth) {
-                    scope.launch { repo.saveNotifAuth(it) }
-                }
-                ToggleRow("VRChat server alerts", vrchatAlert) {
-                    scope.launch { repo.saveNotifVrchatAlert(it) }
-                }
-                ToggleRow("VRChat Plus / credit gifts", giftReceived) {
-                    scope.launch { repo.saveNotifGiftReceived(it) }
-                }
+                ToggleRow("VRChat connection status", connection,
+                    { scope.launch { repo.saveNotifConnection(it) } },
+                    "When VRChat monitoring connects or disconnects")
+                ToggleRow("Sign-in required alerts", auth,
+                    { scope.launch { repo.saveNotifAuth(it) } },
+                    "When your VRChat session expires and needs re-login")
+                ToggleRow("VRChat server alerts", vrchatAlert,
+                    { scope.launch { repo.saveNotifVrchatAlert(it) } },
+                    "Maintenance notices and other VRChat server alerts")
+                ToggleRow("VRChat Plus / credit gifts", giftReceived,
+                    { scope.launch { repo.saveNotifGiftReceived(it) } },
+                    "When someone sends you VRChat Plus or credits")
             }
         }
     }

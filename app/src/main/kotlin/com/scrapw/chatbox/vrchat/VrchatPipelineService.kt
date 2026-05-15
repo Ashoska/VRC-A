@@ -129,7 +129,9 @@ class VrchatPipelineService : Service() {
     private val lastFriendAvatarNotifMs = mutableMapOf<String, Long>()
     private val lastFriendStatusNotifMs = mutableMapOf<String, Long>()
     private val LOCATION_NOTIF_COOLDOWN_MS = 60_000L
+    private val WARMUP_MS = 30_000L
     private var pipelineConnectedAtMs = 0L
+    private val recentlyRelocated = mutableMapOf<String, Long>()
     private var presenceRefreshJob: Job? = null
     // Tracks last connection notification state so we don't spam connect/disconnect.
     private var lastConnectionNotifWasUp: Boolean? = null
@@ -214,7 +216,14 @@ class VrchatPipelineService : Service() {
         writeOfflineAndStopRpc()
         stopSelf()
         super.onTaskRemoved(rootIntent)
+        Thread {
+            Thread.sleep(10_000)
+            android.os.Process.killProcess(android.os.Process.myPid())
+        }.start()
     }
+
+    private fun isInWarmup(): Boolean =
+        pipelineConnectedAtMs > 0 && System.currentTimeMillis() - pipelineConnectedAtMs < WARMUP_MS
 
     override fun onDestroy() {
         adminPresenceListener?.remove()
@@ -569,30 +578,29 @@ class VrchatPipelineService : Service() {
                     val worldName = content.optJSONObject("world")?.optString("name").orEmpty()
                         .ifBlank { user?.optString("worldName").orEmpty() }
                         .ifBlank { user?.optJSONObject("world")?.optString("name").orEmpty() }
-                    val previous = friendsCache[userId]
-                    val newStatus = user?.optString("status") ?: previous?.status.orEmpty()
                     friendsCache[userId] = entryFromUserJson(user, displayName).copy(
                         location = location,
                         worldName = worldName
                     )
                     persistFriendsCache()
-                    val notifText = when {
-                        location == "traveling" -> "$displayName is traveling between worlds"
-                        location == "private" -> "$displayName is now online in a private instance"
-                        worldName.isNotBlank() -> "$displayName is now online in $worldName"
-                        else -> "$displayName is now online"
-                    }
                     pendingOffline.remove(userId)
-                    fireEventNotification(
-                        id = "online_$userId".hashCode(),
-                        title = "Friend online",
-                        text = notifText,
-                        profileUrl = "https://vrchat.com/home/user/$userId",
-                        prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_ONLINE,
-                        channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
-                        groupKey = GROUP_KEY_FRIENDS
-                    )
-                    maybeFireStatusChange(userId, displayName, previous?.status.orEmpty(), newStatus)
+                    if (!isInWarmup()) {
+                        val notifText = when {
+                            location == "traveling" -> "$displayName is traveling between worlds"
+                            location == "private" -> "$displayName is now online in a private instance"
+                            worldName.isNotBlank() -> "$displayName is now online in $worldName"
+                            else -> "$displayName is now online"
+                        }
+                        fireEventNotification(
+                            id = "online_$userId".hashCode(),
+                            title = "Friend online",
+                            text = notifText,
+                            profileUrl = "https://vrchat.com/home/user/$userId",
+                            prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_ONLINE,
+                            channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
+                            groupKey = GROUP_KEY_FRIENDS
+                        )
+                    }
                 }
 
                 "friend-active" -> {
@@ -606,15 +614,17 @@ class VrchatPipelineService : Service() {
                         worldName = previous?.worldName.orEmpty()
                     )
                     persistFriendsCache()
-                    fireEventNotification(
-                        id = "active_$userId".hashCode(),
-                        title = "Friend on the website",
-                        text = "$displayName is active on the VRChat website",
-                        profileUrl = "https://vrchat.com/home/user/$userId",
-                        prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_ACTIVE,
-                        channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
-                        groupKey = GROUP_KEY_FRIENDS
-                    )
+                    if (!isInWarmup()) {
+                        fireEventNotification(
+                            id = "active_$userId".hashCode(),
+                            title = "Friend on the website",
+                            text = "$displayName is active on the VRChat website",
+                            profileUrl = "https://vrchat.com/home/user/$userId",
+                            prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_ACTIVE,
+                            channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
+                            groupKey = GROUP_KEY_FRIENDS
+                        )
+                    }
                 }
 
                 "friend-offline" -> {
@@ -659,9 +669,9 @@ class VrchatPipelineService : Service() {
                         worldName = worldName
                     )
                     persistFriendsCache()
+                    recentlyRelocated[userId] = System.currentTimeMillis()
 
-                    // Fire location notification if world actually changed and is non-private.
-                    if (worldName.isNotBlank() && worldName != previousWorld &&
+                    if (!isInWarmup() && worldName.isNotBlank() && worldName != previousWorld &&
                         location.isNotBlank() && location != "private" && location != "traveling" && location != "offline") {
                         val now = System.currentTimeMillis()
                         val lastNotif = lastFriendLocationNotifMs[userId] ?: 0L
@@ -773,6 +783,19 @@ class VrchatPipelineService : Service() {
                     text = if (message.isNotBlank()) "$senderName: $message" else "$senderName sent you a message",
                     profileUrl = if (senderUserId.isNotBlank()) "https://vrchat.com/home/user/$senderUserId" else null,
                     prefKey = VrchatNotificationPrefs.KEY_NOTIF_VRCHAT_MESSAGE,
+                    channelId = NOTIF_CHANNEL_FRIEND_REQUESTS,
+                    groupKey = GROUP_KEY_SOCIAL,
+                    dedupId = notifId.ifBlank { null }
+                )
+            }
+            notifType == "gift" || notifType == "giftCredits" || notifType == "giftBundle" -> {
+                val detail = message.ifBlank { "You received a VRChat gift" }
+                fireEventNotification(
+                    id = "gift_${notifId.ifBlank { senderUserId }}".hashCode(),
+                    title = "Gift received",
+                    text = if (senderName != "someone") "$senderName sent you a gift: $detail" else detail,
+                    profileUrl = if (senderUserId.isNotBlank()) "https://vrchat.com/home/user/$senderUserId" else null,
+                    prefKey = VrchatNotificationPrefs.KEY_NOTIF_GIFT_RECEIVED,
                     channelId = NOTIF_CHANNEL_FRIEND_REQUESTS,
                     groupKey = GROUP_KEY_SOCIAL,
                     dedupId = notifId.ifBlank { null }
@@ -963,7 +986,6 @@ class VrchatPipelineService : Service() {
         val newRank = extractTrustRank(user).ifBlank { previous.trustRank }
         val newLocation = user.optString("location", previous.location)
 
-        // Update cache regardless of whether we notify.
         friendsCache[userId] = previous.copy(
             displayName = newDisplayName,
             status = newStatus,
@@ -974,7 +996,11 @@ class VrchatPipelineService : Service() {
         )
         persistFriendsCache()
 
-        // Display name change.
+        if (isInWarmup()) return
+
+        val locationChanged = newLocation != previous.location
+        val recentRelocation = (System.currentTimeMillis() - (recentlyRelocated[userId] ?: 0L)) < 15_000L
+
         if (newDisplayName != previous.displayName && previous.displayName.isNotBlank()) {
             fireEventNotification(
                 id = "name_$userId".hashCode(),
@@ -988,11 +1014,12 @@ class VrchatPipelineService : Service() {
             )
         }
 
-        // Status change.
-        maybeFireStatusChange(userId, newDisplayName, previous.status, newStatus)
+        if (!locationChanged) {
+            maybeFireStatusChange(userId, newDisplayName, previous.status, newStatus)
+        }
 
-        // Avatar change (throttled per friend).
-        if (newAvatar.isNotBlank() && newAvatar != previous.avatarThumb && previous.avatarThumb.isNotBlank() && newLocation == previous.location) {
+        if (newAvatar.isNotBlank() && newAvatar != previous.avatarThumb &&
+            previous.avatarThumb.isNotBlank() && !locationChanged && !recentRelocation) {
             val now = System.currentTimeMillis()
             val last = lastFriendAvatarNotifMs[userId] ?: 0L
             if (now - last >= LOCATION_NOTIF_COOLDOWN_MS) {
@@ -1009,7 +1036,6 @@ class VrchatPipelineService : Service() {
             }
         }
 
-        // Bio change.
         if (newBio.isNotBlank() && newBio != previous.bio && previous.bio.isNotBlank()) {
             fireEventNotification(
                 id = "bio_$userId".hashCode(),
@@ -1023,7 +1049,6 @@ class VrchatPipelineService : Service() {
             )
         }
 
-        // Trust rank change.
         if (newRank.isNotBlank() && newRank != previous.trustRank && previous.trustRank.isNotBlank()) {
             fireEventNotification(
                 id = "rank_$userId".hashCode(),

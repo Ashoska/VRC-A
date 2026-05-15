@@ -2617,72 +2617,63 @@ private suspend fun githubUploadAsset(
     onProgress: (Float) -> Unit
 ): String = withContext(Dispatchers.IO) {
     val encodedName = java.net.URLEncoder.encode(fileName, "UTF-8")
-    var uploadUrl = "https://uploads.github.com/repos/$owner/$repo/releases/$releaseId/assets?name=$encodedName"
+    var currentUrl = "https://uploads.github.com/repos/$owner/$repo/releases/$releaseId/assets?name=$encodedName"
+    var hops = 0
 
-    // Resolve redirects with a probe (no body) before uploading the APK.
-    // GitHub returns 307 redirects to S3 and HttpURLConnection can lose
-    // the Location header when the body has already been written.
-    for (hop in 0 until 5) {
-        val probe = URL(uploadUrl).openConnection() as HttpURLConnection
-        probe.instanceFollowRedirects = false
-        probe.requestMethod = "POST"
-        probe.setRequestProperty("Authorization", "Bearer $pat")
-        probe.setRequestProperty("Accept", "application/vnd.github+json")
-        probe.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
-        probe.setRequestProperty("Content-Type", "application/vnd.android.package-archive")
-        probe.setRequestProperty("Content-Length", "0")
-        probe.connectTimeout = 15_000
-        probe.readTimeout = 15_000
-        val code = try { probe.responseCode } catch (_: Throwable) { -1 }
-        if (code in listOf(301, 302, 303, 307, 308)) {
-            val location = probe.getHeaderField("Location")
-            probe.disconnect()
-            if (location.isNullOrBlank()) break
-            uploadUrl = if (location.startsWith("http")) location
-                        else URL(URL(uploadUrl), location).toString()
+    while (true) {
+        val conn = URL(currentUrl).openConnection() as HttpURLConnection
+        conn.instanceFollowRedirects = false
+        conn.requestMethod = "POST"
+        conn.setRequestProperty("Authorization", "Bearer $pat")
+        conn.setRequestProperty("Accept", "application/vnd.github+json")
+        conn.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
+        conn.setRequestProperty("Content-Type", "application/vnd.android.package-archive")
+        conn.setRequestProperty("Content-Length", apkFile.length().toString())
+        conn.doOutput = true
+        conn.connectTimeout = 15_000
+        conn.readTimeout = 300_000
+
+        val totalBytes = apkFile.length().toFloat()
+        var writtenBytes = 0L
+        val buf = ByteArray(64 * 1024)
+
+        conn.outputStream.use { out ->
+            apkFile.inputStream().use { inp ->
+                var n: Int
+                while (inp.read(buf).also { n = it } != -1) {
+                    out.write(buf, 0, n)
+                    writtenBytes += n
+                    if (totalBytes > 0f) onProgress(writtenBytes / totalBytes)
+                }
+                out.flush()
+            }
+        }
+
+        val code = conn.responseCode
+        if (code in listOf(301, 302, 303, 307, 308) && hops < 5) {
+            val location = conn.getHeaderField("Location")
+            conn.disconnect()
+            if (location.isNullOrBlank()) {
+                throw Exception("GitHub upload redirect ($code) without Location header")
+            }
+            currentUrl = if (location.startsWith("http")) location
+                         else URL(URL(currentUrl), location).toString()
+            hops++
+            onProgress(0f)
             continue
         }
-        probe.disconnect()
-        break
-    }
 
-    val conn = URL(uploadUrl).openConnection() as HttpURLConnection
-    conn.instanceFollowRedirects = true
-    conn.requestMethod = "POST"
-    conn.setRequestProperty("Authorization", "Bearer $pat")
-    conn.setRequestProperty("Accept", "application/vnd.github+json")
-    conn.setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
-    conn.setRequestProperty("Content-Type", "application/vnd.android.package-archive")
-    conn.setRequestProperty("Content-Length", apkFile.length().toString())
-    conn.doOutput = true
-    conn.connectTimeout = 15_000
-    conn.readTimeout = 300_000
+        val responseBody = (if (code in 200..299) conn.inputStream else conn.errorStream)
+            ?.bufferedReader()?.readText().orEmpty()
 
-    val totalBytes = apkFile.length().toFloat()
-    var writtenBytes = 0L
-    val buf = ByteArray(64 * 1024)
-
-    conn.outputStream.use { out ->
-        apkFile.inputStream().use { inp ->
-            var n: Int
-            while (inp.read(buf).also { n = it } != -1) {
-                out.write(buf, 0, n)
-                writtenBytes += n
-                if (totalBytes > 0f) onProgress(writtenBytes / totalBytes)
-            }
-            out.flush()
+        if (code !in 200..299) {
+            throw Exception("GitHub upload asset failed ($code): $responseBody")
         }
+
+        return@withContext JSONObject(responseBody).getString("browser_download_url")
     }
-
-    val code = conn.responseCode
-    val responseBody = (if (code in 200..299) conn.inputStream else conn.errorStream)
-        ?.bufferedReader()?.readText().orEmpty()
-
-    if (code !in 200..299) {
-        throw Exception("GitHub upload asset failed ($code): $responseBody")
-    }
-
-    return@withContext JSONObject(responseBody).getString("browser_download_url")
+    @Suppress("UNREACHABLE_CODE")
+    throw Exception("GitHub upload: too many redirects")
 }
 
 // ---- Composable ----
