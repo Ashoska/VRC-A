@@ -2,6 +2,7 @@
 package com.vrca.admin
 
 import android.content.Context
+import com.vrca.BuildConfig
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.clickable

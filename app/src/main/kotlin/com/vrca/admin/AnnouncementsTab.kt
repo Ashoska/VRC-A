@@ -1,5 +1,6 @@
 package com.vrca.admin
 
+import com.vrca.BuildConfig
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row

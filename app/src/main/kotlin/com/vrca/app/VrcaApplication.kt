@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import android.os.Build
 import android.os.Process
+import com.vrca.BuildConfig
 import com.vrca.data.UserPreferencesRepository
 import java.io.PrintWriter
 import java.io.StringWriter

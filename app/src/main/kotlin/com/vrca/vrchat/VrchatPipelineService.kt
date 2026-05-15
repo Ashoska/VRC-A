@@ -20,6 +20,9 @@ import com.google.firebase.firestore.SetOptions
 import com.vrca.BuildConfig
 import com.vrca.app.MainActivity
 import com.vrca.R
+import com.vrca.discord.DiscordRpcService
+import com.vrca.discord.DiscordRpcState
+import com.vrca.discord.DiscordRpcStatus
 import com.vrca.update.checkFirestoreRelease
 import com.vrca.update.ReleaseCheckResult
 import com.vrca.data.dataStore

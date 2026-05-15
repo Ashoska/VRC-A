@@ -17,6 +17,8 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.vrca.R
+import com.vrca.vrchat.VrchatAuthManager
+import com.vrca.vrchat.VrchatPipelineState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job

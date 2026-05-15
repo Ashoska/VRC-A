@@ -37,8 +37,13 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
+import com.vrca.BuildConfig
 import com.vrca.ui.screen.VrcaScreen
 import com.vrca.ui.viewmodel.VrcaViewModel
+import com.vrca.update.ReleaseCheckResult
+import com.vrca.update.ReleaseInfo
+import com.vrca.update.checkFirestoreRelease
+import com.vrca.update.checkTargetedUpdate
 import com.vrca.vrchat.VrchatAuthManager
 import com.vrca.vrchat.VrchatBanChecker
 import com.vrca.vrchat.VrchatLoginScreen
