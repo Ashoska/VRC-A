@@ -10,11 +10,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
-import com.vrca.ui.viewmodel.ChatboxViewModel
+import com.vrca.ui.viewmodel.VrcaViewModel
 
 
 @Composable
-fun MessengerOverlay(chatboxViewModel: ChatboxViewModel, collapse: () -> Unit) {
+fun MessengerOverlay(chatboxViewModel: VrcaViewModel, collapse: () -> Unit) {
     Surface(
         color = MaterialTheme.colorScheme.surfaceColorAtElevation(2.dp).copy(alpha = 0.9f),
         modifier = Modifier.clip(RoundedCornerShape(4.dp))

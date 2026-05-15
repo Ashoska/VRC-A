@@ -1,4 +1,3 @@
-// app/src/main/kotlin/com/vrca/ui/ChatboxViewModel.kt
 package com.vrca.ui.viewmodel
 
 import android.content.Context
@@ -30,12 +29,12 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
 import com.vrca.BuildConfig
-import com.vrca.app.ChatboxApplication
+import com.vrca.app.VrcaApplication
 import com.vrca.nowplaying.NowPlayingState
 import com.vrca.data.UserPreferencesRepository
-import com.vrca.osc.ChatboxOSC
-import com.vrca.ui.mainScreen.ConversationUiState
-import com.vrca.ui.mainScreen.Message
+import com.vrca.osc.VrcaOsc
+import com.vrca.ui.conversation.ConversationUiState
+import com.vrca.ui.conversation.Message
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
@@ -55,7 +54,7 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * ChatboxViewModel (DEVICE-FIRST) \u2014 RESTORED + RULES-COMPAT
+ * VrcaViewModel (DEVICE-FIRST) \u2014 RESTORED + RULES-COMPAT
  *
  * \u2705 Canonical doc:
  *   users/{deviceHash}
@@ -73,14 +72,14 @@ import kotlin.math.min
  * - Optional: listens to bannedDevices/{deviceHash} (legacy device ban doc)
  * - When banned, ALL OSC sends are blocked (including typing, realtime, AFK/Cycle/Music, manual send).
  */
-class ChatboxViewModel(
-    private val app: ChatboxApplication,
+class VrcaViewModel(
+    private val app: VrcaApplication,
     val userPreferencesRepository: UserPreferencesRepository,
     private val savedState: SavedStateHandle = SavedStateHandle()
 ) : ViewModel() {
 
     companion object {
-        private lateinit var instance: ChatboxViewModel
+        private lateinit var instance: VrcaViewModel
 
         private const val CYCLE_INTERVAL_SECONDS_LOCKED = 10
         private const val MUSIC_REFRESH_SECONDS_LOCKED = 1
@@ -109,7 +108,7 @@ class ChatboxViewModel(
         // Moderation attach retry
         private const val MOD_ATTACH_RETRY_MS = 1_250L
 
-        // SharedPrefs (must match AdminScreen + ChatboxApp/MainActivity)
+        // SharedPrefs (must match AdminScreen + VrcaApp/MainActivity)
         private const val REMOTE_PREFS_FILE = "vrca_remote"
         private const val PREF_DEVICE_ID_HASH = "device_id_hash"
         private const val PREF_AUTH_UID = "auth_uid"
@@ -124,20 +123,20 @@ class ChatboxViewModel(
 
         val Factory: ViewModelProvider.Factory = viewModelFactory {
             initializer {
-                val application = (this[APPLICATION_KEY] as ChatboxApplication)
-                instance = ChatboxViewModel(
+                val application = (this[APPLICATION_KEY] as VrcaApplication)
+                instance = VrcaViewModel(
                     app = application,
                     userPreferencesRepository = application.userPreferencesRepository,
                     savedState = createSavedStateHandle()
                 )
-                Log.d("ChatboxViewModel", "Init")
+                Log.d("VrcaViewModel", "Init")
                 instance
             }
         }
 
         @MainThread
-        fun getInstance(): ChatboxViewModel {
-            if (!::instance.isInitialized) throw Exception("ChatboxViewModel is not initialized!")
+        fun getInstance(): VrcaViewModel {
+            if (!::instance.isInitialized) throw Exception("VrcaViewModel is not initialized!")
             return instance
         }
     }
@@ -587,8 +586,8 @@ class ChatboxViewModel(
             stopAll(clearFromChatbox = false)
 
             // Ensure typing indicator is off locally (no OSC send; just state safety).
-            remoteChatboxOSC.typing = false
-            localChatboxOSC.typing = false
+            remoteVrcaOsc.typing = false
+            localVrcaOsc.typing = false
         }
     }
 
@@ -884,7 +883,7 @@ class ChatboxViewModel(
         private set
 
     fun stashMessage(local: Boolean = false) {
-        val osc = if (!local) remoteChatboxOSC else localChatboxOSC
+        val osc = if (!local) remoteVrcaOsc else localVrcaOsc
         osc.typing = false
 
         val txt = messageText.value.text
@@ -937,12 +936,12 @@ class ChatboxViewModel(
         initialValue = MessengerUiState()
     )
 
-    private val remoteChatboxOSC = ChatboxOSC(
+    private val remoteVrcaOsc = VrcaOsc(
         ipAddress = runBlocking { userPreferencesRepository.ipAddress.first() },
         port = 9000
     )
 
-    private val localChatboxOSC = ChatboxOSC(
+    private val localVrcaOsc = VrcaOsc(
         ipAddress = "localhost",
         port = 9000
     )
@@ -952,20 +951,20 @@ class ChatboxViewModel(
     }
 
     fun ipAddressApply(address: String) {
-        remoteChatboxOSC.ipAddress = address
+        remoteVrcaOsc.ipAddress = address
         viewModelScope.launch { userPreferencesRepository.saveIpAddress(address) }
         startSelfSyncLoopIfNeeded()
         attachModerationListenersLoopOnce()
     }
 
     fun ipAddressApplyRuntimeOnly(address: String) {
-        remoteChatboxOSC.ipAddress = address
+        remoteVrcaOsc.ipAddress = address
         startSelfSyncLoopIfNeeded()
         attachModerationListenersLoopOnce()
     }
 
     fun portApply(port: Int) {
-        remoteChatboxOSC.port = port
+        remoteVrcaOsc.port = port
         viewModelScope.launch { userPreferencesRepository.savePort(port) }
         startSelfSyncLoopIfNeeded()
         attachModerationListenersLoopOnce()
@@ -988,7 +987,7 @@ class ChatboxViewModel(
     }
 
     fun onMessageTextChange(message: TextFieldValue, local: Boolean = false) {
-        val osc = if (!local) remoteChatboxOSC else localChatboxOSC
+        val osc = if (!local) remoteVrcaOsc else localVrcaOsc
         messageText.value = message
         stashedMessage = message.text
 
@@ -1007,7 +1006,7 @@ class ChatboxViewModel(
     fun sendMessage(local: Boolean = false) {
         if (isBanned) return
 
-        val osc = if (!local) remoteChatboxOSC else localChatboxOSC
+        val osc = if (!local) remoteVrcaOsc else localVrcaOsc
 
         osc.sendMessage(
             messageText.value.text,
@@ -2200,7 +2199,7 @@ class ChatboxViewModel(
 
     private fun sendToVrchatRaw(text: String, local: Boolean, addToConversation: Boolean) {
         if (isBanned) return
-        val osc = if (!local) remoteChatboxOSC else localChatboxOSC
+        val osc = if (!local) remoteVrcaOsc else localVrcaOsc
         osc.sendMessage(text, messengerUiState.value.isSendImmediately, triggerSFX = false)
         lastSentToVrchatAtMs = System.currentTimeMillis()
         if (addToConversation) conversationUiState.addMessage(Message(text, false, Instant.now()))

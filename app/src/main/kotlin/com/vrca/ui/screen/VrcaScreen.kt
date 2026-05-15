@@ -1,4 +1,3 @@
-// app/src/main/kotlin/com/vrca/ChatboxScreen.kt
 package com.vrca.ui.screen
 
 import android.content.Context
@@ -291,8 +290,8 @@ private object DeviceId {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ChatboxScreen(
-    chatboxViewModel: com.vrca.ui.viewmodel.ChatboxViewModel
+fun VrcaScreen(
+    chatboxViewModel: com.vrca.ui.viewmodel.VrcaViewModel
 ) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -996,7 +995,7 @@ private fun SectionCard(
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun HomePage(
-    vm: com.vrca.ui.viewmodel.ChatboxViewModel,
+    vm: com.vrca.ui.viewmodel.VrcaViewModel,
     snackbarHostState: SnackbarHostState,
     onOpenSettings: () -> Unit,
     announcements: List<AnnouncementUi>,
@@ -1366,7 +1365,7 @@ private fun HomePage(
             subtitle = "Headset IP (Quest / PC)."
         ) {
             Column(Modifier.bringIntoViewRequester(connectionBring)) {
-                com.vrca.ui.mainScreen.IpField(
+                com.vrca.ui.conversation.IpField(
                     chatboxViewModel = vm,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -1456,7 +1455,7 @@ private fun TutorialStep(
    ========================= */
 
 @Composable
-private fun AutomationsPage(vm: com.vrca.ui.viewmodel.ChatboxViewModel, isBanned: Boolean) {
+private fun AutomationsPage(vm: com.vrca.ui.viewmodel.VrcaViewModel, isBanned: Boolean) {
     val scope = rememberCoroutineScope()
     var tab by rememberSaveable { mutableStateOf(ChatboxAutomationsTab.Pinned) }
 
@@ -1768,7 +1767,7 @@ private fun AutomationsPage(vm: com.vrca.ui.viewmodel.ChatboxViewModel, isBanned
 
 @Composable
 private fun NowPlayingPage(
-    vm: com.vrca.ui.viewmodel.ChatboxViewModel,
+    vm: com.vrca.ui.viewmodel.VrcaViewModel,
     isBanned: Boolean,
     onPersistSpotifyEnabled: (Boolean) -> Unit,
     onPersistSpotifyDemo: (Boolean) -> Unit,
@@ -1869,7 +1868,7 @@ private fun NowPlayingPage(
 
 @Composable
 private fun SettingsPage(
-    vm: com.vrca.ui.viewmodel.ChatboxViewModel,
+    vm: com.vrca.ui.viewmodel.VrcaViewModel,
     lastFirebaseIssue: String?,
     moderationError: String?
 ) {
@@ -2224,7 +2223,7 @@ private fun VrchatStatusBanner() {
 
 @Composable
 private fun VrchatStatusPage(
-    vm: com.vrca.ui.viewmodel.ChatboxViewModel,
+    vm: com.vrca.ui.viewmodel.VrcaViewModel,
     onOpenLogin: () -> Unit
 ) {
     val ctx = LocalContext.current

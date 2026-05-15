@@ -75,7 +75,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.vrca.data.SettingsStates
-import com.vrca.ui.viewmodel.ChatboxViewModel
+import com.vrca.ui.viewmodel.VrcaViewModel
 import kotlinx.coroutines.launch
 
 // -------------------------
@@ -89,7 +89,7 @@ private enum class AutomationsTab(val title: String) {
 
 @Composable
 internal fun LegacyChatboxMainPages(
-    vm: ChatboxViewModel,
+    vm: VrcaViewModel,
     startPage: String,
     modifier: Modifier
 ) {
@@ -154,7 +154,7 @@ private fun SectionCard(
    ========================= */
 
 @Composable
-private fun HomePage(vm: ChatboxViewModel) {
+private fun HomePage(vm: VrcaViewModel) {
     val uiState by vm.messengerUiState.collectAsState()
     val ctx = androidx.compose.ui.platform.LocalContext.current
 
@@ -344,7 +344,7 @@ private fun HomePage(vm: ChatboxViewModel) {
             title = "Connection",
             subtitle = "Headset IP (Quest / PC)."
         ) {
-            com.vrca.ui.mainScreen.IpField(
+            com.vrca.ui.conversation.IpField(
                 chatboxViewModel = vm,
                 modifier = Modifier.fillMaxWidth()
             )
@@ -463,7 +463,7 @@ private fun WizardStep(
    ============================== */
 
 @Composable
-private fun AutomationsPage(vm: ChatboxViewModel) {
+private fun AutomationsPage(vm: VrcaViewModel) {
     val scope = rememberCoroutineScope()
     var tab by rememberSaveable { mutableStateOf(AutomationsTab.AFK) }
 
@@ -771,7 +771,7 @@ private fun MusicPresetPreviewText(
 }
 
 @Composable
-private fun NowPlayingPage(vm: ChatboxViewModel) {
+private fun NowPlayingPage(vm: VrcaViewModel) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
 
     PageContainer {
@@ -861,7 +861,7 @@ private fun NowPlayingPage(vm: ChatboxViewModel) {
    ========================= */
 
 @Composable
-private fun DebugPage(vm: ChatboxViewModel) {
+private fun DebugPage(vm: VrcaViewModel) {
     PageContainer {
         SectionCard(
             title = "Listener",
@@ -914,7 +914,7 @@ private enum class SettingsSection(val title: String) {
 
 @Composable
 fun SettingsPage(
-    vm: ChatboxViewModel,
+    vm: VrcaViewModel,
     modifier: Modifier = Modifier
 ) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
@@ -1106,7 +1106,7 @@ private fun vrChatSafePreview(input: String): String {
    ========================= */
 
 @Composable
-fun NotificationToggleSection(vm: ChatboxViewModel) {
+fun NotificationToggleSection(vm: VrcaViewModel) {
     val scope = rememberCoroutineScope()
     val repo = vm.userPreferencesRepository
 

@@ -1,4 +1,4 @@
-package com.vrca.ui.mainScreen
+package com.vrca.ui.conversation
 
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.toMutableStateList

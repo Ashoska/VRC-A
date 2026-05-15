@@ -1,4 +1,4 @@
-package com.vrca.ui.mainScreen
+package com.vrca.ui.conversation
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
@@ -9,16 +9,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.vrca.ui.viewmodel.ChatboxViewModel
+import com.vrca.ui.viewmodel.VrcaViewModel
 
 /**
  * NOTE:
  * This file is kept intentionally minimal so it always compiles.
- * Your main UI is handled by ChatboxScreen.kt.
+ * Your main UI is handled by VrcaScreen.kt.
  */
 @Composable
 fun MessageField(
-    chatboxViewModel: ChatboxViewModel,
+    chatboxViewModel: VrcaViewModel,
     modifier: Modifier = Modifier
 ) {
     ElevatedCard(modifier = modifier.fillMaxWidth()) {

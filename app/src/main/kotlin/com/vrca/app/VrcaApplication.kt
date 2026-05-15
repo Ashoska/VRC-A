@@ -1,4 +1,3 @@
-// app/src/main/kotlin/com/vrca/ChatboxApplication.kt
 package com.vrca.app
 
 import android.app.Application
@@ -13,15 +12,13 @@ import java.util.Date
 import java.util.Locale
 import kotlin.system.exitProcess
 
-class ChatboxApplication : Application() {
+class VrcaApplication : Application() {
 
     companion object {
-        // Used by ChatboxApp.kt to show last crash
         const val CRASH_PREFS_FILE = "vrca_crash"
         const val CRASH_KEY_TEXT = "last_crash_text"
     }
 
-    // Used by ChatboxViewModel.Factory
     lateinit var userPreferencesRepository: UserPreferencesRepository
         private set
 

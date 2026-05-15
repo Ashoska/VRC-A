@@ -21,15 +21,15 @@ import kotlinx.coroutines.launch
  * Foreground service whose only job is to keep the app scheduled while the screen is off (Doze).
  * Your existing ViewModel jobs keep sending OSC; this service prevents the process from being frozen.
  */
-class ChatboxKeepAliveService : Service() {
+class KeepAliveService : Service() {
 
     companion object {
-        private const val TAG = "ChatboxKeepAliveService"
+        private const val TAG = "VrcaKeepAlive"
         private const val CHANNEL_ID = "chatbox_keepalive"
         private const val NOTIF_ID = 1001
 
         fun start(context: Context) {
-            val i = Intent(context, ChatboxKeepAliveService::class.java)
+            val i = Intent(context, KeepAliveService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(i)
             } else {
@@ -38,7 +38,7 @@ class ChatboxKeepAliveService : Service() {
         }
 
         fun stop(context: Context) {
-            context.stopService(Intent(context, ChatboxKeepAliveService::class.java))
+            context.stopService(Intent(context, KeepAliveService::class.java))
         }
     }
 

@@ -13,9 +13,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
-import com.vrca.keepalive.ChatboxKeepAliveService
+import com.vrca.keepalive.KeepAliveService
 import com.vrca.overlay.OverlayDaemon
-import com.vrca.ui.theme.ChatboxTheme
+import com.vrca.ui.theme.VrcaTheme
 import java.security.MessageDigest
 import java.security.SecureRandom
 
@@ -45,7 +45,7 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestPermission()
     ) { _ ->
         // Even if denied, still try to start (some devices allow FGS without notif permission).
-        ChatboxKeepAliveService.start(applicationContext)
+        KeepAliveService.start(applicationContext)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -64,18 +64,18 @@ class MainActivity : ComponentActivity() {
             ) == PackageManager.PERMISSION_GRANTED
 
             if (granted) {
-                ChatboxKeepAliveService.start(applicationContext)
+                KeepAliveService.start(applicationContext)
             } else {
                 notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
         } else {
-            ChatboxKeepAliveService.start(applicationContext)
+            KeepAliveService.start(applicationContext)
         }
 
         setContent {
-            ChatboxTheme(themeMode = com.vrca.ui.theme.ThemeMode.Dark) {
-                // App routing (ToS gate + Admin-only UI) lives in ChatboxApp.kt
-                ChatboxApp()
+            VrcaTheme(themeMode = com.vrca.ui.theme.ThemeMode.Dark) {
+                // App routing (ToS gate + Admin-only UI) lives in VrcaApp.kt
+                VrcaApp()
 
                 //Overlay MUST stay inside Compose because OverlayDaemon is @Composable
                 OverlayDaemon(this@MainActivity)

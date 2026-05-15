@@ -46,13 +46,13 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.vrca.R
 import com.vrca.data.SettingsStates
-import com.vrca.ui.viewmodel.ChatboxViewModel
+import com.vrca.ui.viewmodel.VrcaViewModel
 import com.vrca.ui.common.HapticConstants
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 
 @Composable
-internal fun MessengerMessageField(chatboxViewModel: ChatboxViewModel, collapse: () -> Unit) {
+internal fun MessengerMessageField(chatboxViewModel: VrcaViewModel, collapse: () -> Unit) {
     val focusRequester = remember { FocusRequester() }
 
     val keepOpenState = SettingsStates.overlayKeepOpen()

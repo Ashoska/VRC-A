@@ -1,4 +1,4 @@
-package com.vrca.ui.mainScreen
+package com.vrca.ui.conversation
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.*
@@ -17,7 +17,7 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import com.vrca.ui.viewmodel.ChatboxViewModel
+import com.vrca.ui.viewmodel.VrcaViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -40,7 +40,7 @@ private fun isValidIpv4(input: String): Boolean {
 
 @Composable
 fun IpField(
-    chatboxViewModel: ChatboxViewModel,
+    chatboxViewModel: VrcaViewModel,
     modifier: Modifier = Modifier
 ) {
     val scope = rememberCoroutineScope()

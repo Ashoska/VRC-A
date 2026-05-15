@@ -40,7 +40,7 @@ import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.vrca.R
 import com.vrca.overlay.ui.ButtonOverlay
 import com.vrca.overlay.ui.MessengerOverlay
-import com.vrca.ui.viewmodel.ChatboxViewModel
+import com.vrca.ui.viewmodel.VrcaViewModel
 import com.vrca.ui.theme.OverlayTheme
 import kotlin.math.roundToInt
 
@@ -209,11 +209,11 @@ class OverlayService : Service() {
         }
 
         msgComposeView.setContent {
-            val chatboxViewModel: ChatboxViewModel =
-                if (!ChatboxViewModel.isInstanceInitialized()) {
-                    viewModel(factory = ChatboxViewModel.Factory)
+            val chatboxViewModel: VrcaViewModel =
+                if (!VrcaViewModel.isInstanceInitialized()) {
+                    viewModel(factory = VrcaViewModel.Factory)
                 } else {
-                    ChatboxViewModel.getInstance()
+                    VrcaViewModel.getInstance()
                 }
 
             OverlayTheme {

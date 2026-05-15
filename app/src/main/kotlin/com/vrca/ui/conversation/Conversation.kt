@@ -1,4 +1,4 @@
-package com.vrca.ui.mainScreen
+package com.vrca.ui.conversation
 
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
@@ -43,7 +43,7 @@ import androidx.compose.ui.unit.dp
 import com.vrca.R
 import com.vrca.data.SettingsStates
 import com.vrca.ui.common.HapticConstants
-import com.vrca.ui.theme.ChatboxTheme
+import com.vrca.ui.theme.VrcaTheme
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -248,7 +248,7 @@ fun ConversationListPreview() {
         Message(content = "🥥🍹🍡"),
         Message(content = "Line1\nLine2")
     )
-    ChatboxTheme {
+    VrcaTheme {
         ConversationList(
             ConversationUiState(
                 initialMessages = messageList.reversed()

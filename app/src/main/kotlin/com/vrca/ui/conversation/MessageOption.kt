@@ -1,4 +1,4 @@
-package com.vrca.ui.mainScreen
+package com.vrca.ui.conversation
 
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
@@ -42,7 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.vrca.R
 import com.vrca.data.SettingsStates
-import com.vrca.ui.viewmodel.ChatboxViewModel
+import com.vrca.ui.viewmodel.VrcaViewModel
 import com.vrca.ui.viewmodel.MessengerUiState
 import com.vrca.ui.common.HapticConstants
 
@@ -153,7 +153,7 @@ fun BarOption(
 
 @Composable
 fun MessageOptions(
-    chatboxViewModel: ChatboxViewModel = viewModel(factory = ChatboxViewModel.Factory),
+    chatboxViewModel: VrcaViewModel = viewModel(factory = VrcaViewModel.Factory),
     uiState: MessengerUiState = MessengerUiState(),
     useChipsOptions: Boolean = true,
     modifier: Modifier = Modifier

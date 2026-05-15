@@ -15,7 +15,7 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
-        android:name="com.vrca.app.ChatboxApplication"
+        android:name="com.vrca.app.VrcaApplication"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -33,7 +33,7 @@
 
         <!-- Keep-alive Foreground Service -->
         <service
-            android:name=".keepalive.ChatboxKeepAliveService"
+            android:name=".keepalive.KeepAliveService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 

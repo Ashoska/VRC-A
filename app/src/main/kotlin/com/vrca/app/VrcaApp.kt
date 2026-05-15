@@ -1,4 +1,3 @@
-// app/src/main/kotlin/com/vrca/ChatboxApp.kt
 package com.vrca.app
 
 import android.content.Context
@@ -38,7 +37,8 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
-import com.vrca.ui.viewmodel.ChatboxViewModel
+import com.vrca.ui.screen.VrcaScreen
+import com.vrca.ui.viewmodel.VrcaViewModel
 import com.vrca.vrchat.VrchatAuthManager
 import com.vrca.vrchat.VrchatBanChecker
 import com.vrca.vrchat.VrchatLoginScreen
@@ -64,7 +64,7 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 
 /**
- * ChatboxApp
+ * VrcaApp
  *
  * Responsibilities:
  *  - crash gate
@@ -76,7 +76,7 @@ import java.security.SecureRandom
  *      - usersById/{uid}     (mapping uid -> deviceHash)
  */
 @Composable
-fun ChatboxApp() {
+fun VrcaApp() {
     val ctx = LocalContext.current
 
     /* -------------------------
@@ -84,10 +84,10 @@ fun ChatboxApp() {
        ------------------------- */
 
     val crashPrefs = remember {
-        ctx.getSharedPreferences(ChatboxApplication.CRASH_PREFS_FILE, Context.MODE_PRIVATE)
+        ctx.getSharedPreferences(VrcaApplication.CRASH_PREFS_FILE, Context.MODE_PRIVATE)
     }
     val lastCrashText = remember {
-        crashPrefs.getString(ChatboxApplication.CRASH_KEY_TEXT, "").orEmpty()
+        crashPrefs.getString(VrcaApplication.CRASH_KEY_TEXT, "").orEmpty()
     }
 
     var allowBoot by remember { mutableStateOf(lastCrashText.isBlank()) }
@@ -97,12 +97,12 @@ fun ChatboxApp() {
             crashText = lastCrashText,
             onClear = {
                 crashPrefs.edit()
-                    .remove(ChatboxApplication.CRASH_KEY_TEXT)
+                    .remove(VrcaApplication.CRASH_KEY_TEXT)
                     .commit()
             },
             onContinue = {
                 crashPrefs.edit()
-                    .remove(ChatboxApplication.CRASH_KEY_TEXT)
+                    .remove(VrcaApplication.CRASH_KEY_TEXT)
                     .commit()
                 allowBoot = true
             }
@@ -185,13 +185,13 @@ fun ChatboxApp() {
        ToS gate
        Must be accepted before the VRChat login is shown.
        Uses local SharedPreferences â€" no Firestore needed at this stage.
-       Re-shows if ToS version bumped (checked in ChatboxScreen too for
+       Re-shows if ToS version bumped (checked in VrcaScreen too for
        returning users who already logged in).
        ------------------------- */
 
     val tosPrefs = remember { ctx.getSharedPreferences("vrca_tos", Context.MODE_PRIVATE) }
     // Version 1 = baseline. Increment in Firestore config/app.tosVersion to force re-acceptance.
-    // At this stage we only check local prefs; ChatboxScreen does the remote version check.
+    // At this stage we only check local prefs; VrcaScreen does the remote version check.
     val localTosAccepted = remember { tosPrefs.getInt("accepted_version", 0) >= 1 }
     var tosGatePassed by remember { mutableStateOf(localTosAccepted) }
 
@@ -395,8 +395,8 @@ fun ChatboxApp() {
        Main app
        ------------------------- */
 
-    val vm: ChatboxViewModel = viewModel(factory = ChatboxViewModel.Factory)
-    ChatboxScreen(chatboxViewModel = vm)
+    val vm: VrcaViewModel = viewModel(factory = VrcaViewModel.Factory)
+    VrcaScreen(chatboxViewModel = vm)
 }
 
 @Composable

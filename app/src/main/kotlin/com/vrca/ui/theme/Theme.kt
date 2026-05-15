@@ -88,7 +88,7 @@ private val SlimeLight = lightColorScheme(
 )
 
 @Composable
-fun ChatboxTheme(
+fun VrcaTheme(
     themeMode: ThemeMode = ThemeMode.System,
     dynamicColor: Boolean = false, // IMPORTANT: OFF by default to match Slime theme
     content: @Composable () -> Unit

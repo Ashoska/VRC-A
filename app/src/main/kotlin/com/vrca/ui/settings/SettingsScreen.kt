@@ -20,11 +20,11 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vrca.R
 import com.vrca.data.SettingsStates
-import com.vrca.ui.viewmodel.ChatboxViewModel
+import com.vrca.ui.viewmodel.VrcaViewModel
 
 @Composable
 fun SettingsScreen(
-    chatboxViewModel: ChatboxViewModel,
+    chatboxViewModel: VrcaViewModel,
     modifier: Modifier = Modifier
 ) {
     // These were already used in your MainScreen logic

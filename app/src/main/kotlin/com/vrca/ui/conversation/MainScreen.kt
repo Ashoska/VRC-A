@@ -1,4 +1,4 @@
-package com.vrca.ui.mainScreen
+package com.vrca.ui.conversation
 
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
@@ -10,13 +10,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.vrca.data.SettingsStates
-import com.vrca.ui.viewmodel.ChatboxViewModel
+import com.vrca.ui.viewmodel.VrcaViewModel
 import com.vrca.ui.viewmodel.MessengerUiState
 
 @Composable
 fun MainScreen(
     modifier: Modifier = Modifier,
-    chatboxViewModel: ChatboxViewModel = viewModel(factory = ChatboxViewModel.Factory),
+    chatboxViewModel: VrcaViewModel = viewModel(factory = VrcaViewModel.Factory),
     uiState: MessengerUiState = MessengerUiState()
 ) {
     val displayIpState = SettingsStates.displayIpState()

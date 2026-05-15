@@ -11,7 +11,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 
 @Composable
-fun ChatboxAppBar(
+fun VrcaAppBar(
     title: String,
     showBack: Boolean,
     onBack: () -> Unit,

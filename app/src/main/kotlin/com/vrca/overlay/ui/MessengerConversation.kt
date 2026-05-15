@@ -39,9 +39,9 @@ import androidx.compose.ui.unit.dp
 import com.vrca.R
 import com.vrca.data.SettingsStates
 import com.vrca.ui.common.HapticConstants
-import com.vrca.ui.mainScreen.ConversationUiState
-import com.vrca.ui.mainScreen.Message
-import com.vrca.ui.theme.ChatboxTheme
+import com.vrca.ui.conversation.ConversationUiState
+import com.vrca.ui.conversation.Message
+import com.vrca.ui.theme.VrcaTheme
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -227,7 +227,7 @@ fun MessengerConversationPreview() {
         Message(content = "🥥🍹🍡"),
         Message(content = "Line1\nLine2")
     )
-    ChatboxTheme {
+    VrcaTheme {
         MessengerConversation(
             ConversationUiState(
                 initialMessages = messageList.reversed()

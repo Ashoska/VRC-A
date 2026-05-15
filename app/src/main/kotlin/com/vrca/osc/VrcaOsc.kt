@@ -11,7 +11,7 @@ import kotlinx.coroutines.launch
 import java.net.InetAddress
 import java.net.UnknownHostException
 
-class ChatboxOSC(
+class VrcaOsc(
     ipAddress: String,
     var port: Int
 ) {
@@ -48,7 +48,7 @@ class ChatboxOSC(
 
     init {
         CoroutineScope(Dispatchers.IO).launch {
-            this@ChatboxOSC.ipAddress = ipAddress
+            this@VrcaOsc.ipAddress = ipAddress
         }
     }
 
