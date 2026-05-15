@@ -472,8 +472,11 @@ class DiscordRpcService : Service() {
         sessionMonitorJob = null
         shimReady = false
         isRunning = false
-        onlineStartEpochMs = 0L
-        rpcPrefs.edit().putLong("online_start_epoch", 0L).apply()
+        // Intentionally do NOT clear onlineStartEpochMs here — Android can tear
+        // down and re-create this service transparently (memory pressure, tab-out,
+        // process restart) and the RPC counter must continue from the original
+        // "joined VRChat" timestamp. The timestamp is correctly cleared in
+        // buildActivityJson() when the user actually goes offline in VRChat.
         DiscordRpcState.reset()
         mainHandler.post {
             webView?.let { wv ->
