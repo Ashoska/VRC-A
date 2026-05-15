@@ -369,7 +369,7 @@ private fun HomePage(vm: ChatboxViewModel) {
 }
 
 @Composable
-private fun ToggleRow(
+internal fun ToggleRow(
     label: String,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
