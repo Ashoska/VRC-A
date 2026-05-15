@@ -490,51 +490,78 @@ internal fun VrchatStatusPage(
     }
 }
 
+private const val VISIBLE_ALERT_LIMIT = 3
+
 @Composable
 private fun InAppAlertCards() {
     val ctx = LocalContext.current
     val alerts by InAppAlertState.alerts.collectAsState()
     if (alerts.isEmpty()) return
 
-    for (alert in alerts) {
-        Card(
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.tertiaryContainer
-            )
+    var expanded by remember { mutableStateOf(false) }
+    val visible = if (expanded || alerts.size <= VISIBLE_ALERT_LIMIT) alerts
+        else alerts.take(VISIBLE_ALERT_LIMIT)
+    val hiddenCount = alerts.size - visible.size
+
+    for (alert in visible) {
+        AlertCard(alert = alert, onDismiss = {
+            InAppAlertState.dismiss(ctx, alert.id)
+        })
+    }
+
+    if (hiddenCount > 0) {
+        TextButton(
+            onClick = { expanded = true },
+            modifier = Modifier.fillMaxWidth()
         ) {
-            Column(
-                Modifier.padding(14.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+            Text(
+                "+$hiddenCount more alert${if (hiddenCount > 1) "s" else ""}",
+                style = MaterialTheme.typography.labelMedium
+            )
+        }
+    }
+}
+
+@Composable
+private fun AlertCard(alert: com.vrca.vrchat.InAppAlert, onDismiss: () -> Unit) {
+    val ctx = LocalContext.current
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.tertiaryContainer
+        )
+    ) {
+        Column(
+            Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        alert.title,
-                        style = MaterialTheme.typography.titleSmall,
-                        modifier = Modifier.weight(1f)
-                    )
-                    TextButton(onClick = { InAppAlertState.dismiss(ctx, alert.id) }) {
-                        Text("Dismiss", style = MaterialTheme.typography.labelSmall)
-                    }
-                }
                 Text(
-                    alert.body,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                    alert.title,
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.weight(1f)
                 )
-                if (alert.url != null) {
-                    Text(
-                        text = "Open in VRChat",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.clickable {
-                            ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(alert.url)))
-                        }
-                    )
+                TextButton(onClick = onDismiss) {
+                    Text("Dismiss", style = MaterialTheme.typography.labelSmall)
                 }
+            }
+            Text(
+                alert.body,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onTertiaryContainer
+            )
+            if (alert.url != null) {
+                Text(
+                    text = "Open in VRChat",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.clickable {
+                        ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(alert.url)))
+                    }
+                )
             }
         }
     }

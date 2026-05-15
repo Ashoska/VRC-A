@@ -1120,6 +1120,7 @@ class VrchatPipelineService : Service() {
         }
 
         if (newBio.isNotBlank() && newBio != previous.bio && previous.bio.isNotBlank()) {
+            val bioAlertBody = "$newDisplayName\n\nBefore: ${previous.bio}\n\nAfter: $newBio"
             fireEventNotification(
                 id = "bio_$userId".hashCode(),
                 title = "Friend updated bio (expand)",
@@ -1128,7 +1129,8 @@ class VrchatPipelineService : Service() {
                 prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_BIO,
                 channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
                 groupKey = GROUP_KEY_FRIENDS,
-                bigText = "$newDisplayName\n\nBefore: ${previous.bio}\n\nAfter: $newBio"
+                bigText = bioAlertBody,
+                alertBody = bioAlertBody
             )
         }
 
