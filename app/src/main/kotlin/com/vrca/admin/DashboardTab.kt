@@ -22,7 +22,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
@@ -45,9 +44,7 @@ internal fun DashboardTab(
     setError: (String?) -> Unit
 ) {
     val totalUsers  = totalUsersCount
-    val onlineCount by remember(users) {
-        derivedStateOf { users.count { it.isOnlineInApp } }
-    }
+    val onlineCount = users.count { it.isOnlineInApp }
     val bannedCount = bannedUsersCount
     val warnedCount = warnedUsersCount
     var evasionCount by remember { mutableIntStateOf(0) }

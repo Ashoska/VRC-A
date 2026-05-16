@@ -103,8 +103,6 @@ internal suspend fun githubCreateRelease(
     tagName: String, releaseName: String, body: String
 ): GithubReleaseResult = withContext(Dispatchers.IO) {
     val client = OkHttpClient.Builder()
-        .followRedirects(false)
-        .followSslRedirects(false)
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
@@ -117,45 +115,43 @@ internal suspend fun githubCreateRelease(
         put("prerelease", false)
     }.toString()
 
-    var currentUrl = "https://api.github.com/repos/$owner/$repo/releases"
-    var hops = 0
-    while (hops < 5) {
-        val request = Request.Builder()
-            .url(currentUrl)
-            .header("Authorization", "Bearer $pat")
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .post(payload.toRequestBody("application/json".toMediaType()))
-            .build()
+    val url = "https://api.github.com/repos/$owner/$repo/releases"
+    var lastError: Exception? = null
 
-        val response = client.newCall(request).execute()
-        val code = response.code
+    for (attempt in 1..5) {
+        try {
+            val request = Request.Builder()
+                .url(url)
+                .header("Authorization", "Bearer $pat")
+                .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .post(payload.toRequestBody("application/json".toMediaType()))
+                .build()
 
-        if (code in listOf(301, 302, 303, 307, 308)) {
-            val location = response.header("Location")
-            response.close()
-            if (location.isNullOrBlank()) {
-                throw Exception("GitHub create release redirect ($code) without Location header")
+            val response = client.newCall(request).execute()
+            val responseBody = response.body?.string().orEmpty()
+
+            if (response.isSuccessful) {
+                val json = JSONObject(responseBody)
+                return@withContext GithubReleaseResult(
+                    releaseId = json.getLong("id"),
+                    uploadUrl = json.getString("upload_url"),
+                    htmlUrl   = json.getString("html_url")
+                )
             }
-            currentUrl = if (location.startsWith("http")) location
-                         else java.net.URI(currentUrl).resolve(location).toString()
-            hops++
-            continue
+
+            lastError = Exception("GitHub create release failed (${response.code}): $responseBody")
+            response.close()
+        } catch (e: Exception) {
+            lastError = e
         }
 
-        val responseBody = response.body?.string().orEmpty()
-        if (!response.isSuccessful) {
-            throw Exception("GitHub create release failed ($code): $responseBody")
+        if (attempt < 5) {
+            val backoff = attempt * 2000L
+            kotlinx.coroutines.delay(backoff)
         }
-
-        val json = JSONObject(responseBody)
-        return@withContext GithubReleaseResult(
-            releaseId = json.getLong("id"),
-            uploadUrl = json.getString("upload_url"),
-            htmlUrl   = json.getString("html_url")
-        )
     }
-    throw Exception("GitHub create release: too many redirects")
+    throw lastError ?: Exception("GitHub create release failed after 5 attempts")
 }
 
 internal suspend fun githubUploadAsset(
@@ -164,72 +160,64 @@ internal suspend fun githubUploadAsset(
     onProgress: (Float) -> Unit
 ): String = withContext(Dispatchers.IO) {
     val client = OkHttpClient.Builder()
-        .followRedirects(false)
-        .followSslRedirects(false)
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(300, TimeUnit.SECONDS)
         .writeTimeout(300, TimeUnit.SECONDS)
         .build()
 
     val encodedName = java.net.URLEncoder.encode(fileName, "UTF-8")
-    var currentUrl = "https://uploads.github.com/repos/$owner/$repo/releases/$releaseId/assets?name=$encodedName"
-    var hops = 0
+    val url = "https://uploads.github.com/repos/$owner/$repo/releases/$releaseId/assets?name=$encodedName"
+    var lastError: Exception? = null
 
-    while (hops < 5) {
-        val body = object : RequestBody() {
-            override fun contentType() = "application/vnd.android.package-archive".toMediaType()
-            override fun contentLength() = apkFile.length()
-            override fun writeTo(sink: BufferedSink) {
-                val totalBytes = apkFile.length().toFloat()
-                var writtenBytes = 0L
-                val buf = ByteArray(64 * 1024)
-                apkFile.inputStream().use { inp ->
-                    while (true) {
-                        val n = inp.read(buf)
-                        if (n == -1) break
-                        sink.write(buf, 0, n)
-                        writtenBytes += n
-                        if (totalBytes > 0f) onProgress(writtenBytes / totalBytes)
+    for (attempt in 1..5) {
+        try {
+            onProgress(0f)
+            val body = object : RequestBody() {
+                override fun contentType() = "application/vnd.android.package-archive".toMediaType()
+                override fun contentLength() = apkFile.length()
+                override fun writeTo(sink: BufferedSink) {
+                    val totalBytes = apkFile.length().toFloat()
+                    var writtenBytes = 0L
+                    val buf = ByteArray(64 * 1024)
+                    apkFile.inputStream().use { inp ->
+                        while (true) {
+                            val n = inp.read(buf)
+                            if (n == -1) break
+                            sink.write(buf, 0, n)
+                            writtenBytes += n
+                            if (totalBytes > 0f) onProgress(writtenBytes / totalBytes)
+                        }
                     }
                 }
             }
-        }
 
-        val request = Request.Builder()
-            .url(currentUrl)
-            .header("Authorization", "Bearer $pat")
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .post(body)
-            .build()
+            val request = Request.Builder()
+                .url(url)
+                .header("Authorization", "Bearer $pat")
+                .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .post(body)
+                .build()
 
-        val response = client.newCall(request).execute()
-        val code = response.code
+            val response = client.newCall(request).execute()
+            val responseBody = response.body?.string().orEmpty()
 
-        if (code in listOf(301, 302, 303, 307, 308)) {
-            val location = response.header("Location")
-            response.close()
-            if (location.isNullOrBlank()) {
-                hops++
-                onProgress(0f)
-                kotlinx.coroutines.delay(1500L)
-                continue
+            if (response.isSuccessful) {
+                return@withContext JSONObject(responseBody).getString("browser_download_url")
             }
-            currentUrl = if (location.startsWith("http")) location
-                         else java.net.URI(currentUrl).resolve(location).toString()
-            hops++
-            onProgress(0f)
-            continue
+
+            lastError = Exception("GitHub upload failed (${response.code}): $responseBody")
+            response.close()
+        } catch (e: Exception) {
+            lastError = e
         }
 
-        val responseBody = response.body?.string().orEmpty()
-        if (!response.isSuccessful) {
-            throw Exception("GitHub upload asset failed ($code): $responseBody")
+        if (attempt < 5) {
+            val backoff = attempt * 2000L
+            kotlinx.coroutines.delay(backoff)
         }
-
-        return@withContext JSONObject(responseBody).getString("browser_download_url")
     }
-    throw Exception("GitHub upload: too many redirects")
+    throw lastError ?: Exception("GitHub upload failed after 5 attempts")
 }
 
 // ---- Composable ----

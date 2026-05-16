@@ -891,7 +891,6 @@ class VrchatPipelineService : Service() {
                     else "https://vrchat.com/home/notifications"
                 when {
                     v2Type.contains("announcement", true) -> {
-                        val fullBody = message.ifBlank { null }
                         fireEventNotification(
                             id = baseId.hashCode(),
                             title = v2Title.ifBlank { "Group announcement" },
@@ -900,7 +899,7 @@ class VrchatPipelineService : Service() {
                             prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
                             channelId = NOTIF_CHANNEL_GROUPS,
                             groupKey = GROUP_KEY_GROUPS,
-                            alertBody = if (fullBody != null && fullBody.length > 100) fullBody else null
+                            alertBody = message.ifBlank { null }
                         )
                     }
                     v2Type.contains("invite", true) -> {
@@ -1032,7 +1031,7 @@ class VrchatPipelineService : Service() {
         lastFriendStatusNotifMs[userId] = now
         fireEventNotification(
             id = "status_$userId".hashCode(),
-            title = "Friend changed presence (expand)",
+            title = "Friend changed presence",
             text = "$displayName is now ${prettyStatus(newStatus)}",
             profileUrl = "https://vrchat.com/home/user/$userId",
             prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_STATUS,
@@ -1087,7 +1086,7 @@ class VrchatPipelineService : Service() {
         if (newDisplayName != previous.displayName && previous.displayName.isNotBlank()) {
             fireEventNotification(
                 id = "name_$userId".hashCode(),
-                title = "Friend renamed (expand)",
+                title = "Friend renamed",
                 text = "${previous.displayName} is now known as $newDisplayName",
                 profileUrl = "https://vrchat.com/home/user/$userId",
                 prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_DISPLAY_NAME,
@@ -1123,7 +1122,7 @@ class VrchatPipelineService : Service() {
             val bioAlertBody = "$newDisplayName\n\nBefore: ${previous.bio}\n\nAfter: $newBio"
             fireEventNotification(
                 id = "bio_$userId".hashCode(),
-                title = "Friend updated bio (expand)",
+                title = "Friend updated bio",
                 text = "$newDisplayName updated their bio",
                 profileUrl = "https://vrchat.com/home/user/$userId",
                 prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_BIO,
@@ -1403,7 +1402,7 @@ class VrchatPipelineService : Service() {
                             profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
                             channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
                             dedupId = notifId.ifBlank { null },
-                            alertBody = if (message.length > 100) message else null
+                            alertBody = message.ifBlank { null }
                         )
                         v2Type.contains("invite", true) -> fireEventNotification(
                             id = baseId.hashCode(), title = v2Title.ifBlank { "Group invite" },
@@ -1484,7 +1483,7 @@ class VrchatPipelineService : Service() {
                                     channelId = NOTIF_CHANNEL_GROUPS,
                                     groupKey = GROUP_KEY_GROUPS,
                                     dedupId = "ga_${groupId}_$createdAt",
-                                    alertBody = if (announcementText.length > 100) announcementText else null
+                                    alertBody = announcementText.ifBlank { null }
                                 )
                                 updatedMap.put(groupId, createdAt)
                             }
@@ -1695,7 +1694,8 @@ class VrchatPipelineService : Service() {
                             profileUrl = null,
                             prefKey = VrchatNotificationPrefs.KEY_NOTIF_ANNOUNCEMENTS,
                             channelId = NOTIF_CHANNEL_CONNECTION,
-                            bigText = if (body.length > 100) body else null
+                            bigText = if (body.length > 100) body else null,
+                            alertBody = body.ifBlank { null }
                         )
                     }
                 }
