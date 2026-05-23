@@ -2072,7 +2072,7 @@ class VrcaViewModel(
         val line1 = when {
             primary.length <= maxLine -> primary
             safeTitle.length <= maxLine -> safeTitle
-            else -> safeTitle.take(maxLine)  // hard cut
+            else -> safeTitle.take(maxLine - 1) + "…"
         }.trim()
 
         val dur = if (spotifyDemoEnabled && !nowPlayingDetected) 205_000L else nowPlayingDurationMs

@@ -366,7 +366,10 @@ class VrchatPipelineService : Service() {
                                 prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_DISPLAY_NAME,
                                 channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
                                 groupKey = GROUP_KEY_FRIENDS,
-                                bigText = "Was: ${old.displayName}\nNow: ${newEntry.displayName}"
+                                bigText = "Was: ${old.displayName}\nNow: ${newEntry.displayName}",
+                                alertBody = "${old.displayName} → ${newEntry.displayName}",
+                                alertBeforeText = old.displayName,
+                                alertAfterText = newEntry.displayName
                             )
                         }
                         // Bio change detection (with cooldown)
@@ -377,7 +380,7 @@ class VrchatPipelineService : Service() {
                                 lastFriendBioNotifMs[userId] = System.currentTimeMillis()
                                 val bioAlertBody = "${newEntry.displayName}\n\nBefore: ${old.bio}\n\nAfter: ${newEntry.bio}"
                                 fireEventNotification(
-                                    id = "bio_$userId".hashCode(),
+                                    id = "bio_${userId}_${System.currentTimeMillis()}".hashCode(),
                                     title = "Friend updated bio",
                                     text = "${newEntry.displayName} updated their bio",
                                     profileUrl = "https://vrchat.com/home/user/$userId",
@@ -385,7 +388,9 @@ class VrchatPipelineService : Service() {
                                     channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
                                     groupKey = GROUP_KEY_FRIENDS,
                                     bigText = bioAlertBody,
-                                    alertBody = bioAlertBody
+                                    alertBody = bioAlertBody,
+                                    alertBeforeText = old.bio,
+                                    alertAfterText = newEntry.bio
                                 )
                             }
                         }
@@ -1201,7 +1206,7 @@ class VrchatPipelineService : Service() {
                 lastFriendBioNotifMs[userId] = now
                 val bioAlertBody = "$newDisplayName\n\nBefore: ${previous.bio}\n\nAfter: $newBio"
                 fireEventNotification(
-                    id = "bio_$userId".hashCode(),
+                    id = "bio_${userId}_${System.currentTimeMillis()}".hashCode(),
                     title = "Friend updated bio",
                     text = "$newDisplayName updated their bio",
                     profileUrl = "https://vrchat.com/home/user/$userId",
