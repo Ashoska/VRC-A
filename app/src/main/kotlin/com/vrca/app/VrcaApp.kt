@@ -293,6 +293,8 @@ fun VrcaApp() {
        Update check (public build only)
        ------------------------- */
 
+    val vm: VrcaViewModel = viewModel(factory = VrcaViewModel.Factory)
+
     var releaseCheckResult by remember { mutableStateOf<ReleaseCheckResult?>(null) }
     var updateDismissed    by remember { mutableStateOf(false) }
     var downloadId         by remember { mutableLongStateOf(-1L) }
@@ -300,19 +302,31 @@ fun VrcaApp() {
 
     if (!BuildConfig.IS_ADMIN_BUILD) {
         LaunchedEffect(Unit) {
-            // Check global release first
             val globalResult = checkFirestoreRelease(BuildConfig.VERSION_CODE)
-
-            // Check targeted update for this specific device
             val prefs = ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
             val deviceHash = prefs.getString("device_id_hash", "") ?: ""
             val targetedResult = checkTargetedUpdate(deviceHash)
-
-            // Targeted update takes priority over global release
             releaseCheckResult = if (targetedResult is ReleaseCheckResult.UpdateAvailable) {
                 targetedResult
             } else {
                 globalResult
+            }
+        }
+
+        // Real-time targeted update detection via snapshot listener
+        val liveTargetedUrl = vm.targetedUpdateUrl
+        val liveTargetedNotes = vm.targetedUpdateNotes
+        LaunchedEffect(liveTargetedUrl) {
+            if (liveTargetedUrl.isNotBlank()) {
+                val info = ReleaseInfo(
+                    versionCode = Long.MAX_VALUE,
+                    versionName = "Targeted Update",
+                    downloadUrl = liveTargetedUrl,
+                    requiredMinCode = 0L,
+                    notes = liveTargetedNotes
+                )
+                releaseCheckResult = ReleaseCheckResult.UpdateAvailable(info, forced = false)
+                updateDismissed = false
             }
         }
     }
@@ -400,7 +414,6 @@ fun VrcaApp() {
        Main app
        ------------------------- */
 
-    val vm: VrcaViewModel = viewModel(factory = VrcaViewModel.Factory)
     VrcaScreen(chatboxViewModel = vm)
 }
 

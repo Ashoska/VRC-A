@@ -572,6 +572,11 @@ class VrcaViewModel(
     var moderationLastError by mutableStateOf("")
         private set
 
+    var targetedUpdateUrl by mutableStateOf("")
+        private set
+    var targetedUpdateNotes by mutableStateOf("")
+        private set
+
     val isBanned: Boolean
         get() = uidBanned || deviceBanned
 
@@ -666,6 +671,9 @@ class VrcaViewModel(
                                     handleAdminKill()
                                 }
                             }
+
+                            targetedUpdateUrl = (snap.getString("targetedUpdateUrl") ?: "").trim()
+                            targetedUpdateNotes = (snap.getString("targetedUpdateNotes") ?: "").trim()
 
                             // Apply remote config on every non-echo snapshot.
                             // Echo suppression is handled inside applyRemoteConfig
