@@ -42,6 +42,17 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Surface
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
@@ -505,28 +516,101 @@ private fun InAppAlertCards() {
     val groups by InAppAlertState.groups.collectAsState()
     if (groups.isEmpty()) return
 
+    var sectionExpanded by remember { mutableStateOf(true) }
     var showAll by remember { mutableStateOf(false) }
-    val visible = if (showAll || groups.size <= VISIBLE_ALERT_LIMIT) groups
-        else groups.take(VISIBLE_ALERT_LIMIT)
-    val hiddenCount = groups.size - visible.size
 
-    for (group in visible) {
-        AlertGroupCard(group = group, onDismiss = {
-            InAppAlertState.dismiss(ctx, group.groupId)
-        })
-    }
+    Surface(
+        color = Color.Transparent,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { sectionExpanded = !sectionExpanded }
+                    .padding(horizontal = 4.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "Notifications (${groups.size})",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Icon(
+                    if (sectionExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                    contentDescription = if (sectionExpanded) "Collapse" else "Expand",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+            AnimatedVisibility(
+                visible = sectionExpanded,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically()
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val visible = if (showAll || groups.size <= VISIBLE_ALERT_LIMIT) groups
+                        else groups.take(VISIBLE_ALERT_LIMIT)
+                    val hiddenCount = groups.size - visible.size
 
-    if (hiddenCount > 0) {
-        TextButton(
-            onClick = { showAll = true },
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text(
-                "+$hiddenCount more alert${if (hiddenCount > 1) "s" else ""}",
-                style = MaterialTheme.typography.labelMedium
-            )
+                    for (group in visible) {
+                        AlertGroupCard(group = group, onDismiss = {
+                            InAppAlertState.dismiss(ctx, group.groupId)
+                        })
+                    }
+
+                    if (hiddenCount > 0) {
+                        OutlinedButton(
+                            onClick = { showAll = true },
+                            modifier = Modifier.fillMaxWidth(),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+                        ) {
+                            Text(
+                                "+$hiddenCount more alert${if (hiddenCount > 1) "s" else ""}",
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
+}
+
+private fun wordDiff(before: String, after: String): Pair<androidx.compose.ui.text.AnnotatedString, androidx.compose.ui.text.AnnotatedString> {
+    val bWords = before.split(" ")
+    val aWords = after.split(" ")
+    val commonPrefix = bWords.zip(aWords).takeWhile { it.first == it.second }.size
+    val bRev = bWords.reversed()
+    val aRev = aWords.reversed()
+    val commonSuffix = bRev.zip(aRev).takeWhile { it.first == it.second }.size
+        .coerceAtMost(bWords.size - commonPrefix)
+        .coerceAtMost(aWords.size - commonPrefix)
+
+    val removedColor = Color(0xFFEF5350)
+    val addedColor = Color(0xFF4CAF50)
+    val neutralColor = Color(0xFFB0B0B0)
+
+    val beforeAnnotated = buildAnnotatedString {
+        for ((i, w) in bWords.withIndex()) {
+            if (i > 0) append(" ")
+            val isChanged = i >= commonPrefix && i < bWords.size - commonSuffix
+            withStyle(SpanStyle(color = if (isChanged) removedColor else neutralColor)) {
+                append(w)
+            }
+        }
+    }
+    val afterAnnotated = buildAnnotatedString {
+        for ((i, w) in aWords.withIndex()) {
+            if (i > 0) append(" ")
+            val isChanged = i >= commonPrefix && i < aWords.size - commonSuffix
+            withStyle(SpanStyle(color = if (isChanged) addedColor else neutralColor)) {
+                append(w)
+            }
+        }
+    }
+    return beforeAnnotated to afterAnnotated
 }
 
 @Composable
@@ -542,23 +626,36 @@ private fun AlertGroupCard(group: InAppAlertGroup, onDismiss: () -> Unit) {
         ),
         modifier = Modifier.clickable { expanded = !expanded }
     ) {
-        Column(Modifier.padding(10.dp)) {
+        Column(Modifier.padding(12.dp)) {
             Text(
                 displayTitle,
                 style = MaterialTheme.typography.titleSmall,
                 modifier = Modifier.fillMaxWidth()
             )
+            Spacer(Modifier.height(4.dp))
             Row(
                 Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                TextButton(onClick = { expanded = !expanded }) {
+                OutlinedButton(
+                    onClick = { expanded = !expanded },
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                    contentPadding = ButtonDefaults.TextButtonContentPadding,
+                    modifier = Modifier.height(32.dp)
+                ) {
                     Text(
                         if (expanded) "Less" else "More",
                         style = MaterialTheme.typography.labelSmall
                     )
                 }
-                TextButton(onClick = onDismiss) {
+                Spacer(Modifier.width(8.dp))
+                OutlinedButton(
+                    onClick = onDismiss,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                    contentPadding = ButtonDefaults.TextButtonContentPadding,
+                    modifier = Modifier.height(32.dp)
+                ) {
                     Text("Dismiss", style = MaterialTheme.typography.labelSmall)
                 }
             }
@@ -567,52 +664,80 @@ private fun AlertGroupCard(group: InAppAlertGroup, onDismiss: () -> Unit) {
                 enter = fadeIn() + expandVertically(),
                 exit = fadeOut() + shrinkVertically()
             ) {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Divider(Modifier.padding(vertical = 2.dp))
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.padding(top = 8.dp)
+                ) {
                     for ((idx, event) in group.events.withIndex()) {
                         if (event.beforeText != null && event.afterText != null) {
-                            Column {
-                                if (eventCount > 1) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.surface,
+                                shape = MaterialTheme.shapes.small,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                            ) {
+                                Column(Modifier.padding(10.dp)) {
+                                    if (eventCount > 1) {
+                                        Text(
+                                            "Change ${idx + 1}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Spacer(Modifier.height(4.dp))
+                                    }
+                                    val (beforeDiff, afterDiff) = remember(event.beforeText, event.afterText) {
+                                        wordDiff(event.beforeText, event.afterText)
+                                    }
                                     Text(
-                                        "Change ${idx + 1}",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        beforeDiff,
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                    Divider(
+                                        Modifier.padding(vertical = 6.dp),
+                                        color = MaterialTheme.colorScheme.outlineVariant
+                                    )
+                                    Text(
+                                        afterDiff,
+                                        style = MaterialTheme.typography.bodySmall
                                     )
                                 }
-                                Text(
-                                    "- ${event.beforeText}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.error
-                                )
-                                Text(
-                                    "+ ${event.afterText}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = Color(0xFF4CAF50)
-                                )
                             }
                         } else if (event.body.isNotBlank()) {
-                            Text(
-                                event.body,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        if (idx < group.events.lastIndex) {
-                            Divider(
-                                Modifier.padding(vertical = 2.dp),
-                                color = MaterialTheme.colorScheme.outlineVariant
-                            )
+                            Surface(
+                                color = MaterialTheme.colorScheme.surface,
+                                shape = MaterialTheme.shapes.small,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                            ) {
+                                Text(
+                                    event.body,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(10.dp)
+                                )
+                            }
                         }
                     }
                     if (group.url != null) {
-                        Text(
-                            text = "Open in VRChat",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.clickable {
+                        OutlinedButton(
+                            onClick = {
                                 ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(group.url)))
-                            }
-                        )
+                            },
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary),
+                            contentPadding = ButtonDefaults.TextButtonContentPadding,
+                            modifier = Modifier.height(32.dp)
+                        ) {
+                            Icon(
+                                Icons.Filled.OpenInNew,
+                                contentDescription = null,
+                                modifier = Modifier.size(14.dp),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                "Open in VRChat",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
                     }
                 }
             }

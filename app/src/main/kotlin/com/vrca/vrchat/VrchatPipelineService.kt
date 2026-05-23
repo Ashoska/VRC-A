@@ -958,7 +958,16 @@ class VrchatPipelineService : Service() {
                 val v2Title = content.optString("title", "")
                 val baseId = if (notifId.isNotBlank()) notifId else "$v2Type-${message.hashCode()}"
                 val groupId = content.optString("relatedGroupId", "").ifBlank {
-                    content.optString("groupId", "")
+                    content.optString("groupId", "").ifBlank {
+                        content.optJSONObject("data")?.optString("groupId", "").orEmpty().ifBlank {
+                            content.optString("senderUserId", "").let { id ->
+                                if (id.startsWith("grp_")) id else ""
+                            }
+                        }
+                    }
+                }
+                if (groupId.isBlank()) {
+                    Log.d(TAG, "notification-v2 missing groupId: type=$v2Type payload=${content.toString().take(500)}")
                 }
                 val groupUrl = if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId"
                     else "https://vrchat.com/home/notifications"
@@ -2238,6 +2247,7 @@ class VrchatPipelineService : Service() {
             .setGroup(groupKey)
             .setGroupSummary(true)
             .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
+            .setOnlyAlertOnce(true)
             .setAutoCancel(true)
             .build()
         nm.notify(summaryId, summary)
