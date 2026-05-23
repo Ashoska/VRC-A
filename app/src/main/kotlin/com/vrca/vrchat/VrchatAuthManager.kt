@@ -76,8 +76,28 @@ object VrchatAuthManager {
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
         )
     } catch (e: Exception) {
-        Log.e(TAG, "EncryptedSharedPreferences init failed", e)
-        null
+        Log.e(TAG, "EncryptedSharedPreferences init failed — attempting recovery", e)
+        try {
+            // Delete corrupted prefs file and its encrypted key file, then retry
+            val prefsFile = java.io.File(context.applicationInfo.dataDir + "/shared_prefs/" + PREFS_FILE + ".xml")
+            val keyFile = java.io.File(context.applicationInfo.dataDir + "/shared_prefs/" + PREFS_FILE + ".xml.__androidx_security_crypto_encrypted_prefs__")
+            if (prefsFile.exists()) prefsFile.delete()
+            if (keyFile.exists()) keyFile.delete()
+            Log.i(TAG, "Deleted corrupted prefs files, re-creating EncryptedSharedPreferences")
+            val masterKey = MasterKey.Builder(context)
+                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                .build()
+            EncryptedSharedPreferences.create(
+                context,
+                PREFS_FILE,
+                masterKey,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            )
+        } catch (e2: Exception) {
+            Log.e(TAG, "EncryptedSharedPreferences recovery also failed", e2)
+            null
+        }
     }
 
     fun isLoggedIn(context: Context): Boolean {
@@ -121,7 +141,14 @@ object VrchatAuthManager {
         val prefs = getPrefs(context) ?: return null
         val twoFa = prefs.getString(KEY_2FA_COOKIE, null) ?: return null
         val storedAt = prefs.getLong(KEY_2FA_COOKIE_STORED_AT, 0L)
-        val valid = storedAt == 0L || System.currentTimeMillis() - storedAt < TWO_FA_COOKIE_MAX_AGE_MS
+        if (storedAt == 0L) {
+            // Migration case: cookie exists but was never timestamped.
+            // Give it a fresh 30-day window from now.
+            Log.i(TAG, "getTwoFaOnlyCookieHeader: migrating 2FA cookie with missing timestamp")
+            prefs.edit().putLong(KEY_2FA_COOKIE_STORED_AT, System.currentTimeMillis()).apply()
+            return twoFa
+        }
+        val valid = System.currentTimeMillis() - storedAt < TWO_FA_COOKIE_MAX_AGE_MS
         return if (valid) twoFa else null
     }
 
@@ -177,6 +204,13 @@ object VrchatAuthManager {
             ?.apply()
     }
 
+    private fun clearCredentials(context: Context) {
+        getPrefs(context)?.edit()
+            ?.remove(KEY_USERNAME)
+            ?.remove(KEY_PASSWORD)
+            ?.apply()
+    }
+
     // ------------------------------------------------------------------
     // Login
     // ------------------------------------------------------------------
@@ -184,6 +218,11 @@ object VrchatAuthManager {
     suspend fun login(context: Context, username: String, password: String): AuthResult =
         withContext(Dispatchers.IO) {
             try {
+                // Save credentials BEFORE the HTTP request so they survive
+                // if the app is killed between a successful response and
+                // the post-response processing.
+                saveCredentials(context, username, password)
+
                 val credentials = Base64.getEncoder()
                     .encodeToString("$username:$password".toByteArray())
 
@@ -213,7 +252,6 @@ object VrchatAuthManager {
                                     ?.putString(KEY_AUTH_COOKIE, authCookieValue)
                                     ?.apply()
                             }
-                            saveCredentials(context, username, password)
                             val types = (0 until requires2FA.length())
                                 .map { requires2FA.getString(it) }
                             Log.d(TAG, "2FA required: $types")
@@ -239,7 +277,6 @@ object VrchatAuthManager {
                                 ?.putString(KEY_DISPLAY_NAME, displayName)
                                 ?.putLong(KEY_COOKIE_STORED_AT, now)
                                 ?.apply()
-                            saveCredentials(context, username, password)
                             AuthResult.Success(userId, displayName)
                         } else {
                             // Unusual: 200 but no id or cookie - log the body for diagnosis
@@ -249,7 +286,9 @@ object VrchatAuthManager {
                     }
 
                     401 -> {
-                        // Wrong credentials
+                        // Wrong credentials — clear saved credentials so auto-relogin
+                        // doesn't keep retrying with invalid creds
+                        clearCredentials(context)
                         AuthResult.Error("Incorrect username or password.")
                     }
 
@@ -639,16 +678,31 @@ object VrchatAuthManager {
         displayName: String
     ) {
         val now = System.currentTimeMillis()
-        getPrefs(context)?.edit()
-            ?.putString(KEY_AUTH_COOKIE, authCookie)
-            ?.putString(KEY_2FA_COOKIE, twoFaCookie)
-            ?.putString(KEY_USER_ID, userId)
-            ?.putString(KEY_DISPLAY_NAME, displayName)
-            ?.putLong(KEY_COOKIE_STORED_AT, now)
-            ?.apply {
-                if (twoFaCookie != null) putLong(KEY_2FA_COOKIE_STORED_AT, now)
-            }
-            ?.apply()
+        val editor = getPrefs(context)?.edit() ?: return
+        editor.putString(KEY_AUTH_COOKIE, authCookie)
+        editor.putString(KEY_USER_ID, userId)
+        editor.putString(KEY_DISPLAY_NAME, displayName)
+        editor.putLong(KEY_COOKIE_STORED_AT, now)
+        if (twoFaCookie != null) {
+            editor.putString(KEY_2FA_COOKIE, twoFaCookie)
+            editor.putLong(KEY_2FA_COOKIE_STORED_AT, now)
+        }
+        editor.apply()
+    }
+
+    fun diagnoseAuthState(context: Context) {
+        val prefs = getPrefs(context)
+        if (prefs == null) {
+            Log.e(TAG, "diagnoseAuthState: getPrefs returned null — EncryptedSharedPreferences broken")
+            return
+        }
+        val hasAuth = prefs.getString(KEY_AUTH_COOKIE, null) != null
+        val has2fa = prefs.getString(KEY_2FA_COOKIE, null) != null
+        val hasUser = prefs.getString(KEY_USER_ID, null) != null
+        val hasCreds = prefs.getString(KEY_USERNAME, null) != null && prefs.getString(KEY_PASSWORD, null) != null
+        val cookieAge = System.currentTimeMillis() - prefs.getLong(KEY_COOKIE_STORED_AT, 0L)
+        val twoFaAge = System.currentTimeMillis() - prefs.getLong(KEY_2FA_COOKIE_STORED_AT, 0L)
+        Log.i(TAG, "Auth state: authCookie=$hasAuth, 2faCookie=$has2fa, userId=$hasUser, credentials=$hasCreds, cookieAgeHrs=${cookieAge/3600000}, 2faAgeHrs=${twoFaAge/3600000}")
     }
 
     /**

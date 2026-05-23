@@ -906,6 +906,7 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
             var tUploadPhase by remember { mutableStateOf("") }
             var tUploadProgress by remember { mutableStateOf(0f) }
             var tUploadDone by remember { mutableStateOf(false) }
+            var targetedUploadError by remember { mutableStateOf<String?>(null) }
 
             val githubPat   = BuildConfig.GITHUB_PAT
             val githubOwner = BuildConfig.GITHUB_OWNER
@@ -957,11 +958,11 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                 if (apkPath.isBlank()) return
 
                 scope.launch {
-                    tUploading = true; tUploadDone = false; tUploadProgress = 0f; setError(null)
+                    tUploading = true; tUploadDone = false; tUploadProgress = 0f; setError(null); targetedUploadError = null
 
                     runCatching {
                         val apkFile = File(apkPath)
-                        val tagName  = "targeted-${docId.take(8)}-${System.currentTimeMillis() / 1000}"
+                        val tagName  = "targeted-${docId.take(8)}-${System.currentTimeMillis()}-${(0..999).random()}"
                         val relName  = "Targeted v${tParsedName.ifBlank { tParsedCode.toString() }}"
                         val fileName = "chatbox-vrc-a-targeted-${tParsedName.ifBlank { tParsedCode.toString() }}.apk"
                             .replace(Regex("[^a-zA-Z0-9._-]"), "_")
@@ -988,19 +989,30 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                         )
 
                         tUploadPhase = "Pushing to user..."
-                        writeField("targetedUpdateUrl", downloadUrl)
-                        writeField("targetedUpdateNotes", targetNotes.trim())
+                        FirebaseFirestore.getInstance()
+                            .collection("users")
+                            .document(docId)
+                            .update(
+                                mapOf(
+                                    "targetedUpdateUrl" to downloadUrl,
+                                    "targetedUpdateNotes" to targetNotes.trim()
+                                )
+                            )
+                            .await()
 
                         targetUrl = downloadUrl
                         hasTargeted = true
                         tUploadDone = true
                         tUploadPhase = ""
+                        targetedUploadError = null
 
                         runCatching { apkFile.delete() }
                         tCachedApkPath = ""; tPickedFileName = ""; tParsedCode = 0L; tParsedName = ""
 
                     }.onFailure { e ->
-                        setError(e.message ?: "Upload failed")
+                        val msg = e.message ?: "Upload failed"
+                        setError(msg)
+                        targetedUploadError = msg
                         tUploadPhase = ""
                     }
 
@@ -1021,9 +1033,21 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                     }
                 }
                 OutlinedButton(onClick = {
-                    writeField("targetedUpdateUrl", "")
-                    writeField("targetedUpdateNotes", "")
-                    hasTargeted = false; targetUrl = ""; targetNotes = ""
+                    scope.launch {
+                        runCatching {
+                            FirebaseFirestore.getInstance()
+                                .collection("users")
+                                .document(docId)
+                                .update(
+                                    mapOf(
+                                        "targetedUpdateUrl" to "",
+                                        "targetedUpdateNotes" to ""
+                                    )
+                                )
+                                .await()
+                            hasTargeted = false; targetUrl = ""; targetNotes = ""
+                        }.onFailure { e -> setError("Remove failed: ${e.message}") }
+                    }
                 }, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Filled.Delete, null, modifier = Modifier.size(16.dp))
                     Spacer(Modifier.width(4.dp))
@@ -1111,6 +1135,18 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                     }
                 }
 
+                if (targetedUploadError != null) {
+                    Card(colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                        Text(
+                            targetedUploadError ?: "",
+                            modifier = Modifier.padding(10.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                }
+
                 Divider()
 
                 // Option 2: Manual URL or fill from latest release
@@ -1138,9 +1174,21 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                 }
                 Button(onClick = {
                     if (targetUrl.trim().isNotBlank()) {
-                        writeField("targetedUpdateUrl", targetUrl.trim())
-                        writeField("targetedUpdateNotes", targetNotes.trim())
-                        hasTargeted = true
+                        scope.launch {
+                            runCatching {
+                                FirebaseFirestore.getInstance()
+                                    .collection("users")
+                                    .document(docId)
+                                    .update(
+                                        mapOf(
+                                            "targetedUpdateUrl" to targetUrl.trim(),
+                                            "targetedUpdateNotes" to targetNotes.trim()
+                                        )
+                                    )
+                                    .await()
+                                hasTargeted = true
+                            }.onFailure { e -> setError("Push failed: ${e.message}") }
+                        }
                     }
                 }, modifier = Modifier.fillMaxWidth(),
                     enabled = targetUrl.trim().isNotBlank() && tCachedApkPath.isBlank()) {

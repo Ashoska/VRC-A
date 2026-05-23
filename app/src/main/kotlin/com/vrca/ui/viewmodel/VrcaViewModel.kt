@@ -145,6 +145,7 @@ class VrcaViewModel(
         uiTickJob?.cancel()
         syncTriggerJob?.cancel()
         liveSyncJob?.cancel()
+        keepaliveJob?.cancel()
         moderationAttachJob?.cancel()
         moderationUserReg?.remove()
         moderationDeviceReg?.remove()
@@ -1050,6 +1051,11 @@ class VrcaViewModel(
 
     private var lastCombinedSendMs = 0L
 
+    // Content-change dedup: skip redundant OSC sends when the text hasn't changed.
+    // Re-sends every 10s even if unchanged so VRChat doesn't clear the chatbox.
+    private var lastSentCombinedText = ""
+    private var lastSentMs = 0L
+
     // =========================
     // AFK
     // =========================
@@ -1113,6 +1119,7 @@ class VrcaViewModel(
         savedState["timeEnabled"] = enabled
         rebuildCombinedPreviewOnly()
         startSelfSyncLoopIfNeeded()
+        manageKeepaliveLoop()
     }
 
     fun updateTimeMode(mode: String) {
@@ -1147,6 +1154,7 @@ class VrcaViewModel(
         private set
 
     private var nowPlayingJob: Job? = null
+    private var keepaliveJob: Job? = null
 
     private var inferredIsPlaying = false
     private var lastTrackKeyForInference: String = ""
@@ -1577,6 +1585,7 @@ class VrcaViewModel(
         rebuildCombinedPreviewOnly()
         if (!enabled) stopAfkSender(clearFromChatbox = true)
         startSelfSyncLoopIfNeeded()
+        manageKeepaliveLoop()
     }
 
     fun setCycleEnabledFlag(enabled: Boolean) {
@@ -1587,6 +1596,7 @@ class VrcaViewModel(
         if (!enabled) stopCycle(clearFromChatbox = true)
         if (enabled) lastCyclePreviewAdvanceMs = 0L
         startSelfSyncLoopIfNeeded()
+        manageKeepaliveLoop()
     }
 
     fun setSpotifyEnabledFlag(enabled: Boolean) {
@@ -1596,6 +1606,7 @@ class VrcaViewModel(
         rebuildCombinedPreviewOnly()
         if (!enabled) stopNowPlayingSender(clearFromChatbox = true)
         startSelfSyncLoopIfNeeded()
+        manageKeepaliveLoop()
     }
 
     fun setSpotifyDemoFlag(enabled: Boolean) {
@@ -1784,6 +1795,9 @@ class VrcaViewModel(
     fun startAfkSender(local: Boolean = false) {
         if (isBanned) return
         if (!afkEnabled) return
+        // AFK sender has its own 12s loop — cancel keepalive to avoid duplication.
+        keepaliveJob?.cancel()
+        keepaliveJob = null
         afkJob?.cancel()
         afkJob = viewModelScope.launch {
             while (afkEnabled && !isBanned) {
@@ -1799,6 +1813,7 @@ class VrcaViewModel(
         afkJob = null
         if (clearFromChatbox && !isBanned) rebuildAndMaybeSendCombined(forceSend = true, forceClearIfAllOff = true)
         startSelfSyncLoopIfNeeded()
+        manageKeepaliveLoop()
     }
 
     fun sendAfkNow(local: Boolean = false) {
@@ -1818,6 +1833,9 @@ class VrcaViewModel(
         persistCycleLinesPreserve()
         viewModelScope.launch { userPreferencesRepository.saveCycleInterval(cycleIntervalSeconds) }
 
+        // Cycle has its own interval-based send loop — cancel keepalive to avoid duplication.
+        keepaliveJob?.cancel()
+        keepaliveJob = null
         cycleJob?.cancel()
         cycleJob = viewModelScope.launch {
             cycleIndex = 0
@@ -1840,6 +1858,7 @@ class VrcaViewModel(
         if (clearFromChatbox && !isBanned) rebuildAndMaybeSendCombined(forceSend = true, forceClearIfAllOff = true)
         lastCyclePreviewAdvanceMs = 0L
         startSelfSyncLoopIfNeeded()
+        manageKeepaliveLoop()
     }
 
     // =========================
@@ -1848,6 +1867,9 @@ class VrcaViewModel(
     fun startNowPlayingSender(local: Boolean = false) {
         if (isBanned) return
         if (!spotifyEnabled) return
+        // NowPlaying has its own 500ms send loop — cancel keepalive to avoid duplication.
+        keepaliveJob?.cancel()
+        keepaliveJob = null
         nowPlayingJob?.cancel()
         nowPlayingJob = viewModelScope.launch {
             while (spotifyEnabled && !isBanned) {
@@ -1864,6 +1886,7 @@ class VrcaViewModel(
         nowPlayingJob = null
         if (clearFromChatbox && !isBanned) rebuildAndMaybeSendCombined(forceSend = true, forceClearIfAllOff = true)
         startSelfSyncLoopIfNeeded()
+        manageKeepaliveLoop()
     }
 
     fun sendNowPlayingOnce(local: Boolean = false) {
@@ -1876,8 +1899,45 @@ class VrcaViewModel(
         stopCycle(clearFromChatbox = false)
         stopNowPlayingSender(clearFromChatbox = false)
         stopAfkSender(clearFromChatbox = false)
+        keepaliveJob?.cancel()
+        keepaliveJob = null
         if (clearFromChatbox && !isBanned) clearChatbox()
         startSelfSyncLoopIfNeeded()
+    }
+
+    // =========================
+    // Keepalive loop — sends chatbox text periodically when no other
+    // sender loop (NowPlaying 500ms, Cycle interval, AFK 12s) is active.
+    // Without this, Time-only or Pinned-only modes never push text to
+    // VRChat, and VRChat clears the chatbox after ~15s of silence.
+    // =========================
+    private fun manageKeepaliveLoop(local: Boolean = false) {
+        // NowPlaying and Cycle have their own send loops — don't duplicate.
+        if (spotifyEnabled || (cycleEnabled && cycleJob != null)) {
+            keepaliveJob?.cancel()
+            keepaliveJob = null
+            return
+        }
+        // AFK sender also has its own 12s loop — don't duplicate.
+        if (afkEnabled && afkJob != null) {
+            keepaliveJob?.cancel()
+            keepaliveJob = null
+            return
+        }
+        val anyActive = afkEnabled || cycleEnabled || timeEnabled
+        if (anyActive && keepaliveJob == null) {
+            keepaliveJob = viewModelScope.launch {
+                // Force immediate send on start so text appears right away.
+                rebuildAndMaybeSendCombined(forceSend = true, local = local)
+                while (true) {
+                    delay(10_000L)
+                    rebuildAndMaybeSendCombined(forceSend = true, local = local)
+                }
+            }
+        } else if (!anyActive) {
+            keepaliveJob?.cancel()
+            keepaliveJob = null
+        }
     }
 
     // =========================
@@ -1911,6 +1971,15 @@ class VrcaViewModel(
 
         val nowMs = System.currentTimeMillis()
         if (nowMs - lastCombinedSendMs < SEND_FLOOR_MS) return
+
+        // Content-change dedup: skip the OSC send if the text is identical to
+        // what we last sent AND it's been less than 10s. This avoids wasteful
+        // repeated sends from the NowPlaying 500ms loop and keepalive loop
+        // when nothing has actually changed. The 10s ceiling ensures VRChat
+        // doesn't clear the chatbox (~15s inactivity timeout).
+        if (combined == lastSentCombinedText && nowMs - lastSentMs < 10_000L) return
+        lastSentCombinedText = combined
+        lastSentMs = nowMs
 
         sendToVrchatRaw(combined, local, addToConversation = false)
         lastCombinedSendMs = nowMs
@@ -2003,7 +2072,7 @@ class VrcaViewModel(
         val line1 = when {
             primary.length <= maxLine -> primary
             safeTitle.length <= maxLine -> safeTitle
-            else -> safeTitle.take(maxLine)  // hard cut
+            else -> safeTitle.take(maxLine - 1) + "…"
         }.trim()
 
         val dur = if (spotifyDemoEnabled && !nowPlayingDetected) 205_000L else nowPlayingDurationMs
@@ -2070,7 +2139,23 @@ class VrcaViewModel(
             cleaned[index] = cleaned[index].copy(text = trimmed)
         }
 
+        // First pass: try stripping artist name from music lines before hard-trimming.
+        // Music lines containing "Artist — Title" can be shortened to just "Title".
         var len = totalLen(cleaned)
+        if (len > maxChars) {
+            for (i in cleaned.indices) {
+                if (cleaned[i].priority == Priority.MUSIC) {
+                    val dashIdx = cleaned[i].text.indexOf(" — ")
+                    if (dashIdx > 0) {
+                        val titleOnly = cleaned[i].text.substring(dashIdx + 3)
+                        cleaned[i] = cleaned[i].copy(text = titleOnly)
+                        len = totalLen(cleaned)
+                        if (len <= maxChars) break
+                    }
+                }
+            }
+        }
+
         while (len > maxChars && cleaned.isNotEmpty()) {
             val excess = len - maxChars
 

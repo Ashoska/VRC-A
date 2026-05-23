@@ -2,6 +2,11 @@ package com.vrca.ui.screen
 
 import android.content.Intent
 import android.net.Uri
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -39,6 +44,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.vrca.discord.DiscordLoginWebView
 import com.vrca.discord.DiscordRpcService
@@ -47,6 +54,7 @@ import com.vrca.discord.DiscordRpcStatus
 import com.vrca.ui.settings.NotificationToggleSection
 import com.vrca.ui.settings.ToggleRow
 import com.vrca.ui.viewmodel.VrcaViewModel
+import com.vrca.vrchat.InAppAlertGroup
 import com.vrca.vrchat.InAppAlertState
 import com.vrca.vrchat.VrchatAuthManager
 import com.vrca.vrchat.VrchatPipelineService
@@ -495,23 +503,23 @@ private const val VISIBLE_ALERT_LIMIT = 3
 @Composable
 private fun InAppAlertCards() {
     val ctx = LocalContext.current
-    val alerts by InAppAlertState.alerts.collectAsState()
-    if (alerts.isEmpty()) return
+    val groups by InAppAlertState.groups.collectAsState()
+    if (groups.isEmpty()) return
 
-    var expanded by remember { mutableStateOf(false) }
-    val visible = if (expanded || alerts.size <= VISIBLE_ALERT_LIMIT) alerts
-        else alerts.take(VISIBLE_ALERT_LIMIT)
-    val hiddenCount = alerts.size - visible.size
+    var showAll by remember { mutableStateOf(false) }
+    val visible = if (showAll || groups.size <= VISIBLE_ALERT_LIMIT) groups
+        else groups.take(VISIBLE_ALERT_LIMIT)
+    val hiddenCount = groups.size - visible.size
 
-    for (alert in visible) {
-        AlertCard(alert = alert, onDismiss = {
-            InAppAlertState.dismiss(ctx, alert.id)
+    for (group in visible) {
+        AlertGroupCard(group = group, onDismiss = {
+            InAppAlertState.dismiss(ctx, group.groupId)
         })
     }
 
     if (hiddenCount > 0) {
         TextButton(
-            onClick = { expanded = true },
+            onClick = { showAll = true },
             modifier = Modifier.fillMaxWidth()
         ) {
             Text(
@@ -523,45 +531,97 @@ private fun InAppAlertCards() {
 }
 
 @Composable
-private fun AlertCard(alert: com.vrca.vrchat.InAppAlert, onDismiss: () -> Unit) {
+private fun AlertGroupCard(group: InAppAlertGroup, onDismiss: () -> Unit) {
     val ctx = LocalContext.current
+    var expanded by remember { mutableStateOf(false) }
+    val eventCount = group.events.size
+    val displayTitle = if (eventCount > 1) "${group.title} ($eventCount)" else group.title
+
     Card(
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.tertiaryContainer
-        )
+        ),
+        modifier = Modifier.clickable { expanded = !expanded }
     ) {
-        Column(
-            Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
+        Column(Modifier.padding(8.dp)) {
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    alert.title,
+                    displayTitle,
                     style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
-                TextButton(onClick = onDismiss) {
-                    Text("Dismiss", style = MaterialTheme.typography.labelSmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
+                    TextButton(onClick = { expanded = !expanded }) {
+                        Text(
+                            if (expanded) "Less" else "More",
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                    TextButton(onClick = onDismiss) {
+                        Text("Dismiss", style = MaterialTheme.typography.labelSmall)
+                    }
                 }
             }
-            Text(
-                alert.body,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onTertiaryContainer
-            )
-            if (alert.url != null) {
-                Text(
-                    text = "Open in VRChat",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.clickable {
-                        ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(alert.url)))
+            AnimatedVisibility(
+                visible = expanded,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically()
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Divider(Modifier.padding(vertical = 2.dp))
+                    for ((idx, event) in group.events.withIndex()) {
+                        if (event.beforeText != null && event.afterText != null) {
+                            Column {
+                                if (eventCount > 1) {
+                                    Text(
+                                        "Change ${idx + 1}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Text(
+                                    event.beforeText,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                    textDecoration = TextDecoration.LineThrough
+                                )
+                                Text(
+                                    event.afterText,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        } else if (event.body.isNotBlank()) {
+                            Text(
+                                event.body,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer
+                            )
+                        }
+                        if (idx < group.events.lastIndex) {
+                            Divider(
+                                Modifier.padding(vertical = 2.dp),
+                                color = MaterialTheme.colorScheme.outlineVariant
+                            )
+                        }
                     }
-                )
+                    if (group.url != null) {
+                        Text(
+                            text = "Open in VRChat",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.clickable {
+                                ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(group.url)))
+                            }
+                        )
+                    }
+                }
             }
         }
     }
