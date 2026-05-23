@@ -678,16 +678,31 @@ object VrchatAuthManager {
         displayName: String
     ) {
         val now = System.currentTimeMillis()
-        getPrefs(context)?.edit()
-            ?.putString(KEY_AUTH_COOKIE, authCookie)
-            ?.putString(KEY_2FA_COOKIE, twoFaCookie)
-            ?.putString(KEY_USER_ID, userId)
-            ?.putString(KEY_DISPLAY_NAME, displayName)
-            ?.putLong(KEY_COOKIE_STORED_AT, now)
-            ?.apply {
-                if (twoFaCookie != null) putLong(KEY_2FA_COOKIE_STORED_AT, now)
-            }
-            ?.apply()
+        val editor = getPrefs(context)?.edit() ?: return
+        editor.putString(KEY_AUTH_COOKIE, authCookie)
+        editor.putString(KEY_USER_ID, userId)
+        editor.putString(KEY_DISPLAY_NAME, displayName)
+        editor.putLong(KEY_COOKIE_STORED_AT, now)
+        if (twoFaCookie != null) {
+            editor.putString(KEY_2FA_COOKIE, twoFaCookie)
+            editor.putLong(KEY_2FA_COOKIE_STORED_AT, now)
+        }
+        editor.apply()
+    }
+
+    fun diagnoseAuthState(context: Context) {
+        val prefs = getPrefs(context)
+        if (prefs == null) {
+            Log.e(TAG, "diagnoseAuthState: getPrefs returned null — EncryptedSharedPreferences broken")
+            return
+        }
+        val hasAuth = prefs.getString(KEY_AUTH_COOKIE, null) != null
+        val has2fa = prefs.getString(KEY_2FA_COOKIE, null) != null
+        val hasUser = prefs.getString(KEY_USER_ID, null) != null
+        val hasCreds = prefs.getString(KEY_USERNAME, null) != null && prefs.getString(KEY_PASSWORD, null) != null
+        val cookieAge = System.currentTimeMillis() - prefs.getLong(KEY_COOKIE_STORED_AT, 0L)
+        val twoFaAge = System.currentTimeMillis() - prefs.getLong(KEY_2FA_COOKIE_STORED_AT, 0L)
+        Log.i(TAG, "Auth state: authCookie=$hasAuth, 2faCookie=$has2fa, userId=$hasUser, credentials=$hasCreds, cookieAgeHrs=${cookieAge/3600000}, 2faAgeHrs=${twoFaAge/3600000}")
     }
 
     /**
