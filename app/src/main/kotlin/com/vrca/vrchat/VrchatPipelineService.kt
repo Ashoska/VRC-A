@@ -24,6 +24,7 @@ import com.vrca.discord.DiscordRpcService
 import com.vrca.discord.DiscordRpcState
 import com.vrca.discord.DiscordRpcStatus
 import com.vrca.update.checkFirestoreRelease
+import com.vrca.update.checkTargetedUpdate
 import com.vrca.update.ReleaseCheckResult
 import com.vrca.data.dataStore
 import com.vrca.sync.AdminBrowsingState
@@ -1715,7 +1716,12 @@ class VrchatPipelineService : Service() {
         serviceScope.launch {
             while (true) {
                 try {
-                    val result = checkFirestoreRelease(BuildConfig.VERSION_CODE)
+                    val targeted = if (deviceHash.isNotBlank()) checkTargetedUpdate(deviceHash) else null
+                    val result = if (targeted is ReleaseCheckResult.UpdateAvailable) {
+                        targeted
+                    } else {
+                        checkFirestoreRelease(BuildConfig.VERSION_CODE)
+                    }
                     if (result is ReleaseCheckResult.UpdateAvailable) {
                         val info = result.info
                         val title = if (result.forced) "VRC-A update required"
@@ -1731,7 +1737,7 @@ class VrchatPipelineService : Service() {
                 } catch (e: Exception) {
                     Log.w(TAG, "App update check failed", e)
                 }
-                delay(6 * 60 * 60 * 1000L) // Re-check every 6 hours
+                delay(6 * 60 * 60 * 1000L)
             }
         }
     }
