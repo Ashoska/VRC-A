@@ -220,9 +220,10 @@ class VrchatPipelineService : Service() {
         // Refresh persistent notification when Discord RPC status changes.
         serviceScope.launch {
             DiscordRpcState.statusFlow.collect {
-                updatePersistentNotif(
-                    if (VrchatPipelineState.isConnected) "Connected" else "Running"
-                )
+                val status = if (VrchatPipelineState.isConnected) {
+                    lastConnectedNotifText ?: "Connected"
+                } else "Running"
+                updatePersistentNotif(status)
             }
         }
     }
