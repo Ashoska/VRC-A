@@ -142,7 +142,6 @@ class VrchatPipelineService : Service() {
     private val lastFriendLocationNotifMs = mutableMapOf<String, Long>()
     private val lastFriendAvatarNotifMs = mutableMapOf<String, Long>()
     private val lastFriendStatusNotifMs = mutableMapOf<String, Long>()
-    private val lastFriendBioNotifMs = mutableMapOf<String, Long>()
     private val LOCATION_NOTIF_COOLDOWN_MS = 60_000L
     private val WARMUP_MS = 30_000L
     private var pipelineConnectedAtMs = 0L
@@ -359,8 +358,9 @@ class VrchatPipelineService : Service() {
                         // Name change detection
                         if (newEntry.displayName != old.displayName &&
                             old.displayName.isNotBlank() && newEntry.displayName.isNotBlank()) {
+                            val nameGroupKey = "name_$userId"
                             fireEventNotification(
-                                id = "name_$userId".hashCode(),
+                                id = nameGroupKey.hashCode(),
                                 title = "Friend renamed",
                                 text = "${old.displayName} is now known as ${newEntry.displayName}",
                                 profileUrl = "https://vrchat.com/home/user/$userId",
@@ -370,30 +370,29 @@ class VrchatPipelineService : Service() {
                                 bigText = "Was: ${old.displayName}\nNow: ${newEntry.displayName}",
                                 alertBody = "${old.displayName} → ${newEntry.displayName}",
                                 alertBeforeText = old.displayName,
-                                alertAfterText = newEntry.displayName
+                                alertAfterText = newEntry.displayName,
+                                alertGroupKey = nameGroupKey
                             )
                         }
-                        // Bio change detection (with cooldown)
+                        // Bio change detection — always fires as grouped in-app alert
                         if (newEntry.bio != old.bio &&
                             old.bio.isNotBlank() && newEntry.bio.isNotBlank()) {
-                            val lastBio = lastFriendBioNotifMs[userId] ?: 0L
-                            if (System.currentTimeMillis() - lastBio >= LOCATION_NOTIF_COOLDOWN_MS) {
-                                lastFriendBioNotifMs[userId] = System.currentTimeMillis()
-                                val bioAlertBody = "${newEntry.displayName}\n\nBefore: ${old.bio}\n\nAfter: ${newEntry.bio}"
-                                fireEventNotification(
-                                    id = "bio_${userId}_${System.currentTimeMillis()}".hashCode(),
-                                    title = "Friend updated bio",
-                                    text = "${newEntry.displayName} updated their bio",
-                                    profileUrl = "https://vrchat.com/home/user/$userId",
-                                    prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_BIO,
-                                    channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
-                                    groupKey = GROUP_KEY_FRIENDS,
-                                    bigText = bioAlertBody,
-                                    alertBody = bioAlertBody,
-                                    alertBeforeText = old.bio,
-                                    alertAfterText = newEntry.bio
-                                )
-                            }
+                            val bioGroupKey = "bio_$userId"
+                            val bioAlertBody = "Before: ${old.bio}\nAfter: ${newEntry.bio}"
+                            fireEventNotification(
+                                id = bioGroupKey.hashCode(),
+                                title = "${newEntry.displayName} updated bio",
+                                text = "${newEntry.displayName} updated their bio",
+                                profileUrl = "https://vrchat.com/home/user/$userId",
+                                prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_BIO,
+                                channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
+                                groupKey = GROUP_KEY_FRIENDS,
+                                bigText = bioAlertBody,
+                                alertBody = bioAlertBody,
+                                alertBeforeText = old.bio,
+                                alertAfterText = newEntry.bio,
+                                alertGroupKey = bioGroupKey
+                            )
                         }
                     }
                 }
@@ -1163,8 +1162,9 @@ class VrchatPipelineService : Service() {
         val recentRelocation = (System.currentTimeMillis() - (recentlyRelocated[userId] ?: 0L)) < 15_000L
 
         if (newDisplayName != previous.displayName && previous.displayName.isNotBlank()) {
+            val nameGroupKey = "name_$userId"
             fireEventNotification(
-                id = "name_$userId".hashCode(),
+                id = nameGroupKey.hashCode(),
                 title = "Friend renamed",
                 text = "${previous.displayName} is now known as $newDisplayName",
                 profileUrl = "https://vrchat.com/home/user/$userId",
@@ -1174,7 +1174,8 @@ class VrchatPipelineService : Service() {
                 bigText = "Was: ${previous.displayName}\nNow: $newDisplayName",
                 alertBody = "${previous.displayName} → $newDisplayName",
                 alertBeforeText = previous.displayName,
-                alertAfterText = newDisplayName
+                alertAfterText = newDisplayName,
+                alertGroupKey = nameGroupKey
             )
         }
 
@@ -1201,25 +1202,23 @@ class VrchatPipelineService : Service() {
         }
 
         if (newBio.isNotBlank() && newBio != previous.bio && previous.bio.isNotBlank()) {
-            val now = System.currentTimeMillis()
-            val lastBio = lastFriendBioNotifMs[userId] ?: 0L
-            if (now - lastBio >= LOCATION_NOTIF_COOLDOWN_MS) {
-                lastFriendBioNotifMs[userId] = now
-                val bioAlertBody = "$newDisplayName\n\nBefore: ${previous.bio}\n\nAfter: $newBio"
-                fireEventNotification(
-                    id = "bio_${userId}_${System.currentTimeMillis()}".hashCode(),
-                    title = "Friend updated bio",
-                    text = "$newDisplayName updated their bio",
-                    profileUrl = "https://vrchat.com/home/user/$userId",
-                    prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_BIO,
-                    channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
-                    groupKey = GROUP_KEY_FRIENDS,
-                    bigText = bioAlertBody,
-                    alertBody = bioAlertBody,
-                    alertBeforeText = previous.bio,
-                    alertAfterText = newBio
-                )
-            }
+            val bioGroupKey = "bio_$userId"
+            val bioAlertBody = "Before: ${previous.bio}\nAfter: $newBio"
+            // Stable Android notification ID — updates in place without re-alerting
+            fireEventNotification(
+                id = bioGroupKey.hashCode(),
+                title = "$newDisplayName updated bio",
+                text = "$newDisplayName updated their bio",
+                profileUrl = "https://vrchat.com/home/user/$userId",
+                prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_BIO,
+                channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
+                groupKey = GROUP_KEY_FRIENDS,
+                bigText = bioAlertBody,
+                alertBody = bioAlertBody,
+                alertBeforeText = previous.bio,
+                alertAfterText = newBio,
+                alertGroupKey = bioGroupKey
+            )
         }
 
         if (newRank.isNotBlank() && newRank != previous.trustRank && previous.trustRank.isNotBlank()) {
@@ -2019,7 +2018,8 @@ class VrchatPipelineService : Service() {
         bigText: String? = null,
         alertBody: String? = null,
         alertBeforeText: String? = null,
-        alertAfterText: String? = null
+        alertAfterText: String? = null,
+        alertGroupKey: String? = null
     ) {
         if (dedupId != null) {
             synchronized(seenNotifIds) {
@@ -2050,13 +2050,21 @@ class VrchatPipelineService : Service() {
             )
         }
 
+        // For grouped alerts, show event count in the Android notification title
+        val displayTitle = if (alertGroupKey != null) {
+            val existingGroup = InAppAlertState.groups.value.firstOrNull { it.groupId == alertGroupKey }
+            val count = (existingGroup?.events?.size ?: 0) + 1 // +1 for the event about to be added
+            if (count > 1) "$title ($count)" else title
+        } else title
+
         val builder = NotificationCompat.Builder(this, channelId)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle(title)
+            .setContentTitle(displayTitle)
             .setContentText(text)
             .setContentIntent(tapIntent)
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setOnlyAlertOnce(alertGroupKey != null)
 
         if (bigText != null) {
             builder.setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
@@ -2070,18 +2078,35 @@ class VrchatPipelineService : Service() {
         nm.notify(id, builder.build())
 
         if (alertBody != null) {
-            InAppAlertState.addAlert(
-                this,
-                InAppAlert(
-                    id = dedupId ?: "alert_$id",
+            val now = System.currentTimeMillis()
+            if (alertGroupKey != null) {
+                InAppAlertState.addGroupedEvent(
+                    ctx = this,
+                    groupKey = alertGroupKey,
                     title = title,
-                    body = alertBody,
                     url = profileUrl,
-                    timestampMs = System.currentTimeMillis(),
-                    beforeText = alertBeforeText,
-                    afterText = alertAfterText
+                    event = InAppAlertEvent(
+                        id = "${alertGroupKey}_$now",
+                        body = alertBody,
+                        beforeText = alertBeforeText,
+                        afterText = alertAfterText,
+                        timestampMs = now
+                    )
                 )
-            )
+            } else {
+                InAppAlertState.addAlert(
+                    this,
+                    InAppAlert(
+                        id = dedupId ?: "alert_$id",
+                        title = title,
+                        body = alertBody,
+                        url = profileUrl,
+                        timestampMs = now,
+                        beforeText = alertBeforeText,
+                        afterText = alertAfterText
+                    )
+                )
+            }
         }
     }
 

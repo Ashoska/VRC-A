@@ -54,6 +54,7 @@ import com.vrca.discord.DiscordRpcStatus
 import com.vrca.ui.settings.NotificationToggleSection
 import com.vrca.ui.settings.ToggleRow
 import com.vrca.ui.viewmodel.VrcaViewModel
+import com.vrca.vrchat.InAppAlertGroup
 import com.vrca.vrchat.InAppAlertState
 import com.vrca.vrchat.VrchatAuthManager
 import com.vrca.vrchat.VrchatPipelineService
@@ -502,23 +503,23 @@ private const val VISIBLE_ALERT_LIMIT = 3
 @Composable
 private fun InAppAlertCards() {
     val ctx = LocalContext.current
-    val alerts by InAppAlertState.alerts.collectAsState()
-    if (alerts.isEmpty()) return
+    val groups by InAppAlertState.groups.collectAsState()
+    if (groups.isEmpty()) return
 
-    var expanded by remember { mutableStateOf(false) }
-    val visible = if (expanded || alerts.size <= VISIBLE_ALERT_LIMIT) alerts
-        else alerts.take(VISIBLE_ALERT_LIMIT)
-    val hiddenCount = alerts.size - visible.size
+    var showAll by remember { mutableStateOf(false) }
+    val visible = if (showAll || groups.size <= VISIBLE_ALERT_LIMIT) groups
+        else groups.take(VISIBLE_ALERT_LIMIT)
+    val hiddenCount = groups.size - visible.size
 
-    for (alert in visible) {
-        AlertCard(alert = alert, onDismiss = {
-            InAppAlertState.dismiss(ctx, alert.id)
+    for (group in visible) {
+        AlertGroupCard(group = group, onDismiss = {
+            InAppAlertState.dismiss(ctx, group.groupId)
         })
     }
 
     if (hiddenCount > 0) {
         TextButton(
-            onClick = { expanded = true },
+            onClick = { showAll = true },
             modifier = Modifier.fillMaxWidth()
         ) {
             Text(
@@ -530,9 +531,12 @@ private fun InAppAlertCards() {
 }
 
 @Composable
-private fun AlertCard(alert: com.vrca.vrchat.InAppAlert, onDismiss: () -> Unit) {
+private fun AlertGroupCard(group: InAppAlertGroup, onDismiss: () -> Unit) {
     val ctx = LocalContext.current
     var expanded by remember { mutableStateOf(false) }
+    val eventCount = group.events.size
+    val displayTitle = if (eventCount > 1) "${group.title} ($eventCount)" else group.title
+
     Card(
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.tertiaryContainer
@@ -546,7 +550,7 @@ private fun AlertCard(alert: com.vrca.vrchat.InAppAlert, onDismiss: () -> Unit) 
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    alert.title,
+                    displayTitle,
                     style = MaterialTheme.typography.titleSmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -569,35 +573,51 @@ private fun AlertCard(alert: com.vrca.vrchat.InAppAlert, onDismiss: () -> Unit) 
                 enter = fadeIn() + expandVertically(),
                 exit = fadeOut() + shrinkVertically()
             ) {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    if (alert.beforeText != null && alert.afterText != null) {
-                        Divider(Modifier.padding(vertical = 4.dp))
-                        Text(
-                            alert.beforeText,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error,
-                            textDecoration = TextDecoration.LineThrough,
-                            modifier = Modifier.padding(bottom = 4.dp)
-                        )
-                        Text(
-                            alert.afterText,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    } else if (alert.body.isNotBlank()) {
-                        Text(
-                            alert.body,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onTertiaryContainer
-                        )
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Divider(Modifier.padding(vertical = 2.dp))
+                    for ((idx, event) in group.events.withIndex()) {
+                        if (event.beforeText != null && event.afterText != null) {
+                            Column {
+                                if (eventCount > 1) {
+                                    Text(
+                                        "Change ${idx + 1}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Text(
+                                    event.beforeText,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                    textDecoration = TextDecoration.LineThrough
+                                )
+                                Text(
+                                    event.afterText,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        } else if (event.body.isNotBlank()) {
+                            Text(
+                                event.body,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer
+                            )
+                        }
+                        if (idx < group.events.lastIndex) {
+                            Divider(
+                                Modifier.padding(vertical = 2.dp),
+                                color = MaterialTheme.colorScheme.outlineVariant
+                            )
+                        }
                     }
-                    if (alert.url != null) {
+                    if (group.url != null) {
                         Text(
                             text = "Open in VRChat",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.clickable {
-                                ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(alert.url)))
+                                ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(group.url)))
                             }
                         )
                     }
