@@ -2,6 +2,11 @@ package com.vrca.ui.screen
 
 import android.content.Intent
 import android.net.Uri
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -39,6 +44,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.vrca.discord.DiscordLoginWebView
 import com.vrca.discord.DiscordRpcService
@@ -525,15 +532,14 @@ private fun InAppAlertCards() {
 @Composable
 private fun AlertCard(alert: com.vrca.vrchat.InAppAlert, onDismiss: () -> Unit) {
     val ctx = LocalContext.current
+    var expanded by remember { mutableStateOf(false) }
     Card(
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.tertiaryContainer
-        )
+        ),
+        modifier = Modifier.clickable { expanded = !expanded }
     ) {
-        Column(
-            Modifier.padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
+        Column(Modifier.padding(8.dp)) {
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -542,26 +548,60 @@ private fun AlertCard(alert: com.vrca.vrchat.InAppAlert, onDismiss: () -> Unit) 
                 Text(
                     alert.title,
                     style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
-                TextButton(onClick = onDismiss) {
-                    Text("Dismiss", style = MaterialTheme.typography.labelSmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
+                    TextButton(onClick = { expanded = !expanded }) {
+                        Text(
+                            if (expanded) "Less" else "More",
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                    TextButton(onClick = onDismiss) {
+                        Text("Dismiss", style = MaterialTheme.typography.labelSmall)
+                    }
                 }
             }
-            Text(
-                alert.body,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onTertiaryContainer
-            )
-            if (alert.url != null) {
-                Text(
-                    text = "Open in VRChat",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.clickable {
-                        ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(alert.url)))
+            AnimatedVisibility(
+                visible = expanded,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically()
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (alert.beforeText != null && alert.afterText != null) {
+                        Divider(Modifier.padding(vertical = 4.dp))
+                        Text(
+                            alert.beforeText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            textDecoration = TextDecoration.LineThrough,
+                            modifier = Modifier.padding(bottom = 4.dp)
+                        )
+                        Text(
+                            alert.afterText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    } else if (alert.body.isNotBlank()) {
+                        Text(
+                            alert.body,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer
+                        )
                     }
-                )
+                    if (alert.url != null) {
+                        Text(
+                            text = "Open in VRChat",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.clickable {
+                                ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(alert.url)))
+                            }
+                        )
+                    }
+                }
             }
         }
     }

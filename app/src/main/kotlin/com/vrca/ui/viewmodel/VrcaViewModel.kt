@@ -2139,7 +2139,23 @@ class VrcaViewModel(
             cleaned[index] = cleaned[index].copy(text = trimmed)
         }
 
+        // First pass: try stripping artist name from music lines before hard-trimming.
+        // Music lines containing "Artist — Title" can be shortened to just "Title".
         var len = totalLen(cleaned)
+        if (len > maxChars) {
+            for (i in cleaned.indices) {
+                if (cleaned[i].priority == Priority.MUSIC) {
+                    val dashIdx = cleaned[i].text.indexOf(" — ")
+                    if (dashIdx > 0) {
+                        val titleOnly = cleaned[i].text.substring(dashIdx + 3)
+                        cleaned[i] = cleaned[i].copy(text = titleOnly)
+                        len = totalLen(cleaned)
+                        if (len <= maxChars) break
+                    }
+                }
+            }
+        }
+
         while (len > maxChars && cleaned.isNotEmpty()) {
             val excess = len - maxChars
 

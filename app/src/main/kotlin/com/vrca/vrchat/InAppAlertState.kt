@@ -11,7 +11,9 @@ data class InAppAlert(
     val title: String,
     val body: String,
     val url: String?,
-    val timestampMs: Long
+    val timestampMs: Long,
+    val beforeText: String? = null,
+    val afterText: String? = null
 )
 
 object InAppAlertState {
@@ -34,7 +36,9 @@ object InAppAlertState {
                 title = obj.optString("title"),
                 body = obj.optString("body"),
                 url = obj.optString("url").ifBlank { null },
-                timestampMs = obj.optLong("ts")
+                timestampMs = obj.optLong("ts"),
+                beforeText = obj.optString("before").ifBlank { null },
+                afterText = obj.optString("after").ifBlank { null }
             )
         }
         _alerts.value = list
@@ -65,6 +69,8 @@ object InAppAlertState {
                 put("body", a.body)
                 put("url", a.url ?: "")
                 put("ts", a.timestampMs)
+                put("before", a.beforeText ?: "")
+                put("after", a.afterText ?: "")
             })
         }
         ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
