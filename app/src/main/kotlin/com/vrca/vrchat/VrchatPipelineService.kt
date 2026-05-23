@@ -957,17 +957,26 @@ class VrchatPipelineService : Service() {
                 val v2Type = content.optString("type", "")
                 val v2Title = content.optString("title", "")
                 val baseId = if (notifId.isNotBlank()) notifId else "$v2Type-${message.hashCode()}"
+                val detailsObj = try {
+                    content.optString("details", "").let { d ->
+                        if (d.startsWith("{")) JSONObject(d) else null
+                    }
+                } catch (_: Exception) { null }
                 val groupId = content.optString("relatedGroupId", "").ifBlank {
                     content.optString("groupId", "").ifBlank {
                         content.optJSONObject("data")?.optString("groupId", "").orEmpty().ifBlank {
-                            if (senderUserId.startsWith("grp_")) senderUserId else ""
+                            detailsObj?.optString("groupId", "").orEmpty().ifBlank {
+                                if (senderUserId.startsWith("grp_")) senderUserId else ""
+                            }
                         }
                     }
                 }
                 val eventId = content.optString("eventId", "").ifBlank {
                     content.optJSONObject("data")?.optString("eventId", "").orEmpty().ifBlank {
-                        content.optString("id", "").let { id ->
-                            if (id.startsWith("cal_")) id else ""
+                        detailsObj?.optString("eventId", "").orEmpty().ifBlank {
+                            content.optString("id", "").let { id ->
+                                if (id.startsWith("cal_")) id else ""
+                            }
                         }
                     }
                 }
@@ -980,47 +989,54 @@ class VrchatPipelineService : Service() {
                 else "https://vrchat.com/home/notifications"
                 when {
                     v2Type.contains("announcement", true) || v2Type.contains("post", true) -> {
-                        val announcementTitle = when {
-                            v2Title.isNotBlank() -> "Announcement: $v2Title"
-                            senderName != "someone" && senderName.isNotBlank() -> "Announcement from $senderName"
-                            else -> "Group announcement"
+                        val groupKey2 = when {
+                            groupId.isNotBlank() -> "announcement_$groupId"
+                            senderName != "someone" && senderName.isNotBlank() -> "announcement_name_$senderName"
+                            else -> null
                         }
-                        val announcementGroupKey = if (groupId.isNotBlank()) "announcement_$groupId" else null
+                        val displayGroupName = if (senderName != "someone" && senderName.isNotBlank()) senderName else "Group"
+                        val announcementTitle = "Announcement from $displayGroupName"
                         val postUrl = if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId/posts" else groupUrl
                         val announcementBody = message.ifBlank { v2Title.ifBlank { "New announcement" } }
                         fireEventNotification(
                             id = baseId.hashCode(),
                             title = announcementTitle,
-                            text = announcementBody.take(140),
+                            text = "${v2Title.ifBlank { "Announcement" }}: ${announcementBody.take(120)}",
                             profileUrl = postUrl,
                             prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
                             channelId = NOTIF_CHANNEL_GROUPS,
                             groupKey = GROUP_KEY_GROUPS,
-                            alertGroupKey = announcementGroupKey,
-                            alertBody = announcementBody
+                            dedupId = notifId.ifBlank { null },
+                            alertGroupKey = groupKey2,
+                            alertBody = announcementBody,
+                            alertEventTitle = v2Title.ifBlank { null }
                         )
                     }
                     v2Type.contains("event", true) || v2Type.contains("calendar", true) -> {
-                        val eventTitle = when {
-                            v2Title.isNotBlank() -> "Event: $v2Title"
-                            senderName != "someone" && senderName.isNotBlank() -> "Event from $senderName"
-                            else -> "Group event"
+                        val groupKey2 = when {
+                            groupId.isNotBlank() -> "event_$groupId"
+                            senderName != "someone" && senderName.isNotBlank() -> "event_name_$senderName"
+                            else -> null
                         }
-                        val eventGroupKey = if (groupId.isNotBlank()) "event_$groupId" else null
+                        val displayGroupName = if (senderName != "someone" && senderName.isNotBlank()) senderName else "Group"
+                        val eventTitleStr = "Event from $displayGroupName"
                         val eventUrl = if (groupId.isNotBlank() && eventId.isNotBlank())
                             "https://vrchat.com/home/group/$groupId/calendar/$eventId"
+                        else if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId"
                         else groupUrl
                         val eventBody = message.ifBlank { v2Title.ifBlank { "New group event" } }
                         fireEventNotification(
                             id = baseId.hashCode(),
-                            title = eventTitle,
-                            text = eventBody.take(140),
+                            title = eventTitleStr,
+                            text = "${v2Title.ifBlank { "Event" }}: ${eventBody.take(120)}",
                             profileUrl = eventUrl,
                             prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT,
                             channelId = NOTIF_CHANNEL_GROUPS,
                             groupKey = GROUP_KEY_GROUPS,
-                            alertGroupKey = eventGroupKey,
-                            alertBody = eventBody
+                            dedupId = notifId.ifBlank { null },
+                            alertGroupKey = groupKey2,
+                            alertBody = eventBody,
+                            alertEventTitle = v2Title.ifBlank { null }
                         )
                     }
                     v2Type.contains("invite", true) -> {
@@ -1551,19 +1567,48 @@ class VrchatPipelineService : Service() {
                     val groupUrl = if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId"
                         else "https://vrchat.com/home/notifications"
                     when {
-                        v2Type.contains("announcement", true) -> {
-                            val backfillAnnouncementTitle = when {
-                                v2Title.isNotBlank() -> "Announcement: $v2Title"
-                                v2Sender.isNotBlank() -> "Announcement from $v2Sender"
-                                else -> "Group announcement"
-                            }
+                        v2Type.contains("announcement", true) || v2Type.contains("post", true) -> {
+                            val backfillGroupKey = if (groupId.isNotBlank()) "announcement_$groupId" else null
+                            val displayName = v2Sender.ifBlank { "Group" }
+                            val postUrl = if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId/posts" else groupUrl
+                            val body = message.ifBlank { v2Title.ifBlank { "New announcement" } }
                             fireEventNotification(
-                                id = baseId.hashCode(), title = backfillAnnouncementTitle,
-                                text = message.take(140).ifBlank { "New announcement in one of your groups" },
-                                profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
+                                id = baseId.hashCode(),
+                                title = "Announcement from $displayName",
+                                text = "${v2Title.ifBlank { "Announcement" }}: ${body.take(120)}",
+                                profileUrl = postUrl,
+                                prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
                                 channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
                                 dedupId = notifId.ifBlank { null },
-                                alertBody = message.ifBlank { null }
+                                alertGroupKey = backfillGroupKey,
+                                alertBody = body,
+                                alertEventTitle = v2Title.ifBlank { null }
+                            )
+                        }
+                        v2Type.contains("event", true) || v2Type.contains("calendar", true) -> {
+                            val backfillGroupKey = if (groupId.isNotBlank()) "event_$groupId" else null
+                            val displayName = v2Sender.ifBlank { "Group" }
+                            val eventId2 = obj.optString("eventId", "").ifBlank {
+                                obj.optJSONObject("data")?.optString("eventId", "").orEmpty().ifBlank {
+                                    notifId.let { if (it.startsWith("cal_")) it else "" }
+                                }
+                            }
+                            val evtUrl = if (groupId.isNotBlank() && eventId2.isNotBlank())
+                                "https://vrchat.com/home/group/$groupId/calendar/$eventId2"
+                            else if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId"
+                            else groupUrl
+                            val body = message.ifBlank { v2Title.ifBlank { "New group event" } }
+                            fireEventNotification(
+                                id = baseId.hashCode(),
+                                title = "Event from $displayName",
+                                text = "${v2Title.ifBlank { "Event" }}: ${body.take(120)}",
+                                profileUrl = evtUrl,
+                                prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT,
+                                channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
+                                dedupId = notifId.ifBlank { null },
+                                alertGroupKey = backfillGroupKey,
+                                alertBody = body,
+                                alertEventTitle = v2Title.ifBlank { null }
                             )
                         }
                         v2Type.contains("invite", true) -> fireEventNotification(
@@ -1638,15 +1683,16 @@ class VrchatPipelineService : Service() {
                             if (createdAt.isNotBlank() && createdAt != lastSeen && announcementText.isNotBlank()) {
                                 fireEventNotification(
                                     id = "ga_${groupId}_${createdAt.hashCode()}".hashCode(),
-                                    title = "Announcement: $announcementTitle",
-                                    text = announcementText.take(140),
+                                    title = "Announcement from $groupName",
+                                    text = "${announcementTitle}: ${announcementText.take(120)}",
                                     profileUrl = "https://vrchat.com/home/group/$groupId/posts",
                                     prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
                                     channelId = NOTIF_CHANNEL_GROUPS,
                                     groupKey = GROUP_KEY_GROUPS,
                                     dedupId = "ga_${groupId}_$createdAt",
                                     alertGroupKey = "announcement_$groupId",
-                                    alertBody = announcementText.ifBlank { null }
+                                    alertBody = announcementText.ifBlank { null },
+                                    alertEventTitle = announcementTitle.ifBlank { null }
                                 )
                                 updatedMap.put(groupId, createdAt)
                             }
@@ -1833,21 +1879,22 @@ class VrchatPipelineService : Service() {
                     val text = announcement.optString("text", "").ifBlank {
                         announcement.optString("title", "")
                     }
-                    val title = announcement.optString("title", "").ifBlank { groupName }
+                    val aTitle = announcement.optString("title", "").ifBlank { groupName }
                     val createdAt = announcement.optString("createdAt", "")
                     val lastSeen = seenMap.optString(groupId, "")
                     if (createdAt.isNotBlank() && createdAt != lastSeen && text.isNotBlank()) {
                         fireEventNotification(
                             id = "ga_${groupId}_${createdAt.hashCode()}".hashCode(),
-                            title = "Announcement: $title",
-                            text = text.take(140),
+                            title = "Announcement from $groupName",
+                            text = "${aTitle}: ${text.take(120)}",
                             profileUrl = "https://vrchat.com/home/group/$groupId/posts",
                             prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
                             channelId = NOTIF_CHANNEL_GROUPS,
                             groupKey = GROUP_KEY_GROUPS,
                             dedupId = "ga_${groupId}_$createdAt",
                             alertGroupKey = "announcement_$groupId",
-                            alertBody = text.ifBlank { null }
+                            alertBody = text.ifBlank { null },
+                            alertEventTitle = aTitle.ifBlank { null }
                         )
                         updatedMap.put(groupId, createdAt)
                         changed = true
@@ -1867,15 +1914,16 @@ class VrchatPipelineService : Service() {
                         if (postCreatedAt.isNotBlank() && postCreatedAt != postLastSeen && postText.isNotBlank()) {
                             fireEventNotification(
                                 id = "gp_${postId}".hashCode(),
-                                title = "Post: $postTitle",
-                                text = postText.take(140),
+                                title = "Announcement from $groupName",
+                                text = "${postTitle}: ${postText.take(120)}",
                                 profileUrl = "https://vrchat.com/home/group/$groupId/posts",
                                 prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
                                 channelId = NOTIF_CHANNEL_GROUPS,
                                 groupKey = GROUP_KEY_GROUPS,
                                 dedupId = "gp_${postId}_$postCreatedAt",
                                 alertGroupKey = "announcement_$groupId",
-                                alertBody = postText.ifBlank { null }
+                                alertBody = postText.ifBlank { null },
+                                alertEventTitle = postTitle.ifBlank { null }
                             )
                             updatedMap.put(postSeenKey, postCreatedAt)
                             changed = true
@@ -2152,7 +2200,8 @@ class VrchatPipelineService : Service() {
         alertBody: String? = null,
         alertBeforeText: String? = null,
         alertAfterText: String? = null,
-        alertGroupKey: String? = null
+        alertGroupKey: String? = null,
+        alertEventTitle: String? = null
     ) {
         if (dedupId != null) {
             synchronized(seenNotifIds) {
@@ -2208,7 +2257,11 @@ class VrchatPipelineService : Service() {
             publishGroupSummary(nm, groupKey, channelId)
         }
 
-        nm.notify(id, builder.build())
+        // For grouped alerts, use a stable Android notification ID per group
+        // so subsequent events update the SAME notification (fuse together)
+        // instead of creating a new notification per event.
+        val notifyId = if (alertGroupKey != null) alertGroupKey.hashCode() else id
+        nm.notify(notifyId, builder.build())
 
         if (alertBody != null) {
             val now = System.currentTimeMillis()
@@ -2223,7 +2276,8 @@ class VrchatPipelineService : Service() {
                         body = alertBody,
                         beforeText = alertBeforeText,
                         afterText = alertAfterText,
-                        timestampMs = now
+                        timestampMs = now,
+                        eventTitle = alertEventTitle
                     )
                 )
             } else {

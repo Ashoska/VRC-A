@@ -516,7 +516,7 @@ private fun InAppAlertCards() {
     val groups by InAppAlertState.groups.collectAsState()
     if (groups.isEmpty()) return
 
-    var sectionExpanded by remember { mutableStateOf(true) }
+    var sectionExpanded by remember { mutableStateOf(false) }
     var showAll by remember { mutableStateOf(false) }
 
     Surface(
@@ -557,6 +557,9 @@ private fun InAppAlertCards() {
                     for (group in visible) {
                         AlertGroupCard(group = group, onDismiss = {
                             InAppAlertState.dismiss(ctx, group.groupId)
+                            // Also dismiss the linked Android notification
+                            val nm = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+                            nm.cancel(group.groupId.hashCode())
                         })
                     }
 
@@ -578,36 +581,55 @@ private fun InAppAlertCards() {
     }
 }
 
+private fun formatRelativeTime(timestampMs: Long): String {
+    val delta = System.currentTimeMillis() - timestampMs
+    val sec = delta / 1000L
+    return when {
+        sec < 5 -> "just now"
+        sec < 60 -> "${sec}s ago"
+        sec < 3600 -> "${sec / 60}m ago"
+        sec < 86400 -> "${sec / 3600}h ago"
+        else -> "${sec / 86400}d ago"
+    }
+}
+
 private fun wordDiff(before: String, after: String): Pair<androidx.compose.ui.text.AnnotatedString, androidx.compose.ui.text.AnnotatedString> {
     val bWords = before.split(" ")
     val aWords = after.split(" ")
-    val commonPrefix = bWords.zip(aWords).takeWhile { it.first == it.second }.size
-    val bRev = bWords.reversed()
-    val aRev = aWords.reversed()
-    val commonSuffix = bRev.zip(aRev).takeWhile { it.first == it.second }.size
-        .coerceAtMost(bWords.size - commonPrefix)
-        .coerceAtMost(aWords.size - commonPrefix)
+
+    // LCS (Longest Common Subsequence) to find which words are unchanged
+    val m = bWords.size
+    val n = aWords.size
+    val dp = Array(m + 1) { IntArray(n + 1) }
+    for (i in 1..m) for (j in 1..n) {
+        dp[i][j] = if (bWords[i - 1] == aWords[j - 1]) dp[i - 1][j - 1] + 1
+        else maxOf(dp[i - 1][j], dp[i][j - 1])
+    }
+    val lcsSet = mutableSetOf<Int>()
+    val lcsSetAfter = mutableSetOf<Int>()
+    var i = m; var j = n
+    while (i > 0 && j > 0) {
+        when {
+            bWords[i - 1] == aWords[j - 1] -> { lcsSet.add(i - 1); lcsSetAfter.add(j - 1); i--; j-- }
+            dp[i - 1][j] > dp[i][j - 1] -> i--
+            else -> j--
+        }
+    }
 
     val removedColor = Color(0xFFEF5350)
     val addedColor = Color(0xFF4CAF50)
     val neutralColor = Color(0xFFB0B0B0)
 
     val beforeAnnotated = buildAnnotatedString {
-        for ((i, w) in bWords.withIndex()) {
-            if (i > 0) append(" ")
-            val isChanged = i >= commonPrefix && i < bWords.size - commonSuffix
-            withStyle(SpanStyle(color = if (isChanged) removedColor else neutralColor)) {
-                append(w)
-            }
+        for ((idx, w) in bWords.withIndex()) {
+            if (idx > 0) append(" ")
+            withStyle(SpanStyle(color = if (idx in lcsSet) neutralColor else removedColor)) { append(w) }
         }
     }
     val afterAnnotated = buildAnnotatedString {
-        for ((i, w) in aWords.withIndex()) {
-            if (i > 0) append(" ")
-            val isChanged = i >= commonPrefix && i < aWords.size - commonSuffix
-            withStyle(SpanStyle(color = if (isChanged) addedColor else neutralColor)) {
-                append(w)
-            }
+        for ((idx, w) in aWords.withIndex()) {
+            if (idx > 0) append(" ")
+            withStyle(SpanStyle(color = if (idx in lcsSetAfter) neutralColor else addedColor)) { append(w) }
         }
     }
     return beforeAnnotated to afterAnnotated
@@ -707,12 +729,27 @@ private fun AlertGroupCard(group: InAppAlertGroup, onDismiss: () -> Unit) {
                                 shape = MaterialTheme.shapes.small,
                                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
                             ) {
-                                Text(
-                                    event.body,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(10.dp)
-                                )
+                                Column(Modifier.padding(10.dp)) {
+                                    if (!event.eventTitle.isNullOrBlank()) {
+                                        Text(
+                                            event.eventTitle,
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Spacer(Modifier.height(2.dp))
+                                    }
+                                    Text(
+                                        event.body,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Spacer(Modifier.height(4.dp))
+                                    Text(
+                                        formatRelativeTime(event.timestampMs),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.outline
+                                    )
+                                }
                             }
                         }
                     }
