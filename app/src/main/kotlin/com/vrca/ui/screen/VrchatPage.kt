@@ -543,46 +543,23 @@ private fun AlertGroupCard(group: InAppAlertGroup, onDismiss: () -> Unit) {
         modifier = Modifier.clickable { expanded = !expanded }
     ) {
         Column(Modifier.padding(10.dp)) {
+            Text(
+                displayTitle,
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.fillMaxWidth()
+            )
             Row(
                 Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                horizontalArrangement = Arrangement.End
             ) {
-                Column(Modifier.weight(1f)) {
+                TextButton(onClick = { expanded = !expanded }) {
                     Text(
-                        displayTitle,
-                        style = MaterialTheme.typography.titleSmall,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
+                        if (expanded) "Less" else "More",
+                        style = MaterialTheme.typography.labelSmall
                     )
-                    if (!expanded) {
-                        val latestEvent = group.events.lastOrNull()
-                        val preview = when {
-                            latestEvent?.afterText != null -> latestEvent.afterText
-                            latestEvent?.body?.isNotBlank() == true -> latestEvent.body
-                            else -> null
-                        }
-                        if (preview != null) {
-                            Text(
-                                preview,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    }
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
-                    TextButton(onClick = { expanded = !expanded }) {
-                        Text(
-                            if (expanded) "Less" else "More",
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                    }
-                    TextButton(onClick = onDismiss) {
-                        Text("Dismiss", style = MaterialTheme.typography.labelSmall)
-                    }
+                TextButton(onClick = onDismiss) {
+                    Text("Dismiss", style = MaterialTheme.typography.labelSmall)
                 }
             }
             AnimatedVisibility(
