@@ -1836,7 +1836,8 @@ class VrchatPipelineService : Service() {
                 if (posts != null) {
                     for (j in 0 until posts.length()) {
                         val post = posts.optJSONObject(j) ?: continue
-                        val postId = post.optString("id", "").ifBlank { continue }
+                        val postId = post.optString("id", "")
+                        if (postId.isBlank()) continue
                         val postTitle = post.optString("title", "").ifBlank { groupName }
                         val postText = post.optString("text", "")
                         val postCreatedAt = post.optString("createdAt", "")
