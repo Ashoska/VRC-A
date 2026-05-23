@@ -85,10 +85,23 @@ fun IpField(
     }
 
     var editBuffer by remember { mutableStateOf(resolvedAddress) }
-    // Re-derive editBuffer when slot changes or the DataStore value for the active slot changes
+    // Track which slot the editBuffer was last set from, so we only update it
+    // when the slot genuinely changes or DataStore emits a NEW value for the
+    // same slot — never when a stale emission from the old slot arrives.
+    var editBufferSlot by remember { mutableIntStateOf(currentSlot) }
+    var editBufferAddr by remember { mutableStateOf(activeAddress) }
     LaunchedEffect(currentSlot, activeAddress) {
-        editBuffer = activeAddress.ifBlank {
-            uiState.ipAddress.takeIf { it != "127.0.0.1" } ?: ""
+        if (currentSlot != editBufferSlot) {
+            editBuffer = activeAddress.ifBlank {
+                uiState.ipAddress.takeIf { it != "127.0.0.1" } ?: ""
+            }
+            editBufferSlot = currentSlot
+            editBufferAddr = activeAddress
+        } else if (activeAddress != editBufferAddr) {
+            editBuffer = activeAddress.ifBlank {
+                uiState.ipAddress.takeIf { it != "127.0.0.1" } ?: ""
+            }
+            editBufferAddr = activeAddress
         }
     }
 

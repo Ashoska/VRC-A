@@ -1117,7 +1117,7 @@ class VrcaViewModel(
         if (isBanned) return
         timeEnabled = enabled
         savedState["timeEnabled"] = enabled
-        rebuildCombinedPreviewOnly()
+        rebuildAndMaybeSendCombined(forceSend = true)
         startSelfSyncLoopIfNeeded()
         manageKeepaliveLoop()
     }
@@ -1570,6 +1570,11 @@ class VrcaViewModel(
     // =========================
     fun killStopAndClear(local: Boolean = false) {
         stopAll(clearFromChatbox = false)
+        afkEnabled = false; savedState["afkEnabled"] = false
+        cycleEnabled = false; savedState["cycleEnabled"] = false
+        spotifyEnabled = false; savedState["spotifyEnabled"] = false
+        timeEnabled = false; savedState["timeEnabled"] = false
+        keepaliveJob?.cancel(); keepaliveJob = null
         if (!isBanned) clearChatbox(local)
         rebuildCombinedPreviewOnly(forceClearIfAllOff = true)
         startSelfSyncLoopIfNeeded()
@@ -1582,8 +1587,9 @@ class VrcaViewModel(
         if (isBanned) return
         afkEnabled = enabled
         savedState["afkEnabled"] = enabled
-        rebuildCombinedPreviewOnly()
         if (!enabled) stopAfkSender(clearFromChatbox = true)
+        else startAfkSender()
+        rebuildAndMaybeSendCombined(forceSend = true)
         startSelfSyncLoopIfNeeded()
         manageKeepaliveLoop()
     }
@@ -1592,9 +1598,9 @@ class VrcaViewModel(
         if (isBanned) return
         cycleEnabled = enabled
         savedState["cycleEnabled"] = enabled
-        rebuildCombinedPreviewOnly()
         if (!enabled) stopCycle(clearFromChatbox = true)
-        if (enabled) lastCyclePreviewAdvanceMs = 0L
+        else { lastCyclePreviewAdvanceMs = 0L; startCycle() }
+        rebuildAndMaybeSendCombined(forceSend = true)
         startSelfSyncLoopIfNeeded()
         manageKeepaliveLoop()
     }
@@ -1603,8 +1609,9 @@ class VrcaViewModel(
         if (isBanned) return
         spotifyEnabled = enabled
         savedState["spotifyEnabled"] = enabled
-        rebuildCombinedPreviewOnly()
         if (!enabled) stopNowPlayingSender(clearFromChatbox = true)
+        else startNowPlayingSender()
+        rebuildAndMaybeSendCombined(forceSend = true)
         startSelfSyncLoopIfNeeded()
         manageKeepaliveLoop()
     }
@@ -1930,7 +1937,7 @@ class VrcaViewModel(
                 // Force immediate send on start so text appears right away.
                 rebuildAndMaybeSendCombined(forceSend = true, local = local)
                 while (true) {
-                    delay(10_000L)
+                    delay(3_000L)
                     rebuildAndMaybeSendCombined(forceSend = true, local = local)
                 }
             }
@@ -1977,7 +1984,7 @@ class VrcaViewModel(
         // repeated sends from the NowPlaying 500ms loop and keepalive loop
         // when nothing has actually changed. The 10s ceiling ensures VRChat
         // doesn't clear the chatbox (~15s inactivity timeout).
-        if (combined == lastSentCombinedText && nowMs - lastSentMs < 10_000L) return
+        if (combined == lastSentCombinedText && nowMs - lastSentMs < 3_000L) return
         lastSentCombinedText = combined
         lastSentMs = nowMs
 

@@ -44,7 +44,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.vrca.discord.DiscordLoginWebView
@@ -539,33 +538,28 @@ private fun AlertGroupCard(group: InAppAlertGroup, onDismiss: () -> Unit) {
 
     Card(
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.tertiaryContainer
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
         ),
         modifier = Modifier.clickable { expanded = !expanded }
     ) {
-        Column(Modifier.padding(8.dp)) {
+        Column(Modifier.padding(10.dp)) {
+            Text(
+                displayTitle,
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.fillMaxWidth()
+            )
             Row(
                 Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                horizontalArrangement = Arrangement.End
             ) {
-                Text(
-                    displayTitle,
-                    style = MaterialTheme.typography.titleSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
-                    TextButton(onClick = { expanded = !expanded }) {
-                        Text(
-                            if (expanded) "Less" else "More",
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                    }
-                    TextButton(onClick = onDismiss) {
-                        Text("Dismiss", style = MaterialTheme.typography.labelSmall)
-                    }
+                TextButton(onClick = { expanded = !expanded }) {
+                    Text(
+                        if (expanded) "Less" else "More",
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("Dismiss", style = MaterialTheme.typography.labelSmall)
                 }
             }
             AnimatedVisibility(
@@ -586,22 +580,21 @@ private fun AlertGroupCard(group: InAppAlertGroup, onDismiss: () -> Unit) {
                                     )
                                 }
                                 Text(
-                                    event.beforeText,
+                                    "- ${event.beforeText}",
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.error,
-                                    textDecoration = TextDecoration.LineThrough
+                                    color = MaterialTheme.colorScheme.error
                                 )
                                 Text(
-                                    event.afterText,
+                                    "+ ${event.afterText}",
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.primary
+                                    color = Color(0xFF4CAF50)
                                 )
                             }
                         } else if (event.body.isNotBlank()) {
                             Text(
                                 event.body,
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onTertiaryContainer
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                         if (idx < group.events.lastIndex) {

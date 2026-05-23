@@ -635,6 +635,20 @@ object VrchatAuthManager {
         }
     }
 
+    suspend fun fetchGroupPosts(context: Context, groupId: String, n: Int = 10): org.json.JSONArray? = withContext(Dispatchers.IO) {
+        val cookieHeader = getCookieHeader(context) ?: return@withContext null
+        try {
+            val (code, body, _) = get(
+                "$BASE/groups/$groupId/posts?n=$n",
+                null, cookieHeader
+            )
+            if (code == 200 && body.startsWith("[")) org.json.JSONArray(body) else null
+        } catch (e: Exception) {
+            Log.w(TAG, "fetchGroupPosts($groupId) failed", e)
+            null
+        }
+    }
+
     // ------------------------------------------------------------------
     // Private helpers
     // ------------------------------------------------------------------
