@@ -447,7 +447,7 @@ class VrchatPipelineService : Service() {
                             Log.w(TAG, "Slow presence refresh failed", e)
                         }
                     }
-                    delay(15_000)
+                    delay(10_000)
                 }
             }
             // Heartbeat: 30s lastSeenAt write while ANY admin is browsing the

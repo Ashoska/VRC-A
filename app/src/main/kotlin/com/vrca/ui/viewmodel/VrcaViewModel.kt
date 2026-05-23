@@ -323,6 +323,24 @@ class VrcaViewModel(
             ?.takeIf { it.isNotBlank() }
             ?.let { data["displayName"] = it }
 
+        // Include VRChat presence if available — piggybacks on self-sync writes
+        // so the admin can see location/status without active watching.
+        val presence = com.vrca.vrchat.VrchatPipelineState.presence
+        if (presence != null) {
+            data["vrchatUserId"] = presence.userId
+            data["vrchatDisplayName"] = presence.displayName
+            data["vrchatState"] = presence.state
+            data["vrchatStatus"] = presence.status
+            data["vrchatStatusDescription"] = presence.statusDescription
+            data["vrchatWorld"] = presence.worldName
+            data["vrchatLocation"] = presence.location
+            data["vrchatInstancePlayerCount"] = presence.instancePlayerCount
+            data["vrchatInstanceCapacity"] = presence.instanceCapacity
+            data["vrchatPlatform"] = presence.platform
+            data["vrchatAvatarThumb"] = presence.currentAvatarThumbnailUrl
+            data["vrchatIsOnline"] = presence.isOnlineInVRChat
+        }
+
         return data
     }
 
