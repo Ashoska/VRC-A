@@ -74,21 +74,25 @@ jobs:
         with:
           name: public-debug
           path: app/build/outputs/apk/publicApp/debug/*.apk
+          retention-days: 3
 
       - name: Upload Public Release APK
         uses: actions/upload-artifact@v4
         with:
           name: public-release
           path: app/build/outputs/apk/publicApp/release/*.apk
+          retention-days: 3
 
       - name: Upload Admin Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: admin-debug
           path: app/build/outputs/apk/adminApp/debug/*.apk
+          retention-days: 3
 
       - name: Upload Admin Release APK
         uses: actions/upload-artifact@v4
         with:
           name: admin-release
           path: app/build/outputs/apk/adminApp/release/*.apk
+          retention-days: 3

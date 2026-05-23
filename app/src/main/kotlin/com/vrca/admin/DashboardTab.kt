@@ -44,7 +44,7 @@ internal fun DashboardTab(
     setError: (String?) -> Unit
 ) {
     val totalUsers  = totalUsersCount
-    val onlineCount = users.count { it.isOnlineInApp }
+    val onlineCount = users.size
     val bannedCount = bannedUsersCount
     val warnedCount = warnedUsersCount
     var evasionCount by remember { mutableIntStateOf(0) }

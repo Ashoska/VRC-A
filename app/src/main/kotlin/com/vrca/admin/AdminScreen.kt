@@ -76,9 +76,9 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
-import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.SetOptions
 import com.google.firebase.firestore.Source
+import android.util.Log
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
@@ -306,10 +306,10 @@ fun AdminScreen() {
         }
         sharedUsersLoading = true
         val reg = db.collection("users")
-            .orderBy("lastSeenAt", Query.Direction.DESCENDING)
             .limit(sharedLiveLimit.toLong())
             .addSnapshotListener { snap, err ->
                 if (err != null) {
+                    Log.e("AdminScreen", "Users snapshot listener failed", err)
                     setErr(err.message ?: "Users load failed")
                     sharedUsersLoading = false
                     return@addSnapshotListener

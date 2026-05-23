@@ -1947,6 +1947,7 @@ class VrchatPipelineService : Service() {
             .setStyle(NotificationCompat.InboxStyle().setSummaryText(summaryText))
             .setGroup(groupKey)
             .setGroupSummary(true)
+            .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
             .setAutoCancel(true)
             .build()
         nm.notify(summaryId, summary)
