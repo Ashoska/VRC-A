@@ -49,6 +49,9 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONArray
 import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.Locale
+import java.util.TimeZone
 import java.util.concurrent.TimeUnit
 
 /**
@@ -138,6 +141,7 @@ class VrchatPipelineService : Service() {
     private val lastFriendLocationNotifMs = mutableMapOf<String, Long>()
     private val lastFriendAvatarNotifMs = mutableMapOf<String, Long>()
     private val lastFriendStatusNotifMs = mutableMapOf<String, Long>()
+    private val lastFriendBioNotifMs = mutableMapOf<String, Long>()
     private val LOCATION_NOTIF_COOLDOWN_MS = 60_000L
     private val WARMUP_MS = 30_000L
     private var pipelineConnectedAtMs = 0L
@@ -145,6 +149,9 @@ class VrchatPipelineService : Service() {
     private var presenceRefreshJob: Job? = null
     // Tracks last connection notification state so we don't spam connect/disconnect.
     private var lastConnectionNotifWasUp: Boolean? = null
+    // WebSocket health check: tracks when the last message was received.
+    private var lastMessageReceivedMs = 0L
+    private var notifRepostIterations = 0
 
     // Announcements listener (Firestore)
     private var announcementsListener: ListenerRegistration? = null
@@ -182,6 +189,9 @@ class VrchatPipelineService : Service() {
         startAppUpdateCheckLoop()
 
         // Re-post the persistent foreground notification if it gets swiped.
+        // Also performs a WebSocket health check every 5th iteration (~50s):
+        // if the pipeline should be connected but hasn't received any messages
+        // in 5+ minutes, force a reconnect.
         serviceScope.launch {
             while (true) {
                 delay(10_000)
@@ -191,6 +201,15 @@ class VrchatPipelineService : Service() {
                     startForeground(NOTIF_ID_PERSISTENT, buildPersistentNotification(
                         if (VrchatPipelineState.isConnected) "Connected" else "Running"
                     ))
+                }
+                // WebSocket health check every 5th iteration (~50s)
+                notifRepostIterations++
+                if (notifRepostIterations % 5 == 0 && VrchatPipelineState.isConnected &&
+                    lastMessageReceivedMs > 0 &&
+                    System.currentTimeMillis() - lastMessageReceivedMs > 5 * 60 * 1000L) {
+                    Log.w(TAG, "No WebSocket messages in 5min — forcing reconnect")
+                    lastMessageReceivedMs = 0L
+                    scheduleReconnect()
                 }
             }
         }
@@ -510,6 +529,7 @@ class VrchatPipelineService : Service() {
                 }
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
+                    lastMessageReceivedMs = System.currentTimeMillis()
                     serviceScope.launch { handlePipelineMessage(text) }
                 }
 
@@ -1119,18 +1139,23 @@ class VrchatPipelineService : Service() {
         }
 
         if (newBio.isNotBlank() && newBio != previous.bio && previous.bio.isNotBlank()) {
-            val bioAlertBody = "$newDisplayName\n\nBefore: ${previous.bio}\n\nAfter: $newBio"
-            fireEventNotification(
-                id = "bio_$userId".hashCode(),
-                title = "Friend updated bio",
-                text = "$newDisplayName updated their bio",
-                profileUrl = "https://vrchat.com/home/user/$userId",
-                prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_BIO,
-                channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
-                groupKey = GROUP_KEY_FRIENDS,
-                bigText = bioAlertBody,
-                alertBody = bioAlertBody
-            )
+            val now = System.currentTimeMillis()
+            val lastBio = lastFriendBioNotifMs[userId] ?: 0L
+            if (now - lastBio >= LOCATION_NOTIF_COOLDOWN_MS) {
+                lastFriendBioNotifMs[userId] = now
+                val bioAlertBody = "$newDisplayName\n\nBefore: ${previous.bio}\n\nAfter: $newBio"
+                fireEventNotification(
+                    id = "bio_$userId".hashCode(),
+                    title = "Friend updated bio",
+                    text = "$newDisplayName updated their bio",
+                    profileUrl = "https://vrchat.com/home/user/$userId",
+                    prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_BIO,
+                    channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
+                    groupKey = GROUP_KEY_FRIENDS,
+                    bigText = bioAlertBody,
+                    alertBody = bioAlertBody
+                )
+            }
         }
 
         if (newRank.isNotBlank() && newRank != previous.trustRank && previous.trustRank.isNotBlank()) {
@@ -1272,6 +1297,21 @@ class VrchatPipelineService : Service() {
     // Offline notification backfill
     // ------------------------------------------------------------------
 
+    /**
+     * Parse a VRChat ISO 8601 timestamp string into epoch millis.
+     * Returns 0 if the string is blank or unparseable.
+     */
+    private fun parseVrcTimestampMs(ts: String): Long {
+        if (ts.isBlank()) return 0L
+        return try {
+            val fmt = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US)
+            fmt.timeZone = TimeZone.getTimeZone("UTC")
+            // Strip fractional seconds and trailing Z for SimpleDateFormat
+            val cleaned = ts.replace(Regex("\\.[0-9]+Z?$"), "").removeSuffix("Z")
+            fmt.parse(cleaned)?.time ?: 0L
+        } catch (_: Exception) { 0L }
+    }
+
     private suspend fun backfillOfflineNotifications() {
         try {
             // First-run guard: if this is the very first pipeline connect ever
@@ -1319,6 +1359,10 @@ class VrchatPipelineService : Service() {
                     val senderName = obj.optString("senderUsername", "someone")
                     val senderUserId = obj.optString("senderUserId", "")
                     val message = obj.optString("message", "")
+                    // Skip notifications older than 24h
+                    val v1CreatedAt = obj.optString("created_at", "")
+                    val v1CreatedMs = parseVrcTimestampMs(v1CreatedAt)
+                    if (v1CreatedMs > 0 && System.currentTimeMillis() - v1CreatedMs > 24L * 60 * 60 * 1000) continue
                     when (notifType) {
                         "friendRequest" -> fireEventNotification(
                             id = "fr_$senderUserId".hashCode(),
@@ -1389,6 +1433,10 @@ class VrchatPipelineService : Service() {
                     val v2Type = obj.optString("type", "")
                     val v2Title = obj.optString("title", "")
                     val message = obj.optString("message", "")
+                    // Skip notifications older than 24h
+                    val v2CreatedAt = obj.optString("created_at", "")
+                    val v2CreatedMs = parseVrcTimestampMs(v2CreatedAt)
+                    if (v2CreatedMs > 0 && System.currentTimeMillis() - v2CreatedMs > 24L * 60 * 60 * 1000) continue
                     val baseId = notifId.ifBlank { "$v2Type-${message.hashCode()}" }
                     val groupId = obj.optString("relatedGroupId", "").ifBlank {
                         obj.optString("groupId", "")
@@ -1473,7 +1521,12 @@ class VrchatPipelineService : Service() {
                             val announcementTitle = announcement.optString("title", "").ifBlank { groupName }
                             val createdAt = announcement.optString("createdAt", "")
                             val lastSeen = seenMap.optString(groupId, "")
-                            if (createdAt.isNotBlank() && createdAt != lastSeen && announcementText.isNotBlank()) {
+                            // Skip announcements older than 48h
+                            val announcementMs = parseVrcTimestampMs(createdAt)
+                            if (announcementMs > 0 && System.currentTimeMillis() - announcementMs > 48L * 60 * 60 * 1000) {
+                                // Still record the timestamp so we don't re-check next time
+                                updatedMap.put(groupId, createdAt)
+                            } else if (createdAt.isNotBlank() && createdAt != lastSeen && announcementText.isNotBlank()) {
                                 fireEventNotification(
                                     id = "ga_${groupId}_${createdAt.hashCode()}".hashCode(),
                                     title = "Announcement: $announcementTitle",
