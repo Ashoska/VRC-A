@@ -398,11 +398,20 @@ class DiscordRpcService : Service() {
         val isOnline = vrcPresence?.isOnlineInVRChat == true
 
         if (isOnline && onlineStartEpochMs == 0L) {
-            onlineStartEpochMs = System.currentTimeMillis()
-            rpcPrefs.edit().putLong("online_start_epoch", onlineStartEpochMs).apply()
+            val saved = rpcPrefs.getLong("online_start_epoch", 0L)
+            val offlineAt = rpcPrefs.getLong("offline_at", 0L)
+            val withinGrace = saved > 0 && offlineAt > 0 &&
+                System.currentTimeMillis() - offlineAt < 10L * 60 * 1000
+            if (withinGrace) {
+                onlineStartEpochMs = saved
+            } else {
+                onlineStartEpochMs = System.currentTimeMillis()
+                rpcPrefs.edit().putLong("online_start_epoch", onlineStartEpochMs).apply()
+            }
+            rpcPrefs.edit().remove("offline_at").apply()
         } else if (!isOnline && onlineStartEpochMs != 0L) {
+            rpcPrefs.edit().putLong("offline_at", System.currentTimeMillis()).apply()
             onlineStartEpochMs = 0L
-            rpcPrefs.edit().putLong("online_start_epoch", 0L).apply()
         }
 
         return JSONObject().apply {

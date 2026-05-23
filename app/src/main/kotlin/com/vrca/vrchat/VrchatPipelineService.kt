@@ -963,12 +963,12 @@ class VrchatPipelineService : Service() {
                     else "https://vrchat.com/home/notifications"
                 when {
                     v2Type.contains("announcement", true) -> {
-                        // Use senderUsername (group name) or v2Title for a more descriptive title
                         val announcementTitle = when {
                             v2Title.isNotBlank() -> "Announcement: $v2Title"
                             senderName != "someone" && senderName.isNotBlank() -> "Announcement from $senderName"
                             else -> "Group announcement"
                         }
+                        val announcementGroupKey = if (groupId.isNotBlank()) "announcement_$groupId" else null
                         fireEventNotification(
                             id = baseId.hashCode(),
                             title = announcementTitle,
@@ -977,6 +977,7 @@ class VrchatPipelineService : Service() {
                             prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
                             channelId = NOTIF_CHANNEL_GROUPS,
                             groupKey = GROUP_KEY_GROUPS,
+                            alertGroupKey = announcementGroupKey,
                             alertBody = message.ifBlank { null }
                         )
                     }
@@ -985,7 +986,7 @@ class VrchatPipelineService : Service() {
                             id = baseId.hashCode(),
                             title = v2Title.ifBlank { "Group invite" },
                             text = message.take(140).ifBlank { "You've been invited to join a group" },
-                            profileUrl = "https://vrchat.com/home/notifications",
+                            profileUrl = groupUrl,
                             prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_INVITE,
                             channelId = NOTIF_CHANNEL_INVITES,
                             groupKey = GROUP_KEY_INVITES
@@ -1592,12 +1593,7 @@ class VrchatPipelineService : Service() {
                             val announcementTitle = announcement.optString("title", "").ifBlank { groupName }
                             val createdAt = announcement.optString("createdAt", "")
                             val lastSeen = seenMap.optString(groupId, "")
-                            // Skip announcements older than 48h
-                            val announcementMs = parseVrcTimestampMs(createdAt)
-                            if (announcementMs > 0 && System.currentTimeMillis() - announcementMs > 48L * 60 * 60 * 1000) {
-                                // Still record the timestamp so we don't re-check next time
-                                updatedMap.put(groupId, createdAt)
-                            } else if (createdAt.isNotBlank() && createdAt != lastSeen && announcementText.isNotBlank()) {
+                            if (createdAt.isNotBlank() && createdAt != lastSeen && announcementText.isNotBlank()) {
                                 fireEventNotification(
                                     id = "ga_${groupId}_${createdAt.hashCode()}".hashCode(),
                                     title = "Announcement: $announcementTitle",
@@ -1607,6 +1603,7 @@ class VrchatPipelineService : Service() {
                                     channelId = NOTIF_CHANNEL_GROUPS,
                                     groupKey = GROUP_KEY_GROUPS,
                                     dedupId = "ga_${groupId}_$createdAt",
+                                    alertGroupKey = "announcement_$groupId",
                                     alertBody = announcementText.ifBlank { null }
                                 )
                                 updatedMap.put(groupId, createdAt)

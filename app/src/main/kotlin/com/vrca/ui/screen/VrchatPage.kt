@@ -44,7 +44,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.vrca.discord.DiscordLoginWebView
@@ -539,23 +538,41 @@ private fun AlertGroupCard(group: InAppAlertGroup, onDismiss: () -> Unit) {
 
     Card(
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.tertiaryContainer
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
         ),
         modifier = Modifier.clickable { expanded = !expanded }
     ) {
-        Column(Modifier.padding(8.dp)) {
+        Column(Modifier.padding(10.dp)) {
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    displayTitle,
-                    style = MaterialTheme.typography.titleSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        displayTitle,
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (!expanded) {
+                        val latestEvent = group.events.lastOrNull()
+                        val preview = when {
+                            latestEvent?.afterText != null -> latestEvent.afterText
+                            latestEvent?.body?.isNotBlank() == true -> latestEvent.body
+                            else -> null
+                        }
+                        if (preview != null) {
+                            Text(
+                                preview,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
                     TextButton(onClick = { expanded = !expanded }) {
                         Text(
@@ -586,22 +603,21 @@ private fun AlertGroupCard(group: InAppAlertGroup, onDismiss: () -> Unit) {
                                     )
                                 }
                                 Text(
-                                    event.beforeText,
+                                    "- ${event.beforeText}",
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.error,
-                                    textDecoration = TextDecoration.LineThrough
+                                    color = MaterialTheme.colorScheme.error
                                 )
                                 Text(
-                                    event.afterText,
+                                    "+ ${event.afterText}",
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.primary
+                                    color = Color(0xFF4CAF50)
                                 )
                             }
                         } else if (event.body.isNotBlank()) {
                             Text(
                                 event.body,
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onTertiaryContainer
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                         if (idx < group.events.lastIndex) {

@@ -318,6 +318,7 @@ fun AdminScreen() {
                     sharedUsers = snap.documents
                         .filter { it.id != deviceHash }
                         .map { parseUserRow(it) }
+                        .sortedByDescending { it.lastSeenAt?.toDate()?.time ?: 0L }
                     sharedUsersLoading = false
                 }
             }
