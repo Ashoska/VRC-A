@@ -442,7 +442,7 @@ class VrchatPipelineService : Service() {
                 while (true) {
                     if (!AdminWatchState.isWatched.value) {
                         try {
-                            syncPresenceToFirestore()
+                            syncPresenceToFirestore(forceLocalUpdate = true)
                         } catch (e: Exception) {
                             Log.w(TAG, "Slow presence refresh failed", e)
                         }
@@ -808,11 +808,11 @@ class VrchatPipelineService : Service() {
                     }
 
                     val myId = VrchatAuthManager.getStoredUserId(this@VrchatPipelineService)
-                    if (userId == myId) syncPresenceToFirestore()
+                    if (userId == myId && AdminWatchState.isWatched.value) syncPresenceToFirestore()
                 }
 
                 "user-update" -> {
-                    syncPresenceToFirestore()
+                    if (AdminWatchState.isWatched.value) syncPresenceToFirestore()
                 }
 
                 "friend-update" -> {
@@ -1752,9 +1752,11 @@ class VrchatPipelineService : Service() {
     // Firestore presence sync
     // ------------------------------------------------------------------
 
-    private suspend fun syncPresenceToFirestore() {
-        val presence = VrchatAuthManager.fetchPresence(this) ?: return
+    private suspend fun syncPresenceToFirestore(forceLocalUpdate: Boolean = false) {
+        if (!forceLocalUpdate && deviceHash.isBlank()) return
+        if (!forceLocalUpdate && !AdminWatchState.isWatched.value) return
 
+        val presence = VrchatAuthManager.fetchPresence(this) ?: return
         VrchatPipelineState.presence = presence
 
         if (deviceHash.isBlank()) return
