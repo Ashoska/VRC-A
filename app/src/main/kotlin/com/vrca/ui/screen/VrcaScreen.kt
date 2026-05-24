@@ -1041,6 +1041,10 @@ private fun SetupIncompleteBanner(
    Shows presence card + login/logout controls
    ========================= */
 
+private object StatusBannerState {
+    var expanded = true
+}
+
 @Composable
 internal fun VrchatStatusBanner() {
     val statusData by VrchatPipelineState.statusPageFlow.collectAsState()
@@ -1065,7 +1069,10 @@ internal fun VrchatStatusBanner() {
     }
 
     val ctx = LocalContext.current
-    var expanded by rememberSaveable { mutableStateOf(true) }
+    var expanded by remember { mutableStateOf(StatusBannerState.expanded) }
+    DisposableEffect(Unit) {
+        onDispose { StatusBannerState.expanded = expanded }
+    }
 
     val title = data.description.ifBlank {
         when (data.indicator) {
