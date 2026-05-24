@@ -8,6 +8,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -45,10 +46,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -648,44 +651,71 @@ private fun AlertGroupCard(group: InAppAlertGroup, onDismiss: () -> Unit) {
     val eventCount = group.events.size
     val displayTitle = if (eventCount > 1) "${group.title} ($eventCount)" else group.title
 
-    Card(
-        colors = CardDefaults.cardColors(
+    val latest = group.events.lastOrNull()
+    val previewText = latest?.body?.takeIf { it.isNotBlank() }
+        ?: latest?.eventTitle?.takeIf { it.isNotBlank() }
+        ?: ""
+
+    ElevatedCard(
+        colors = CardDefaults.elevatedCardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant
         ),
-        modifier = Modifier.clickable { expanded = !expanded }
+        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp)
     ) {
-        Column(Modifier.padding(12.dp)) {
-            Text(
-                displayTitle,
-                style = MaterialTheme.typography.titleSmall,
-                modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(Modifier.height(4.dp))
+        Column(Modifier.padding(start = 14.dp, top = 10.dp, end = 6.dp, bottom = 12.dp)) {
+            // Header: accent bar + title/preview on the left, dismiss + chevron right.
             Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded },
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                OutlinedButton(
-                    onClick = { expanded = !expanded },
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                    contentPadding = ButtonDefaults.TextButtonContentPadding,
-                    modifier = Modifier.height(32.dp)
-                ) {
+                Box(
+                    Modifier
+                        .padding(end = 10.dp, top = 2.dp)
+                        .size(width = 3.dp, height = 30.dp)
+                        .background(
+                            MaterialTheme.colorScheme.primary,
+                            shape = MaterialTheme.shapes.small
+                        )
+                )
+                Column(Modifier.weight(1f)) {
                     Text(
-                        if (expanded) "Less" else "More",
-                        style = MaterialTheme.typography.labelSmall
+                        displayTitle,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    if (!expanded && previewText.isNotBlank()) {
+                        Text(
+                            previewText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    latest?.let {
+                        Text(
+                            formatRelativeTime(it.timestampMs),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.outline
+                        )
+                    }
+                }
+                IconButton(onClick = onDismiss, modifier = Modifier.size(36.dp)) {
+                    Icon(
+                        Icons.Filled.Close,
+                        contentDescription = "Dismiss",
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                Spacer(Modifier.width(8.dp))
-                OutlinedButton(
-                    onClick = onDismiss,
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                    contentPadding = ButtonDefaults.TextButtonContentPadding,
-                    modifier = Modifier.height(32.dp)
-                ) {
-                    Text("Dismiss", style = MaterialTheme.typography.labelSmall)
-                }
+                Icon(
+                    if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                    contentDescription = if (expanded) "Collapse" else "Expand",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(end = 6.dp)
+                )
             }
             AnimatedVisibility(
                 visible = expanded,
@@ -694,16 +724,16 @@ private fun AlertGroupCard(group: InAppAlertGroup, onDismiss: () -> Unit) {
             ) {
                 Column(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.padding(top = 8.dp)
+                    modifier = Modifier.padding(top = 10.dp, end = 8.dp)
                 ) {
                     for ((idx, event) in group.events.withIndex()) {
                         if (event.beforeText != null && event.afterText != null) {
                             Surface(
                                 color = MaterialTheme.colorScheme.surface,
                                 shape = MaterialTheme.shapes.small,
-                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                                modifier = Modifier.fillMaxWidth()
                             ) {
-                                Column(Modifier.padding(10.dp)) {
+                                Column(Modifier.padding(12.dp)) {
                                     if (eventCount > 1) {
                                         Text(
                                             "Change ${idx + 1}",
@@ -733,23 +763,23 @@ private fun AlertGroupCard(group: InAppAlertGroup, onDismiss: () -> Unit) {
                             Surface(
                                 color = MaterialTheme.colorScheme.surface,
                                 shape = MaterialTheme.shapes.small,
-                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                                modifier = Modifier.fillMaxWidth()
                             ) {
-                                Column(Modifier.padding(10.dp)) {
+                                Column(Modifier.padding(12.dp)) {
                                     if (!event.eventTitle.isNullOrBlank()) {
                                         Text(
                                             event.eventTitle,
                                             style = MaterialTheme.typography.labelMedium,
                                             color = MaterialTheme.colorScheme.onSurface
                                         )
-                                        Spacer(Modifier.height(2.dp))
+                                        Spacer(Modifier.height(3.dp))
                                     }
                                     Text(
                                         event.body,
-                                        style = MaterialTheme.typography.bodySmall,
+                                        style = MaterialTheme.typography.bodyMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
-                                    Spacer(Modifier.height(4.dp))
+                                    Spacer(Modifier.height(6.dp))
                                     Text(
                                         formatRelativeTime(event.timestampMs),
                                         style = MaterialTheme.typography.labelSmall,
@@ -765,19 +795,18 @@ private fun AlertGroupCard(group: InAppAlertGroup, onDismiss: () -> Unit) {
                                 ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(group.url)))
                             },
                             border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary),
-                            contentPadding = ButtonDefaults.TextButtonContentPadding,
-                            modifier = Modifier.height(32.dp)
+                            modifier = Modifier.fillMaxWidth().height(40.dp)
                         ) {
                             Icon(
                                 Icons.Filled.OpenInNew,
                                 contentDescription = null,
-                                modifier = Modifier.size(14.dp),
+                                modifier = Modifier.size(16.dp),
                                 tint = MaterialTheme.colorScheme.primary
                             )
-                            Spacer(Modifier.width(4.dp))
+                            Spacer(Modifier.width(6.dp))
                             Text(
                                 "Open in VRChat",
-                                style = MaterialTheme.typography.labelSmall,
+                                style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.primary
                             )
                         }
