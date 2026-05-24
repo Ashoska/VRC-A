@@ -1185,26 +1185,41 @@ internal fun VrchatStatusBanner() {
                     }
 
                     if (data.incidents.isNotEmpty()) {
-                        for (inc in data.incidents.take(2)) {
-                            Surface(
-                                shape = MaterialTheme.shapes.medium,
-                                color = innerCardColor,
-                                shadowElevation = 1.dp
-                            ) {
-                                Column(
-                                    Modifier.padding(14.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Text(
-                                        inc.name,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = onContainerColor
-                                    )
-                                    if (inc.latestUpdate.isNotBlank()) {
+                        Surface(
+                            shape = MaterialTheme.shapes.medium,
+                            color = innerCardColor,
+                            shadowElevation = 1.dp
+                        ) {
+                            Column(Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
+                                Text(
+                                    "Latest updates",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = onContainerColor.copy(alpha = 0.6f),
+                                    modifier = Modifier.padding(vertical = 6.dp)
+                                )
+                                val incidents = data.incidents.take(2)
+                                for ((idx, inc) in incidents.withIndex()) {
+                                    Column(
+                                        Modifier.padding(vertical = 6.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
                                         Text(
-                                            inc.latestUpdate,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = onContainerColor.copy(alpha = 0.7f)
+                                            inc.name,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = onContainerColor
+                                        )
+                                        if (inc.latestUpdate.isNotBlank()) {
+                                            Text(
+                                                inc.latestUpdate,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = onContainerColor.copy(alpha = 0.7f)
+                                            )
+                                        }
+                                    }
+                                    if (idx < incidents.lastIndex) {
+                                        Divider(
+                                            color = onContainerColor.copy(alpha = 0.1f),
+                                            thickness = 0.5.dp
                                         )
                                     }
                                 }
