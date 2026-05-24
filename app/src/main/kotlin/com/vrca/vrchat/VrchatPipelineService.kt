@@ -1872,7 +1872,7 @@ class VrchatPipelineService : Service() {
                         // without this the immediate reconnect backfill missed
                         // them entirely (they only surfaced via the 5-min poll
                         // loop, or never). Per-post seen dedup prevents repeats.
-                        val posts = VrchatAuthManager.fetchGroupPosts(this@VrchatPipelineService, groupId, 5)
+                        val posts = VrchatAuthManager.fetchGroupPosts(this@VrchatPipelineService, groupId, 20)
                         if (posts != null) {
                             for (j in 0 until posts.length()) {
                                 val post = posts.optJSONObject(j) ?: continue
@@ -1945,7 +1945,7 @@ class VrchatPipelineService : Service() {
                     if (createdAt.isNotBlank()) seenMap.put(groupId, createdAt)
                     // Seed recent post IDs too so the backfill/poll posts sweep
                     // doesn't fire a flood of pre-existing posts on first run.
-                    val posts = VrchatAuthManager.fetchGroupPosts(this@VrchatPipelineService, groupId, 5)
+                    val posts = VrchatAuthManager.fetchGroupPosts(this@VrchatPipelineService, groupId, 20)
                     if (posts != null) {
                         for (j in 0 until posts.length()) {
                             val post = posts.optJSONObject(j) ?: continue
@@ -2152,7 +2152,7 @@ class VrchatPipelineService : Service() {
                         changed = true
                     }
                 }
-                val posts = VrchatAuthManager.fetchGroupPosts(this, groupId, 5)
+                val posts = VrchatAuthManager.fetchGroupPosts(this, groupId, 20)
                 if (posts != null) {
                     for (j in 0 until posts.length()) {
                         val post = posts.optJSONObject(j) ?: continue
