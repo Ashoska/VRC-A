@@ -191,18 +191,32 @@ internal suspend fun githubUploadAsset(
                 }
             }
 
-            val request = Request.Builder()
-                .url(url)
+            fun buildReq(target: String) = Request.Builder()
+                .url(target)
                 .header("Authorization", "Bearer $pat")
                 .header("Accept", "application/vnd.github+json")
                 .header("X-GitHub-Api-Version", "2022-11-28")
                 .post(body)
                 .build()
 
-            val response = client.newCall(request).execute()
+            var response = client.newCall(buildReq(url)).execute()
+            // GitHub's uploads.github.com asset endpoint frequently answers a
+            // 301/302/307/308 redirect. OkHttp does NOT auto-replay a POST body
+            // to the redirect target, so it surfaces the redirect as an error.
+            // Follow it manually (the file-backed body is repeatable) preserving
+            // the POST method, up to 3 hops.
+            var redirects = 0
+            while (response.code in intArrayOf(301, 302, 307, 308) && redirects < 3) {
+                val location = response.header("Location")
+                response.close()
+                if (location.isNullOrBlank()) break
+                redirects++
+                response = client.newCall(buildReq(location)).execute()
+            }
             val responseBody = response.body?.string().orEmpty()
 
             if (response.isSuccessful) {
+                response.close()
                 return@withContext JSONObject(responseBody).getString("browser_download_url")
             }
 

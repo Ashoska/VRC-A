@@ -271,12 +271,25 @@ class VrchatPipelineService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        writeOfflineAndStopRpc()
-        stopSelf()
         super.onTaskRemoved(rootIntent)
+        // Send the final "going offline" write, THEN fully kill the process so
+        // nothing keeps running in the background after the app is swiped away
+        // (users were confused seeing it still alive). The write is awaited with
+        // a short timeout on a background thread so the offline state has a
+        // chance to reach Firestore before we hard-stop everything.
+        stopRpcService()
         Thread {
-            Thread.sleep(10_000)
+            try {
+                val task = buildOfflineWriteTask()
+                if (task != null) {
+                    try {
+                        com.google.android.gms.tasks.Tasks.await(task, 5, TimeUnit.SECONDS)
+                    } catch (_: Throwable) {}
+                }
+            } catch (_: Throwable) {}
+            try { stopSelf() } catch (_: Throwable) {}
             android.os.Process.killProcess(android.os.Process.myPid())
+            kotlin.system.exitProcess(0)
         }.start()
     }
 
@@ -297,34 +310,40 @@ class VrchatPipelineService : Service() {
         super.onDestroy()
     }
 
-    private fun writeOfflineAndStopRpc() {
+    private fun stopRpcService() {
         if (DiscordRpcService.isRunning) {
             val stopRpc = Intent(this, DiscordRpcService::class.java)
             stopRpc.action = DiscordRpcService.ACTION_STOP
             try { startService(stopRpc) } catch (_: Throwable) {}
         }
-        if (deviceHash.isNotBlank()) {
-            try {
-                val presence = VrchatPipelineState.presence
-                val data = mutableMapOf<String, Any>(
-                    "isOnlineInApp" to false,
-                    "lastSeenAt" to FieldValue.serverTimestamp(),
-                    // Drop any legacy friends data still lingering on the doc.
-                    "savedFriendIds" to FieldValue.delete(),
-                    "savedFriendNames" to FieldValue.delete()
-                )
-                if (presence != null) {
-                    data["vrchatState"] = presence.status
-                    data["vrchatLocation"] = presence.location
-                    data["vrchatWorldName"] = presence.worldName
-                    data["vrchatDisplayName"] = presence.displayName
-                }
-                FirebaseFirestore.getInstance()
-                    .collection("users").document(deviceHash)
-                    .set(data, SetOptions.merge())
-            } catch (_: Throwable) {}
+    }
+
+    /** Builds the "going offline" Firestore write task, or null if not possible. */
+    private fun buildOfflineWriteTask(): com.google.android.gms.tasks.Task<Void>? {
+        if (deviceHash.isBlank()) return null
+        return try {
+            val presence = VrchatPipelineState.presence
+            val data = mutableMapOf<String, Any>(
+                "isOnlineInApp" to false,
+                "lastSeenAt" to FieldValue.serverTimestamp(),
+                // Drop any legacy friends data still lingering on the doc.
+                "savedFriendIds" to FieldValue.delete(),
+                "savedFriendNames" to FieldValue.delete()
+            )
+            if (presence != null) {
+                data["vrchatState"] = presence.status
+                data["vrchatLocation"] = presence.location
+                data["vrchatWorldName"] = presence.worldName
+                data["vrchatDisplayName"] = presence.displayName
+            }
+            FirebaseFirestore.getInstance()
+                .collection("users").document(deviceHash)
+                .set(data, SetOptions.merge())
+        } catch (_: Throwable) {
+            null
         }
     }
+
 
     // ------------------------------------------------------------------
     // Pipeline management
@@ -1053,8 +1072,8 @@ class VrchatPipelineService : Service() {
                         }
                     }
                     v2Type.contains("event", true) || v2Type.contains("calendar", true) -> {
-                        if (groupId.isNotBlank() && isContentFingerprintSeen(groupId, v2Title, message)) {
-                            Log.d(TAG, "WS event skipped (already fired): group=$groupId title=$v2Title")
+                        if (groupId.isNotBlank() && eventId.isNotBlank() && isEventFingerprintSeen(groupId, eventId)) {
+                            Log.d(TAG, "WS event skipped (already fired): group=$groupId event=$eventId")
                         } else {
                         val displayGroupName = resolveGroupNameAsync(groupId, senderName)
                         val groupKey2 = when {
@@ -1082,7 +1101,7 @@ class VrchatPipelineService : Service() {
                             alertEventTitle = cleanName(v2Title).ifBlank { null },
                             eventTimestampMs = v2CreatedMs.takeIf { it > 0 }
                         )
-                        if (groupId.isNotBlank()) addContentFingerprintToSeen(groupId, v2Title, message)
+                        if (groupId.isNotBlank()) addEventFingerprintToSeen(groupId, eventId)
                         }
                     }
                     v2Type.contains("invite", true) -> {
@@ -1650,18 +1669,18 @@ class VrchatPipelineService : Service() {
                 if (groupId.isNotBlank()) addContentFingerprintToSeen(groupId, v2Title, message)
             }
             v2Type.contains("event", true) || v2Type.contains("calendar", true) -> {
-                if (groupId.isNotBlank() && isContentFingerprintSeen(groupId, v2Title, message)) {
-                    Log.d(TAG, "V2 event skipped (REST already fired): group=$groupId title=$v2Title")
-                    return
-                }
-                val backfillGroupKey = if (groupId.isNotBlank()) "event_$groupId" else null
-                val displayName = resolveGroupNameAsync(groupId, v2Sender)
                 val eventId2 = obj.optString("eventId", "").ifBlank {
                     obj.optJSONObject("data")?.optString("eventId", "").orEmpty().ifBlank {
                         if (notifId.startsWith("cal_")) notifId
                         else findIdWithPrefix(obj, "cal_").orEmpty()
                     }
                 }
+                if (groupId.isNotBlank() && eventId2.isNotBlank() && isEventFingerprintSeen(groupId, eventId2)) {
+                    Log.d(TAG, "V2 event skipped (already fired): group=$groupId event=$eventId2")
+                    return
+                }
+                val backfillGroupKey = if (groupId.isNotBlank()) "event_$groupId" else null
+                val displayName = resolveGroupNameAsync(groupId, v2Sender)
                 val evtUrl = if (groupId.isNotBlank() && eventId2.isNotBlank())
                     "https://vrchat.com/home/group/$groupId/calendar/$eventId2"
                 else if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId"
@@ -1680,7 +1699,7 @@ class VrchatPipelineService : Service() {
                     alertEventTitle = cleanName(v2Title).ifBlank { null },
                     eventTimestampMs = v2CreatedMs.takeIf { it > 0 }
                 )
-                if (groupId.isNotBlank()) addContentFingerprintToSeen(groupId, v2Title, message)
+                if (groupId.isNotBlank()) addEventFingerprintToSeen(groupId, eventId2)
             }
             v2Type.contains("invite", true) -> fireEventNotification(
                 id = baseId.hashCode(), title = v2Title.ifBlank { "Group invite" },
@@ -2051,15 +2070,22 @@ class VrchatPipelineService : Service() {
                             }
                         }
                     }
+                    // Only seed PAST events (already happened) so they don't flood.
+                    // Upcoming events are intentionally NOT seeded — the backfill
+                    // sweep right after fires them once so the user sees events
+                    // they missed while closed; per-event dedup stops re-fires.
                     val events = VrchatAuthManager.fetchGroupCalendarEvents(this@VrchatPipelineService, groupId, 20)
                     if (events != null) {
+                        val now = System.currentTimeMillis()
                         for (j in 0 until events.length()) {
                             val ev = events.optJSONObject(j) ?: continue
                             val evId = ev.optString("id", "").ifBlank { findIdWithPrefix(ev, "cal_").orEmpty() }
                             if (evId.isBlank()) continue
-                            val marker = ev.optString("startsAt", "").ifBlank {
-                                ev.optString("createdAt", "").ifBlank { evId }
-                            }
+                            val startsAt = ev.optString("startsAt", "")
+                            val startsMs = parseVrcTimestampMs(startsAt)
+                            val isPast = startsMs in 1 until now
+                            if (!isPast) continue
+                            val marker = startsAt.ifBlank { ev.optString("createdAt", "").ifBlank { evId } }
                             val k = "${groupId}_event_$evId"
                             if (!seenMap.has(k)) { seenMap.put(k, marker); added++ }
                         }
@@ -2313,6 +2339,26 @@ class VrchatPipelineService : Service() {
         return synchronized(seenNotifIds) { fp in seenNotifIds }
     }
 
+    // Event fingerprint is keyed on the EVENT ID (not content) so that two
+    // distinct events with the same generic title (e.g. "Event starting")
+    // don't collide and suppress each other. Used for cross-path dedup of the
+    // SAME event arriving via WebSocket, V2 backfill, and the REST calendar
+    // sweep — all three extract the same `cal_xxx` id for a given event.
+    private fun eventFingerprint(groupId: String, eventId: String): String {
+        return "evt_fp_${groupId}_$eventId"
+    }
+
+    private fun addEventFingerprintToSeen(groupId: String, eventId: String) {
+        if (eventId.isBlank()) return
+        synchronized(seenNotifIds) { seenNotifIds.add(eventFingerprint(groupId, eventId)) }
+    }
+
+    private fun isEventFingerprintSeen(groupId: String, eventId: String): Boolean {
+        if (eventId.isBlank()) return false
+        val fp = eventFingerprint(groupId, eventId)
+        return synchronized(seenNotifIds) { fp in seenNotifIds }
+    }
+
     // Fires a group calendar event notification if it's new (not in seenMap).
     // Returns true if it fired (so callers can flag the seen-map dirty).
     private suspend fun fireGroupCalendarEvent(
@@ -2337,6 +2383,9 @@ class VrchatPipelineService : Service() {
         // doesn't re-fire, but an edited startsAt does.
         val marker = startsAt.ifBlank { eventId }
         if (marker == lastSeen) return false
+        // Cross-path dedup keyed on the event id (not content) so a sibling
+        // event with the same title doesn't get suppressed.
+        if (isEventFingerprintSeen(groupId, eventId)) return false
         if (eventTitle.isBlank() && eventDesc.isBlank()) return false
         fireEventNotification(
             id = "gce_$eventId".hashCode(),
@@ -2353,7 +2402,7 @@ class VrchatPipelineService : Service() {
             eventTimestampMs = startsMs.takeIf { it > 0 }
         )
         updatedMap.put(seenKey, marker)
-        addContentFingerprintToSeen(groupId, eventTitle, eventDesc)
+        addEventFingerprintToSeen(groupId, eventId)
         return true
     }
 

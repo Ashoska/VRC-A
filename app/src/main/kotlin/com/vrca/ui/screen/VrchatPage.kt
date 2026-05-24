@@ -636,8 +636,14 @@ private fun wordDiff(before: String, after: String): Pair<androidx.compose.ui.te
     // is an identical token the LCS aligned elsewhere), not deleted or added —
     // render those in purple on both sides so reordering a bio reads as "moved"
     // instead of red/green. Matching is multiset-based so counts stay balanced.
-    val removedIdx = bWords.indices.filter { it !in lcsSet && bWords[it].isNotBlank() }
-    val addedIdx = aWords.indices.filter { it !in lcsSetAfter && aWords[it].isNotBlank() }
+    // Only MEANINGFUL tokens are move-eligible: common short words/punctuation
+    // ("my", "I", "<3", "|", "a", "to") recur all over a bio, so matching them
+    // as "moved" painted them purple everywhere even when nothing actually moved.
+    // Requiring length >= 4 keeps genuine moved phrases purple while short tokens
+    // fall back to normal red/green add/remove.
+    fun moveEligible(w: String) = w.trim().length >= 4
+    val removedIdx = bWords.indices.filter { it !in lcsSet && moveEligible(bWords[it]) }
+    val addedIdx = aWords.indices.filter { it !in lcsSetAfter && moveEligible(aWords[it]) }
 
     val addedCounts = HashMap<String, Int>()
     for (k in addedIdx) addedCounts[aWords[k]] = (addedCounts[aWords[k]] ?: 0) + 1

@@ -123,7 +123,12 @@ class DiscordRpcService : Service() {
         }
 
         sessionRecoveryCount = 0
-        onlineStartEpochMs = rpcPrefs.getLong("online_start_epoch", 0L)
+        // Start from 0 so buildActivityJson() runs the grace-window check
+        // against offline_at. Preloading the persisted epoch directly here
+        // bypassed that check (the grace block only runs when the in-memory
+        // value is 0), which let a day-old start epoch ship to Discord as a
+        // bogus "25 hours online" timer after a normal cold start.
+        onlineStartEpochMs = 0L
         DiscordRpcState.status = DiscordRpcStatus.CONNECTING
         DiscordRpcState.failureMessage = null
 
@@ -397,21 +402,33 @@ class DiscordRpcService : Service() {
         val vrcPresence = VrchatPipelineState.presence
         val isOnline = vrcPresence?.isOnlineInVRChat == true
 
+        val nowMs = System.currentTimeMillis()
         if (isOnline && onlineStartEpochMs == 0L) {
             val saved = rpcPrefs.getLong("online_start_epoch", 0L)
-            val offlineAt = rpcPrefs.getLong("offline_at", 0L)
-            val withinGrace = saved > 0 && offlineAt > 0 &&
-                System.currentTimeMillis() - offlineAt < 10L * 60 * 1000
+            // last_online_seen is refreshed on every confirmed-online tick, so
+            // it freezes the moment the app stops tracking (process death, swipe).
+            // Measuring the gap from it — not from offline_at, which only updates
+            // on explicit transitions the app may miss — means a long untracked
+            // gap correctly resets the counter instead of bridging into a bogus
+            // multi-hour timer.
+            val lastSeen = rpcPrefs.getLong("last_online_seen", 0L)
+            val withinGrace = saved > 0 && lastSeen > 0 &&
+                nowMs - lastSeen < 10L * 60 * 1000
             if (withinGrace) {
                 onlineStartEpochMs = saved
             } else {
-                onlineStartEpochMs = System.currentTimeMillis()
+                onlineStartEpochMs = nowMs
                 rpcPrefs.edit().putLong("online_start_epoch", onlineStartEpochMs).apply()
             }
             rpcPrefs.edit().remove("offline_at").apply()
         } else if (!isOnline && onlineStartEpochMs != 0L) {
-            rpcPrefs.edit().putLong("offline_at", System.currentTimeMillis()).apply()
+            rpcPrefs.edit().putLong("offline_at", nowMs).apply()
             onlineStartEpochMs = 0L
+        }
+        // Heartbeat the last-online marker whenever we confirm online so the
+        // grace window above can tell how long the app was actually away.
+        if (isOnline) {
+            rpcPrefs.edit().putLong("last_online_seen", nowMs).apply()
         }
 
         return JSONObject().apply {
