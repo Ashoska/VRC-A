@@ -1555,6 +1555,148 @@ class VrchatPipelineService : Service() {
         return "a group"
     }
 
+    // Processes a single notification-v2 object (from REST backfill OR the
+    // poll-loop retry sweep) and fires the appropriate notification. Shared so
+    // the periodic poll re-attempts anything the one-shot connect backfill
+    // missed (transient 429/timeout/cold-start race); seenNotifIds dedup makes
+    // re-processing safe (each fires at most once).
+    private suspend fun processV2Notification(obj: JSONObject) {
+        val notifId = obj.optString("id", "")
+        val v2Type = obj.optString("type", "")
+        val v2Title = obj.optString("title", "")
+        val v2Sender = obj.optString("senderUsername", "")
+        val message = obj.optString("message", "")
+        val v2CreatedAt = obj.optString("created_at", "")
+        val v2CreatedMs = parseVrcTimestampMs(v2CreatedAt)
+        // Catch-up content fires however old it is (seenNotifIds still
+        // guarantees each one fires only once) so users away for a week
+        // don't miss them: group announcements/events plus role/transfer
+        // changes. Remaining transient types (invites, queue, join
+        // requests, instance) skip when older than 24h.
+        val isCatchUpType = v2Type.contains("announcement", true) ||
+            v2Type.contains("post", true) ||
+            v2Type.contains("event", true) ||
+            v2Type.contains("calendar", true) ||
+            v2Type.contains("role", true) ||
+            v2Type.contains("transfer", true)
+        if (!isCatchUpType && v2CreatedMs > 0 &&
+            System.currentTimeMillis() - v2CreatedMs > 24L * 60 * 60 * 1000) return
+        val baseId = notifId.ifBlank { "$v2Type-${message.hashCode()}" }
+        val groupId = obj.optString("relatedGroupId", "").ifBlank {
+            obj.optString("groupId", "").ifBlank {
+                findIdWithPrefix(obj, "grp_").orEmpty()
+            }
+        }
+        val groupUrl = if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId"
+            else "https://vrchat.com/home/notifications"
+        when {
+            v2Type.contains("announcement", true) || v2Type.contains("post", true) -> {
+                val backfillGroupKey = if (groupId.isNotBlank()) "announcement_$groupId" else null
+                val displayName = resolveGroupNameAsync(groupId, v2Sender)
+                val postUrl = if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId/posts" else groupUrl
+                val body = message.ifBlank { v2Title.ifBlank { "New announcement" } }
+                fireEventNotification(
+                    id = baseId.hashCode(),
+                    title = "Announcement from $displayName",
+                    text = "${v2Title.ifBlank { "Announcement" }}: ${body.take(120)}",
+                    profileUrl = postUrl,
+                    prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
+                    channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
+                    dedupId = notifId.ifBlank { null },
+                    alertGroupKey = backfillGroupKey,
+                    alertBody = body,
+                    alertEventTitle = cleanName(v2Title).ifBlank { null },
+                    eventTimestampMs = v2CreatedMs.takeIf { it > 0 }
+                )
+            }
+            v2Type.contains("event", true) || v2Type.contains("calendar", true) -> {
+                val backfillGroupKey = if (groupId.isNotBlank()) "event_$groupId" else null
+                val displayName = resolveGroupNameAsync(groupId, v2Sender)
+                val eventId2 = obj.optString("eventId", "").ifBlank {
+                    obj.optJSONObject("data")?.optString("eventId", "").orEmpty().ifBlank {
+                        if (notifId.startsWith("cal_")) notifId
+                        else findIdWithPrefix(obj, "cal_").orEmpty()
+                    }
+                }
+                val evtUrl = if (groupId.isNotBlank() && eventId2.isNotBlank())
+                    "https://vrchat.com/home/group/$groupId/calendar/$eventId2"
+                else if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId"
+                else groupUrl
+                val body = message.ifBlank { v2Title.ifBlank { "New group event" } }
+                fireEventNotification(
+                    id = baseId.hashCode(),
+                    title = "Event from $displayName",
+                    text = "${v2Title.ifBlank { "Event" }}: ${body.take(120)}",
+                    profileUrl = evtUrl,
+                    prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT,
+                    channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
+                    dedupId = notifId.ifBlank { null },
+                    alertGroupKey = backfillGroupKey,
+                    alertBody = body,
+                    alertEventTitle = cleanName(v2Title).ifBlank { null },
+                    eventTimestampMs = v2CreatedMs.takeIf { it > 0 }
+                )
+            }
+            v2Type.contains("invite", true) -> fireEventNotification(
+                id = baseId.hashCode(), title = v2Title.ifBlank { "Group invite" },
+                text = message.take(140).ifBlank { "You've been invited to join a group" },
+                profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_INVITE,
+                channelId = NOTIF_CHANNEL_INVITES, groupKey = GROUP_KEY_INVITES,
+                dedupId = notifId.ifBlank { null }
+            )
+            v2Type.contains("queue", true) -> fireEventNotification(
+                id = baseId.hashCode(), title = v2Title.ifBlank { "Queue ready" },
+                text = message.take(140).ifBlank { "Your spot in a group instance queue is ready" },
+                profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_QUEUE,
+                channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
+                dedupId = notifId.ifBlank { null }
+            )
+            v2Type.contains("join", true) && v2Type.contains("request", true) -> fireEventNotification(
+                id = baseId.hashCode(), title = v2Title.ifBlank { "Group join request" },
+                text = message.take(140).ifBlank { "Someone wants to join one of your groups" },
+                profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_JOIN_REQUEST,
+                channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
+                dedupId = notifId.ifBlank { null }
+            )
+            v2Type.contains("role", true) || v2Type.contains("transfer", true) -> fireEventNotification(
+                id = baseId.hashCode(), title = v2Title.ifBlank { "Group role updated" },
+                text = message.take(140).ifBlank { "Your role in a group changed" },
+                profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ROLE,
+                channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
+                dedupId = notifId.ifBlank { null }
+            )
+            v2Type.contains("instance", true) -> fireEventNotification(
+                id = baseId.hashCode(), title = v2Title.ifBlank { "Group instance opened" },
+                text = message.take(140).ifBlank { "A new group instance is now joinable" },
+                profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_INSTANCE,
+                channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
+                dedupId = notifId.ifBlank { null }
+            )
+            v2Type.startsWith("group.") -> fireEventNotification(
+                id = baseId.hashCode(), title = v2Title.ifBlank { "Group activity" },
+                text = message.take(140).ifBlank { "New activity in one of your groups" },
+                profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT,
+                channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
+                dedupId = notifId.ifBlank { null },
+                alertBody = if (message.length > 100) message else null
+            )
+            else -> {
+                Log.i(TAG, "backfill notification-v2 unmatched type='$v2Type' title='$v2Title' groupId=$groupId")
+                if (isCatchUpType && (v2Title.isNotBlank() || message.isNotBlank())) {
+                    fireEventNotification(
+                        id = baseId.hashCode(),
+                        title = v2Title.ifBlank { "VRChat notification" },
+                        text = message.take(140).ifBlank { v2Title },
+                        profileUrl = if (groupId.isNotBlank()) groupUrl else "https://vrchat.com/home/notifications",
+                        prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT,
+                        channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
+                        dedupId = notifId.ifBlank { null }
+                    )
+                }
+            }
+        }
+    }
+
     private suspend fun backfillOfflineNotifications() {
         try {
             // First-run guard: if this is the very first pipeline connect ever
@@ -1676,127 +1818,7 @@ class VrchatPipelineService : Service() {
             if (v2 != null) {
                 for (i in 0 until v2.length()) {
                     val obj = v2.optJSONObject(i) ?: continue
-                    val notifId = obj.optString("id", "")
-                    val v2Type = obj.optString("type", "")
-                    val v2Title = obj.optString("title", "")
-                    val v2Sender = obj.optString("senderUsername", "")
-                    val message = obj.optString("message", "")
-                    val v2CreatedAt = obj.optString("created_at", "")
-                    val v2CreatedMs = parseVrcTimestampMs(v2CreatedAt)
-                    // Catch-up content fires however old it is (seenNotifIds still
-                    // guarantees each one fires only once) so users away for a week
-                    // don't miss them: group announcements/events plus role/transfer
-                    // changes (persistent state worth knowing about whenever you
-                    // return). Remaining transient types (invites, queue, join
-                    // requests, instance) skip when older than 24h.
-                    val isCatchUpType = v2Type.contains("announcement", true) ||
-                        v2Type.contains("post", true) ||
-                        v2Type.contains("event", true) ||
-                        v2Type.contains("calendar", true) ||
-                        v2Type.contains("role", true) ||
-                        v2Type.contains("transfer", true)
-                    if (!isCatchUpType && v2CreatedMs > 0 &&
-                        System.currentTimeMillis() - v2CreatedMs > 24L * 60 * 60 * 1000) continue
-                    val baseId = notifId.ifBlank { "$v2Type-${message.hashCode()}" }
-                    val groupId = obj.optString("relatedGroupId", "").ifBlank {
-                        obj.optString("groupId", "").ifBlank {
-                            findIdWithPrefix(obj, "grp_").orEmpty()
-                        }
-                    }
-                    val groupUrl = if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId"
-                        else "https://vrchat.com/home/notifications"
-                    when {
-                        v2Type.contains("announcement", true) || v2Type.contains("post", true) -> {
-                            val backfillGroupKey = if (groupId.isNotBlank()) "announcement_$groupId" else null
-                            val displayName = resolveGroupNameAsync(groupId, v2Sender)
-                            val postUrl = if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId/posts" else groupUrl
-                            val body = message.ifBlank { v2Title.ifBlank { "New announcement" } }
-                            fireEventNotification(
-                                id = baseId.hashCode(),
-                                title = "Announcement from $displayName",
-                                text = "${v2Title.ifBlank { "Announcement" }}: ${body.take(120)}",
-                                profileUrl = postUrl,
-                                prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
-                                channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
-                                dedupId = notifId.ifBlank { null },
-                                alertGroupKey = backfillGroupKey,
-                                alertBody = body,
-                                alertEventTitle = cleanName(v2Title).ifBlank { null },
-                                eventTimestampMs = v2CreatedMs.takeIf { it > 0 }
-                            )
-                        }
-                        v2Type.contains("event", true) || v2Type.contains("calendar", true) -> {
-                            val backfillGroupKey = if (groupId.isNotBlank()) "event_$groupId" else null
-                            val displayName = resolveGroupNameAsync(groupId, v2Sender)
-                            val eventId2 = obj.optString("eventId", "").ifBlank {
-                                obj.optJSONObject("data")?.optString("eventId", "").orEmpty().ifBlank {
-                                    if (notifId.startsWith("cal_")) notifId
-                                    else findIdWithPrefix(obj, "cal_").orEmpty()
-                                }
-                            }
-                            val evtUrl = if (groupId.isNotBlank() && eventId2.isNotBlank())
-                                "https://vrchat.com/home/group/$groupId/calendar/$eventId2"
-                            else if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId"
-                            else groupUrl
-                            val body = message.ifBlank { v2Title.ifBlank { "New group event" } }
-                            fireEventNotification(
-                                id = baseId.hashCode(),
-                                title = "Event from $displayName",
-                                text = "${v2Title.ifBlank { "Event" }}: ${body.take(120)}",
-                                profileUrl = evtUrl,
-                                prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT,
-                                channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
-                                dedupId = notifId.ifBlank { null },
-                                alertGroupKey = backfillGroupKey,
-                                alertBody = body,
-                                alertEventTitle = cleanName(v2Title).ifBlank { null },
-                                eventTimestampMs = v2CreatedMs.takeIf { it > 0 }
-                            )
-                        }
-                        v2Type.contains("invite", true) -> fireEventNotification(
-                            id = baseId.hashCode(), title = v2Title.ifBlank { "Group invite" },
-                            text = message.take(140).ifBlank { "You've been invited to join a group" },
-                            profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_INVITE,
-                            channelId = NOTIF_CHANNEL_INVITES, groupKey = GROUP_KEY_INVITES,
-                            dedupId = notifId.ifBlank { null }
-                        )
-                        v2Type.contains("queue", true) -> fireEventNotification(
-                            id = baseId.hashCode(), title = v2Title.ifBlank { "Queue ready" },
-                            text = message.take(140).ifBlank { "Your spot in a group instance queue is ready" },
-                            profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_QUEUE,
-                            channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
-                            dedupId = notifId.ifBlank { null }
-                        )
-                        v2Type.contains("join", true) && v2Type.contains("request", true) -> fireEventNotification(
-                            id = baseId.hashCode(), title = v2Title.ifBlank { "Group join request" },
-                            text = message.take(140).ifBlank { "Someone wants to join one of your groups" },
-                            profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_JOIN_REQUEST,
-                            channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
-                            dedupId = notifId.ifBlank { null }
-                        )
-                        v2Type.contains("role", true) || v2Type.contains("transfer", true) -> fireEventNotification(
-                            id = baseId.hashCode(), title = v2Title.ifBlank { "Group role updated" },
-                            text = message.take(140).ifBlank { "Your role in a group changed" },
-                            profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ROLE,
-                            channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
-                            dedupId = notifId.ifBlank { null }
-                        )
-                        v2Type.contains("instance", true) -> fireEventNotification(
-                            id = baseId.hashCode(), title = v2Title.ifBlank { "Group instance opened" },
-                            text = message.take(140).ifBlank { "A new group instance is now joinable" },
-                            profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_INSTANCE,
-                            channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
-                            dedupId = notifId.ifBlank { null }
-                        )
-                        v2Type.startsWith("group.") -> fireEventNotification(
-                            id = baseId.hashCode(), title = v2Title.ifBlank { "Group activity" },
-                            text = message.take(140).ifBlank { "New activity in one of your groups" },
-                            profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT,
-                            channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
-                            dedupId = notifId.ifBlank { null },
-                            alertBody = if (message.length > 100) message else null
-                        )
-                    }
+                    processV2Notification(obj)
                 }
             }
             delay(300)
@@ -2066,6 +2088,28 @@ class VrchatPipelineService : Service() {
 
     private suspend fun pollGroupAnnouncements() {
         if (!VrchatAuthManager.isLoggedIn(this)) return
+
+        // Retry sweep of pending notification-v2 (events, announcements, role
+        // changes). The one-shot connect backfill can miss these on a transient
+        // 429/timeout or a cold-start race; re-running here every poll cycle is
+        // the retry path. seenNotifIds dedup ensures each fires at most once.
+        // Skipped on the very first connect (baseline not yet established).
+        val initialized = dataStore.data.first()[booleanPreferencesKey("notif_backfill_initialized")] ?: false
+        if (initialized) {
+            try {
+                val v2 = VrchatAuthManager.fetchPendingNotificationsV2(this)
+                if (v2 != null) {
+                    for (i in 0 until v2.length()) {
+                        val obj = v2.optJSONObject(i) ?: continue
+                        processV2Notification(obj)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "poll: V2 notification retry sweep failed", e)
+            }
+            delay(300)
+        }
+
         val groups = VrchatAuthManager.fetchUserGroups(this) ?: return
         val seenKey = androidx.datastore.preferences.core.stringPreferencesKey("notif_group_announcement_seen")
         val seenRaw = dataStore.data.first()[seenKey] ?: "{}"
