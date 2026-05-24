@@ -1504,10 +1504,14 @@ class VrchatPipelineService : Service() {
                     val senderName = obj.optString("senderUsername", "someone")
                     val senderUserId = obj.optString("senderUserId", "")
                     val message = obj.optString("message", "")
-                    // Skip notifications older than 24h
                     val v1CreatedAt = obj.optString("created_at", "")
                     val v1CreatedMs = parseVrcTimestampMs(v1CreatedAt)
-                    if (v1CreatedMs > 0 && System.currentTimeMillis() - v1CreatedMs > 24L * 60 * 60 * 1000) continue
+                    // Friend requests are pending/actionable state that persists until
+                    // accepted or declined, so they fire regardless of age (dedup fires
+                    // each once). Other transient V1 types skip when older than 24h.
+                    val v1CatchUp = notifType == "friendRequest"
+                    if (!v1CatchUp && v1CreatedMs > 0 &&
+                        System.currentTimeMillis() - v1CreatedMs > 24L * 60 * 60 * 1000) continue
                     when (notifType) {
                         "friendRequest" -> fireEventNotification(
                             id = "fr_$senderUserId".hashCode(),
@@ -1581,15 +1585,18 @@ class VrchatPipelineService : Service() {
                     val message = obj.optString("message", "")
                     val v2CreatedAt = obj.optString("created_at", "")
                     val v2CreatedMs = parseVrcTimestampMs(v2CreatedAt)
-                    // Group announcements/events are catch-up content: fire them
-                    // however old they are (seenNotifIds still guarantees each one
-                    // fires only once) so users away for a week don't miss them.
-                    // Transient types (friend requests, invites, queue, etc.) skip
-                    // when older than 24h to avoid resurfacing stale noise.
+                    // Catch-up content fires however old it is (seenNotifIds still
+                    // guarantees each one fires only once) so users away for a week
+                    // don't miss them: group announcements/events plus role/transfer
+                    // changes (persistent state worth knowing about whenever you
+                    // return). Remaining transient types (invites, queue, join
+                    // requests, instance) skip when older than 24h.
                     val isCatchUpType = v2Type.contains("announcement", true) ||
                         v2Type.contains("post", true) ||
                         v2Type.contains("event", true) ||
-                        v2Type.contains("calendar", true)
+                        v2Type.contains("calendar", true) ||
+                        v2Type.contains("role", true) ||
+                        v2Type.contains("transfer", true)
                     if (!isCatchUpType && v2CreatedMs > 0 &&
                         System.currentTimeMillis() - v2CreatedMs > 24L * 60 * 60 * 1000) continue
                     val baseId = notifId.ifBlank { "$v2Type-${message.hashCode()}" }
