@@ -677,27 +677,34 @@ object VrchatAuthManager {
     // wrapping the list under "results"/"events".
     suspend fun fetchGroupCalendarEvents(context: Context, groupId: String, n: Int = 20): org.json.JSONArray? = withContext(Dispatchers.IO) {
         val cookieHeader = getCookieHeader(context) ?: return@withContext null
-        try {
-            val (code, body, _) = get(
-                "$BASE/groups/$groupId/calendar?n=$n",
-                null, cookieHeader
-            )
-            Log.i(TAG, "fetchGroupCalendarEvents($groupId) http=$code bodyHead=${body.take(60)}")
-            if (code != 200) return@withContext null
-            when {
-                body.startsWith("[") -> org.json.JSONArray(body)
-                body.startsWith("{") -> {
-                    val obj = org.json.JSONObject(body)
-                    obj.optJSONArray("results")
-                        ?: obj.optJSONArray("events")
-                        ?: obj.optJSONArray("calendarEvents")
+        val endpoints = arrayOf(
+            "$BASE/groups/$groupId/events?n=$n",
+            "$BASE/groups/$groupId/scheduledEvents?n=$n",
+            "$BASE/groups/$groupId/calendar?n=$n"
+        )
+        for (url in endpoints) {
+            try {
+                val (code, body, _) = get(url, null, cookieHeader)
+                Log.i(TAG, "fetchGroupCalendarEvents($groupId) url=${url.substringAfter("groups/")} http=$code bodyHead=${body.take(80)}")
+                if (code == 404) continue
+                if (code != 200) continue
+                val result = when {
+                    body.startsWith("[") -> org.json.JSONArray(body)
+                    body.startsWith("{") -> {
+                        val obj = org.json.JSONObject(body)
+                        obj.optJSONArray("results")
+                            ?: obj.optJSONArray("events")
+                            ?: obj.optJSONArray("calendarEvents")
+                            ?: obj.optJSONArray("scheduledEvents")
+                    }
+                    else -> null
                 }
-                else -> null
+                if (result != null && result.length() > 0) return@withContext result
+            } catch (e: Exception) {
+                Log.w(TAG, "fetchGroupCalendarEvents($groupId) ${url.substringAfterLast("/")} failed", e)
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "fetchGroupCalendarEvents($groupId) failed", e)
-            null
         }
+        null
     }
 
     // ------------------------------------------------------------------
