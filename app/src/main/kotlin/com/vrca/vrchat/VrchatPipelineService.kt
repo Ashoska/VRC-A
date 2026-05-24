@@ -382,23 +382,32 @@ class VrchatPipelineService : Service() {
                                 alertGroupKey = nameGroupKey
                             )
                         }
-                        // Bio change detection — always fires as grouped in-app alert
+                        // Bio change detection — fires on edit, clear (→empty),
+                        // or add (empty→). Both sides come from full fetches so
+                        // the bio field is reliable; only empty→empty is ignored.
                         if (newEntry.bio != old.bio &&
-                            old.bio.isNotBlank() && newEntry.bio.isNotBlank()) {
+                            (newEntry.bio.isNotBlank() || old.bio.isNotBlank())) {
                             val bioGroupKey = "bio_$userId"
-                            val bioAlertBody = "Before: ${old.bio}\nAfter: ${newEntry.bio}"
+                            val bioTitle = when {
+                                newEntry.bio.isBlank() -> "${newEntry.displayName} cleared their bio"
+                                old.bio.isBlank() -> "${newEntry.displayName} added a bio"
+                                else -> "${newEntry.displayName} updated bio"
+                            }
+                            val beforeShown = old.bio.ifBlank { "(empty)" }
+                            val afterShown = newEntry.bio.ifBlank { "(empty)" }
+                            val bioAlertBody = "Before: $beforeShown\nAfter: $afterShown"
                             fireEventNotification(
                                 id = bioGroupKey.hashCode(),
-                                title = "${newEntry.displayName} updated bio",
-                                text = "${newEntry.displayName} updated their bio",
+                                title = bioTitle,
+                                text = bioTitle,
                                 profileUrl = "https://vrchat.com/home/user/$userId",
                                 prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_BIO,
                                 channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
                                 groupKey = GROUP_KEY_FRIENDS,
                                 bigText = bioAlertBody,
                                 alertBody = bioAlertBody,
-                                alertBeforeText = old.bio,
-                                alertAfterText = newEntry.bio,
+                                alertBeforeText = beforeShown,
+                                alertAfterText = afterShown,
                                 alertGroupKey = bioGroupKey
                             )
                         }
@@ -1249,7 +1258,11 @@ class VrchatPipelineService : Service() {
         val newDisplayName = user.optString("displayName", previous.displayName)
         val newStatus = user.optString("status", previous.status)
         val newAvatar = user.optString("currentAvatarThumbnailImageUrl", previous.avatarThumb)
-        val newBio = user.optString("bio", previous.bio)
+        // Only treat bio as changed when the payload explicitly carries the
+        // field. Partial friend-update payloads (location/status only) omit
+        // bio entirely — defaulting to previous.bio keeps those from firing.
+        val bioPresent = user.has("bio")
+        val newBio = if (bioPresent) user.optString("bio", "") else previous.bio
         val newRank = extractTrustRank(user).ifBlank { previous.trustRank }
         val newLocation = user.optString("location", previous.location)
 
@@ -1308,22 +1321,34 @@ class VrchatPipelineService : Service() {
             }
         }
 
-        if (newBio.isNotBlank() && newBio != previous.bio && previous.bio.isNotBlank()) {
+        // Fire on any real bio change the payload reported: edit, clear
+        // (text → empty), or add (empty → text). Requires the bio field to be
+        // present so partial payloads don't false-fire, and requires at least
+        // one side non-blank so empty → empty is ignored.
+        if (bioPresent && newBio != previous.bio &&
+            (newBio.isNotBlank() || previous.bio.isNotBlank())) {
             val bioGroupKey = "bio_$userId"
-            val bioAlertBody = "Before: ${previous.bio}\nAfter: $newBio"
+            val bioTitle = when {
+                newBio.isBlank() -> "$newDisplayName cleared their bio"
+                previous.bio.isBlank() -> "$newDisplayName added a bio"
+                else -> "$newDisplayName updated bio"
+            }
+            val beforeShown = previous.bio.ifBlank { "(empty)" }
+            val afterShown = newBio.ifBlank { "(empty)" }
+            val bioAlertBody = "Before: $beforeShown\nAfter: $afterShown"
             // Stable Android notification ID — updates in place without re-alerting
             fireEventNotification(
                 id = bioGroupKey.hashCode(),
-                title = "$newDisplayName updated bio",
-                text = "$newDisplayName updated their bio",
+                title = bioTitle,
+                text = bioTitle,
                 profileUrl = "https://vrchat.com/home/user/$userId",
                 prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_BIO,
                 channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
                 groupKey = GROUP_KEY_FRIENDS,
                 bigText = bioAlertBody,
                 alertBody = bioAlertBody,
-                alertBeforeText = previous.bio,
-                alertAfterText = newBio,
+                alertBeforeText = beforeShown,
+                alertAfterText = afterShown,
                 alertGroupKey = bioGroupKey
             )
         }
@@ -1878,25 +1903,29 @@ class VrchatPipelineService : Service() {
                                 val post = posts.optJSONObject(j) ?: continue
                                 val postId = post.optString("id", "")
                                 if (postId.isBlank()) continue
-                                val postTitle = post.optString("title", "").ifBlank { groupName }
+                                val rawPostTitle = post.optString("title", "")
+                                val postTitle = rawPostTitle.ifBlank { groupName }
                                 val postText = post.optString("text", "")
                                 val postCreatedAt = post.optString("createdAt", "")
                                 val postCreatedMs = parseVrcTimestampMs(postCreatedAt)
                                 val postSeenKey = "${groupId}_post_$postId"
                                 val postLastSeen = seenMap.optString(postSeenKey, "")
-                                if (postCreatedAt.isNotBlank() && postCreatedAt != postLastSeen && postText.isNotBlank()) {
+                                // Fire when there's ANY content (text or title) — a
+                                // title-only announcement was previously skipped.
+                                if (postCreatedAt.isNotBlank() && postCreatedAt != postLastSeen &&
+                                    (postText.isNotBlank() || rawPostTitle.isNotBlank())) {
                                     fireEventNotification(
                                         id = "gp_${postId}".hashCode(),
                                         title = "Announcement from $groupName",
-                                        text = "${postTitle}: ${postText.take(120)}",
+                                        text = "${postTitle}: ${postText.ifBlank { rawPostTitle }.take(120)}",
                                         profileUrl = "https://vrchat.com/home/group/$groupId/posts",
                                         prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
                                         channelId = NOTIF_CHANNEL_GROUPS,
                                         groupKey = GROUP_KEY_GROUPS,
                                         dedupId = "gp_${postId}_$postCreatedAt",
                                         alertGroupKey = "announcement_$groupId",
-                                        alertBody = postText.ifBlank { null },
-                                        alertEventTitle = postTitle.ifBlank { null },
+                                        alertBody = postText.ifBlank { rawPostTitle.ifBlank { null } },
+                                        alertEventTitle = rawPostTitle.ifBlank { null },
                                         eventTimestampMs = postCreatedMs.takeIf { it > 0 }
                                     )
                                     updatedMap.put(postSeenKey, postCreatedAt)
@@ -2070,18 +2099,28 @@ class VrchatPipelineService : Service() {
 
     private fun startGroupAnnouncementPollLoop() {
         serviceScope.launch {
-            // First poll runs ~45s after start (once the pipeline has connected
-            // and the first-run baseline has had a chance to seed) so catch-up
-            // announcements/posts surface quickly on reopen instead of waiting
-            // a full 5 minutes. Steady-state polling stays at 5 min.
-            delay(45 * 1000L)
+            // VRChat's notification/announcement endpoints lag behind reality:
+            // an item created moments before reconnect often isn't in the API
+            // response yet during the immediate connect backfill, so a single
+            // sweep misses it. We run several quick catch-up sweeps (15s, 40s,
+            // 90s) to absorb that propagation delay before settling into the
+            // steady 5-min cadence. seenNotifIds dedup keeps each item to one fire.
+            val warmupDelays = longArrayOf(15_000L, 25_000L, 50_000L)
+            for (d in warmupDelays) {
+                delay(d)
+                try {
+                    pollGroupAnnouncements()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Group announcement warmup poll failed", e)
+                }
+            }
             while (true) {
+                delay(5 * 60 * 1000L)
                 try {
                     pollGroupAnnouncements()
                 } catch (e: Exception) {
                     Log.w(TAG, "Group announcement poll failed", e)
                 }
-                delay(5 * 60 * 1000L)
             }
         }
     }
@@ -2158,25 +2197,27 @@ class VrchatPipelineService : Service() {
                         val post = posts.optJSONObject(j) ?: continue
                         val postId = post.optString("id", "")
                         if (postId.isBlank()) continue
-                        val postTitle = post.optString("title", "").ifBlank { groupName }
+                        val rawPostTitle = post.optString("title", "")
+                        val postTitle = rawPostTitle.ifBlank { groupName }
                         val postText = post.optString("text", "")
                         val postCreatedAt = post.optString("createdAt", "")
                         val postCreatedMs = parseVrcTimestampMs(postCreatedAt)
                         val postSeenKey = "${groupId}_post_$postId"
                         val postLastSeen = seenMap.optString(postSeenKey, "")
-                        if (postCreatedAt.isNotBlank() && postCreatedAt != postLastSeen && postText.isNotBlank()) {
+                        if (postCreatedAt.isNotBlank() && postCreatedAt != postLastSeen &&
+                            (postText.isNotBlank() || rawPostTitle.isNotBlank())) {
                             fireEventNotification(
                                 id = "gp_${postId}".hashCode(),
                                 title = "Announcement from $groupName",
-                                text = "${postTitle}: ${postText.take(120)}",
+                                text = "${postTitle}: ${postText.ifBlank { rawPostTitle }.take(120)}",
                                 profileUrl = "https://vrchat.com/home/group/$groupId/posts",
                                 prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
                                 channelId = NOTIF_CHANNEL_GROUPS,
                                 groupKey = GROUP_KEY_GROUPS,
                                 dedupId = "gp_${postId}_$postCreatedAt",
                                 alertGroupKey = "announcement_$groupId",
-                                alertBody = postText.ifBlank { null },
-                                alertEventTitle = postTitle.ifBlank { null },
+                                alertBody = postText.ifBlank { rawPostTitle.ifBlank { null } },
+                                alertEventTitle = rawPostTitle.ifBlank { null },
                                 eventTimestampMs = postCreatedMs.takeIf { it > 0 }
                             )
                             updatedMap.put(postSeenKey, postCreatedAt)
@@ -2466,17 +2507,29 @@ class VrchatPipelineService : Service() {
         // reconnect backfill). Gate first, then dedup only when we will fire.
         val prefs = dataStore.data.first()
         val enabled = prefs[booleanPreferencesKey(prefKey)] ?: false
-        if (!enabled) return
+        if (!enabled) {
+            Log.d(TAG, "notif drop (toggle off): pref=$prefKey title=$title dedup=$dedupId")
+            return
+        }
 
         if (dedupId != null) {
+            var alreadySeen = false
             synchronized(seenNotifIds) {
-                if (!seenNotifIds.add(dedupId)) return
-                while (seenNotifIds.size > MAX_SEEN_NOTIF_IDS) {
-                    seenNotifIds.iterator().let { it.next(); it.remove() }
+                if (!seenNotifIds.add(dedupId)) {
+                    alreadySeen = true
+                } else {
+                    while (seenNotifIds.size > MAX_SEEN_NOTIF_IDS) {
+                        seenNotifIds.iterator().let { it.next(); it.remove() }
+                    }
                 }
+            }
+            if (alreadySeen) {
+                Log.d(TAG, "notif skip (already seen): dedup=$dedupId title=$title")
+                return
             }
             persistSeenNotifIds()
         }
+        Log.i(TAG, "notif FIRE: title=$title dedup=$dedupId group=$alertGroupKey")
 
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
@@ -2543,7 +2596,8 @@ class VrchatPipelineService : Service() {
                         beforeText = alertBeforeText,
                         afterText = alertAfterText,
                         timestampMs = displayTs,
-                        eventTitle = alertEventTitle
+                        eventTitle = alertEventTitle,
+                        url = profileUrl
                     )
                 )
             } else {

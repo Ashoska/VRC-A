@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -57,6 +58,7 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -662,12 +664,11 @@ private fun AlertGroupCard(group: InAppAlertGroup, onDismiss: () -> Unit) {
         ),
         elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp)
     ) {
-        Column(Modifier.padding(start = 14.dp, top = 10.dp, end = 6.dp, bottom = 12.dp)) {
-            // Header: accent bar + title/preview on the left, dismiss + chevron right.
+        Column(Modifier.padding(start = 14.dp, top = 10.dp, end = 8.dp, bottom = 12.dp)) {
+            // Header: accent bar + title/preview (tap to expand) on the left,
+            // a chevron expand affordance, then a clearly-separated dismiss button.
             Row(
-                Modifier
-                    .fillMaxWidth()
-                    .clickable { expanded = !expanded },
+                Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Box(
@@ -679,43 +680,60 @@ private fun AlertGroupCard(group: InAppAlertGroup, onDismiss: () -> Unit) {
                             shape = MaterialTheme.shapes.small
                         )
                 )
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        displayTitle,
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    if (!expanded && previewText.isNotBlank()) {
+                // Title + chevron together form the expand tap target.
+                Row(
+                    Modifier
+                        .weight(1f)
+                        .clickable { expanded = !expanded },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
                         Text(
-                            previewText,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            displayTitle,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurface
                         )
+                        if (!expanded && previewText.isNotBlank()) {
+                            Text(
+                                previewText,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        latest?.let {
+                            Text(
+                                formatRelativeTime(it.timestampMs),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.outline
+                            )
+                        }
                     }
-                    latest?.let {
-                        Text(
-                            formatRelativeTime(it.timestampMs),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.outline
-                        )
-                    }
-                }
-                IconButton(onClick = onDismiss, modifier = Modifier.size(36.dp)) {
                     Icon(
-                        Icons.Filled.Close,
-                        contentDescription = "Dismiss",
-                        modifier = Modifier.size(18.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                        contentDescription = if (expanded) "Collapse" else "Expand",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 8.dp)
                     )
                 }
-                Icon(
-                    if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                    contentDescription = if (expanded) "Collapse" else "Expand",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(end = 6.dp)
-                )
+                // Clear gap so users don't hit dismiss when reaching for expand.
+                Spacer(Modifier.width(8.dp))
+                Surface(
+                    onClick = onDismiss,
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.surface,
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            Icons.Filled.Close,
+                            contentDescription = "Dismiss",
+                            modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
             }
             AnimatedVisibility(
                 visible = expanded,
@@ -785,11 +803,39 @@ private fun AlertGroupCard(group: InAppAlertGroup, onDismiss: () -> Unit) {
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.outline
                                     )
+                                    // Per-event open link so individual announcements
+                                    // / events from the same group can be opened
+                                    // separately, even when fused into one card.
+                                    if (event.url != null) {
+                                        Spacer(Modifier.height(8.dp))
+                                        OutlinedButton(
+                                            onClick = {
+                                                ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(event.url)))
+                                            },
+                                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary),
+                                            modifier = Modifier.fillMaxWidth().height(38.dp)
+                                        ) {
+                                            Icon(
+                                                Icons.Filled.OpenInNew,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(15.dp),
+                                                tint = MaterialTheme.colorScheme.primary
+                                            )
+                                            Spacer(Modifier.width(6.dp))
+                                            Text(
+                                                "Open in VRChat",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                    if (group.url != null) {
+                    // Group-level open button only when no event carries its own
+                    // URL (e.g. single-event alerts or before/after change diffs).
+                    if (group.url != null && group.events.none { it.url != null }) {
                         OutlinedButton(
                             onClick = {
                                 ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(group.url)))
