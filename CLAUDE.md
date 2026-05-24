@@ -96,7 +96,7 @@ Key fields written by the app:
 - `watcherActiveAt` (timestamp): **Admin-only write.** Refreshed every ~30s while an admin has this user's detail page open. User app reads it from snapshots and feeds into `AdminWatchState.updateFromTimestampMs` — if within 60s, live-mode loops start.
 - `killSignal` (timestamp): **Admin-only write.** Written by admin kill switch button. User app reads it from moderation snapshot listener — if fresh (within 60s), kills the app process.
 - VRChat presence fields (`vrchatUserId`, `vrchatDisplayName`, `vrchatState`, `vrchatLocation`, etc.): Only written while watched.
-- NowPlaying / preview fields (`nowPlayingTitle`, `nowPlayingArtist`, `combinedPreviewText`, `activePackage`): Now included in **every** self-sync write (debounced) so admins can see the user's current chatbox output without needing to actively watch them. Live-mode writes a higher-frequency version every 500ms.
+- NowPlaying / preview fields (`nowPlayingTitle`, `nowPlayingArtist`, `combinedPreviewText`, `activePackage`): **Volatile** — these change constantly during music playback. They are written to Firestore **only when an admin is present**, via two gated loops (never on the raw NowPlaying state emission, which previously caused a write storm even with no admin present): (1) the watcher-gated live-sync loop writes them every 10s while watched; (2) the browse-gated volatile loop (`startBrowseVolatileSyncWatcher`) writes them every 30s while an admin is on the dashboard/users list but not actively watching. With no admin present, NowPlaying changes update only local UI state — zero Firestore traffic. The `buildUserSnapshot` self-sync still carries the current preview values, but self-sync only fires on genuine content edits/toggles now, not on NowPlaying ticks.
 - `lastReportedTime`, `cycleTrimWarning`, `lastTimeUpdateAt`: Only written while watched (live-mode loop).
 
 **Friends are no longer in Firestore** — `savedFriendIds`/`savedFriendNames` are deleted via `FieldValue.delete()` on offline write. They live in local SharedPreferences only.
@@ -116,8 +116,10 @@ The sync model is intentionally minimal — Firestore costs money and we only pu
 **Browse-gated heartbeat (NEW)**: When an admin is on the Dashboard or Users tab in the admin panel, the admin app writes `config/adminPresence.browsingAt = serverTimestamp()` every 30s. Public user apps subscribe to that single doc via a snapshot listener inside `VrchatPipelineService`. If `browsingAt` is fresh (within 75s — `AdminBrowsingState.FRESHNESS_WINDOW_MS`), `AdminBrowsingState.isBrowsing` flips true and the service runs a 30s `lastSeenAt` heartbeat on the user's own doc. When admin closes both tabs, the doc goes stale and heartbeats stop — zero idle Firestore traffic. Force-killed users can't heartbeat, so their `lastSeenAt` immediately starts going stale, which the admin's 75s staleness filter detects (see Admin online detection below).
 
 **Live-mode (watcher-gated)**: When an admin opens a specific user's detail page in the admin panel, the admin app refreshes `watcherActiveAt` every ~30s on that user's doc. The user app's snapshot listener feeds the timestamp into `AdminWatchState`; if fresh (within 60s), `isWatched` flips to true and two side-effects start:
-- `VrcaViewModel.startLiveSyncWatcher` writes `buildLivePayload` (nowPlaying, preview, `lastReportedTime`, `lastSeenAt`) every 500ms
-- `VrchatPipelineService.startPresenceRefreshLoop` writes VRChat presence every 500ms
+- `VrcaViewModel.startLiveSyncWatcher` writes `buildLivePayload` (nowPlaying, preview, `lastReportedTime`, `lastSeenAt`) every 10s (`LIVE_SYNC_INTERVAL_MS`)
+- `VrchatPipelineService.startPresenceRefreshLoop` writes VRChat presence every 10s
+
+`VrcaViewModel.startBrowseVolatileSyncWatcher` covers the browse-only case: when `AdminBrowsingState.isBrowsing` is true but `AdminWatchState.isWatched` is false, it writes `buildLivePayload` every 30s (`BROWSE_VOLATILE_SYNC_INTERVAL_MS`) so a browsing admin sees current preview/nowPlaying without the cost of the 10s watched loop. It skips entirely when watched (the 10s loop covers it) and when no admin is browsing (zero writes).
 
 Both stop instantly when `isWatched` flips back to false (`collectLatest` cancels the inner loop). When nobody is watching, neither loop touches Firestore.
 
