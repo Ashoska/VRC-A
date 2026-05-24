@@ -483,11 +483,12 @@ class DiscordRpcService : Service() {
         sessionMonitorJob = null
         shimReady = false
         isRunning = false
-        // Intentionally do NOT clear onlineStartEpochMs here — Android can tear
-        // down and re-create this service transparently (memory pressure, tab-out,
-        // process restart) and the RPC counter must continue from the original
-        // "joined VRChat" timestamp. The timestamp is correctly cleared in
-        // buildActivityJson() when the user actually goes offline in VRChat.
+        // Save offline_at so the grace window works on restart.
+        // Without this, if the app is killed while online in VRChat,
+        // offline_at would be 0 on restart and the grace check would fail.
+        if (onlineStartEpochMs != 0L) {
+            rpcPrefs.edit().putLong("offline_at", System.currentTimeMillis()).apply()
+        }
         DiscordRpcState.reset()
         mainHandler.post {
             webView?.let { wv ->

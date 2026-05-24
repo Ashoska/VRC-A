@@ -11,7 +11,8 @@ data class InAppAlertEvent(
     val body: String,
     val beforeText: String? = null,
     val afterText: String? = null,
-    val timestampMs: Long
+    val timestampMs: Long,
+    val eventTitle: String? = null
 )
 
 data class InAppAlertGroup(
@@ -148,6 +149,7 @@ object InAppAlertState {
                     put("before", e.beforeText ?: "")
                     put("after", e.afterText ?: "")
                     put("ts", e.timestampMs)
+                    put("eventTitle", e.eventTitle ?: "")
                 })
             }
             arr.put(JSONObject().apply {
@@ -177,7 +179,8 @@ object InAppAlertState {
                     body = eObj.optString("body"),
                     beforeText = eObj.optString("before").ifBlank { null },
                     afterText = eObj.optString("after").ifBlank { null },
-                    timestampMs = eObj.optLong("ts")
+                    timestampMs = eObj.optLong("ts"),
+                    eventTitle = eObj.optString("eventTitle").ifBlank { null }
                 )
             }
             list += InAppAlertGroup(
