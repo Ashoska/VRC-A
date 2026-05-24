@@ -78,6 +78,9 @@ class VrchatPipelineService : Service() {
         private const val TAG = "VrcPipeline"
         private const val PIPELINE_URL = "wss://pipeline.vrchat.cloud"
         private const val USER_AGENT = "VRC-A-Companion/1.0 (Android; companion app)"
+        // Slow always-on lastSeenAt heartbeat interval (5 min) — ungated by
+        // admin presence so "last on the app" stays accurate for admins.
+        private const val LASTSEEN_HEARTBEAT_MS = 5 * 60 * 1000L
 
         private const val NOTIF_CHANNEL_PERSISTENT = "vrca_pipeline"
         // Legacy single-channel ID — kept only so we can delete it on upgrade.
@@ -472,6 +475,22 @@ class VrchatPipelineService : Service() {
                             }
                             delay(30_000)
                         }
+                    }
+                }
+            }
+            // Slow always-on lastSeenAt heartbeat (5 min). Runs regardless of
+            // admin presence so admins can see accurate "last on the app"
+            // times even after being offline themselves — without this, a user
+            // who keeps the app open with no edits and no admin browsing would
+            // show a "last seen" stuck at app-open time. One field + timestamp
+            // every 5 min is ~288 cheap writes/user/day.
+            launch {
+                while (true) {
+                    delay(LASTSEEN_HEARTBEAT_MS)
+                    try {
+                        writeHeartbeat()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Slow lastSeen heartbeat failed", e)
                     }
                 }
             }
