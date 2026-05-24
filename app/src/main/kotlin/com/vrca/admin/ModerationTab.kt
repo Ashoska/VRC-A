@@ -90,10 +90,15 @@ internal fun ModerationTab(
 
     var userDocReg by remember { mutableStateOf<ListenerRegistration?>(null) }
     var deviceDocReg by remember { mutableStateOf<ListenerRegistration?>(null) }
+    // Tracks which deviceHash the device listener is bound to, so we only
+    // re-attach (and re-read the bannedDevices doc) when it actually changes —
+    // not on every user-doc snapshot (which fires every ~10s while watching).
+    var deviceDocHash by remember { mutableStateOf("") }
 
     fun clearLoaded() {
         userDocReg?.remove(); userDocReg = null
         deviceDocReg?.remove(); deviceDocReg = null
+        deviceDocHash = ""
         loaded = null
 
         liveWarned = false
@@ -191,6 +196,7 @@ internal fun ModerationTab(
     fun attachLiveTarget(target: ModerationTarget) {
         userDocReg?.remove(); userDocReg = null
         deviceDocReg?.remove(); deviceDocReg = null
+        deviceDocHash = ""
 
         userDocReg = db.collection("users").document(target.docId)
             .addSnapshotListener { snap, e ->
@@ -210,8 +216,9 @@ internal fun ModerationTab(
                 if (!editingBan) editBanReason = liveBanReason
 
                 val dh = (snap.getString("deviceHash") ?: target.deviceHash).trim()
-                if (dh.isNotBlank()) {
+                if (dh.isNotBlank() && dh != deviceDocHash) {
                     deviceDocReg?.remove()
+                    deviceDocHash = dh
                     deviceDocReg = db.collection("bannedDevices").document(dh)
                         .addSnapshotListener { ds, de ->
                             if (de != null) {
