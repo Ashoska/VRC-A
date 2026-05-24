@@ -1064,9 +1064,7 @@ internal fun VrchatStatusBanner() {
     }
 
     val ctx = LocalContext.current
-    // Defaults to expanded; `remember` resets when the composable is recreated
-    // on app reopen, so a new outage is always shown expanded the next launch.
-    var expanded by remember { mutableStateOf(true) }
+    var expanded by rememberSaveable { mutableStateOf(true) }
 
     val title = data.description.ifBlank {
         when (data.indicator) {
