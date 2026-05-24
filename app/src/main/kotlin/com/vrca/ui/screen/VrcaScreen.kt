@@ -1075,16 +1075,16 @@ internal fun VrchatStatusBanner() {
     }
     val affected = data.components.filter { it.status != "operational" }
 
-    val surfaceColor = MaterialTheme.colorScheme.surface
+    val innerCardColor = MaterialTheme.colorScheme.surfaceVariant
 
     ElevatedCard(
         colors = CardDefaults.elevatedCardColors(containerColor = containerColor),
-        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 3.dp)
+        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 4.dp)
     ) {
         Column(
             Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
+                .padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Row(
@@ -1094,7 +1094,7 @@ internal fun VrchatStatusBanner() {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Canvas(Modifier.size(12.dp)) {
+                Canvas(Modifier.size(10.dp)) {
                     drawCircle(color = bannerColor)
                 }
                 Text(
@@ -1106,12 +1106,12 @@ internal fun VrchatStatusBanner() {
                 if (!expanded && affected.isNotEmpty()) {
                     Surface(
                         shape = MaterialTheme.shapes.small,
-                        color = bannerColor.copy(alpha = 0.15f)
+                        color = onContainerColor.copy(alpha = 0.12f)
                     ) {
                         Text(
                             "${affected.size} affected",
                             style = MaterialTheme.typography.labelSmall,
-                            color = bannerColor,
+                            color = onContainerColor,
                             modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                         )
                     }
@@ -1128,60 +1128,53 @@ internal fun VrchatStatusBanner() {
             AnimatedVisibility(visible = expanded) {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     if (affected.isNotEmpty()) {
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text(
-                                "Affected systems",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = onContainerColor.copy(alpha = 0.6f)
-                            )
-                            Surface(
-                                shape = MaterialTheme.shapes.medium,
-                                color = surfaceColor.copy(alpha = 0.45f)
-                            ) {
-                                Column(Modifier.padding(10.dp),
-                                    verticalArrangement = Arrangement.spacedBy(0.dp)) {
-                                    for ((idx, c) in affected.withIndex()) {
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .padding(vertical = 6.dp),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
+                        Surface(
+                            shape = MaterialTheme.shapes.medium,
+                            color = innerCardColor,
+                            shadowElevation = 1.dp
+                        ) {
+                            Column(Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
+                                Text(
+                                    "Affected systems",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        .copy(alpha = 0.6f),
+                                    modifier = Modifier.padding(vertical = 6.dp)
+                                )
+                                for ((idx, c) in affected.withIndex()) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 8.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            c.name,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Surface(
+                                            shape = MaterialTheme.shapes.small,
+                                            color = bannerColor.copy(alpha = 0.15f)
                                         ) {
-                                            Row(
-                                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                modifier = Modifier.weight(1f)
-                                            ) {
-                                                Canvas(Modifier.size(6.dp)) {
-                                                    drawCircle(color = bannerColor)
-                                                }
-                                                Text(
-                                                    c.name,
-                                                    style = MaterialTheme.typography.bodyMedium,
-                                                    color = onContainerColor
-                                                )
-                                            }
-                                            Surface(
-                                                shape = MaterialTheme.shapes.small,
-                                                color = bannerColor.copy(alpha = 0.12f)
-                                            ) {
-                                                Text(
-                                                    c.status.replace("_", " ")
-                                                        .replaceFirstChar { it.uppercase() },
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = bannerColor,
-                                                    modifier = Modifier.padding(
-                                                        horizontal = 8.dp, vertical = 2.dp)
-                                                )
-                                            }
-                                        }
-                                        if (idx < affected.lastIndex) {
-                                            Divider(
-                                                color = onContainerColor.copy(alpha = 0.08f),
-                                                thickness = 0.5.dp
+                                            Text(
+                                                c.status.replace("_", " ")
+                                                    .replaceFirstChar { it.uppercase() },
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = bannerColor,
+                                                modifier = Modifier.padding(
+                                                    horizontal = 8.dp, vertical = 3.dp)
                                             )
                                         }
+                                    }
+                                    if (idx < affected.lastIndex) {
+                                        Divider(
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                .copy(alpha = 0.1f),
+                                            thickness = 0.5.dp
+                                        )
                                     }
                                 }
                             }
@@ -1189,33 +1182,28 @@ internal fun VrchatStatusBanner() {
                     }
 
                     if (data.incidents.isNotEmpty()) {
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text(
-                                "Latest updates",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = onContainerColor.copy(alpha = 0.6f)
-                            )
-                            for (inc in data.incidents.take(2)) {
-                                Surface(
-                                    shape = MaterialTheme.shapes.medium,
-                                    color = surfaceColor.copy(alpha = 0.45f)
+                        for (inc in data.incidents.take(2)) {
+                            Surface(
+                                shape = MaterialTheme.shapes.medium,
+                                color = innerCardColor,
+                                shadowElevation = 1.dp
+                            ) {
+                                Column(
+                                    Modifier.padding(14.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
                                 ) {
-                                    Column(
-                                        Modifier.padding(12.dp),
-                                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                                    ) {
+                                    Text(
+                                        inc.name,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    if (inc.latestUpdate.isNotBlank()) {
                                         Text(
-                                            inc.name,
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            color = onContainerColor
+                                            inc.latestUpdate,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                .copy(alpha = 0.7f)
                                         )
-                                        if (inc.latestUpdate.isNotBlank()) {
-                                            Text(
-                                                inc.latestUpdate,
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = onContainerColor.copy(alpha = 0.65f)
-                                            )
-                                        }
                                     }
                                 }
                             }
@@ -1224,7 +1212,8 @@ internal fun VrchatStatusBanner() {
 
                     Surface(
                         shape = MaterialTheme.shapes.small,
-                        color = bannerColor.copy(alpha = 0.1f),
+                        color = innerCardColor,
+                        shadowElevation = 1.dp,
                         modifier = Modifier.clickable {
                             val intent = Intent(Intent.ACTION_VIEW,
                                 Uri.parse("https://status.vrchat.com"))
@@ -1234,8 +1223,8 @@ internal fun VrchatStatusBanner() {
                         Text(
                             "View VRChat Status Page",
                             style = MaterialTheme.typography.labelSmall,
-                            color = bannerColor,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
                         )
                     }
                 }
