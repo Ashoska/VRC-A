@@ -1781,6 +1781,42 @@ class VrchatPipelineService : Service() {
                                 updatedMap.put(groupId, createdAt)
                             }
                         }
+                        // Also sweep group POSTS here (not just the single pinned
+                        // announcement) — most group announcements are posts, and
+                        // without this the immediate reconnect backfill missed
+                        // them entirely (they only surfaced via the 5-min poll
+                        // loop, or never). Per-post seen dedup prevents repeats.
+                        val posts = VrchatAuthManager.fetchGroupPosts(this@VrchatPipelineService, groupId, 5)
+                        if (posts != null) {
+                            for (j in 0 until posts.length()) {
+                                val post = posts.optJSONObject(j) ?: continue
+                                val postId = post.optString("id", "")
+                                if (postId.isBlank()) continue
+                                val postTitle = post.optString("title", "").ifBlank { groupName }
+                                val postText = post.optString("text", "")
+                                val postCreatedAt = post.optString("createdAt", "")
+                                val postCreatedMs = parseVrcTimestampMs(postCreatedAt)
+                                val postSeenKey = "${groupId}_post_$postId"
+                                val postLastSeen = seenMap.optString(postSeenKey, "")
+                                if (postCreatedAt.isNotBlank() && postCreatedAt != postLastSeen && postText.isNotBlank()) {
+                                    fireEventNotification(
+                                        id = "gp_${postId}".hashCode(),
+                                        title = "Announcement from $groupName",
+                                        text = "${postTitle}: ${postText.take(120)}",
+                                        profileUrl = "https://vrchat.com/home/group/$groupId/posts",
+                                        prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
+                                        channelId = NOTIF_CHANNEL_GROUPS,
+                                        groupKey = GROUP_KEY_GROUPS,
+                                        dedupId = "gp_${postId}_$postCreatedAt",
+                                        alertGroupKey = "announcement_$groupId",
+                                        alertBody = postText.ifBlank { null },
+                                        alertEventTitle = postTitle.ifBlank { null },
+                                        eventTimestampMs = postCreatedMs.takeIf { it > 0 }
+                                    )
+                                    updatedMap.put(postSeenKey, postCreatedAt)
+                                }
+                            }
+                        }
                         delay(250)
                     } catch (e: Exception) {
                         Log.w(TAG, "backfill: group announcement $groupId failed", e)
@@ -1821,6 +1857,19 @@ class VrchatPipelineService : Service() {
                     val announcement = VrchatAuthManager.fetchGroupAnnouncement(this@VrchatPipelineService, groupId)
                     val createdAt = announcement?.optString("createdAt", "") ?: ""
                     if (createdAt.isNotBlank()) seenMap.put(groupId, createdAt)
+                    // Seed recent post IDs too so the backfill/poll posts sweep
+                    // doesn't fire a flood of pre-existing posts on first run.
+                    val posts = VrchatAuthManager.fetchGroupPosts(this@VrchatPipelineService, groupId, 5)
+                    if (posts != null) {
+                        for (j in 0 until posts.length()) {
+                            val post = posts.optJSONObject(j) ?: continue
+                            val postId = post.optString("id", "")
+                            val postCreatedAt = post.optString("createdAt", "")
+                            if (postId.isNotBlank() && postCreatedAt.isNotBlank()) {
+                                seenMap.put("${groupId}_post_$postId", postCreatedAt)
+                            }
+                        }
+                    }
                     delay(250)
                 } catch (e: Exception) {
                     Log.w(TAG, "seedBackfillBaseline: group $groupId failed", e)
@@ -1935,7 +1984,11 @@ class VrchatPipelineService : Service() {
 
     private fun startGroupAnnouncementPollLoop() {
         serviceScope.launch {
-            delay(5 * 60 * 1000L)
+            // First poll runs ~45s after start (once the pipeline has connected
+            // and the first-run baseline has had a chance to seed) so catch-up
+            // announcements/posts surface quickly on reopen instead of waiting
+            // a full 5 minutes. Steady-state polling stays at 5 min.
+            delay(45 * 1000L)
             while (true) {
                 try {
                     pollGroupAnnouncements()
