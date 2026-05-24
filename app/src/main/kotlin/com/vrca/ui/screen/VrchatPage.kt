@@ -637,11 +637,15 @@ private fun wordDiff(before: String, after: String): Pair<androidx.compose.ui.te
     // render those in purple on both sides so reordering a bio reads as "moved"
     // instead of red/green. Matching is multiset-based so counts stay balanced.
     // Only MEANINGFUL tokens are move-eligible: common short words/punctuation
-    // ("my", "I", "<3", "|", "a", "to") recur all over a bio, so matching them
-    // as "moved" painted them purple everywhere even when nothing actually moved.
-    // Requiring length >= 4 keeps genuine moved phrases purple while short tokens
-    // fall back to normal red/green add/remove.
-    fun moveEligible(w: String) = w.trim().length >= 4
+    val moveBlocklist = setOf(
+        "i", "a", "an", "the", "my", "me", "he", "we", "be", "it", "is", "in",
+        "to", "of", "or", "on", "at", "by", "no", "do", "so", "as", "up", "if",
+        "am", "us", "and", "for", "but", "not", "you", "are", "was", "has", "had",
+        "its", "our", "her", "his", "all", "can", "who", "got", "get", "the",
+        "|", "-", "~", "/", "<3", ":3", ":)", ":D", ":(", ";)", "^^", "xd",
+        "lol", "omg", "ily", "uwu", "owo"
+    )
+    fun moveEligible(w: String) = w.trim().lowercase() !in moveBlocklist
     val removedIdx = bWords.indices.filter { it !in lcsSet && moveEligible(bWords[it]) }
     val addedIdx = aWords.indices.filter { it !in lcsSetAfter && moveEligible(aWords[it]) }
 
