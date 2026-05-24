@@ -6,6 +6,7 @@ import android.content.Intent
 import android.net.Uri
 import android.provider.Settings.Secure
 import android.util.Log
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
@@ -31,6 +32,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Gavel
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
@@ -1061,13 +1064,31 @@ internal fun VrchatStatusBanner() {
     }
 
     val ctx = LocalContext.current
+    // Defaults to expanded; `remember` resets when the composable is recreated
+    // on app reopen, so a new outage is always shown expanded the next launch.
+    var expanded by remember { mutableStateOf(true) }
+
+    val title = data.description.ifBlank {
+        when (data.indicator) {
+            "critical" -> "Major System Outage"
+            "major" -> "Significant System Issues"
+            else -> "Service Degraded"
+        }
+    }
+    val affected = data.components.filter { it.status != "operational" }
 
     Card(colors = CardDefaults.cardColors(containerColor = containerColor)) {
         Column(
-            Modifier.padding(14.dp),
+            Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            // Header row: status dot + title + collapse/expand chevron
             Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded },
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -1075,54 +1096,97 @@ internal fun VrchatStatusBanner() {
                     drawCircle(color = bannerColor)
                 }
                 Text(
-                    data.description.ifBlank {
-                        when (data.indicator) {
-                            "critical" -> "Major System Outage"
-                            "major" -> "Significant System Issues"
-                            else -> "Service Degraded"
-                        }
-                    },
+                    title,
                     style = MaterialTheme.typography.titleSmall,
-                    color = onContainerColor
+                    color = onContainerColor,
+                    modifier = Modifier.weight(1f)
+                )
+                if (!expanded && affected.isNotEmpty()) {
+                    Text(
+                        "${affected.size} affected",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = onContainerColor.copy(alpha = 0.7f)
+                    )
+                }
+                Icon(
+                    imageVector = if (expanded) Icons.Filled.KeyboardArrowUp
+                        else Icons.Filled.KeyboardArrowDown,
+                    contentDescription = if (expanded) "Collapse" else "Expand",
+                    tint = onContainerColor
                 )
             }
 
-            // Show affected components
-            val affected = data.components.filter { it.status != "operational" }
-            if (affected.isNotEmpty()) {
-                for (c in affected) {
+            AnimatedVisibility(visible = expanded) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    // Affected components, grouped under a clear sub-heading so the
+                    // separate VRChat systems read as distinct rows rather than a clump.
+                    if (affected.isNotEmpty()) {
+                        Text(
+                            "Affected systems",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = onContainerColor.copy(alpha = 0.8f)
+                        )
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            for (c in affected) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        c.name,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = onContainerColor,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Text(
+                                        c.status.replace("_", " ")
+                                            .replaceFirstChar { it.uppercase() },
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = bannerColor
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Active incidents, grouped under their own sub-heading.
+                    if (data.incidents.isNotEmpty()) {
+                        Text(
+                            "Latest updates",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = onContainerColor.copy(alpha = 0.8f)
+                        )
+                        for (inc in data.incidents.take(2)) {
+                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text(
+                                    inc.name,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = onContainerColor
+                                )
+                                if (inc.latestUpdate.isNotBlank()) {
+                                    Text(
+                                        inc.latestUpdate,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = onContainerColor.copy(alpha = 0.7f)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
                     Text(
-                        "${c.name}: ${c.status.replace("_", " ")}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = onContainerColor
+                        "View VRChat Status Page",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = bannerColor,
+                        modifier = Modifier.clickable {
+                            val intent = Intent(Intent.ACTION_VIEW,
+                                Uri.parse("https://status.vrchat.com"))
+                            ctx.startActivity(intent)
+                        }
                     )
                 }
             }
-
-            // Show active incidents
-            if (data.incidents.isNotEmpty()) {
-                for (inc in data.incidents.take(2)) {
-                    Text(inc.name, style = MaterialTheme.typography.bodySmall, color = onContainerColor)
-                    if (inc.latestUpdate.isNotBlank()) {
-                        Text(
-                            inc.latestUpdate,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = onContainerColor.copy(alpha = 0.7f)
-                        )
-                    }
-                }
-            }
-
-            Text(
-                "View VRChat Status Page",
-                style = MaterialTheme.typography.labelSmall,
-                color = bannerColor,
-                modifier = Modifier.clickable {
-                    val intent = Intent(Intent.ACTION_VIEW,
-                        Uri.parse("https://status.vrchat.com"))
-                    ctx.startActivity(intent)
-                }
-            )
         }
     }
 }

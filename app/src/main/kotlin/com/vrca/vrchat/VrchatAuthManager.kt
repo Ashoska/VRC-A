@@ -758,8 +758,10 @@ object VrchatAuthManager {
     ): Triple<Int, String, List<String>> {
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
+            useCaches = false
             setRequestProperty("User-Agent", USER_AGENT)
             setRequestProperty("Accept", "application/json")
+            setRequestProperty("Cache-Control", "no-cache")
             if (authHeader != null) setRequestProperty("Authorization", authHeader)
             if (cookieHeader != null) setRequestProperty("Cookie", cookieHeader)
             connectTimeout = 15_000

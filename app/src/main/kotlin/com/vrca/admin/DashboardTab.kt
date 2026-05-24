@@ -44,8 +44,10 @@ internal fun DashboardTab(
     setError: (String?) -> Unit
 ) {
     val totalUsers  = totalUsersCount
-    val nowMs = System.currentTimeMillis()
-    val onlineCount = users.count { isUserOnline(it, nowMs) }
+    // Dashboard counter uses the raw isOnlineInApp flag (no staleness window)
+    // so online users show immediately when the admin opens the app, before
+    // their heartbeats arrive. The admin-side staleness sweep cleans up dead users.
+    val onlineCount = users.count { it.isOnlineInApp }
     val bannedCount = bannedUsersCount
     val warnedCount = warnedUsersCount
     var evasionCount by remember { mutableIntStateOf(0) }

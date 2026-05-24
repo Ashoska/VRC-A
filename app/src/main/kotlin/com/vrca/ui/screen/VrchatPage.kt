@@ -594,10 +594,15 @@ private fun formatRelativeTime(timestampMs: Long): String {
 }
 
 private fun wordDiff(before: String, after: String): Pair<androidx.compose.ui.text.AnnotatedString, androidx.compose.ui.text.AnnotatedString> {
-    val bWords = before.split(" ")
-    val aWords = after.split(" ")
+    // Tokenize keeping whitespace runs (including newlines) as their own tokens
+    // so multi-line bios diff word-by-word AND preserve their original layout.
+    // Splitting on " " alone left newlines glued to adjacent words ("bio\n\nMy"),
+    // which broke alignment and falsely flagged unchanged words as changed.
+    val tokenRegex = Regex("\\s+|\\S+")
+    val bWords = tokenRegex.findAll(before).map { it.value }.toList()
+    val aWords = tokenRegex.findAll(after).map { it.value }.toList()
 
-    // LCS (Longest Common Subsequence) to find which words are unchanged
+    // LCS (Longest Common Subsequence) to find which tokens are unchanged
     val m = bWords.size
     val n = aWords.size
     val dp = Array(m + 1) { IntArray(n + 1) }
@@ -622,14 +627,15 @@ private fun wordDiff(before: String, after: String): Pair<androidx.compose.ui.te
 
     val beforeAnnotated = buildAnnotatedString {
         for ((idx, w) in bWords.withIndex()) {
-            if (idx > 0) append(" ")
-            withStyle(SpanStyle(color = if (idx in lcsSet) neutralColor else removedColor)) { append(w) }
+            // Whitespace tokens always render neutral so only real words get colored.
+            val color = if (w.isBlank() || idx in lcsSet) neutralColor else removedColor
+            withStyle(SpanStyle(color = color)) { append(w) }
         }
     }
     val afterAnnotated = buildAnnotatedString {
         for ((idx, w) in aWords.withIndex()) {
-            if (idx > 0) append(" ")
-            withStyle(SpanStyle(color = if (idx in lcsSetAfter) neutralColor else addedColor)) { append(w) }
+            val color = if (w.isBlank() || idx in lcsSetAfter) neutralColor else addedColor
+            withStyle(SpanStyle(color = color)) { append(w) }
         }
     }
     return beforeAnnotated to afterAnnotated
