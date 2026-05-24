@@ -1023,6 +1023,9 @@ class VrchatPipelineService : Service() {
                 val v2CreatedMs = parseVrcTimestampMs(content.optString("created_at", ""))
                 when {
                     v2Type.contains("announcement", true) || v2Type.contains("post", true) -> {
+                        if (groupId.isNotBlank() && isContentFingerprintSeen(groupId, v2Title, message)) {
+                            Log.d(TAG, "WS announcement skipped (already fired): group=$groupId title=$v2Title")
+                        } else {
                         val displayGroupName = resolveGroupNameAsync(groupId, senderName)
                         val groupKey2 = when {
                             groupId.isNotBlank() -> "announcement_$groupId"
@@ -1046,8 +1049,13 @@ class VrchatPipelineService : Service() {
                             alertEventTitle = cleanName(v2Title).ifBlank { null },
                             eventTimestampMs = v2CreatedMs.takeIf { it > 0 }
                         )
+                        if (groupId.isNotBlank()) addContentFingerprintToSeen(groupId, v2Title, message)
+                        }
                     }
                     v2Type.contains("event", true) || v2Type.contains("calendar", true) -> {
+                        if (groupId.isNotBlank() && isContentFingerprintSeen(groupId, v2Title, message)) {
+                            Log.d(TAG, "WS event skipped (already fired): group=$groupId title=$v2Title")
+                        } else {
                         val displayGroupName = resolveGroupNameAsync(groupId, senderName)
                         val groupKey2 = when {
                             groupId.isNotBlank() -> "event_$groupId"
@@ -1074,6 +1082,8 @@ class VrchatPipelineService : Service() {
                             alertEventTitle = cleanName(v2Title).ifBlank { null },
                             eventTimestampMs = v2CreatedMs.takeIf { it > 0 }
                         )
+                        if (groupId.isNotBlank()) addContentFingerprintToSeen(groupId, v2Title, message)
+                        }
                     }
                     v2Type.contains("invite", true) -> {
                         fireEventNotification(
@@ -1637,6 +1647,7 @@ class VrchatPipelineService : Service() {
                     alertEventTitle = cleanName(v2Title).ifBlank { null },
                     eventTimestampMs = v2CreatedMs.takeIf { it > 0 }
                 )
+                if (groupId.isNotBlank()) addContentFingerprintToSeen(groupId, v2Title, message)
             }
             v2Type.contains("event", true) || v2Type.contains("calendar", true) -> {
                 if (groupId.isNotBlank() && isContentFingerprintSeen(groupId, v2Title, message)) {
@@ -1669,6 +1680,7 @@ class VrchatPipelineService : Service() {
                     alertEventTitle = cleanName(v2Title).ifBlank { null },
                     eventTimestampMs = v2CreatedMs.takeIf { it > 0 }
                 )
+                if (groupId.isNotBlank()) addContentFingerprintToSeen(groupId, v2Title, message)
             }
             v2Type.contains("invite", true) -> fireEventNotification(
                 id = baseId.hashCode(), title = v2Title.ifBlank { "Group invite" },
