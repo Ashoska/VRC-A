@@ -989,7 +989,8 @@ class VrchatPipelineService : Service() {
                     content.optString("groupId", "").ifBlank {
                         content.optJSONObject("data")?.optString("groupId", "").orEmpty().ifBlank {
                             detailsObj?.optString("groupId", "").orEmpty().ifBlank {
-                                if (senderUserId.startsWith("grp_")) senderUserId else ""
+                                if (senderUserId.startsWith("grp_")) senderUserId
+                                else findIdWithPrefix(content, "grp_").orEmpty()
                             }
                         }
                     }
@@ -998,7 +999,7 @@ class VrchatPipelineService : Service() {
                     content.optJSONObject("data")?.optString("eventId", "").orEmpty().ifBlank {
                         detailsObj?.optString("eventId", "").orEmpty().ifBlank {
                             content.optString("id", "").let { id ->
-                                if (id.startsWith("cal_")) id else ""
+                                if (id.startsWith("cal_")) id else findIdWithPrefix(content, "cal_").orEmpty()
                             }
                         }
                     }
@@ -1132,6 +1133,27 @@ class VrchatPipelineService : Service() {
                             groupKey = GROUP_KEY_GROUPS,
                             alertBody = if (fullBody != null && fullBody.length > 100) fullBody else null
                         )
+                    }
+                    else -> {
+                        // Unknown notification-v2 type — don't silently drop it.
+                        // Log the exact type so we can add a dedicated branch, and
+                        // fire it through the group channel so the user still sees
+                        // it. This is the catch-all that fixes events/announcements
+                        // whose type string didn't match the branches above.
+                        Log.i(TAG, "notification-v2 unmatched type='$v2Type' title='$v2Title' " +
+                            "groupId=$groupId payload=${content.toString().take(400)}")
+                        if (v2Title.isNotBlank() || message.isNotBlank()) {
+                            fireEventNotification(
+                                id = baseId.hashCode(),
+                                title = v2Title.ifBlank { "VRChat notification" },
+                                text = message.take(140).ifBlank { v2Title },
+                                profileUrl = if (groupId.isNotBlank()) groupUrl else "https://vrchat.com/home/notifications",
+                                prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT,
+                                channelId = NOTIF_CHANNEL_GROUPS,
+                                groupKey = GROUP_KEY_GROUPS,
+                                dedupId = notifId.ifBlank { null }
+                            )
+                        }
                     }
                 }
             }
@@ -1460,6 +1482,45 @@ class VrchatPipelineService : Service() {
         } catch (_: Exception) { 0L }
     }
 
+    // Recursively scans a JSON object/array for the first string value (or
+    // string-key) that starts with the given prefix (e.g. "cal_", "grp_").
+    // VRChat's notification-v2 payloads bury the calendar event id and group
+    // id in inconsistent places (top-level, `data`, `details`, `link`), so a
+    // prefix scan is far more reliable than guessing exact field names.
+    private fun findIdWithPrefix(node: Any?, prefix: String, depth: Int = 0): String? {
+        if (depth > 6 || node == null) return null
+        when (node) {
+            is JSONObject -> {
+                val keys = node.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    val v = node.opt(k)
+                    if (v is String && v.startsWith(prefix)) return v
+                    findIdWithPrefix(v, prefix, depth + 1)?.let { return it }
+                }
+            }
+            is org.json.JSONArray -> {
+                for (i in 0 until node.length()) {
+                    findIdWithPrefix(node.opt(i), prefix, depth + 1)?.let { return it }
+                }
+            }
+            is String -> {
+                // A nested JSON string (e.g. a `details` blob) — parse and recurse.
+                val t = node.trim()
+                if (t.startsWith(prefix)) return t
+                if (t.startsWith("{") || t.startsWith("[")) {
+                    val parsed = try {
+                        if (t.startsWith("{")) JSONObject(t) else org.json.JSONArray(t)
+                    } catch (_: Exception) { null }
+                    if (parsed != null) return findIdWithPrefix(parsed, prefix, depth + 1)
+                }
+                // Embedded in a URL like .../calendar/cal_xxx
+                Regex("${Regex.escape(prefix)}[A-Za-z0-9_-]+").find(t)?.let { return it.value }
+            }
+        }
+        return null
+    }
+
     // Treat JSON "null", empty, and whitespace as no value so the UI never
     // renders "Announcement from null".
     private fun cleanName(raw: String?): String {
@@ -1638,7 +1699,9 @@ class VrchatPipelineService : Service() {
                         System.currentTimeMillis() - v2CreatedMs > 24L * 60 * 60 * 1000) continue
                     val baseId = notifId.ifBlank { "$v2Type-${message.hashCode()}" }
                     val groupId = obj.optString("relatedGroupId", "").ifBlank {
-                        obj.optString("groupId", "")
+                        obj.optString("groupId", "").ifBlank {
+                            findIdWithPrefix(obj, "grp_").orEmpty()
+                        }
                     }
                     val groupUrl = if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId"
                         else "https://vrchat.com/home/notifications"
@@ -1667,7 +1730,8 @@ class VrchatPipelineService : Service() {
                             val displayName = resolveGroupNameAsync(groupId, v2Sender)
                             val eventId2 = obj.optString("eventId", "").ifBlank {
                                 obj.optJSONObject("data")?.optString("eventId", "").orEmpty().ifBlank {
-                                    notifId.let { if (it.startsWith("cal_")) it else "" }
+                                    if (notifId.startsWith("cal_")) notifId
+                                    else findIdWithPrefix(obj, "cal_").orEmpty()
                                 }
                             }
                             val evtUrl = if (groupId.isNotBlank() && eventId2.isNotBlank())
