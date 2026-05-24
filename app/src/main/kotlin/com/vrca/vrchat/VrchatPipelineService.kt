@@ -994,7 +994,7 @@ class VrchatPipelineService : Service() {
                 val v2CreatedMs = parseVrcTimestampMs(content.optString("created_at", ""))
                 when {
                     v2Type.contains("announcement", true) || v2Type.contains("post", true) -> {
-                        val displayGroupName = resolveGroupName(groupId, senderName)
+                        val displayGroupName = resolveGroupNameAsync(groupId, senderName)
                         val groupKey2 = when {
                             groupId.isNotBlank() -> "announcement_$groupId"
                             displayGroupName != "a group" -> "announcement_name_$displayGroupName"
@@ -1019,7 +1019,7 @@ class VrchatPipelineService : Service() {
                         )
                     }
                     v2Type.contains("event", true) || v2Type.contains("calendar", true) -> {
-                        val displayGroupName = resolveGroupName(groupId, senderName)
+                        val displayGroupName = resolveGroupNameAsync(groupId, senderName)
                         val groupKey2 = when {
                             groupId.isNotBlank() -> "event_$groupId"
                             displayGroupName != "a group" -> "event_name_$displayGroupName"
@@ -1457,6 +1457,24 @@ class VrchatPipelineService : Service() {
         return "a group"
     }
 
+    // Same as resolveGroupName but, when the groupId isn't cached and the
+    // sender name is missing, fetches the group's real name from the API once
+    // and caches it. Used for live + backfill group notifications so events
+    // (which often omit senderUsername) still render "Event from <GroupName>".
+    private suspend fun resolveGroupNameAsync(groupId: String, senderName: String?): String {
+        groupNameCache[groupId]?.let { if (it.isNotBlank()) return it }
+        val sender = cleanName(senderName)
+        if (sender.isNotEmpty() && !sender.equals("someone", true)) return sender
+        if (groupId.isNotBlank()) {
+            val fetched = VrchatAuthManager.fetchGroupName(this, groupId)
+            if (!fetched.isNullOrBlank()) {
+                groupNameCache[groupId] = fetched
+                return fetched
+            }
+        }
+        return "a group"
+    }
+
     private suspend fun backfillOfflineNotifications() {
         try {
             // First-run guard: if this is the very first pipeline connect ever
@@ -1608,7 +1626,7 @@ class VrchatPipelineService : Service() {
                     when {
                         v2Type.contains("announcement", true) || v2Type.contains("post", true) -> {
                             val backfillGroupKey = if (groupId.isNotBlank()) "announcement_$groupId" else null
-                            val displayName = resolveGroupName(groupId, v2Sender)
+                            val displayName = resolveGroupNameAsync(groupId, v2Sender)
                             val postUrl = if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId/posts" else groupUrl
                             val body = message.ifBlank { v2Title.ifBlank { "New announcement" } }
                             fireEventNotification(
@@ -1627,7 +1645,7 @@ class VrchatPipelineService : Service() {
                         }
                         v2Type.contains("event", true) || v2Type.contains("calendar", true) -> {
                             val backfillGroupKey = if (groupId.isNotBlank()) "event_$groupId" else null
-                            val displayName = resolveGroupName(groupId, v2Sender)
+                            val displayName = resolveGroupNameAsync(groupId, v2Sender)
                             val eventId2 = obj.optString("eventId", "").ifBlank {
                                 obj.optJSONObject("data")?.optString("eventId", "").orEmpty().ifBlank {
                                     notifId.let { if (it.startsWith("cal_")) it else "" }

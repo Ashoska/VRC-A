@@ -621,6 +621,20 @@ object VrchatAuthManager {
         }
     }
 
+    suspend fun fetchGroupName(context: Context, groupId: String): String? = withContext(Dispatchers.IO) {
+        if (groupId.isBlank()) return@withContext null
+        val cookieHeader = getCookieHeader(context) ?: return@withContext null
+        try {
+            val (code, body, _) = get("$BASE/groups/$groupId", null, cookieHeader)
+            if (code == 200 && body.startsWith("{")) {
+                org.json.JSONObject(body).optString("name", "").takeIf { it.isNotBlank() }
+            } else null
+        } catch (e: Exception) {
+            Log.w(TAG, "fetchGroupName($groupId) failed", e)
+            null
+        }
+    }
+
     suspend fun fetchGroupAnnouncement(context: Context, groupId: String): org.json.JSONObject? = withContext(Dispatchers.IO) {
         val cookieHeader = getCookieHeader(context) ?: return@withContext null
         try {
