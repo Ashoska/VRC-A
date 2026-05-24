@@ -1150,9 +1150,13 @@ internal fun VrchatStatusBanner() {
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         Text(
-                                            c.name,
+                                            c.name
+                                                .replace("Realtime Player State Changes",
+                                                    "Realtime Player State"),
                                             style = MaterialTheme.typography.bodyMedium,
                                             color = onContainerColor,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
                                             modifier = Modifier.weight(1f)
                                         )
                                         Surface(
