@@ -1932,6 +1932,15 @@ class VrchatPipelineService : Service() {
                                 }
                             }
                         }
+                        // Sweep group CALENDAR EVENTS too. Events created while
+                        // closed don't reliably show up in notifications-v2, so
+                        // without this they never surface on reopen.
+                        val events = VrchatAuthManager.fetchGroupCalendarEvents(this@VrchatPipelineService, groupId, 20)
+                        if (events != null) {
+                            for (j in 0 until events.length()) {
+                                fireGroupCalendarEvent(events.optJSONObject(j) ?: continue, groupId, groupName, seenMap, updatedMap)
+                            }
+                        }
                         delay(250)
                     } catch (e: Exception) {
                         Log.w(TAG, "backfill: group announcement $groupId failed", e)
@@ -1983,6 +1992,19 @@ class VrchatPipelineService : Service() {
                             if (postId.isNotBlank() && postCreatedAt.isNotBlank()) {
                                 seenMap.put("${groupId}_post_$postId", postCreatedAt)
                             }
+                        }
+                    }
+                    // Seed existing calendar events too.
+                    val events = VrchatAuthManager.fetchGroupCalendarEvents(this@VrchatPipelineService, groupId, 20)
+                    if (events != null) {
+                        for (j in 0 until events.length()) {
+                            val ev = events.optJSONObject(j) ?: continue
+                            val evId = ev.optString("id", "").ifBlank { findIdWithPrefix(ev, "cal_").orEmpty() }
+                            if (evId.isBlank()) continue
+                            val marker = ev.optString("startsAt", "").ifBlank {
+                                ev.optString("createdAt", "").ifBlank { evId }
+                            }
+                            seenMap.put("${groupId}_event_$evId", marker)
                         }
                     }
                     delay(250)
@@ -2225,6 +2247,14 @@ class VrchatPipelineService : Service() {
                         }
                     }
                 }
+                val events = VrchatAuthManager.fetchGroupCalendarEvents(this, groupId, 20)
+                if (events != null) {
+                    for (j in 0 until events.length()) {
+                        if (fireGroupCalendarEvent(events.optJSONObject(j) ?: continue, groupId, groupName, seenMap, updatedMap)) {
+                            changed = true
+                        }
+                    }
+                }
                 delay(300)
             } catch (e: Exception) {
                 Log.w(TAG, "pollGroupAnnouncements: group $groupId failed", e)
@@ -2234,6 +2264,49 @@ class VrchatPipelineService : Service() {
             val repo = com.vrca.data.UserPreferencesRepository(this)
             repo.saveNotifGroupAnnouncementSeen(updatedMap.toString())
         }
+    }
+
+    // Fires a group calendar event notification if it's new (not in seenMap).
+    // Returns true if it fired (so callers can flag the seen-map dirty).
+    private suspend fun fireGroupCalendarEvent(
+        event: JSONObject,
+        groupId: String,
+        groupName: String,
+        seenMap: JSONObject,
+        updatedMap: JSONObject
+    ): Boolean {
+        val eventId = event.optString("id", "").ifBlank { findIdWithPrefix(event, "cal_").orEmpty() }
+        if (eventId.isBlank()) return false
+        val eventTitle = event.optString("title", "").ifBlank { event.optString("name", "") }
+        val eventDesc = event.optString("description", "").ifBlank { event.optString("text", "") }
+        // Prefer the scheduled start time; fall back to creation time.
+        val startsAt = event.optString("startsAt", "").ifBlank {
+            event.optString("createdAt", "")
+        }
+        val startsMs = parseVrcTimestampMs(startsAt)
+        val seenKey = "${groupId}_event_$eventId"
+        val lastSeen = seenMap.optString(seenKey, "")
+        // Use the event id alone as the change marker so an unchanged event
+        // doesn't re-fire, but an edited startsAt does.
+        val marker = startsAt.ifBlank { eventId }
+        if (marker == lastSeen) return false
+        if (eventTitle.isBlank() && eventDesc.isBlank()) return false
+        fireEventNotification(
+            id = "gce_$eventId".hashCode(),
+            title = "Event from $groupName",
+            text = "${eventTitle.ifBlank { "Event" }}: ${eventDesc.take(120)}",
+            profileUrl = "https://vrchat.com/home/group/$groupId/calendar/$eventId",
+            prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT,
+            channelId = NOTIF_CHANNEL_GROUPS,
+            groupKey = GROUP_KEY_GROUPS,
+            dedupId = "gce_${eventId}_$marker",
+            alertGroupKey = "event_$groupId",
+            alertBody = eventDesc.ifBlank { eventTitle }.ifBlank { null },
+            alertEventTitle = eventTitle.ifBlank { null },
+            eventTimestampMs = startsMs.takeIf { it > 0 }
+        )
+        updatedMap.put(seenKey, marker)
+        return true
     }
 
     private suspend fun fireAppUpdateNotification(title: String, text: String, bigText: String?) {

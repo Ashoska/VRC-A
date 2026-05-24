@@ -656,9 +656,46 @@ object VrchatAuthManager {
                 "$BASE/groups/$groupId/posts?n=$n",
                 null, cookieHeader
             )
-            if (code == 200 && body.startsWith("[")) org.json.JSONArray(body) else null
+            if (code != 200) return@withContext null
+            // VRChat wraps posts in an object: {"posts":[...],"total":N}.
+            // Older/edge responses may return a bare array — handle both.
+            when {
+                body.startsWith("[") -> org.json.JSONArray(body)
+                body.startsWith("{") -> org.json.JSONObject(body).optJSONArray("posts")
+                else -> null
+            }
         } catch (e: Exception) {
             Log.w(TAG, "fetchGroupPosts($groupId) failed", e)
+            null
+        }
+    }
+
+    // Group calendar events. VRChat exposes group events at
+    // GET /groups/{groupId}/calendar — used to backfill events created while
+    // the app was closed (they don't reliably appear in the per-user
+    // notifications-v2 feed). Response may be a bare array or an object
+    // wrapping the list under "results"/"events".
+    suspend fun fetchGroupCalendarEvents(context: Context, groupId: String, n: Int = 20): org.json.JSONArray? = withContext(Dispatchers.IO) {
+        val cookieHeader = getCookieHeader(context) ?: return@withContext null
+        try {
+            val (code, body, _) = get(
+                "$BASE/groups/$groupId/calendar?n=$n",
+                null, cookieHeader
+            )
+            Log.i(TAG, "fetchGroupCalendarEvents($groupId) http=$code bodyHead=${body.take(60)}")
+            if (code != 200) return@withContext null
+            when {
+                body.startsWith("[") -> org.json.JSONArray(body)
+                body.startsWith("{") -> {
+                    val obj = org.json.JSONObject(body)
+                    obj.optJSONArray("results")
+                        ?: obj.optJSONArray("events")
+                        ?: obj.optJSONArray("calendarEvents")
+                }
+                else -> null
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "fetchGroupCalendarEvents($groupId) failed", e)
             null
         }
     }
