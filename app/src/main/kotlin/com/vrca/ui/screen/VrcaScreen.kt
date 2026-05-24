@@ -1097,18 +1097,12 @@ internal fun VrchatStatusBanner() {
                 Canvas(Modifier.size(12.dp)) {
                     drawCircle(color = bannerColor)
                 }
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        title,
-                        style = MaterialTheme.typography.titleSmall,
-                        color = onContainerColor
-                    )
-                    Text(
-                        "status.vrchat.com",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = onContainerColor.copy(alpha = 0.5f)
-                    )
-                }
+                Text(
+                    title,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = onContainerColor,
+                    modifier = Modifier.weight(1f)
+                )
                 if (!expanded && affected.isNotEmpty()) {
                     Surface(
                         shape = MaterialTheme.shapes.small,
