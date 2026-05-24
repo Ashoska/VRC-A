@@ -73,6 +73,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -1075,7 +1076,7 @@ internal fun VrchatStatusBanner() {
     }
     val affected = data.components.filter { it.status != "operational" }
 
-    val innerCardColor = MaterialTheme.colorScheme.surfaceVariant
+    val innerCardColor = lerp(containerColor, onContainerColor, 0.12f)
 
     ElevatedCard(
         colors = CardDefaults.elevatedCardColors(containerColor = containerColor),
@@ -1137,8 +1138,7 @@ internal fun VrchatStatusBanner() {
                                 Text(
                                     "Affected systems",
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        .copy(alpha = 0.6f),
+                                    color = onContainerColor.copy(alpha = 0.6f),
                                     modifier = Modifier.padding(vertical = 6.dp)
                                 )
                                 for ((idx, c) in affected.withIndex()) {
@@ -1152,7 +1152,7 @@ internal fun VrchatStatusBanner() {
                                         Text(
                                             c.name,
                                             style = MaterialTheme.typography.bodyMedium,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            color = onContainerColor,
                                             modifier = Modifier.weight(1f)
                                         )
                                         Surface(
@@ -1171,8 +1171,7 @@ internal fun VrchatStatusBanner() {
                                     }
                                     if (idx < affected.lastIndex) {
                                         Divider(
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                .copy(alpha = 0.1f),
+                                            color = onContainerColor.copy(alpha = 0.1f),
                                             thickness = 0.5.dp
                                         )
                                     }
@@ -1195,14 +1194,13 @@ internal fun VrchatStatusBanner() {
                                     Text(
                                         inc.name,
                                         style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        color = onContainerColor
                                     )
                                     if (inc.latestUpdate.isNotBlank()) {
                                         Text(
                                             inc.latestUpdate,
                                             style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                .copy(alpha = 0.7f)
+                                            color = onContainerColor.copy(alpha = 0.7f)
                                         )
                                     }
                                 }
@@ -1223,7 +1221,7 @@ internal fun VrchatStatusBanner() {
                         Text(
                             "View VRChat Status Page",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = onContainerColor,
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
                         )
                     }
