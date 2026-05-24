@@ -1579,10 +1579,19 @@ class VrchatPipelineService : Service() {
                     val v2Title = obj.optString("title", "")
                     val v2Sender = obj.optString("senderUsername", "")
                     val message = obj.optString("message", "")
-                    // Skip notifications older than 24h
                     val v2CreatedAt = obj.optString("created_at", "")
                     val v2CreatedMs = parseVrcTimestampMs(v2CreatedAt)
-                    if (v2CreatedMs > 0 && System.currentTimeMillis() - v2CreatedMs > 24L * 60 * 60 * 1000) continue
+                    // Group announcements/events are catch-up content: fire them
+                    // however old they are (seenNotifIds still guarantees each one
+                    // fires only once) so users away for a week don't miss them.
+                    // Transient types (friend requests, invites, queue, etc.) skip
+                    // when older than 24h to avoid resurfacing stale noise.
+                    val isCatchUpType = v2Type.contains("announcement", true) ||
+                        v2Type.contains("post", true) ||
+                        v2Type.contains("event", true) ||
+                        v2Type.contains("calendar", true)
+                    if (!isCatchUpType && v2CreatedMs > 0 &&
+                        System.currentTimeMillis() - v2CreatedMs > 24L * 60 * 60 * 1000) continue
                     val baseId = notifId.ifBlank { "$v2Type-${message.hashCode()}" }
                     val groupId = obj.optString("relatedGroupId", "").ifBlank {
                         obj.optString("groupId", "")
@@ -1707,11 +1716,10 @@ class VrchatPipelineService : Service() {
                             val createdAt = announcement.optString("createdAt", "")
                             val createdMs = parseVrcTimestampMs(createdAt)
                             val lastSeen = seenMap.optString(groupId, "")
-                            // Skip announcements older than 48h so reopening the app
-                            // after a few days doesn't resurface stale announcements.
-                            val tooOld = createdMs > 0 &&
-                                System.currentTimeMillis() - createdMs > 48L * 60 * 60 * 1000
-                            if (createdAt.isNotBlank() && createdAt != lastSeen && announcementText.isNotBlank() && !tooOld) {
+                            // No age cutoff: the per-group seen timestamp fires each
+                            // announcement exactly once, so week-away users still get
+                            // catch-up announcements without old ones resurfacing.
+                            if (createdAt.isNotBlank() && createdAt != lastSeen && announcementText.isNotBlank()) {
                                 fireEventNotification(
                                     id = "ga_${groupId}_${createdAt.hashCode()}".hashCode(),
                                     title = "Announcement from $groupName",
@@ -1726,9 +1734,6 @@ class VrchatPipelineService : Service() {
                                     alertEventTitle = announcementTitle.ifBlank { null },
                                     eventTimestampMs = createdMs.takeIf { it > 0 }
                                 )
-                                updatedMap.put(groupId, createdAt)
-                            } else if (tooOld && createdAt.isNotBlank()) {
-                                // Record the timestamp so we don't keep re-checking it.
                                 updatedMap.put(groupId, createdAt)
                             }
                         }
@@ -1923,9 +1928,7 @@ class VrchatPipelineService : Service() {
                     val createdAt = announcement.optString("createdAt", "")
                     val createdMs = parseVrcTimestampMs(createdAt)
                     val lastSeen = seenMap.optString(groupId, "")
-                    val tooOld = createdMs > 0 &&
-                        System.currentTimeMillis() - createdMs > 48L * 60 * 60 * 1000
-                    if (createdAt.isNotBlank() && createdAt != lastSeen && text.isNotBlank() && !tooOld) {
+                    if (createdAt.isNotBlank() && createdAt != lastSeen && text.isNotBlank()) {
                         fireEventNotification(
                             id = "ga_${groupId}_${createdAt.hashCode()}".hashCode(),
                             title = "Announcement from $groupName",
@@ -1942,9 +1945,6 @@ class VrchatPipelineService : Service() {
                         )
                         updatedMap.put(groupId, createdAt)
                         changed = true
-                    } else if (tooOld && createdAt.isNotBlank()) {
-                        updatedMap.put(groupId, createdAt)
-                        changed = true
                     }
                 }
                 val posts = VrchatAuthManager.fetchGroupPosts(this, groupId, 5)
@@ -1959,9 +1959,7 @@ class VrchatPipelineService : Service() {
                         val postCreatedMs = parseVrcTimestampMs(postCreatedAt)
                         val postSeenKey = "${groupId}_post_$postId"
                         val postLastSeen = seenMap.optString(postSeenKey, "")
-                        val postTooOld = postCreatedMs > 0 &&
-                            System.currentTimeMillis() - postCreatedMs > 48L * 60 * 60 * 1000
-                        if (postCreatedAt.isNotBlank() && postCreatedAt != postLastSeen && postText.isNotBlank() && !postTooOld) {
+                        if (postCreatedAt.isNotBlank() && postCreatedAt != postLastSeen && postText.isNotBlank()) {
                             fireEventNotification(
                                 id = "gp_${postId}".hashCode(),
                                 title = "Announcement from $groupName",
@@ -1976,9 +1974,6 @@ class VrchatPipelineService : Service() {
                                 alertEventTitle = postTitle.ifBlank { null },
                                 eventTimestampMs = postCreatedMs.takeIf { it > 0 }
                             )
-                            updatedMap.put(postSeenKey, postCreatedAt)
-                            changed = true
-                        } else if (postTooOld && postCreatedAt.isNotBlank()) {
                             updatedMap.put(postSeenKey, postCreatedAt)
                             changed = true
                         }
