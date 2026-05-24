@@ -2414,6 +2414,16 @@ class VrchatPipelineService : Service() {
         alertEventTitle: String? = null,
         eventTimestampMs: Long? = null
     ) {
+        // Check the toggle BEFORE touching seenNotifIds. Adding the dedup id
+        // first risks permanently poisoning it: if `enabled` reads false for a
+        // transient reason (e.g. DataStore not fully loaded during the cold-start
+        // connect/backfill race), the notification would be dropped AND marked
+        // seen, so it could never fire again on any later path (poll loop,
+        // reconnect backfill). Gate first, then dedup only when we will fire.
+        val prefs = dataStore.data.first()
+        val enabled = prefs[booleanPreferencesKey(prefKey)] ?: false
+        if (!enabled) return
+
         if (dedupId != null) {
             synchronized(seenNotifIds) {
                 if (!seenNotifIds.add(dedupId)) return
@@ -2423,9 +2433,6 @@ class VrchatPipelineService : Service() {
             }
             persistSeenNotifIds()
         }
-        val prefs = dataStore.data.first()
-        val enabled = prefs[booleanPreferencesKey(prefKey)] ?: false
-        if (!enabled) return
 
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
