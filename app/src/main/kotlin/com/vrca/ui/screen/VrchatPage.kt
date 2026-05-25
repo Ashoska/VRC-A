@@ -57,6 +57,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.shape.CircleShape
@@ -798,27 +799,36 @@ private fun AlertGroupCard(group: InAppAlertGroup, onDismiss: () -> Unit) {
                             )
                         }
                     }
-                    Icon(
-                        if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                        contentDescription = if (expanded) "Collapse" else "Expand",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 8.dp)
-                    )
+                    Spacer(Modifier.width(8.dp))
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+                        modifier = Modifier.size(34.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                                contentDescription = if (expanded) "Collapse" else "Expand",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                    }
                 }
                 // Clear gap so users don't hit dismiss when reaching for expand.
                 Spacer(Modifier.width(8.dp))
                 Surface(
                     onClick = onDismiss,
                     shape = CircleShape,
-                    color = MaterialTheme.colorScheme.surface,
-                    modifier = Modifier.size(40.dp)
+                    color = MaterialTheme.colorScheme.error.copy(alpha = 0.14f),
+                    modifier = Modifier.size(36.dp)
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Icon(
                             Icons.Filled.Close,
                             contentDescription = "Dismiss",
                             modifier = Modifier.size(20.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            tint = MaterialTheme.colorScheme.error
                         )
                     }
                 }
@@ -852,13 +862,27 @@ private fun AlertGroupCard(group: InAppAlertGroup, onDismiss: () -> Unit) {
                                         wordDiff(event.beforeText, event.afterText)
                                     }
                                     Text(
+                                        "BEFORE",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFFEF5350)
+                                    )
+                                    Spacer(Modifier.height(3.dp))
+                                    Text(
                                         beforeDiff,
                                         style = MaterialTheme.typography.bodySmall
                                     )
                                     Divider(
-                                        Modifier.padding(vertical = 6.dp),
+                                        Modifier.padding(vertical = 8.dp),
                                         color = MaterialTheme.colorScheme.outlineVariant
                                     )
+                                    Text(
+                                        "AFTER",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF4CAF50)
+                                    )
+                                    Spacer(Modifier.height(3.dp))
                                     Text(
                                         afterDiff,
                                         style = MaterialTheme.typography.bodySmall

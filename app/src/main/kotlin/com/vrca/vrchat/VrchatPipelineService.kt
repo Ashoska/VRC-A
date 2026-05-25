@@ -2915,7 +2915,9 @@ class VrchatPipelineService : Service() {
             }
         } else ""
         return NotificationCompat.Builder(this, NOTIF_CHANNEL_PERSISTENT)
-            .setSmallIcon(R.drawable.ic_notification)
+            // Distinct sync glyph (matches the Automations tab) so the persistent
+            // background-service notification is visually separate from event alerts.
+            .setSmallIcon(R.drawable.ic_notif_sync)
             .setContentTitle("VRC-A")
             .setContentText(status + rpcSuffix)
             .setContentIntent(tapIntent)
