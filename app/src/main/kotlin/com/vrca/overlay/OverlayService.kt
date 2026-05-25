@@ -47,7 +47,7 @@ import kotlin.math.roundToInt
 class OverlayService : Service() {
 
     companion object {
-        private const val NOTIF_CHANNEL_ID = "chatbox_overlay_foreground"
+        private const val NOTIF_CHANNEL_ID = "vrca_pipeline"
         private const val NOTIF_CHANNEL_NAME = "Chatbox Overlay"
         private const val NOTIF_ID = 1001
     }
@@ -137,16 +137,18 @@ class OverlayService : Service() {
         if (Build.VERSION.SDK_INT >= 26) {
             val existing = nm.getNotificationChannel(NOTIF_CHANNEL_ID)
             if (existing == null) {
-                val channel = NotificationChannel(
-                    NOTIF_CHANNEL_ID,
-                    NOTIF_CHANNEL_NAME,
-                    NotificationManager.IMPORTANCE_MIN
-                ).apply {
-                    description = "Keeps Chatbox overlay running while screen is off"
-                    setShowBadge(false)
-                    lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                val existing = nm.getNotificationChannel(NOTIF_CHANNEL_ID)
+                if (existing == null) {
+                    val channel = NotificationChannel(
+                        NOTIF_CHANNEL_ID,
+                        "VRC-A Background",
+                        NotificationManager.IMPORTANCE_MIN
+                    ).apply {
+                        setShowBadge(false)
+                        setSound(null, null)
+                    }
+                    nm.createNotificationChannel(channel)
                 }
-                nm.createNotificationChannel(channel)
             }
         }
 

@@ -28,6 +28,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
@@ -298,6 +299,7 @@ fun VrcaApp() {
     var updateDismissed    by remember { mutableStateOf(false) }
     var downloadId         by remember { mutableLongStateOf(-1L) }
     var downloadDone       by remember { mutableStateOf(false) }
+    var downloadError      by remember { mutableStateOf<String?>(null) }
 
     if (!BuildConfig.IS_ADMIN_BUILD) {
         val prefs = remember { ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE) }
@@ -364,27 +366,56 @@ fun VrcaApp() {
                     val cursor = dm.query(query)
                     if (cursor.moveToFirst()) {
                         val statusCol = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
-                        val localUriCol = cursor.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI)
                         val status = cursor.getInt(statusCol)
-                        val localUri = cursor.getString(localUriCol)
-                        if (status == DownloadManager.STATUS_SUCCESSFUL && localUri != null) {
-                            val file = File(Uri.parse(localUri).path!!)
-                            val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                                FileProvider.getUriForFile(
-                                    context,
-                                    "${context.packageName}.fileprovider",
-                                    file
-                                )
-                            } else {
-                                Uri.fromFile(file)
+
+                        if (status == DownloadManager.STATUS_FAILED) {
+                            val reasonCol = cursor.getColumnIndex(DownloadManager.COLUMN_REASON)
+                            val reason = cursor.getInt(reasonCol)
+                            downloadError = when (reason) {
+                                DownloadManager.ERROR_HTTP_DATA_ERROR,
+                                DownloadManager.ERROR_UNHANDLED_HTTP_CODE ->
+                                    "Download failed — the download URL may require authentication (is the GitHub repo private?)"
+                                DownloadManager.ERROR_FILE_ERROR ->
+                                    "Download failed — could not write file to storage"
+                                else -> "Download failed (error code $reason)"
                             }
-                            val install = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
-                                setDataAndType(uri, "application/vnd.android.package-archive")
-                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            }
-                            context.startActivity(install)
                             downloadDone = true
+                            cursor.close()
+                            return
+                        }
+
+                        if (status == DownloadManager.STATUS_SUCCESSFUL) {
+                            val localUriCol = cursor.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI)
+                            val localUri = cursor.getString(localUriCol)
+                            if (localUri != null) {
+                                val file = File(Uri.parse(localUri).path!!)
+                                // GitHub private repos redirect unauthenticated requests
+                                // to the login page — DownloadManager downloads the HTML
+                                // and reports success. Catch it: real APKs are >100 KB.
+                                if (file.length() < 100_000L) {
+                                    downloadError = "Download failed — got a web page instead of an APK. The GitHub repo is likely private. Make the repo public or use a public download URL."
+                                    downloadDone = true
+                                    file.delete()
+                                    cursor.close()
+                                    return
+                                }
+                                val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                                    FileProvider.getUriForFile(
+                                        context,
+                                        "${context.packageName}.fileprovider",
+                                        file
+                                    )
+                                } else {
+                                    Uri.fromFile(file)
+                                }
+                                val install = Intent(Intent.ACTION_VIEW).apply {
+                                    setDataAndType(uri, "application/vnd.android.package-archive")
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                context.startActivity(install)
+                                downloadDone = true
+                            }
                         }
                     }
                     cursor.close()
@@ -412,11 +443,12 @@ fun VrcaApp() {
             info = updateToShow.info,
             forced = updateToShow.forced,
             downloading = downloadId >= 0L && !downloadDone,
+            error = downloadError,
             onDismiss = { updateDismissed = true },
             onDownload = { url ->
+                downloadError = null
                 val dm = ctx.getSystemService(android.content.Context.DOWNLOAD_SERVICE) as DownloadManager
                 val fileName = "vrc-a-update.apk"
-                // Delete any previous partial download
                 val dest = File(ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), fileName)
                 if (dest.exists()) dest.delete()
                 val request = DownloadManager.Request(Uri.parse(url)).apply {
@@ -443,24 +475,53 @@ private fun UpdateDialog(
     info: ReleaseInfo,
     forced: Boolean,
     downloading: Boolean = false,
+    error: String? = null,
     onDismiss: () -> Unit,
     onDownload: (String) -> Unit
 ) {
-    AlertDialog(
-        onDismissRequest = { if (!forced) onDismiss() },
-        title = {
-            Text(if (forced) "Update Required" else "Update Available")
-        },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("Version ${info.versionName} is available.")
-                if (info.notes.isNotBlank()) {
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = { if (!forced) onDismiss() }
+    ) {
+        ElevatedCard(
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
+            colors = androidx.compose.material3.CardDefaults.elevatedCardColors(
+                containerColor = MaterialTheme.colorScheme.surface
+            )
+        ) {
+            Column(
+                modifier = Modifier.padding(24.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                // Header
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(
-                        info.notes,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        if (forced) "Update Required" else "Update Available",
+                        style = MaterialTheme.typography.titleLarge,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        info.versionName,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary
                     )
                 }
+
+                // Release notes
+                if (info.notes.isNotBlank()) {
+                    Surface(
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        tonalElevation = 1.dp
+                    ) {
+                        Text(
+                            info.notes,
+                            modifier = Modifier.padding(12.dp).fillMaxWidth(),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
                 if (forced) {
                     Text(
                         "This update is required to continue using the app.",
@@ -468,20 +529,61 @@ private fun UpdateDialog(
                         color = MaterialTheme.colorScheme.error
                     )
                 }
+
+                // Error message
+                if (error != null) {
+                    Surface(
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.errorContainer
+                    ) {
+                        Text(
+                            error,
+                            modifier = Modifier.padding(12.dp).fillMaxWidth(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                }
+
+                // Progress indicator
+                if (downloading) {
+                    androidx.compose.material3.LinearProgressIndicator(
+                        modifier = Modifier.fillMaxWidth()
+                            .height(4.dp)
+                            .clip(androidx.compose.foundation.shape.RoundedCornerShape(2.dp))
+                    )
+                }
+
+                // Buttons
+                androidx.compose.foundation.layout.Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End)
+                ) {
+                    if (!forced) {
+                        OutlinedButton(onClick = onDismiss) {
+                            Text("Later")
+                        }
+                    }
+                    Button(
+                        onClick = { if (!downloading) onDownload(info.downloadUrl) },
+                        enabled = !downloading
+                    ) {
+                        if (downloading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.height(18.dp).widthIn(max = 18.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onPrimary
+                            )
+                            Spacer(Modifier.widthIn(min = 8.dp))
+                            Text("Downloading")
+                        } else {
+                            Text(if (error != null) "Retry" else "Download")
+                        }
+                    }
+                }
             }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = { if (!downloading) onDownload(info.downloadUrl) },
-                enabled = !downloading
-            ) {
-                Text(if (downloading) "Downloading..." else "Download")
-            }
-        },
-        dismissButton = if (!forced) ({
-            TextButton(onClick = onDismiss) { Text("Later") }
-        }) else null
-    )
+        }
+    }
 }
 
 /* =========================================================
