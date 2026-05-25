@@ -28,6 +28,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
@@ -478,21 +479,49 @@ private fun UpdateDialog(
     onDismiss: () -> Unit,
     onDownload: (String) -> Unit
 ) {
-    AlertDialog(
-        onDismissRequest = { if (!forced) onDismiss() },
-        title = {
-            Text(if (forced) "Update Required" else "Update Available")
-        },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("Version ${info.versionName} is available.")
-                if (info.notes.isNotBlank()) {
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = { if (!forced) onDismiss() }
+    ) {
+        ElevatedCard(
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
+            colors = androidx.compose.material3.CardDefaults.elevatedCardColors(
+                containerColor = MaterialTheme.colorScheme.surface
+            )
+        ) {
+            Column(
+                modifier = Modifier.padding(24.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                // Header
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(
-                        info.notes,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        if (forced) "Update Required" else "Update Available",
+                        style = MaterialTheme.typography.titleLarge,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        info.versionName,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary
                     )
                 }
+
+                // Release notes
+                if (info.notes.isNotBlank()) {
+                    Surface(
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        tonalElevation = 1.dp
+                    ) {
+                        Text(
+                            info.notes,
+                            modifier = Modifier.padding(12.dp).fillMaxWidth(),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
                 if (forced) {
                     Text(
                         "This update is required to continue using the app.",
@@ -500,27 +529,61 @@ private fun UpdateDialog(
                         color = MaterialTheme.colorScheme.error
                     )
                 }
+
+                // Error message
                 if (error != null) {
-                    Text(
-                        error,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error
+                    Surface(
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.errorContainer
+                    ) {
+                        Text(
+                            error,
+                            modifier = Modifier.padding(12.dp).fillMaxWidth(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                }
+
+                // Progress indicator
+                if (downloading) {
+                    androidx.compose.material3.LinearProgressIndicator(
+                        modifier = Modifier.fillMaxWidth()
+                            .height(4.dp)
+                            .clip(androidx.compose.foundation.shape.RoundedCornerShape(2.dp))
                     )
                 }
+
+                // Buttons
+                androidx.compose.foundation.layout.Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End)
+                ) {
+                    if (!forced) {
+                        OutlinedButton(onClick = onDismiss) {
+                            Text("Later")
+                        }
+                    }
+                    Button(
+                        onClick = { if (!downloading) onDownload(info.downloadUrl) },
+                        enabled = !downloading
+                    ) {
+                        if (downloading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.height(18.dp).widthIn(max = 18.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onPrimary
+                            )
+                            Spacer(Modifier.widthIn(min = 8.dp))
+                            Text("Downloading")
+                        } else {
+                            Text(if (error != null) "Retry" else "Download")
+                        }
+                    }
+                }
             }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = { if (!downloading) onDownload(info.downloadUrl) },
-                enabled = !downloading
-            ) {
-                Text(if (downloading) "Downloading..." else if (error != null) "Retry" else "Download")
-            }
-        },
-        dismissButton = if (!forced) ({
-            TextButton(onClick = onDismiss) { Text("Later") }
-        }) else null
-    )
+        }
+    }
 }
 
 /* =========================================================

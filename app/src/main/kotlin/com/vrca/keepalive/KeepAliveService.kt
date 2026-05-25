@@ -25,7 +25,7 @@ class KeepAliveService : Service() {
 
     companion object {
         private const val TAG = "VrcaKeepAlive"
-        private const val CHANNEL_ID = "chatbox_keepalive"
+        private const val CHANNEL_ID = "vrca_pipeline"
         private const val NOTIF_ID = 1001
 
         fun start(context: Context) {
@@ -123,29 +123,33 @@ class KeepAliveService : Service() {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val ch = NotificationChannel(
-                    CHANNEL_ID,
-                    "Chatbox Background",
-                    NotificationManager.IMPORTANCE_LOW
-                ).apply {
-                    description = "Keeps Chatbox running while screen is off so OSC continues."
-                    setShowBadge(false)
+                val existing = nm.getNotificationChannel(CHANNEL_ID)
+                if (existing == null) {
+                    val ch = NotificationChannel(
+                        CHANNEL_ID,
+                        "VRC-A Background",
+                        NotificationManager.IMPORTANCE_MIN
+                    ).apply {
+                        setShowBadge(false)
+                        setSound(null, null)
+                    }
+                    nm.createNotificationChannel(ch)
                 }
-                nm.createNotificationChannel(ch)
             }
 
             val notif = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 Notification.Builder(this, CHANNEL_ID)
-                    .setContentTitle("Chatbox running")
-                    .setContentText("Keeping OSC updates alive while screen is off")
+                    .setContentTitle("VRC-A")
+                    .setContentText("Running")
                     .setSmallIcon(R.drawable.ic_notif_sync)
                     .setOngoing(true)
+                    .setShowWhen(false)
                     .build()
             } else {
                 @Suppress("DEPRECATION")
                 Notification.Builder(this)
-                    .setContentTitle("Chatbox running")
-                    .setContentText("Keeping OSC updates alive while screen is off")
+                    .setContentTitle("VRC-A")
+                    .setContentText("Running")
                     .setSmallIcon(R.drawable.ic_notif_sync)
                     .setOngoing(true)
                     .build()
