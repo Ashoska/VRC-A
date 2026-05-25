@@ -29,7 +29,7 @@ VRC-A is a companion app for VRChat. It provides:
 
 ## 5. Risks You Should Know
 
-**VRChat:** VRC-A uses VRChat's public API and WebSocket pipeline. While it does not modify game files or inject code, Tupper (VRChat) could change their API or terms at any time. We are not responsible for any action VRChat takes on your account.
+**VRChat:** VRC-A uses VRChat's public API and WebSocket pipeline. While it does not modify game files or inject code, (VRChat) could change their API or terms at any time. We are not responsible for any action VRChat takes on your account.
 
 **Discord RPC:** The Discord integration runs a real Discord web session in a hidden WebView and injects presence data onto the gateway connection. This is **not an approved Discord integration**. Risks include:
 - Discord may detect and terminate the session
