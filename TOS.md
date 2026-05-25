@@ -12,7 +12,7 @@ VRC-A is a companion app for VRChat. It provides:
 ## 3. Data & Privacy
 
 **What we store:**
-- An anonymous device identifier (SHA-256 hash not your Android ID directly)
+
 - App settings, toggle states, and chatbox content in Firebase Firestore
 - VRChat auth cookies in encrypted local storage (never sent to our servers)
 - Discord session cookies in a local WebView (never extracted or transmitted)

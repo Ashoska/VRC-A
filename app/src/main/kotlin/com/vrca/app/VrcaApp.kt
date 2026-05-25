@@ -6,6 +6,7 @@ import android.os.Build
 import android.provider.Settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -19,12 +20,15 @@ import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -34,6 +38,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
@@ -64,6 +69,7 @@ import androidx.core.content.FileProvider
 import java.io.File
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -187,57 +193,79 @@ fun VrcaApp() {
     }
 
     /* -------------------------
-       ToS gate
+       ToS gate (Firestore-backed, admin-configurable)
        Must be accepted before the VRChat login is shown.
-       Uses local SharedPreferences â€" no Firestore needed at this stage.
-       Re-shows if ToS version bumped (checked in VrcaScreen too for
-       returning users who already logged in).
+       Reads tosVersion/tosText/tosUrl from Firestore config/app.
+       Re-shows when admin bumps the version or updates the text.
        ------------------------- */
 
-    val tosPrefs = remember { ctx.getSharedPreferences("vrca_tos", Context.MODE_PRIVATE) }
-    // Version 1 = baseline. Increment in Firestore config/app.tosVersion to force re-acceptance.
-    // At this stage we only check local prefs; VrcaScreen does the remote version check.
-    val localTosAccepted = remember { tosPrefs.getInt("accepted_version", 0) >= 1 }
-    var tosGatePassed by remember { mutableStateOf(localTosAccepted) }
+    val scope = rememberCoroutineScope()
+    val remotePrefs = remember { ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE) }
+    val deviceHash = remember { remotePrefs.getString("device_id_hash", "") ?: "" }
 
-    if (!tosGatePassed) {
-        Surface(modifier = Modifier.fillMaxSize()) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(androidx.compose.foundation.rememberScrollState())
-                    .padding(24.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                Text("Terms of Use", style = MaterialTheme.typography.headlineMedium)
-                Text(
-                    "Before using VRC-A, please read and accept the Terms of Use.\n\n" +
-                    "â€¢ VRC-A sends OSC messages to VRChat on your behalf.\n" +
-                    "â€¢ VRC-A connects to VRChat's web API to read your status and notifications.\n" +
-                    "â€¢ You are responsible for how you use this app within VRChat's community guidelines.\n" +
-                    "â€¢ VRC-A is not affiliated with or endorsed by VRChat Inc.\n" +
-                    "â€¢ Your session cookie is stored locally on your device only.\n" +
-                    "â€¢ This app may collect device identifiers for moderation purposes.",
-                    style = MaterialTheme.typography.bodyMedium
-                )
-                Spacer(Modifier.weight(1f))
-                Button(
-                    onClick = {
-                        tosPrefs.edit().putInt("accepted_version", 1)
-                            .putLong("accepted_at_ms", System.currentTimeMillis()).apply()
-                        tosGatePassed = true
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("I Accept") }
-                OutlinedButton(
-                    onClick = {
-                        // Gracefully exit if they decline
-                        (ctx as? android.app.Activity)?.finish()
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("Decline") }
+    var remoteTosVersion by remember { mutableStateOf(1) }
+    var remoteTosText by remember { mutableStateOf("") }
+    var remoteTosUrl by remember { mutableStateOf("") }
+    var remoteTosUpdatedAtMs by remember { mutableStateOf(0L) }
+
+    DisposableEffect(Unit) {
+        val reg = FirebaseFirestore.getInstance()
+            .collection("config").document("app")
+            .addSnapshotListener { snap, _ ->
+                if (snap != null && snap.exists()) {
+                    remoteTosVersion = (snap.getLong("tosVersion") ?: 1L).toInt().coerceAtLeast(1)
+                    remoteTosText = snap.getString("tosText") ?: ""
+                    remoteTosUrl = snap.getString("tosUrl") ?: ""
+                    remoteTosUpdatedAtMs = snap.getTimestamp("updatedAt")?.toDate()?.time ?: 0L
+                }
             }
-        }
+        onDispose { reg.remove() }
+    }
+
+    val requiredTosVersion = remoteTosVersion.coerceAtLeast(1)
+
+    var tosAccepted by rememberSaveable {
+        mutableStateOf(
+            TosPrefs.acceptedVersion(ctx) >= requiredTosVersion &&
+                TosPrefs.acceptedAtMs(ctx) >= remoteTosUpdatedAtMs
+        )
+    }
+
+    LaunchedEffect(requiredTosVersion, remoteTosUpdatedAtMs) {
+        tosAccepted =
+            TosPrefs.acceptedVersion(ctx) >= requiredTosVersion &&
+                TosPrefs.acceptedAtMs(ctx) >= remoteTosUpdatedAtMs
+    }
+
+    if (!tosAccepted) {
+        TosGate(
+            tosVersion = requiredTosVersion,
+            tosText = remoteTosText,
+            tosUrl = remoteTosUrl,
+            onOpenUrl = { url ->
+                runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+            },
+            onAccept = {
+                TosPrefs.accept(ctx, requiredTosVersion)
+                tosAccepted = true
+
+                scope.launch {
+                    runCatching {
+                        val data = hashMapOf(
+                            "tosAcceptedVersion" to requiredTosVersion,
+                            "tosAcceptedAt" to Timestamp.now(),
+                            "updatedAt" to Timestamp.now()
+                        )
+                        if (deviceHash.isNotBlank()) {
+                            FirebaseFirestore.getInstance()
+                                .collection("users").document(deviceHash)
+                                .set(data, SetOptions.merge())
+                                .await()
+                        }
+                    }
+                }
+            }
+        )
         return
     }
 
@@ -979,6 +1007,103 @@ private fun BannedScreen(reason: String) {
                         )
                     }
                 }
+            }
+        }
+    }
+}
+
+private object TosPrefs {
+    private const val FILE = "vrca_tos"
+    private const val KEY_ACCEPTED_VERSION = "accepted_version"
+    private const val KEY_ACCEPTED_AT_MS = "accepted_at_ms"
+
+    fun acceptedVersion(ctx: Context): Int =
+        ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE).getInt(KEY_ACCEPTED_VERSION, 0)
+
+    fun acceptedAtMs(ctx: Context): Long =
+        ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE).getLong(KEY_ACCEPTED_AT_MS, 0L)
+
+    fun accept(ctx: Context, version: Int) {
+        ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit()
+            .putInt(KEY_ACCEPTED_VERSION, version.coerceAtLeast(1))
+            .putLong(KEY_ACCEPTED_AT_MS, System.currentTimeMillis())
+            .apply()
+    }
+}
+
+@Composable
+private fun TosGate(
+    tosVersion: Int,
+    tosText: String,
+    tosUrl: String,
+    onOpenUrl: (String) -> Unit,
+    onAccept: () -> Unit
+) {
+    var checked by rememberSaveable { mutableStateOf(false) }
+
+    val fallbackText = remember {
+        """
+TERMS OF SERVICE (SUMMARY)
+
+By using this app, you agree to:
+- Use it responsibly and legally
+- Not use it to harass, spam, or impersonate others
+- Understand VRChat chatbox limits apply and messages may be trimmed
+- Accept that settings/history are stored locally on your device
+- You may be moderated (warned/banned) for abuse
+
+If you do not agree, close the app.
+        """.trimIndent()
+    }
+
+    Surface {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text("Terms of Service", style = MaterialTheme.typography.headlineSmall)
+            Text(
+                "Version $tosVersion",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            ElevatedCard {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = tosText.ifBlank { fallbackText },
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+
+                    if (tosUrl.isNotBlank()) {
+                        OutlinedButton(
+                            onClick = { onOpenUrl(tosUrl.trim()) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Open full ToS link")
+                        }
+                    }
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("I agree to the Terms of Service")
+                Switch(checked = checked, onCheckedChange = { checked = it })
+            }
+
+            Button(
+                onClick = onAccept,
+                enabled = checked,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Accept & Continue")
             }
         }
     }
