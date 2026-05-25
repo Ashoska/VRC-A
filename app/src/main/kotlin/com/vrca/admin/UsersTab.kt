@@ -984,10 +984,8 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
 
                         tUploadPhase = "Uploading APK..."
                         val downloadUrl = githubUploadAsset(
-                            owner      = githubOwner,
-                            repo       = githubRepo,
+                            uploadUrlTemplate = release.uploadUrl,
                             pat        = githubPat,
-                            releaseId  = release.releaseId,
                             fileName   = fileName,
                             apkFile    = apkFile,
                             onProgress = { tUploadProgress = it }
