@@ -20,8 +20,6 @@ VRC-A is a companion app for VRChat. It provides:
 
 **What we don't collect:** Your name, email, phone number, IP address, or any personal identity information.
 
-**Admin monitoring:** When an administrator views your profile in the admin panel, the app temporarily syncs your VRChat presence (online status, world, display name) to Firestore. This stops immediately when the admin navigates away. No monitoring occurs otherwise.
-
 ## 4. Required Permissions & Why
 - **Foreground Service**: Keeps VRChat notifications and chatbox running in the background
 - **Notification Access**: Reads music notifications to display "Now Playing" in your chatbox
