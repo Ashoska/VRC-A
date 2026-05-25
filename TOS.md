@@ -38,11 +38,11 @@ VRC-A is a companion app for VRChat. It provides:
 
 You are shown a one-time risk acknowledgment before enabling this feature.
 
-**Updates:** In-app updates download APKs from GitHub. The app verifies downloads are valid before prompting install, but you are responsible for reviewing what you install.
+**Updates:** In-app updates download APKs. The app verifies downloads are valid before prompting install, but you are responsible for reviewing what you install.
 
 ## 6. Acceptable Use
 Do not:
-- Harass, spam, or harm others using this app
+- Harass, spam, or harm others using by this app
 - Bypass moderation restrictions
 - Exploit or interfere with the service
 - Violate VRChat's or Discord's Terms of Service
@@ -57,4 +57,4 @@ VRC-A is provided "as is." We do not guarantee uptime, compatibility, or that th
 These terms may update at any time. Continued use means you accept the changes.
 
 ## 10. Contact
-Reach the developer through official distribution channels.
+Reach the developer through the discord support server https://discord.com/invite/Vaj7h4qCey
