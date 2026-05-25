@@ -992,11 +992,12 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                         FirebaseFirestore.getInstance()
                             .collection("users")
                             .document(docId)
-                            .update(
+                            .set(
                                 mapOf(
                                     "targetedUpdateUrl" to downloadUrl,
                                     "targetedUpdateNotes" to targetNotes.trim()
-                                )
+                                ),
+                                SetOptions.merge()
                             )
                             .await()
 
@@ -1038,11 +1039,12 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                             FirebaseFirestore.getInstance()
                                 .collection("users")
                                 .document(docId)
-                                .update(
+                                .set(
                                     mapOf(
                                         "targetedUpdateUrl" to "",
                                         "targetedUpdateNotes" to ""
-                                    )
+                                    ),
+                                    SetOptions.merge()
                                 )
                                 .await()
                             hasTargeted = false; targetUrl = ""; targetNotes = ""
@@ -1179,11 +1181,12 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                                 FirebaseFirestore.getInstance()
                                     .collection("users")
                                     .document(docId)
-                                    .update(
+                                    .set(
                                         mapOf(
                                             "targetedUpdateUrl" to targetUrl.trim(),
                                             "targetedUpdateNotes" to targetNotes.trim()
-                                        )
+                                        ),
+                                        SetOptions.merge()
                                     )
                                     .await()
                                 hasTargeted = true
