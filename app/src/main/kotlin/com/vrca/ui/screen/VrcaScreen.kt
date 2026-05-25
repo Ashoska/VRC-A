@@ -148,41 +148,6 @@ internal object UiPrefs {
     }
 }
 
-/**
- * OK ToS acceptance storage.
- * We store an "accepted_version" integer locally.
- * "version" is fetched remotely.
- */
-private object TosPrefs {
-    private const val FILE = "vrca_tos"
-    private const val KEY_ACCEPTED_VERSION = "accepted_version"
-    private const val KEY_ACCEPTED_AT_MS = "accepted_at_ms"
-
-    fun acceptedVersion(ctx: Context): Int =
-        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getInt(KEY_ACCEPTED_VERSION, 0)
-
-    fun acceptedAtMs(ctx: Context): Long =
-        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getLong(KEY_ACCEPTED_AT_MS, 0L)
-
-    fun accept(ctx: Context, version: Int) {
-        ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit()
-            .putInt(KEY_ACCEPTED_VERSION, version.coerceAtLeast(1))
-            .putLong(KEY_ACCEPTED_AT_MS, System.currentTimeMillis())
-            .apply()
-    }
-}
-
-/* =========================
-   Remote UI models
-   ========================= */
-
-private data class RemoteTosUi(
-    val tosVersion: Int = 1,
-    val tosText: String = "",
-    val tosUrl: String = "",
-    val updatedAt: Timestamp? = null
-)
-
 internal data class AnnouncementUi(
     val id: String,
     val title: String,
@@ -287,31 +252,7 @@ fun VrcaScreen(
         }
     }
 
-    // --- Remote config state ---
-    var remoteTos by remember { mutableStateOf(RemoteTosUi()) }
     var announcements by remember { mutableStateOf<List<AnnouncementUi>>(emptyList()) }
-
-    // Listen: config/app (ToS)
-    DisposableEffect(Unit) {
-        var reg: ListenerRegistration? = null
-        reg = db.collection("config").document("app")
-            .addSnapshotListener { snap, err ->
-                if (err != null) {
-                    reportFirebase("config/app", "Snapshot listener error", err)
-                    return@addSnapshotListener
-                }
-                if (snap != null && snap.exists()) {
-                    val v = (snap.getLong("tosVersion") ?: 1L).toInt().coerceAtLeast(1)
-                    remoteTos = RemoteTosUi(
-                        tosVersion = v,
-                        tosText = snap.getString("tosText") ?: "",
-                        tosUrl = snap.getString("tosUrl") ?: "",
-                        updatedAt = snap.getTimestamp("updatedAt")
-                    )
-                }
-            }
-        onDispose { reg?.remove() }
-    }
 
     // Announcements
     DisposableEffect(Unit) {
@@ -363,53 +304,6 @@ fun VrcaScreen(
             deviceBanReason = chatboxViewModel.deviceBanReason,
             updatedAt = null
         )
-    }
-
-    // --- ToS gate (remote) ---
-    val requiredTosVersion = remoteTos.tosVersion.coerceAtLeast(1)
-    val requiredUpdatedAtMs = remoteTos.updatedAt?.toDate()?.time ?: 0L
-
-    var tosAccepted by rememberSaveable {
-        mutableStateOf(
-            TosPrefs.acceptedVersion(ctx) >= requiredTosVersion &&
-                TosPrefs.acceptedAtMs(ctx) >= requiredUpdatedAtMs
-        )
-    }
-
-    LaunchedEffect(requiredTosVersion, requiredUpdatedAtMs) {
-        tosAccepted =
-            TosPrefs.acceptedVersion(ctx) >= requiredTosVersion &&
-                TosPrefs.acceptedAtMs(ctx) >= requiredUpdatedAtMs
-    }
-
-    if (!tosAccepted) {
-        TosGate(
-            tosVersion = requiredTosVersion,
-            tosText = remoteTos.tosText,
-            tosUrl = remoteTos.tosUrl,
-            onOpenUrl = { url ->
-                runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
-            },
-            onAccept = {
-                TosPrefs.accept(ctx, requiredTosVersion)
-                tosAccepted = true
-
-                // Best-effort: persist acceptance to Firestore (requires rules allowing these keys).
-                scope.launch {
-                    runCatching {
-                        val data = hashMapOf(
-                            "tosAcceptedVersion" to requiredTosVersion,
-                            "tosAcceptedAt" to Timestamp.now(),
-                            "updatedAt" to Timestamp.now()
-                        )
-                        db.collection("users").document(deviceHash)
-                            .set(data, com.google.firebase.firestore.SetOptions.merge())
-                            .await()
-                    }
-                }
-            }
-        )
-        return
     }
 
     // --- Ban gate (from VM) ---
@@ -687,89 +581,6 @@ private fun BannedScreen(
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedButton(onClick = onOpenSettings, modifier = Modifier.weight(1f)) { Text("Settings") }
                 OutlinedButton(onClick = onOpenInfo, modifier = Modifier.weight(1f)) { Text("Info") }
-            }
-        }
-    }
-}
-
-/* =========================
-   ToS Gate UI
-   ========================= */
-
-@Composable
-private fun TosGate(
-    tosVersion: Int,
-    tosText: String,
-    tosUrl: String,
-    onOpenUrl: (String) -> Unit,
-    onAccept: () -> Unit
-) {
-    var checked by rememberSaveable { mutableStateOf(false) }
-
-    // Always show something even if Firestore text is empty.
-    val fallbackText = remember {
-        """
-TERMS OF SERVICE (SUMMARY)
-
-By using this app, you agree to:
-- Use it responsibly and legally
-- Not use it to harass, spam, or impersonate others
-- Understand VRChat chatbox limits apply and messages may be trimmed
-- Accept that settings/history are stored locally on your device
-- You may be moderated (warned/banned) for abuse
-
-If you do not agree, close the app.
-        """.trimIndent()
-    }
-
-    Surface {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text("Terms of Service", style = MaterialTheme.typography.headlineSmall)
-            Text(
-                "Version $tosVersion",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            ElevatedCard {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text(
-                        text = tosText.ifBlank { fallbackText },
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-
-                    if (tosUrl.isNotBlank()) {
-                        OutlinedButton(
-                            onClick = { onOpenUrl(tosUrl.trim()) },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text("Open full ToS link")
-                        }
-                    }
-                }
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("I agree to the Terms of Service")
-                Switch(checked = checked, onCheckedChange = { checked = it })
-            }
-
-            Button(
-                onClick = onAccept,
-                enabled = checked,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("Accept & Continue")
             }
         }
     }
