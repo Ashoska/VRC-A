@@ -8,7 +8,6 @@ VRC-A is a companion app for VRChat. It provides:
 - **Chatbox**: Sends customizable text (music status, time, pinned/cycling messages) to VRChat via OSC
 - **VRChat Notifications**: Real-time alerts for friend activity (online/offline, location, status, bio, avatar changes), friend requests, unfriends, group announcements, events, and invites
 - **Discord Rich Presence**: Displays your VRChat activity on your Discord profile using a background WebView session
-- **Admin Tools** (owner build only): User dashboard, moderation controls, directed app updates
 
 ## 3. Data & Privacy
 
