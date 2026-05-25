@@ -138,7 +138,7 @@ class KeepAliveService : Service() {
                 Notification.Builder(this, CHANNEL_ID)
                     .setContentTitle("Chatbox running")
                     .setContentText("Keeping OSC updates alive while screen is off")
-                    .setSmallIcon(R.drawable.ic_notification)
+                    .setSmallIcon(R.drawable.ic_notif_sync)
                     .setOngoing(true)
                     .build()
             } else {
@@ -146,7 +146,7 @@ class KeepAliveService : Service() {
                 Notification.Builder(this)
                     .setContentTitle("Chatbox running")
                     .setContentText("Keeping OSC updates alive while screen is off")
-                    .setSmallIcon(R.drawable.ic_notification)
+                    .setSmallIcon(R.drawable.ic_notif_sync)
                     .setOngoing(true)
                     .build()
             }
