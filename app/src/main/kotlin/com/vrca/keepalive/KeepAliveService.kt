@@ -75,8 +75,29 @@ class KeepAliveService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // A null intent is a START_STICKY restart. If the user just swiped the app
+        // away, abort instead of resurrecting — this wakelock-holding service was
+        // the main reason the process never died on swipe.
+        if (intent == null && com.vrca.app.AppShutdown.isManualKillFresh(this)) {
+            try { wakeLock?.let { if (it.isHeld) it.release() } } catch (_: Throwable) {}
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            Thread {
+                try { Thread.sleep(300) } catch (_: Throwable) {}
+                android.os.Process.killProcess(android.os.Process.myPid())
+                kotlin.system.exitProcess(0)
+            }.start()
+            return START_NOT_STICKY
+        }
         // If killed, try to come back.
         return START_STICKY
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        // KeepAliveService is always running and holds a wakelock, so its
+        // onTaskRemoved is the reliable place to tear the whole process down.
+        com.vrca.app.AppShutdown.onTaskSwiped(this)
     }
 
     override fun onDestroy() {

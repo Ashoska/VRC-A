@@ -104,6 +104,7 @@ class UserPreferencesRepository(private val context: Context) {
         val NOTIF_GIFT_SEEN_AT           = longPreferencesKey("notif_gift_seen_at")
         val NOTIF_BACKFILL_INITIALIZED   = booleanPreferencesKey("notif_backfill_initialized")
         val POSTS_EVENTS_BASELINE_V2     = booleanPreferencesKey("posts_events_baseline_v2")
+        val CALENDAR_BASELINE_V3         = booleanPreferencesKey("calendar_baseline_v3")
 
         val TOS_ACCEPTED_VERSION  = intPreferencesKey("tos_accepted_version")
         val TOS_ACCEPTED_AT_EPOCH = longPreferencesKey("tos_accepted_at_epoch")
@@ -334,6 +335,7 @@ class UserPreferencesRepository(private val context: Context) {
     suspend fun saveNotifGiftSeenAt(v: Long)              = context.dataStore.edit { it[Keys.NOTIF_GIFT_SEEN_AT]          = v }
     suspend fun saveNotifBackfillInitialized(v: Boolean)  = context.dataStore.edit { it[Keys.NOTIF_BACKFILL_INITIALIZED]  = v }
     suspend fun savePostsEventsBaselineV2(v: Boolean)    = context.dataStore.edit { it[Keys.POSTS_EVENTS_BASELINE_V2]  = v }
+    suspend fun saveCalendarBaselineV3(v: Boolean)       = context.dataStore.edit { it[Keys.CALENDAR_BASELINE_V3]      = v }
 
     suspend fun saveSetupVrchatDone(v: Boolean) = context.dataStore.edit { it[Keys.SETUP_VRCHAT_DONE] = v }
     suspend fun saveSetupIpDone(v: Boolean)     = context.dataStore.edit { it[Keys.SETUP_IP_DONE]     = v }

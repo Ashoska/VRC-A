@@ -116,10 +116,6 @@ class VrchatPipelineService : Service() {
         // Extras passed when starting
         const val EXTRA_DEVICE_HASH = "device_hash"
 
-        // Set when the app is swiped away; a sticky restart within this window
-        // is treated as the deliberate kill and aborts instead of resurrecting.
-        const val KEY_MANUAL_KILL_AT = "manual_kill_at"
-        const val MANUAL_KILL_WINDOW_MS = 15_000L
 
         /** Send this intent to check if the service is running */
         fun isRunning(context: Context): Boolean {
@@ -252,25 +248,20 @@ class VrchatPipelineService : Service() {
                 // just swiped the app away (manual_kill flag fresh), honour the
                 // kill instead of resurrecting the service — otherwise START_STICKY
                 // brings the whole process straight back and it looks "not killed".
-                if (intent == null) {
-                    val killedAt = applicationContext
-                        .getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
-                        .getLong(KEY_MANUAL_KILL_AT, 0L)
-                    if (System.currentTimeMillis() - killedAt < MANUAL_KILL_WINDOW_MS) {
-                        stopForeground(STOP_FOREGROUND_REMOVE)
-                        stopSelf()
-                        // Android sticky-restarted us into a fresh process that would
-                        // otherwise linger as a cached background process. Kill it
-                        // outright after this method returns START_NOT_STICKY (so it
-                        // won't be recreated again). The brief delay lets the return
-                        // value register before the process dies.
-                        Thread {
-                            try { Thread.sleep(300) } catch (_: Throwable) {}
-                            android.os.Process.killProcess(android.os.Process.myPid())
-                            kotlin.system.exitProcess(0)
-                        }.start()
-                        return START_NOT_STICKY
-                    }
+                if (intent == null && com.vrca.app.AppShutdown.isManualKillFresh(this)) {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                    // Android sticky-restarted us into a fresh process that would
+                    // otherwise linger as a cached background process. Kill it
+                    // outright after this method returns START_NOT_STICKY (so it
+                    // won't be recreated again). The brief delay lets the return
+                    // value register before the process dies.
+                    Thread {
+                        try { Thread.sleep(300) } catch (_: Throwable) {}
+                        android.os.Process.killProcess(android.os.Process.myPid())
+                        kotlin.system.exitProcess(0)
+                    }.start()
+                    return START_NOT_STICKY
                 }
                 // Prefer deviceHash from the intent extra, but fall back to the
                 // SharedPreferences value so a sticky restart with null intent
@@ -301,34 +292,9 @@ class VrchatPipelineService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
-        // Send the final "going offline" write, THEN fully kill the process so
-        // nothing keeps running in the background after the app is swiped away
-        // (users were confused seeing it still alive). The write is awaited with
-        // a short timeout on a background thread so the offline state has a
-        // chance to reach Firestore before we hard-stop everything.
-        // Mark this as a deliberate kill so a START_STICKY restart (null intent)
-        // aborts instead of resurrecting either service.
-        try {
-            applicationContext
-                .getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
-                .edit()
-                .putLong(KEY_MANUAL_KILL_AT, System.currentTimeMillis())
-                .commit()
-        } catch (_: Throwable) {}
-        stopRpcService()
-        Thread {
-            try {
-                val task = buildOfflineWriteTask()
-                if (task != null) {
-                    try {
-                        com.google.android.gms.tasks.Tasks.await(task, 5, TimeUnit.SECONDS)
-                    } catch (_: Throwable) {}
-                }
-            } catch (_: Throwable) {}
-            try { stopSelf() } catch (_: Throwable) {}
-            android.os.Process.killProcess(android.os.Process.myPid())
-            kotlin.system.exitProcess(0)
-        }.start()
+        // Delegate to the shared coordinator so the offline write + full process
+        // kill happens exactly once regardless of which service fires first.
+        com.vrca.app.AppShutdown.onTaskSwiped(this)
     }
 
     private fun isInWarmup(): Boolean =
@@ -346,40 +312,6 @@ class VrchatPipelineService : Service() {
         VrchatPipelineState.presence = null
         VrchatPipelineState.statusPageState = null
         super.onDestroy()
-    }
-
-    private fun stopRpcService() {
-        if (DiscordRpcService.isRunning) {
-            val stopRpc = Intent(this, DiscordRpcService::class.java)
-            stopRpc.action = DiscordRpcService.ACTION_STOP
-            try { startService(stopRpc) } catch (_: Throwable) {}
-        }
-    }
-
-    /** Builds the "going offline" Firestore write task, or null if not possible. */
-    private fun buildOfflineWriteTask(): com.google.android.gms.tasks.Task<Void>? {
-        if (deviceHash.isBlank()) return null
-        return try {
-            val presence = VrchatPipelineState.presence
-            val data = mutableMapOf<String, Any>(
-                "isOnlineInApp" to false,
-                "lastSeenAt" to FieldValue.serverTimestamp(),
-                // Drop any legacy friends data still lingering on the doc.
-                "savedFriendIds" to FieldValue.delete(),
-                "savedFriendNames" to FieldValue.delete()
-            )
-            if (presence != null) {
-                data["vrchatState"] = presence.status
-                data["vrchatLocation"] = presence.location
-                data["vrchatWorldName"] = presence.worldName
-                data["vrchatDisplayName"] = presence.displayName
-            }
-            FirebaseFirestore.getInstance()
-                .collection("users").document(deviceHash)
-                .set(data, SetOptions.merge())
-        } catch (_: Throwable) {
-            null
-        }
     }
 
 
@@ -1850,6 +1782,20 @@ class VrchatPipelineService : Service() {
                 migRepo.savePostsEventsBaselineV2(true)
             }
 
+            // One-time baseline for the corrected calendar endpoint. The old
+            // /groups/{id}/events paths always 404'd, so NO calendar events were
+            // ever seeded. Now that GET /calendar/{groupId} works, the very first
+            // sweep would fire EVERY existing upcoming event at once. Seed ALL
+            // current events (past AND upcoming) without firing so only events
+            // created AFTER this point surface as new.
+            val calendarBaselined = dataStore.data.first()[booleanPreferencesKey("calendar_baseline_v3")] ?: false
+            if (!calendarBaselined) {
+                Log.i(TAG, "Migration: seeding ALL calendar events (endpoint fix baseline)")
+                seedAllCalendarEventsBaseline()
+                val calRepo = com.vrca.data.UserPreferencesRepository(this@VrchatPipelineService)
+                calRepo.saveCalendarBaselineV3(true)
+            }
+
             // V1 notifications: friend requests, invites, votetokick, messages
             val v1 = VrchatAuthManager.fetchPendingNotifications(this@VrchatPipelineService)
             if (v1 != null) {
@@ -2138,6 +2084,53 @@ class VrchatPipelineService : Service() {
             Log.i(TAG, "Posts/events migration: seeded $added entries into seenMap")
         } catch (e: Exception) {
             Log.w(TAG, "seedPostsAndEventsIntoExistingMap failed", e)
+        }
+    }
+
+    /**
+     * Seeds EVERY current calendar event (past and upcoming) into the seen map
+     * AND the event fingerprint set, without firing. One-time baseline for the
+     * corrected calendar endpoint so the first working sweep doesn't flood the
+     * user with every pre-existing upcoming event. After this, only events
+     * created later surface as new.
+     */
+    private suspend fun seedAllCalendarEventsBaseline() {
+        try {
+            val groups = VrchatAuthManager.fetchUserGroups(this@VrchatPipelineService) ?: return
+            val seenKey = androidx.datastore.preferences.core.stringPreferencesKey("notif_group_announcement_seen")
+            val seenRaw = dataStore.data.first()[seenKey] ?: "{}"
+            val seenMap = try { JSONObject(seenRaw) } catch (_: Exception) { JSONObject() }
+            var added = 0
+            val groupCount = minOf(groups.length(), 50)
+            for (i in 0 until groupCount) {
+                val group = groups.optJSONObject(i) ?: continue
+                val groupId = group.optString("groupId", "").ifBlank { group.optString("id", "") }
+                if (groupId.isBlank()) continue
+                try {
+                    val events = VrchatAuthManager.fetchGroupCalendarEvents(this@VrchatPipelineService, groupId, 20)
+                    if (events != null) {
+                        for (j in 0 until events.length()) {
+                            val ev = events.optJSONObject(j) ?: continue
+                            val evId = ev.optString("id", "").ifBlank { findIdWithPrefix(ev, "cal_").orEmpty() }
+                            if (evId.isBlank()) continue
+                            val startsAt = ev.optString("startsAt", "")
+                            val marker = startsAt.ifBlank { ev.optString("createdAt", "").ifBlank { evId } }
+                            val k = "${groupId}_event_$evId"
+                            if (!seenMap.has(k)) { seenMap.put(k, marker); added++ }
+                            addEventFingerprintToSeen(groupId, evId)
+                        }
+                    }
+                    delay(250)
+                } catch (e: Exception) {
+                    Log.w(TAG, "seedAllCalendarEventsBaseline: group $groupId failed", e)
+                }
+            }
+            val repo = com.vrca.data.UserPreferencesRepository(this@VrchatPipelineService)
+            repo.saveNotifGroupAnnouncementSeen(seenMap.toString())
+            persistSeenNotifIds()
+            Log.i(TAG, "Calendar baseline: seeded $added events into seenMap")
+        } catch (e: Exception) {
+            Log.w(TAG, "seedAllCalendarEventsBaseline failed", e)
         }
     }
 

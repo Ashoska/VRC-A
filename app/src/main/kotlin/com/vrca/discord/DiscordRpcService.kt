@@ -116,25 +116,20 @@ class DiscordRpcService : Service() {
             }
         }
         // A null intent is a START_STICKY restart. If the user just swiped the app
-        // away, the pipeline service stamped a manual-kill flag — honour it so this
-        // WebView-backed service doesn't resurrect itself and keep the app alive.
-        if (intent == null) {
-            val killedAt = applicationContext
-                .getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
-                .getLong("manual_kill_at", 0L)
-            if (System.currentTimeMillis() - killedAt < 15_000L) {
-                teardown()
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
-                // Kill the resurrected process so it doesn't linger in the
-                // background; START_NOT_STICKY (returned below) prevents a re-restart.
-                Thread {
-                    try { Thread.sleep(300) } catch (_: Throwable) {}
-                    android.os.Process.killProcess(android.os.Process.myPid())
-                    kotlin.system.exitProcess(0)
-                }.start()
-                return START_NOT_STICKY
-            }
+        // away, honour the deliberate kill so this WebView-backed service doesn't
+        // resurrect itself and keep the app alive.
+        if (intent == null && com.vrca.app.AppShutdown.isManualKillFresh(this)) {
+            teardown()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            // Kill the resurrected process so it doesn't linger in the
+            // background; START_NOT_STICKY (returned below) prevents a re-restart.
+            Thread {
+                try { Thread.sleep(300) } catch (_: Throwable) {}
+                android.os.Process.killProcess(android.os.Process.myPid())
+                kotlin.system.exitProcess(0)
+            }.start()
+            return START_NOT_STICKY
         }
         ensureChannel()
         startForeground(NOTIF_ID, buildNotif("Discord RPC starting..."))
@@ -171,11 +166,11 @@ class DiscordRpcService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         clearActivity()
-        mainHandler.postDelayed({
-            teardown()
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-        }, 1500)
+        teardown()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+        // Coordinate the full process kill (no-op if another service already did).
+        com.vrca.app.AppShutdown.onTaskSwiped(this)
         super.onTaskRemoved(rootIntent)
     }
 

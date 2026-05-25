@@ -38,6 +38,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -560,12 +561,18 @@ private fun InAppAlertCards() {
                     val hiddenCount = groups.size - visible.size
 
                     for (group in visible) {
-                        AlertGroupCard(group = group, onDismiss = {
-                            InAppAlertState.dismiss(ctx, group.groupId)
-                            // Also dismiss the linked Android notification
-                            val nm = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
-                            nm.cancel(group.groupId.hashCode())
-                        })
+                        // Key by group identity so each card's expanded state stays
+                        // with ITS group. Without this, Compose tracks state by list
+                        // position, so a new alert prepended to the list would steal
+                        // the expanded state from the card the user was viewing.
+                        key(group.groupId) {
+                            AlertGroupCard(group = group, onDismiss = {
+                                InAppAlertState.dismiss(ctx, group.groupId)
+                                // Also dismiss the linked Android notification
+                                val nm = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+                                nm.cancel(group.groupId.hashCode())
+                            })
+                        }
                     }
 
                     if (hiddenCount > 0) {
