@@ -482,6 +482,12 @@ class VrcaViewModel(
     )
 
     private suspend fun applyRemoteContentBeforeSync() {
+        // The admin build keeps its chatbox content purely in local DataStore.
+        // It must NOT read its own users/{adminHash} doc back into DataStore:
+        // a stale snapshot (from an earlier sync, including the pre-distinct-hash
+        // era when admin shared the public doc) would overwrite the admin's
+        // fresh local presets on every reopen.
+        if (BuildConfig.IS_ADMIN_BUILD) return
         runCatching {
             val deviceHash = readDeviceHashFromPrefs()
             if (!isValidDeviceHash(deviceHash)) return@runCatching
@@ -546,6 +552,10 @@ class VrcaViewModel(
     }
 
     private suspend fun performSelfSync() {
+        // Admin build never writes its own user doc — content lives in DataStore
+        // only. Writing it would create an orphan doc AND feed the round-trip
+        // (write → snapshot echo → applyRemoteConfig) that wipes local presets.
+        if (BuildConfig.IS_ADMIN_BUILD) return
         if (!initialDataLoaded) return
         runCatching {
             val authUid = ensureAnonAuth() ?: return@runCatching
@@ -797,6 +807,11 @@ class VrcaViewModel(
     }
 
     private fun applyRemoteConfig(snap: com.google.firebase.firestore.DocumentSnapshot) {
+        // Admin build does not apply remote config to itself. It is never the
+        // target of admin edits, and applying a stale own-doc snapshot would
+        // overwrite its local DataStore presets. (Watcher detection is also
+        // meaningless here since the admin is filtered out of its own list.)
+        if (BuildConfig.IS_ADMIN_BUILD) return
         // Watcher detection runs on EVERY snapshot (even the first). Admins
         // refresh `watcherActiveAt` from the admin panel; if recent enough
         // we flip [AdminWatchState.isWatched] to true and the live-sync
