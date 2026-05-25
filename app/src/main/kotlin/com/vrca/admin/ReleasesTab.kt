@@ -161,8 +161,8 @@ internal suspend fun githubCreateRelease(
 }
 
 internal suspend fun githubUploadAsset(
-    owner: String, repo: String, pat: String,
-    releaseId: Long, fileName: String, apkFile: File,
+    uploadUrlTemplate: String, pat: String,
+    fileName: String, apkFile: File,
     onProgress: (Float) -> Unit
 ): String = withContext(Dispatchers.IO) {
     val client = OkHttpClient.Builder()
@@ -174,8 +174,15 @@ internal suspend fun githubUploadAsset(
         .retryOnConnectionFailure(true)
         .build()
 
+    // upload_url comes back from githubCreateRelease as a canonical template,
+    // e.g. https://uploads.github.com/repos/OWNER/REPO/releases/ID/assets{?name,label}
+    // Using it (rather than rebuilding from owner/repo) means a renamed repo's
+    // redirect was already resolved during create — so the binary POST goes
+    // straight to the canonical host with no redirect that would close the
+    // upload sink mid-stream ("IllegalStateException: closed").
     val encodedName = java.net.URLEncoder.encode(fileName, "UTF-8")
-    val url = "https://uploads.github.com/repos/$owner/$repo/releases/$releaseId/assets?name=$encodedName"
+    val base = uploadUrlTemplate.substringBefore("{")
+    val url = if (base.contains("?")) "$base&name=$encodedName" else "$base?name=$encodedName"
     var lastError: Exception? = null
 
     for (attempt in 1..5) {
@@ -416,10 +423,8 @@ internal fun ReleasesTab(
                 // Step 2: upload APK asset with progress
                 uploadPhase = "Uploading APK..."
                 val downloadUrl = githubUploadAsset(
-                    owner      = githubOwner,
-                    repo       = githubRepo,
+                    uploadUrlTemplate = release.uploadUrl,
                     pat        = githubPat,
-                    releaseId  = release.releaseId,
                     fileName   = fileName,
                     apkFile    = apkFile,
                     onProgress = { uploadProgress = it }
