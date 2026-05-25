@@ -103,7 +103,11 @@ class VrcaViewModel(
         // No constant background heartbeat: app-open and app-close writes
         // (the latter from VrchatPipelineService.onTaskRemoved) maintain
         // online/offline state with two writes per session.
-        private const val LIVE_SYNC_INTERVAL_MS = 5_000L
+        private const val LIVE_SYNC_INTERVAL_MS = 10_000L
+        // When an admin is browsing (dashboard/users list) but not actively
+        // watching this user's detail, push volatile preview/nowPlaying at a
+        // slower cadence so the directory shows current output cheaply.
+        private const val BROWSE_VOLATILE_SYNC_INTERVAL_MS = 30_000L
 
         // Moderation attach retry
         private const val MOD_ATTACH_RETRY_MS = 1_250L
@@ -428,6 +432,32 @@ class VrcaViewModel(
             db.collection(COL_USERS).document(deviceHash)
                 .set(buildLivePayload(), SetOptions.merge())
                 .await()
+        }
+    }
+
+    /**
+     * Browse-gated volatile loop: when an admin is on the dashboard/users list
+     * (AdminBrowsingState.isBrowsing) but NOT actively watching this user, push
+     * preview/nowPlaying every 30s so the directory shows current output without
+     * the user spamming writes. Skips entirely when watched (the faster
+     * live-sync loop covers it) and when no admin is present (no writes at all).
+     */
+    private var browseVolatileJob: Job? = null
+
+    private fun startBrowseVolatileSyncWatcher() {
+        if (BuildConfig.IS_ADMIN_BUILD) return
+        if (browseVolatileJob != null) return
+        browseVolatileJob = viewModelScope.launch {
+            com.vrca.sync.AdminBrowsingState.isBrowsing.collectLatest { browsing ->
+                if (browsing) {
+                    while (true) {
+                        if (!com.vrca.sync.AdminWatchState.isWatched.value) {
+                            performLiveSync()
+                        }
+                        delay(BROWSE_VOLATILE_SYNC_INTERVAL_MS)
+                    }
+                }
+            }
         }
     }
 
@@ -1296,6 +1326,8 @@ class VrcaViewModel(
 
         // Live-mode loop: idle until an admin starts watching.
         startLiveSyncWatcher()
+        // Browse-mode volatile loop: idle until an admin browses the directory.
+        startBrowseVolatileSyncWatcher()
 
         // Block self-sync until DataStore has provided initial values for all
         // user-content fields AND those values have been assigned into ViewModel
@@ -1465,7 +1497,13 @@ class VrcaViewModel(
 
                 nowPlayingIsPlaying = computeDisplayedPlaying()
                 rebuildCombinedPreviewOnly()
-                startSelfSyncLoopIfNeeded()
+                // NowPlaying changes are volatile and fire constantly during
+                // playback. They are NOT written to Firestore here — doing so
+                // produced a write storm even when no admin was present. The
+                // watcher-gated live-sync loop (when watched) and the
+                // browse-gated volatile loop (when an admin is on the
+                // dashboard/users tab) handle pushing preview/nowPlaying to
+                // Firestore. With no admin present, nothing is written.
             }
         }
     }

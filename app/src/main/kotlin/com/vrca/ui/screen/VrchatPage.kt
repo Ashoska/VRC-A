@@ -8,12 +8,14 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -36,6 +38,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -45,15 +48,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -555,12 +562,18 @@ private fun InAppAlertCards() {
                     val hiddenCount = groups.size - visible.size
 
                     for (group in visible) {
-                        AlertGroupCard(group = group, onDismiss = {
-                            InAppAlertState.dismiss(ctx, group.groupId)
-                            // Also dismiss the linked Android notification
-                            val nm = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
-                            nm.cancel(group.groupId.hashCode())
-                        })
+                        // Key by group identity so each card's expanded state stays
+                        // with ITS group. Without this, Compose tracks state by list
+                        // position, so a new alert prepended to the list would steal
+                        // the expanded state from the card the user was viewing.
+                        key(group.groupId) {
+                            AlertGroupCard(group = group, onDismiss = {
+                                InAppAlertState.dismiss(ctx, group.groupId)
+                                // Also dismiss the linked Android notification
+                                val nm = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+                                nm.cancel(group.groupId.hashCode())
+                            })
+                        }
                     }
 
                     if (hiddenCount > 0) {
@@ -594,48 +607,129 @@ private fun formatRelativeTime(timestampMs: Long): String {
 }
 
 private fun wordDiff(before: String, after: String): Pair<androidx.compose.ui.text.AnnotatedString, androidx.compose.ui.text.AnnotatedString> {
-    // Tokenize keeping whitespace runs (including newlines) as their own tokens
-    // so multi-line bios diff word-by-word AND preserve their original layout.
-    // Splitting on " " alone left newlines glued to adjacent words ("bio\n\nMy"),
-    // which broke alignment and falsely flagged unchanged words as changed.
-    val tokenRegex = Regex("\\s+|\\S+")
-    val bWords = tokenRegex.findAll(before).map { it.value }.toList()
-    val aWords = tokenRegex.findAll(after).map { it.value }.toList()
-
-    // LCS (Longest Common Subsequence) to find which tokens are unchanged
-    val m = bWords.size
-    val n = aWords.size
-    val dp = Array(m + 1) { IntArray(n + 1) }
-    for (i in 1..m) for (j in 1..n) {
-        dp[i][j] = if (bWords[i - 1] == aWords[j - 1]) dp[i - 1][j - 1] + 1
-        else maxOf(dp[i - 1][j], dp[i][j - 1])
-    }
-    val lcsSet = mutableSetOf<Int>()
-    val lcsSetAfter = mutableSetOf<Int>()
-    var i = m; var j = n
-    while (i > 0 && j > 0) {
-        when {
-            bWords[i - 1] == aWords[j - 1] -> { lcsSet.add(i - 1); lcsSetAfter.add(j - 1); i--; j-- }
-            dp[i - 1][j] > dp[i][j - 1] -> i--
-            else -> j--
-        }
-    }
-
     val removedColor = Color(0xFFEF5350)
     val addedColor = Color(0xFF4CAF50)
     val neutralColor = Color(0xFFB0B0B0)
+    val movedColor = Color(0xFFB388FF) // purple — line was moved, not added/removed
+
+    // Diff at the LINE level, not the word level. Bios are usually multi-line
+    // lists; word-level LCS matched common words ("the", "my", "get") across
+    // DIFFERENT lines and painted the result an inconsistent red/green/purple
+    // mess. Whole lines are far more unique, so a line-level diff is stable and
+    // readable: each line is unchanged, removed, added, or moved.
+    fun lcs(b: List<String>, a: List<String>): Pair<HashSet<Int>, HashSet<Int>> {
+        val m = b.size; val n = a.size
+        val dp = Array(m + 1) { IntArray(n + 1) }
+        for (i in 1..m) for (j in 1..n) {
+            dp[i][j] = if (b[i - 1] == a[j - 1]) dp[i - 1][j - 1] + 1
+            else maxOf(dp[i - 1][j], dp[i][j - 1])
+        }
+        val sb = HashSet<Int>(); val sa = HashSet<Int>()
+        var i = m; var j = n
+        while (i > 0 && j > 0) {
+            when {
+                b[i - 1] == a[j - 1] -> { sb.add(i - 1); sa.add(j - 1); i--; j-- }
+                dp[i - 1][j] >= dp[i][j - 1] -> i--
+                else -> j--
+            }
+        }
+        return sb to sa
+    }
+
+    // Word-level diff for a SINGLE edited line: short, single-line text doesn't
+    // suffer the cross-line scramble, so a plain red/green token diff is clean.
+    fun lineWordDiff(b: String, a: String): Pair<androidx.compose.ui.text.AnnotatedString, androidx.compose.ui.text.AnnotatedString> {
+        val tk = Regex("\\s+|\\S+")
+        val bw = tk.findAll(b).map { it.value }.toList()
+        val aw = tk.findAll(a).map { it.value }.toList()
+        val (cb, ca) = lcs(bw, aw)
+        val bs = buildAnnotatedString {
+            for ((idx, w) in bw.withIndex()) {
+                val c = if (w.isBlank() || idx in cb) neutralColor else removedColor
+                withStyle(SpanStyle(color = c)) { append(w) }
+            }
+        }
+        val asr = buildAnnotatedString {
+            for ((idx, w) in aw.withIndex()) {
+                val c = if (w.isBlank() || idx in ca) neutralColor else addedColor
+                withStyle(SpanStyle(color = c)) { append(w) }
+            }
+        }
+        return bs to asr
+    }
+
+    val bLines = before.split("\n")
+    val aLines = after.split("\n")
+    val (lcsB, lcsA) = lcs(bLines, aLines)
+
+    val removedLineIdx = bLines.indices.filter { it !in lcsB }
+    val addedLineIdx = aLines.indices.filter { it !in lcsA }
+
+    // Move detection on whole lines: a removed line whose exact trimmed content
+    // reappears as an added line was moved (purple), not deleted+added. Whole-line
+    // matching is unambiguous, so no blocklist is needed.
+    val movedB = HashSet<Int>(); val movedA = HashSet<Int>()
+    val addedByContent = HashMap<String, ArrayDeque<Int>>()
+    for (k in addedLineIdx) {
+        val key = aLines[k].trim()
+        if (key.isNotEmpty()) addedByContent.getOrPut(key) { ArrayDeque() }.add(k)
+    }
+    for (k in removedLineIdx) {
+        val key = bLines[k].trim()
+        if (key.isEmpty()) continue
+        val dq = addedByContent[key] ?: continue
+        if (dq.isNotEmpty()) { movedA.add(dq.removeFirst()); movedB.add(k) }
+    }
+
+    // Pair each remaining removed line with the most similar remaining added line
+    // (token Jaccard > 0.3) so a single edited line shows word-level changes
+    // instead of an entire red line plus an entire green line.
+    fun tokens(s: String) = s.lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }.toSet()
+    fun sim(b: String, a: String): Double {
+        val tb = tokens(b); val ta = tokens(a)
+        val union = tb.union(ta).size
+        return if (union == 0) 0.0 else tb.intersect(ta).size.toDouble() / union
+    }
+    val realRemoved = removedLineIdx.filter { it !in movedB }
+    val realAdded = addedLineIdx.filter { it !in movedA }
+    val pairBtoA = HashMap<Int, Int>()
+    val usedA = HashSet<Int>()
+    for (rb in realRemoved) {
+        var best = -1; var bestScore = 0.3
+        for (ra in realAdded) {
+            if (ra in usedA) continue
+            val s = sim(bLines[rb], aLines[ra])
+            if (s > bestScore) { bestScore = s; best = ra }
+        }
+        if (best >= 0) { pairBtoA[rb] = best; usedA.add(best) }
+    }
+    val pairAtoB = HashMap<Int, Int>()
+    val pairDiff = HashMap<Int, Pair<androidx.compose.ui.text.AnnotatedString, androidx.compose.ui.text.AnnotatedString>>()
+    for ((b, a) in pairBtoA) {
+        pairAtoB[a] = b
+        pairDiff[b] = lineWordDiff(bLines[b], aLines[a])
+    }
 
     val beforeAnnotated = buildAnnotatedString {
-        for ((idx, w) in bWords.withIndex()) {
-            // Whitespace tokens always render neutral so only real words get colored.
-            val color = if (w.isBlank() || idx in lcsSet) neutralColor else removedColor
-            withStyle(SpanStyle(color = color)) { append(w) }
+        for ((idx, line) in bLines.withIndex()) {
+            if (idx > 0) withStyle(SpanStyle(color = neutralColor)) { append("\n") }
+            when {
+                idx in lcsB -> withStyle(SpanStyle(color = neutralColor)) { append(line) }
+                idx in movedB -> withStyle(SpanStyle(color = movedColor)) { append(line) }
+                idx in pairDiff -> append(pairDiff[idx]!!.first)
+                else -> withStyle(SpanStyle(color = removedColor)) { append(line) }
+            }
         }
     }
     val afterAnnotated = buildAnnotatedString {
-        for ((idx, w) in aWords.withIndex()) {
-            val color = if (w.isBlank() || idx in lcsSetAfter) neutralColor else addedColor
-            withStyle(SpanStyle(color = color)) { append(w) }
+        for ((idx, line) in aLines.withIndex()) {
+            if (idx > 0) withStyle(SpanStyle(color = neutralColor)) { append("\n") }
+            when {
+                idx in lcsA -> withStyle(SpanStyle(color = neutralColor)) { append(line) }
+                idx in movedA -> withStyle(SpanStyle(color = movedColor)) { append(line) }
+                pairAtoB.containsKey(idx) -> append(pairDiff[pairAtoB.getValue(idx)]!!.second)
+                else -> withStyle(SpanStyle(color = addedColor)) { append(line) }
+            }
         }
     }
     return beforeAnnotated to afterAnnotated
@@ -648,43 +742,95 @@ private fun AlertGroupCard(group: InAppAlertGroup, onDismiss: () -> Unit) {
     val eventCount = group.events.size
     val displayTitle = if (eventCount > 1) "${group.title} ($eventCount)" else group.title
 
-    Card(
-        colors = CardDefaults.cardColors(
+    val latest = group.events.lastOrNull()
+    val previewText = latest?.body?.takeIf { it.isNotBlank() }
+        ?: latest?.eventTitle?.takeIf { it.isNotBlank() }
+        ?: ""
+
+    ElevatedCard(
+        colors = CardDefaults.elevatedCardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant
         ),
-        modifier = Modifier.clickable { expanded = !expanded }
+        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp)
     ) {
-        Column(Modifier.padding(12.dp)) {
-            Text(
-                displayTitle,
-                style = MaterialTheme.typography.titleSmall,
-                modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(Modifier.height(4.dp))
+        Column(Modifier.padding(start = 14.dp, top = 10.dp, end = 8.dp, bottom = 12.dp)) {
+            // Header: accent bar + title/preview (tap to expand) on the left,
+            // a chevron expand affordance, then a clearly-separated dismiss button.
             Row(
                 Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                OutlinedButton(
-                    onClick = { expanded = !expanded },
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                    contentPadding = ButtonDefaults.TextButtonContentPadding,
-                    modifier = Modifier.height(32.dp)
+                Box(
+                    Modifier
+                        .padding(end = 10.dp, top = 2.dp)
+                        .size(width = 3.dp, height = 30.dp)
+                        .background(
+                            MaterialTheme.colorScheme.primary,
+                            shape = MaterialTheme.shapes.small
+                        )
+                )
+                // Title + chevron together form the expand tap target.
+                Row(
+                    Modifier
+                        .weight(1f)
+                        .clickable { expanded = !expanded },
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        if (expanded) "Less" else "More",
-                        style = MaterialTheme.typography.labelSmall
-                    )
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            displayTitle,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        if (!expanded && previewText.isNotBlank()) {
+                            Text(
+                                previewText,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        latest?.let {
+                            Text(
+                                formatRelativeTime(it.timestampMs),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.outline
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+                        modifier = Modifier.size(34.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                                contentDescription = if (expanded) "Collapse" else "Expand",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                    }
                 }
+                // Clear gap so users don't hit dismiss when reaching for expand.
                 Spacer(Modifier.width(8.dp))
-                OutlinedButton(
+                Surface(
                     onClick = onDismiss,
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                    contentPadding = ButtonDefaults.TextButtonContentPadding,
-                    modifier = Modifier.height(32.dp)
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.error.copy(alpha = 0.14f),
+                    modifier = Modifier.size(36.dp)
                 ) {
-                    Text("Dismiss", style = MaterialTheme.typography.labelSmall)
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            Icons.Filled.Close,
+                            contentDescription = "Dismiss",
+                            modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                    }
                 }
             }
             AnimatedVisibility(
@@ -694,16 +840,16 @@ private fun AlertGroupCard(group: InAppAlertGroup, onDismiss: () -> Unit) {
             ) {
                 Column(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.padding(top = 8.dp)
+                    modifier = Modifier.padding(top = 10.dp, end = 8.dp)
                 ) {
                     for ((idx, event) in group.events.withIndex()) {
                         if (event.beforeText != null && event.afterText != null) {
                             Surface(
                                 color = MaterialTheme.colorScheme.surface,
                                 shape = MaterialTheme.shapes.small,
-                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                                modifier = Modifier.fillMaxWidth()
                             ) {
-                                Column(Modifier.padding(10.dp)) {
+                                Column(Modifier.padding(12.dp)) {
                                     if (eventCount > 1) {
                                         Text(
                                             "Change ${idx + 1}",
@@ -716,13 +862,27 @@ private fun AlertGroupCard(group: InAppAlertGroup, onDismiss: () -> Unit) {
                                         wordDiff(event.beforeText, event.afterText)
                                     }
                                     Text(
+                                        "BEFORE",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFFEF5350)
+                                    )
+                                    Spacer(Modifier.height(3.dp))
+                                    Text(
                                         beforeDiff,
                                         style = MaterialTheme.typography.bodySmall
                                     )
                                     Divider(
-                                        Modifier.padding(vertical = 6.dp),
+                                        Modifier.padding(vertical = 8.dp),
                                         color = MaterialTheme.colorScheme.outlineVariant
                                     )
+                                    Text(
+                                        "AFTER",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF4CAF50)
+                                    )
+                                    Spacer(Modifier.height(3.dp))
                                     Text(
                                         afterDiff,
                                         style = MaterialTheme.typography.bodySmall
@@ -733,51 +893,78 @@ private fun AlertGroupCard(group: InAppAlertGroup, onDismiss: () -> Unit) {
                             Surface(
                                 color = MaterialTheme.colorScheme.surface,
                                 shape = MaterialTheme.shapes.small,
-                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                                modifier = Modifier.fillMaxWidth()
                             ) {
-                                Column(Modifier.padding(10.dp)) {
+                                Column(Modifier.padding(12.dp)) {
                                     if (!event.eventTitle.isNullOrBlank()) {
                                         Text(
                                             event.eventTitle,
                                             style = MaterialTheme.typography.labelMedium,
                                             color = MaterialTheme.colorScheme.onSurface
                                         )
-                                        Spacer(Modifier.height(2.dp))
+                                        Spacer(Modifier.height(3.dp))
                                     }
                                     Text(
                                         event.body,
-                                        style = MaterialTheme.typography.bodySmall,
+                                        style = MaterialTheme.typography.bodyMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
-                                    Spacer(Modifier.height(4.dp))
+                                    Spacer(Modifier.height(6.dp))
                                     Text(
                                         formatRelativeTime(event.timestampMs),
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.outline
                                     )
+                                    // Per-event open link so individual announcements
+                                    // / events from the same group can be opened
+                                    // separately, even when fused into one card.
+                                    if (event.url != null) {
+                                        Spacer(Modifier.height(8.dp))
+                                        OutlinedButton(
+                                            onClick = {
+                                                ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(event.url)))
+                                            },
+                                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary),
+                                            modifier = Modifier.fillMaxWidth().height(38.dp)
+                                        ) {
+                                            Icon(
+                                                Icons.Filled.OpenInNew,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(15.dp),
+                                                tint = MaterialTheme.colorScheme.primary
+                                            )
+                                            Spacer(Modifier.width(6.dp))
+                                            Text(
+                                                "Open in VRChat",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                    if (group.url != null) {
+                    // Group-level open button only when no event carries its own
+                    // URL (e.g. single-event alerts or before/after change diffs).
+                    if (group.url != null && group.events.none { it.url != null }) {
                         OutlinedButton(
                             onClick = {
                                 ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(group.url)))
                             },
                             border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary),
-                            contentPadding = ButtonDefaults.TextButtonContentPadding,
-                            modifier = Modifier.height(32.dp)
+                            modifier = Modifier.fillMaxWidth().height(40.dp)
                         ) {
                             Icon(
                                 Icons.Filled.OpenInNew,
                                 contentDescription = null,
-                                modifier = Modifier.size(14.dp),
+                                modifier = Modifier.size(16.dp),
                                 tint = MaterialTheme.colorScheme.primary
                             )
-                            Spacer(Modifier.width(4.dp))
+                            Spacer(Modifier.width(6.dp))
                             Text(
                                 "Open in VRChat",
-                                style = MaterialTheme.typography.labelSmall,
+                                style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.primary
                             )
                         }

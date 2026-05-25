@@ -78,6 +78,9 @@ class VrchatPipelineService : Service() {
         private const val TAG = "VrcPipeline"
         private const val PIPELINE_URL = "wss://pipeline.vrchat.cloud"
         private const val USER_AGENT = "VRC-A-Companion/1.0 (Android; companion app)"
+        // Slow always-on lastSeenAt heartbeat interval (5 min) — ungated by
+        // admin presence so "last on the app" stays accurate for admins.
+        private const val LASTSEEN_HEARTBEAT_MS = 5 * 60 * 1000L
 
         private const val NOTIF_CHANNEL_PERSISTENT = "vrca_pipeline"
         // Legacy single-channel ID — kept only so we can delete it on upgrade.
@@ -112,6 +115,7 @@ class VrchatPipelineService : Service() {
 
         // Extras passed when starting
         const val EXTRA_DEVICE_HASH = "device_hash"
+
 
         /** Send this intent to check if the service is running */
         fun isRunning(context: Context): Boolean {
@@ -240,6 +244,25 @@ class VrchatPipelineService : Service() {
                 return START_NOT_STICKY
             }
             else -> {
+                // A null intent means Android is sticky-restarting us. If the user
+                // just swiped the app away (manual_kill flag fresh), honour the
+                // kill instead of resurrecting the service — otherwise START_STICKY
+                // brings the whole process straight back and it looks "not killed".
+                if (intent == null && com.vrca.app.AppShutdown.isManualKillFresh(this)) {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                    // Android sticky-restarted us into a fresh process that would
+                    // otherwise linger as a cached background process. Kill it
+                    // outright after this method returns START_NOT_STICKY (so it
+                    // won't be recreated again). The brief delay lets the return
+                    // value register before the process dies.
+                    Thread {
+                        try { Thread.sleep(300) } catch (_: Throwable) {}
+                        android.os.Process.killProcess(android.os.Process.myPid())
+                        kotlin.system.exitProcess(0)
+                    }.start()
+                    return START_NOT_STICKY
+                }
                 // Prefer deviceHash from the intent extra, but fall back to the
                 // SharedPreferences value so a sticky restart with null intent
                 // (Android killed the service due to memory pressure) still
@@ -268,13 +291,10 @@ class VrchatPipelineService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        writeOfflineAndStopRpc()
-        stopSelf()
         super.onTaskRemoved(rootIntent)
-        Thread {
-            Thread.sleep(10_000)
-            android.os.Process.killProcess(android.os.Process.myPid())
-        }.start()
+        // Delegate to the shared coordinator so the offline write + full process
+        // kill happens exactly once regardless of which service fires first.
+        com.vrca.app.AppShutdown.onTaskSwiped(this)
     }
 
     private fun isInWarmup(): Boolean =
@@ -294,34 +314,6 @@ class VrchatPipelineService : Service() {
         super.onDestroy()
     }
 
-    private fun writeOfflineAndStopRpc() {
-        if (DiscordRpcService.isRunning) {
-            val stopRpc = Intent(this, DiscordRpcService::class.java)
-            stopRpc.action = DiscordRpcService.ACTION_STOP
-            try { startService(stopRpc) } catch (_: Throwable) {}
-        }
-        if (deviceHash.isNotBlank()) {
-            try {
-                val presence = VrchatPipelineState.presence
-                val data = mutableMapOf<String, Any>(
-                    "isOnlineInApp" to false,
-                    "lastSeenAt" to FieldValue.serverTimestamp(),
-                    // Drop any legacy friends data still lingering on the doc.
-                    "savedFriendIds" to FieldValue.delete(),
-                    "savedFriendNames" to FieldValue.delete()
-                )
-                if (presence != null) {
-                    data["vrchatState"] = presence.status
-                    data["vrchatLocation"] = presence.location
-                    data["vrchatWorldName"] = presence.worldName
-                    data["vrchatDisplayName"] = presence.displayName
-                }
-                FirebaseFirestore.getInstance()
-                    .collection("users").document(deviceHash)
-                    .set(data, SetOptions.merge())
-            } catch (_: Throwable) {}
-        }
-    }
 
     // ------------------------------------------------------------------
     // Pipeline management
@@ -379,23 +371,32 @@ class VrchatPipelineService : Service() {
                                 alertGroupKey = nameGroupKey
                             )
                         }
-                        // Bio change detection — always fires as grouped in-app alert
+                        // Bio change detection — fires on edit, clear (→empty),
+                        // or add (empty→). Both sides come from full fetches so
+                        // the bio field is reliable; only empty→empty is ignored.
                         if (newEntry.bio != old.bio &&
-                            old.bio.isNotBlank() && newEntry.bio.isNotBlank()) {
+                            (newEntry.bio.isNotBlank() || old.bio.isNotBlank())) {
                             val bioGroupKey = "bio_$userId"
-                            val bioAlertBody = "Before: ${old.bio}\nAfter: ${newEntry.bio}"
+                            val bioTitle = when {
+                                newEntry.bio.isBlank() -> "${newEntry.displayName} cleared their bio"
+                                old.bio.isBlank() -> "${newEntry.displayName} added a bio"
+                                else -> "${newEntry.displayName} updated bio"
+                            }
+                            val beforeShown = old.bio.ifBlank { "(empty)" }
+                            val afterShown = newEntry.bio.ifBlank { "(empty)" }
+                            val bioAlertBody = "Before: $beforeShown\nAfter: $afterShown"
                             fireEventNotification(
                                 id = bioGroupKey.hashCode(),
-                                title = "${newEntry.displayName} updated bio",
-                                text = "${newEntry.displayName} updated their bio",
+                                title = bioTitle,
+                                text = bioTitle,
                                 profileUrl = "https://vrchat.com/home/user/$userId",
                                 prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_BIO,
                                 channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
                                 groupKey = GROUP_KEY_FRIENDS,
                                 bigText = bioAlertBody,
                                 alertBody = bioAlertBody,
-                                alertBeforeText = old.bio,
-                                alertAfterText = newEntry.bio,
+                                alertBeforeText = beforeShown,
+                                alertAfterText = afterShown,
                                 alertGroupKey = bioGroupKey
                             )
                         }
@@ -475,13 +476,29 @@ class VrchatPipelineService : Service() {
                     }
                 }
             }
+            // Slow always-on lastSeenAt heartbeat (5 min). Runs regardless of
+            // admin presence so admins can see accurate "last on the app"
+            // times even after being offline themselves — without this, a user
+            // who keeps the app open with no edits and no admin browsing would
+            // show a "last seen" stuck at app-open time. One field + timestamp
+            // every 5 min is ~288 cheap writes/user/day.
+            launch {
+                while (true) {
+                    delay(LASTSEEN_HEARTBEAT_MS)
+                    try {
+                        writeHeartbeat()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Slow lastSeen heartbeat failed", e)
+                    }
+                }
+            }
             // Fast poll only while an admin is actively watching this user.
             // collectLatest cancels the inner loop the moment the watch flag
             // flips back to false, so Firestore traffic stops instantly.
             AdminWatchState.isWatched.collectLatest { watched ->
                 if (watched) {
                     while (true) {
-                        delay(5_000)
+                        delay(10_000)
                         try {
                             syncPresenceToFirestore()
                         } catch (e: Exception) {
@@ -970,7 +987,8 @@ class VrchatPipelineService : Service() {
                     content.optString("groupId", "").ifBlank {
                         content.optJSONObject("data")?.optString("groupId", "").orEmpty().ifBlank {
                             detailsObj?.optString("groupId", "").orEmpty().ifBlank {
-                                if (senderUserId.startsWith("grp_")) senderUserId else ""
+                                if (senderUserId.startsWith("grp_")) senderUserId
+                                else findIdWithPrefix(content, "grp_").orEmpty()
                             }
                         }
                     }
@@ -979,7 +997,7 @@ class VrchatPipelineService : Service() {
                     content.optJSONObject("data")?.optString("eventId", "").orEmpty().ifBlank {
                         detailsObj?.optString("eventId", "").orEmpty().ifBlank {
                             content.optString("id", "").let { id ->
-                                if (id.startsWith("cal_")) id else ""
+                                if (id.startsWith("cal_")) id else findIdWithPrefix(content, "cal_").orEmpty()
                             }
                         }
                     }
@@ -994,7 +1012,10 @@ class VrchatPipelineService : Service() {
                 val v2CreatedMs = parseVrcTimestampMs(content.optString("created_at", ""))
                 when {
                     v2Type.contains("announcement", true) || v2Type.contains("post", true) -> {
-                        val displayGroupName = resolveGroupName(groupId, senderName)
+                        if (groupId.isNotBlank() && isContentFingerprintSeen(groupId, v2Title, message)) {
+                            Log.d(TAG, "WS announcement skipped (already fired): group=$groupId title=$v2Title")
+                        } else {
+                        val displayGroupName = resolveGroupNameAsync(groupId, senderName)
                         val groupKey2 = when {
                             groupId.isNotBlank() -> "announcement_$groupId"
                             displayGroupName != "a group" -> "announcement_name_$displayGroupName"
@@ -1017,9 +1038,14 @@ class VrchatPipelineService : Service() {
                             alertEventTitle = cleanName(v2Title).ifBlank { null },
                             eventTimestampMs = v2CreatedMs.takeIf { it > 0 }
                         )
+                        if (groupId.isNotBlank()) addContentFingerprintToSeen(groupId, v2Title, message)
+                        }
                     }
                     v2Type.contains("event", true) || v2Type.contains("calendar", true) -> {
-                        val displayGroupName = resolveGroupName(groupId, senderName)
+                        if (groupId.isNotBlank() && eventId.isNotBlank() && isEventFingerprintSeen(groupId, eventId)) {
+                            Log.d(TAG, "WS event skipped (already fired): group=$groupId event=$eventId")
+                        } else {
+                        val displayGroupName = resolveGroupNameAsync(groupId, senderName)
                         val groupKey2 = when {
                             groupId.isNotBlank() -> "event_$groupId"
                             displayGroupName != "a group" -> "event_name_$displayGroupName"
@@ -1045,6 +1071,8 @@ class VrchatPipelineService : Service() {
                             alertEventTitle = cleanName(v2Title).ifBlank { null },
                             eventTimestampMs = v2CreatedMs.takeIf { it > 0 }
                         )
+                        if (groupId.isNotBlank()) addEventFingerprintToSeen(groupId, eventId)
+                        }
                     }
                     v2Type.contains("invite", true) -> {
                         fireEventNotification(
@@ -1113,6 +1141,27 @@ class VrchatPipelineService : Service() {
                             groupKey = GROUP_KEY_GROUPS,
                             alertBody = if (fullBody != null && fullBody.length > 100) fullBody else null
                         )
+                    }
+                    else -> {
+                        // Unknown notification-v2 type — don't silently drop it.
+                        // Log the exact type so we can add a dedicated branch, and
+                        // fire it through the group channel so the user still sees
+                        // it. This is the catch-all that fixes events/announcements
+                        // whose type string didn't match the branches above.
+                        Log.i(TAG, "notification-v2 unmatched type='$v2Type' title='$v2Title' " +
+                            "groupId=$groupId payload=${content.toString().take(400)}")
+                        if (v2Title.isNotBlank() || message.isNotBlank()) {
+                            fireEventNotification(
+                                id = baseId.hashCode(),
+                                title = v2Title.ifBlank { "VRChat notification" },
+                                text = message.take(140).ifBlank { v2Title },
+                                profileUrl = if (groupId.isNotBlank()) groupUrl else "https://vrchat.com/home/notifications",
+                                prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT,
+                                channelId = NOTIF_CHANNEL_GROUPS,
+                                groupKey = GROUP_KEY_GROUPS,
+                                dedupId = notifId.ifBlank { null }
+                            )
+                        }
                     }
                 }
             }
@@ -1208,7 +1257,11 @@ class VrchatPipelineService : Service() {
         val newDisplayName = user.optString("displayName", previous.displayName)
         val newStatus = user.optString("status", previous.status)
         val newAvatar = user.optString("currentAvatarThumbnailImageUrl", previous.avatarThumb)
-        val newBio = user.optString("bio", previous.bio)
+        // Only treat bio as changed when the payload explicitly carries the
+        // field. Partial friend-update payloads (location/status only) omit
+        // bio entirely — defaulting to previous.bio keeps those from firing.
+        val bioPresent = user.has("bio")
+        val newBio = if (bioPresent) user.optString("bio", "") else previous.bio
         val newRank = extractTrustRank(user).ifBlank { previous.trustRank }
         val newLocation = user.optString("location", previous.location)
 
@@ -1267,22 +1320,34 @@ class VrchatPipelineService : Service() {
             }
         }
 
-        if (newBio.isNotBlank() && newBio != previous.bio && previous.bio.isNotBlank()) {
+        // Fire on any real bio change the payload reported: edit, clear
+        // (text → empty), or add (empty → text). Requires the bio field to be
+        // present so partial payloads don't false-fire, and requires at least
+        // one side non-blank so empty → empty is ignored.
+        if (bioPresent && newBio != previous.bio &&
+            (newBio.isNotBlank() || previous.bio.isNotBlank())) {
             val bioGroupKey = "bio_$userId"
-            val bioAlertBody = "Before: ${previous.bio}\nAfter: $newBio"
+            val bioTitle = when {
+                newBio.isBlank() -> "$newDisplayName cleared their bio"
+                previous.bio.isBlank() -> "$newDisplayName added a bio"
+                else -> "$newDisplayName updated bio"
+            }
+            val beforeShown = previous.bio.ifBlank { "(empty)" }
+            val afterShown = newBio.ifBlank { "(empty)" }
+            val bioAlertBody = "Before: $beforeShown\nAfter: $afterShown"
             // Stable Android notification ID — updates in place without re-alerting
             fireEventNotification(
                 id = bioGroupKey.hashCode(),
-                title = "$newDisplayName updated bio",
-                text = "$newDisplayName updated their bio",
+                title = bioTitle,
+                text = bioTitle,
                 profileUrl = "https://vrchat.com/home/user/$userId",
                 prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_BIO,
                 channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
                 groupKey = GROUP_KEY_FRIENDS,
                 bigText = bioAlertBody,
                 alertBody = bioAlertBody,
-                alertBeforeText = previous.bio,
-                alertAfterText = newBio,
+                alertBeforeText = beforeShown,
+                alertAfterText = afterShown,
                 alertGroupKey = bioGroupKey
             )
         }
@@ -1441,6 +1506,45 @@ class VrchatPipelineService : Service() {
         } catch (_: Exception) { 0L }
     }
 
+    // Recursively scans a JSON object/array for the first string value (or
+    // string-key) that starts with the given prefix (e.g. "cal_", "grp_").
+    // VRChat's notification-v2 payloads bury the calendar event id and group
+    // id in inconsistent places (top-level, `data`, `details`, `link`), so a
+    // prefix scan is far more reliable than guessing exact field names.
+    private fun findIdWithPrefix(node: Any?, prefix: String, depth: Int = 0): String? {
+        if (depth > 6 || node == null) return null
+        when (node) {
+            is JSONObject -> {
+                val keys = node.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    val v = node.opt(k)
+                    if (v is String && v.startsWith(prefix)) return v
+                    findIdWithPrefix(v, prefix, depth + 1)?.let { return it }
+                }
+            }
+            is org.json.JSONArray -> {
+                for (i in 0 until node.length()) {
+                    findIdWithPrefix(node.opt(i), prefix, depth + 1)?.let { return it }
+                }
+            }
+            is String -> {
+                // A nested JSON string (e.g. a `details` blob) — parse and recurse.
+                val t = node.trim()
+                if (t.startsWith(prefix)) return t
+                if (t.startsWith("{") || t.startsWith("[")) {
+                    val parsed = try {
+                        if (t.startsWith("{")) JSONObject(t) else org.json.JSONArray(t)
+                    } catch (_: Exception) { null }
+                    if (parsed != null) return findIdWithPrefix(parsed, prefix, depth + 1)
+                }
+                // Embedded in a URL like .../calendar/cal_xxx
+                Regex("${Regex.escape(prefix)}[A-Za-z0-9_-]+").find(t)?.let { return it.value }
+            }
+        }
+        return null
+    }
+
     // Treat JSON "null", empty, and whitespace as no value so the UI never
     // renders "Announcement from null".
     private fun cleanName(raw: String?): String {
@@ -1457,6 +1561,176 @@ class VrchatPipelineService : Service() {
         return "a group"
     }
 
+    // Same as resolveGroupName but, when the groupId isn't cached and the
+    // sender name is missing, fetches the group's real name from the API once
+    // and caches it. Used for live + backfill group notifications so events
+    // (which often omit senderUsername) still render "Event from <GroupName>".
+    private suspend fun resolveGroupNameAsync(groupId: String, senderName: String?): String {
+        groupNameCache[groupId]?.let { if (it.isNotBlank()) return it }
+        val sender = cleanName(senderName)
+        if (sender.isNotEmpty() && !sender.equals("someone", true)) return sender
+        if (groupId.isNotBlank()) {
+            val fetched = VrchatAuthManager.fetchGroupName(this, groupId)
+            if (!fetched.isNullOrBlank()) {
+                groupNameCache[groupId] = fetched
+                return fetched
+            }
+        }
+        return "a group"
+    }
+
+    // Processes a single notification-v2 object (from REST backfill OR the
+    // poll-loop retry sweep) and fires the appropriate notification. Shared so
+    // the periodic poll re-attempts anything the one-shot connect backfill
+    // missed (transient 429/timeout/cold-start race); seenNotifIds dedup makes
+    // re-processing safe (each fires at most once).
+    private suspend fun processV2Notification(obj: JSONObject) {
+        val notifId = obj.optString("id", "")
+        val v2Type = obj.optString("type", "")
+        val v2Title = obj.optString("title", "")
+        val v2Sender = obj.optString("senderUsername", "")
+        val message = obj.optString("message", "")
+        val v2CreatedAt = obj.optString("created_at", "")
+        val v2CreatedMs = parseVrcTimestampMs(v2CreatedAt)
+        // Catch-up content fires however old it is (seenNotifIds still
+        // guarantees each one fires only once) so users away for a week
+        // don't miss them: group announcements/events plus role/transfer
+        // changes. Remaining transient types (invites, queue, join
+        // requests, instance) skip when older than 24h.
+        val isCatchUpType = v2Type.contains("announcement", true) ||
+            v2Type.contains("post", true) ||
+            v2Type.contains("event", true) ||
+            v2Type.contains("calendar", true) ||
+            v2Type.contains("role", true) ||
+            v2Type.contains("transfer", true)
+        if (!isCatchUpType && v2CreatedMs > 0 &&
+            System.currentTimeMillis() - v2CreatedMs > 24L * 60 * 60 * 1000) return
+        val baseId = notifId.ifBlank { "$v2Type-${message.hashCode()}" }
+        val groupId = obj.optString("relatedGroupId", "").ifBlank {
+            obj.optString("groupId", "").ifBlank {
+                findIdWithPrefix(obj, "grp_").orEmpty()
+            }
+        }
+        val groupUrl = if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId"
+            else "https://vrchat.com/home/notifications"
+        when {
+            v2Type.contains("announcement", true) || v2Type.contains("post", true) -> {
+                if (groupId.isNotBlank() && isContentFingerprintSeen(groupId, v2Title, message)) {
+                    Log.d(TAG, "V2 announcement skipped (REST already fired): group=$groupId title=$v2Title")
+                    return
+                }
+                val backfillGroupKey = if (groupId.isNotBlank()) "announcement_$groupId" else null
+                val displayName = resolveGroupNameAsync(groupId, v2Sender)
+                val postUrl = if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId/posts" else groupUrl
+                val body = message.ifBlank { v2Title.ifBlank { "New announcement" } }
+                fireEventNotification(
+                    id = baseId.hashCode(),
+                    title = "Announcement from $displayName",
+                    text = "${v2Title.ifBlank { "Announcement" }}: ${body.take(120)}",
+                    profileUrl = postUrl,
+                    prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
+                    channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
+                    dedupId = notifId.ifBlank { null },
+                    alertGroupKey = backfillGroupKey,
+                    alertBody = body,
+                    alertEventTitle = cleanName(v2Title).ifBlank { null },
+                    eventTimestampMs = v2CreatedMs.takeIf { it > 0 }
+                )
+                if (groupId.isNotBlank()) addContentFingerprintToSeen(groupId, v2Title, message)
+            }
+            v2Type.contains("event", true) || v2Type.contains("calendar", true) -> {
+                val eventId2 = obj.optString("eventId", "").ifBlank {
+                    obj.optJSONObject("data")?.optString("eventId", "").orEmpty().ifBlank {
+                        if (notifId.startsWith("cal_")) notifId
+                        else findIdWithPrefix(obj, "cal_").orEmpty()
+                    }
+                }
+                if (groupId.isNotBlank() && eventId2.isNotBlank() && isEventFingerprintSeen(groupId, eventId2)) {
+                    Log.d(TAG, "V2 event skipped (already fired): group=$groupId event=$eventId2")
+                    return
+                }
+                val backfillGroupKey = if (groupId.isNotBlank()) "event_$groupId" else null
+                val displayName = resolveGroupNameAsync(groupId, v2Sender)
+                val evtUrl = if (groupId.isNotBlank() && eventId2.isNotBlank())
+                    "https://vrchat.com/home/group/$groupId/calendar/$eventId2"
+                else if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId"
+                else groupUrl
+                val body = message.ifBlank { v2Title.ifBlank { "New group event" } }
+                fireEventNotification(
+                    id = baseId.hashCode(),
+                    title = "Event from $displayName",
+                    text = "${v2Title.ifBlank { "Event" }}: ${body.take(120)}",
+                    profileUrl = evtUrl,
+                    prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT,
+                    channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
+                    dedupId = notifId.ifBlank { null },
+                    alertGroupKey = backfillGroupKey,
+                    alertBody = body,
+                    alertEventTitle = cleanName(v2Title).ifBlank { null },
+                    eventTimestampMs = v2CreatedMs.takeIf { it > 0 }
+                )
+                if (groupId.isNotBlank()) addEventFingerprintToSeen(groupId, eventId2)
+            }
+            v2Type.contains("invite", true) -> fireEventNotification(
+                id = baseId.hashCode(), title = v2Title.ifBlank { "Group invite" },
+                text = message.take(140).ifBlank { "You've been invited to join a group" },
+                profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_INVITE,
+                channelId = NOTIF_CHANNEL_INVITES, groupKey = GROUP_KEY_INVITES,
+                dedupId = notifId.ifBlank { null }
+            )
+            v2Type.contains("queue", true) -> fireEventNotification(
+                id = baseId.hashCode(), title = v2Title.ifBlank { "Queue ready" },
+                text = message.take(140).ifBlank { "Your spot in a group instance queue is ready" },
+                profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_QUEUE,
+                channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
+                dedupId = notifId.ifBlank { null }
+            )
+            v2Type.contains("join", true) && v2Type.contains("request", true) -> fireEventNotification(
+                id = baseId.hashCode(), title = v2Title.ifBlank { "Group join request" },
+                text = message.take(140).ifBlank { "Someone wants to join one of your groups" },
+                profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_JOIN_REQUEST,
+                channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
+                dedupId = notifId.ifBlank { null }
+            )
+            v2Type.contains("role", true) || v2Type.contains("transfer", true) -> fireEventNotification(
+                id = baseId.hashCode(), title = v2Title.ifBlank { "Group role updated" },
+                text = message.take(140).ifBlank { "Your role in a group changed" },
+                profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ROLE,
+                channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
+                dedupId = notifId.ifBlank { null }
+            )
+            v2Type.contains("instance", true) -> fireEventNotification(
+                id = baseId.hashCode(), title = v2Title.ifBlank { "Group instance opened" },
+                text = message.take(140).ifBlank { "A new group instance is now joinable" },
+                profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_INSTANCE,
+                channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
+                dedupId = notifId.ifBlank { null }
+            )
+            v2Type.startsWith("group.") -> fireEventNotification(
+                id = baseId.hashCode(), title = v2Title.ifBlank { "Group activity" },
+                text = message.take(140).ifBlank { "New activity in one of your groups" },
+                profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT,
+                channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
+                dedupId = notifId.ifBlank { null },
+                alertBody = if (message.length > 100) message else null
+            )
+            else -> {
+                Log.i(TAG, "backfill notification-v2 unmatched type='$v2Type' title='$v2Title' groupId=$groupId")
+                if (isCatchUpType && (v2Title.isNotBlank() || message.isNotBlank())) {
+                    fireEventNotification(
+                        id = baseId.hashCode(),
+                        title = v2Title.ifBlank { "VRChat notification" },
+                        text = message.take(140).ifBlank { v2Title },
+                        profileUrl = if (groupId.isNotBlank()) groupUrl else "https://vrchat.com/home/notifications",
+                        prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT,
+                        channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
+                        dedupId = notifId.ifBlank { null }
+                    )
+                }
+            }
+        }
+    }
+
     private suspend fun backfillOfflineNotifications() {
         try {
             // First-run guard: if this is the very first pipeline connect ever
@@ -1470,6 +1744,7 @@ class VrchatPipelineService : Service() {
                 seedBackfillBaseline()
                 val repo = com.vrca.data.UserPreferencesRepository(this@VrchatPipelineService)
                 repo.saveNotifBackfillInitialized(true)
+                repo.savePostsEventsBaselineV2(true)
                 // Pre-seed V1/V2 notification IDs so they don't fire on first backfill
                 try {
                     val v1 = VrchatAuthManager.fetchPendingNotifications(this@VrchatPipelineService)
@@ -1492,6 +1767,33 @@ class VrchatPipelineService : Service() {
                     Log.w(TAG, "Failed to seed V1/V2 notification IDs", e)
                 }
                 return
+            }
+
+            // One-time migration: the posts/events baseline was never seeded
+            // for users who installed before fetchGroupPosts was fixed (it
+            // returned null for VRChat's wrapped JSON response). Re-seed
+            // all existing posts + calendar events into the seenMap so they
+            // don't flood as "new" on this connect.
+            val postsEventsMigrated = dataStore.data.first()[booleanPreferencesKey("posts_events_baseline_v2")] ?: false
+            if (!postsEventsMigrated) {
+                Log.i(TAG, "Migration: seeding existing posts + calendar events into seenMap")
+                seedPostsAndEventsIntoExistingMap()
+                val migRepo = com.vrca.data.UserPreferencesRepository(this@VrchatPipelineService)
+                migRepo.savePostsEventsBaselineV2(true)
+            }
+
+            // One-time baseline for the corrected calendar endpoint. The old
+            // /groups/{id}/events paths always 404'd, so NO calendar events were
+            // ever seeded. Now that GET /calendar/{groupId} works, the very first
+            // sweep would fire EVERY existing upcoming event at once. Seed ALL
+            // current events (past AND upcoming) without firing so only events
+            // created AFTER this point surface as new.
+            val calendarBaselined = dataStore.data.first()[booleanPreferencesKey("calendar_baseline_v3")] ?: false
+            if (!calendarBaselined) {
+                Log.i(TAG, "Migration: seeding ALL calendar events (endpoint fix baseline)")
+                seedAllCalendarEventsBaseline()
+                val calRepo = com.vrca.data.UserPreferencesRepository(this@VrchatPipelineService)
+                calRepo.saveCalendarBaselineV3(true)
             }
 
             // V1 notifications: friend requests, invites, votetokick, messages
@@ -1578,124 +1880,7 @@ class VrchatPipelineService : Service() {
             if (v2 != null) {
                 for (i in 0 until v2.length()) {
                     val obj = v2.optJSONObject(i) ?: continue
-                    val notifId = obj.optString("id", "")
-                    val v2Type = obj.optString("type", "")
-                    val v2Title = obj.optString("title", "")
-                    val v2Sender = obj.optString("senderUsername", "")
-                    val message = obj.optString("message", "")
-                    val v2CreatedAt = obj.optString("created_at", "")
-                    val v2CreatedMs = parseVrcTimestampMs(v2CreatedAt)
-                    // Catch-up content fires however old it is (seenNotifIds still
-                    // guarantees each one fires only once) so users away for a week
-                    // don't miss them: group announcements/events plus role/transfer
-                    // changes (persistent state worth knowing about whenever you
-                    // return). Remaining transient types (invites, queue, join
-                    // requests, instance) skip when older than 24h.
-                    val isCatchUpType = v2Type.contains("announcement", true) ||
-                        v2Type.contains("post", true) ||
-                        v2Type.contains("event", true) ||
-                        v2Type.contains("calendar", true) ||
-                        v2Type.contains("role", true) ||
-                        v2Type.contains("transfer", true)
-                    if (!isCatchUpType && v2CreatedMs > 0 &&
-                        System.currentTimeMillis() - v2CreatedMs > 24L * 60 * 60 * 1000) continue
-                    val baseId = notifId.ifBlank { "$v2Type-${message.hashCode()}" }
-                    val groupId = obj.optString("relatedGroupId", "").ifBlank {
-                        obj.optString("groupId", "")
-                    }
-                    val groupUrl = if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId"
-                        else "https://vrchat.com/home/notifications"
-                    when {
-                        v2Type.contains("announcement", true) || v2Type.contains("post", true) -> {
-                            val backfillGroupKey = if (groupId.isNotBlank()) "announcement_$groupId" else null
-                            val displayName = resolveGroupName(groupId, v2Sender)
-                            val postUrl = if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId/posts" else groupUrl
-                            val body = message.ifBlank { v2Title.ifBlank { "New announcement" } }
-                            fireEventNotification(
-                                id = baseId.hashCode(),
-                                title = "Announcement from $displayName",
-                                text = "${v2Title.ifBlank { "Announcement" }}: ${body.take(120)}",
-                                profileUrl = postUrl,
-                                prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
-                                channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
-                                dedupId = notifId.ifBlank { null },
-                                alertGroupKey = backfillGroupKey,
-                                alertBody = body,
-                                alertEventTitle = cleanName(v2Title).ifBlank { null },
-                                eventTimestampMs = v2CreatedMs.takeIf { it > 0 }
-                            )
-                        }
-                        v2Type.contains("event", true) || v2Type.contains("calendar", true) -> {
-                            val backfillGroupKey = if (groupId.isNotBlank()) "event_$groupId" else null
-                            val displayName = resolveGroupName(groupId, v2Sender)
-                            val eventId2 = obj.optString("eventId", "").ifBlank {
-                                obj.optJSONObject("data")?.optString("eventId", "").orEmpty().ifBlank {
-                                    notifId.let { if (it.startsWith("cal_")) it else "" }
-                                }
-                            }
-                            val evtUrl = if (groupId.isNotBlank() && eventId2.isNotBlank())
-                                "https://vrchat.com/home/group/$groupId/calendar/$eventId2"
-                            else if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId"
-                            else groupUrl
-                            val body = message.ifBlank { v2Title.ifBlank { "New group event" } }
-                            fireEventNotification(
-                                id = baseId.hashCode(),
-                                title = "Event from $displayName",
-                                text = "${v2Title.ifBlank { "Event" }}: ${body.take(120)}",
-                                profileUrl = evtUrl,
-                                prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT,
-                                channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
-                                dedupId = notifId.ifBlank { null },
-                                alertGroupKey = backfillGroupKey,
-                                alertBody = body,
-                                alertEventTitle = cleanName(v2Title).ifBlank { null },
-                                eventTimestampMs = v2CreatedMs.takeIf { it > 0 }
-                            )
-                        }
-                        v2Type.contains("invite", true) -> fireEventNotification(
-                            id = baseId.hashCode(), title = v2Title.ifBlank { "Group invite" },
-                            text = message.take(140).ifBlank { "You've been invited to join a group" },
-                            profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_INVITE,
-                            channelId = NOTIF_CHANNEL_INVITES, groupKey = GROUP_KEY_INVITES,
-                            dedupId = notifId.ifBlank { null }
-                        )
-                        v2Type.contains("queue", true) -> fireEventNotification(
-                            id = baseId.hashCode(), title = v2Title.ifBlank { "Queue ready" },
-                            text = message.take(140).ifBlank { "Your spot in a group instance queue is ready" },
-                            profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_QUEUE,
-                            channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
-                            dedupId = notifId.ifBlank { null }
-                        )
-                        v2Type.contains("join", true) && v2Type.contains("request", true) -> fireEventNotification(
-                            id = baseId.hashCode(), title = v2Title.ifBlank { "Group join request" },
-                            text = message.take(140).ifBlank { "Someone wants to join one of your groups" },
-                            profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_JOIN_REQUEST,
-                            channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
-                            dedupId = notifId.ifBlank { null }
-                        )
-                        v2Type.contains("role", true) || v2Type.contains("transfer", true) -> fireEventNotification(
-                            id = baseId.hashCode(), title = v2Title.ifBlank { "Group role updated" },
-                            text = message.take(140).ifBlank { "Your role in a group changed" },
-                            profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ROLE,
-                            channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
-                            dedupId = notifId.ifBlank { null }
-                        )
-                        v2Type.contains("instance", true) -> fireEventNotification(
-                            id = baseId.hashCode(), title = v2Title.ifBlank { "Group instance opened" },
-                            text = message.take(140).ifBlank { "A new group instance is now joinable" },
-                            profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_INSTANCE,
-                            channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
-                            dedupId = notifId.ifBlank { null }
-                        )
-                        v2Type.startsWith("group.") -> fireEventNotification(
-                            id = baseId.hashCode(), title = v2Title.ifBlank { "Group activity" },
-                            text = message.take(140).ifBlank { "New activity in one of your groups" },
-                            profileUrl = groupUrl, prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT,
-                            channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
-                            dedupId = notifId.ifBlank { null },
-                            alertBody = if (message.length > 100) message else null
-                        )
-                    }
+                    processV2Notification(obj)
                 }
             }
             delay(300)
@@ -1714,34 +1899,53 @@ class VrchatPipelineService : Service() {
                     if (groupId.isBlank()) continue
                     if (groupName.isNotBlank() && groupName != "A group") groupNameCache[groupId] = groupName
                     try {
-                        val announcement = VrchatAuthManager.fetchGroupAnnouncement(this@VrchatPipelineService, groupId)
-                        if (announcement != null) {
-                            val announcementText = announcement.optString("text", "").ifBlank {
-                                announcement.optString("title", "")
+                        // Sweep group POSTS (which includes the pinned
+                        // announcement — no separate fetchGroupAnnouncement
+                        // call needed, and removing it eliminates duplicate
+                        // ga_ vs gp_ dedup-ID firing for the same content).
+                        val posts = VrchatAuthManager.fetchGroupPosts(this@VrchatPipelineService, groupId, 20)
+                        if (posts != null) {
+                            for (j in 0 until posts.length()) {
+                                val post = posts.optJSONObject(j) ?: continue
+                                val postId = post.optString("id", "")
+                                if (postId.isBlank()) continue
+                                val rawPostTitle = post.optString("title", "")
+                                val postTitle = rawPostTitle.ifBlank { groupName }
+                                val postText = post.optString("text", "")
+                                val postCreatedAt = post.optString("createdAt", "")
+                                val postCreatedMs = parseVrcTimestampMs(postCreatedAt)
+                                val postSeenKey = "${groupId}_post_$postId"
+                                val postLastSeen = seenMap.optString(postSeenKey, "")
+                                // Fire when there's ANY content (text or title) — a
+                                // title-only announcement was previously skipped.
+                                if (postCreatedAt.isNotBlank() && postCreatedAt != postLastSeen &&
+                                    (postText.isNotBlank() || rawPostTitle.isNotBlank())) {
+                                    fireEventNotification(
+                                        id = "gp_${postId}".hashCode(),
+                                        title = "Announcement from $groupName",
+                                        text = "${postTitle}: ${postText.ifBlank { rawPostTitle }.take(120)}",
+                                        profileUrl = "https://vrchat.com/home/group/$groupId/posts",
+                                        prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
+                                        channelId = NOTIF_CHANNEL_GROUPS,
+                                        groupKey = GROUP_KEY_GROUPS,
+                                        dedupId = "gp_${postId}_$postCreatedAt",
+                                        alertGroupKey = "announcement_$groupId",
+                                        alertBody = postText.ifBlank { rawPostTitle.ifBlank { null } },
+                                        alertEventTitle = rawPostTitle.ifBlank { null },
+                                        eventTimestampMs = postCreatedMs.takeIf { it > 0 }
+                                    )
+                                    updatedMap.put(postSeenKey, postCreatedAt)
+                                    addContentFingerprintToSeen(groupId, rawPostTitle, postText)
+                                }
                             }
-                            val announcementTitle = announcement.optString("title", "").ifBlank { groupName }
-                            val createdAt = announcement.optString("createdAt", "")
-                            val createdMs = parseVrcTimestampMs(createdAt)
-                            val lastSeen = seenMap.optString(groupId, "")
-                            // No age cutoff: the per-group seen timestamp fires each
-                            // announcement exactly once, so week-away users still get
-                            // catch-up announcements without old ones resurfacing.
-                            if (createdAt.isNotBlank() && createdAt != lastSeen && announcementText.isNotBlank()) {
-                                fireEventNotification(
-                                    id = "ga_${groupId}_${createdAt.hashCode()}".hashCode(),
-                                    title = "Announcement from $groupName",
-                                    text = "${announcementTitle}: ${announcementText.take(120)}",
-                                    profileUrl = "https://vrchat.com/home/group/$groupId/posts",
-                                    prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
-                                    channelId = NOTIF_CHANNEL_GROUPS,
-                                    groupKey = GROUP_KEY_GROUPS,
-                                    dedupId = "ga_${groupId}_$createdAt",
-                                    alertGroupKey = "announcement_$groupId",
-                                    alertBody = announcementText.ifBlank { null },
-                                    alertEventTitle = announcementTitle.ifBlank { null },
-                                    eventTimestampMs = createdMs.takeIf { it > 0 }
-                                )
-                                updatedMap.put(groupId, createdAt)
+                        }
+                        // Sweep group CALENDAR EVENTS too. Events created while
+                        // closed don't reliably show up in notifications-v2, so
+                        // without this they never surface on reopen.
+                        val events = VrchatAuthManager.fetchGroupCalendarEvents(this@VrchatPipelineService, groupId, 20)
+                        if (events != null) {
+                            for (j in 0 until events.length()) {
+                                fireGroupCalendarEvent(events.optJSONObject(j) ?: continue, groupId, groupName, seenMap, updatedMap)
                             }
                         }
                         delay(250)
@@ -1784,6 +1988,32 @@ class VrchatPipelineService : Service() {
                     val announcement = VrchatAuthManager.fetchGroupAnnouncement(this@VrchatPipelineService, groupId)
                     val createdAt = announcement?.optString("createdAt", "") ?: ""
                     if (createdAt.isNotBlank()) seenMap.put(groupId, createdAt)
+                    // Seed recent post IDs too so the backfill/poll posts sweep
+                    // doesn't fire a flood of pre-existing posts on first run.
+                    val posts = VrchatAuthManager.fetchGroupPosts(this@VrchatPipelineService, groupId, 20)
+                    if (posts != null) {
+                        for (j in 0 until posts.length()) {
+                            val post = posts.optJSONObject(j) ?: continue
+                            val postId = post.optString("id", "")
+                            val postCreatedAt = post.optString("createdAt", "")
+                            if (postId.isNotBlank() && postCreatedAt.isNotBlank()) {
+                                seenMap.put("${groupId}_post_$postId", postCreatedAt)
+                            }
+                        }
+                    }
+                    // Seed existing calendar events too.
+                    val events = VrchatAuthManager.fetchGroupCalendarEvents(this@VrchatPipelineService, groupId, 20)
+                    if (events != null) {
+                        for (j in 0 until events.length()) {
+                            val ev = events.optJSONObject(j) ?: continue
+                            val evId = ev.optString("id", "").ifBlank { findIdWithPrefix(ev, "cal_").orEmpty() }
+                            if (evId.isBlank()) continue
+                            val marker = ev.optString("startsAt", "").ifBlank {
+                                ev.optString("createdAt", "").ifBlank { evId }
+                            }
+                            seenMap.put("${groupId}_event_$evId", marker)
+                        }
+                    }
                     delay(250)
                 } catch (e: Exception) {
                     Log.w(TAG, "seedBackfillBaseline: group $groupId failed", e)
@@ -1794,6 +2024,113 @@ class VrchatPipelineService : Service() {
             Log.i(TAG, "Backfill baseline seeded for ${seenMap.length()} groups")
         } catch (e: Exception) {
             Log.w(TAG, "seedBackfillBaseline failed", e)
+        }
+    }
+
+    private suspend fun seedPostsAndEventsIntoExistingMap() {
+        try {
+            val groups = VrchatAuthManager.fetchUserGroups(this@VrchatPipelineService) ?: return
+            val seenKey = androidx.datastore.preferences.core.stringPreferencesKey("notif_group_announcement_seen")
+            val seenRaw = dataStore.data.first()[seenKey] ?: "{}"
+            val seenMap = try { JSONObject(seenRaw) } catch (_: Exception) { JSONObject() }
+            var added = 0
+            val groupCount = minOf(groups.length(), 50)
+            for (i in 0 until groupCount) {
+                val group = groups.optJSONObject(i) ?: continue
+                val groupId = group.optString("groupId", "").ifBlank { group.optString("id", "") }
+                if (groupId.isBlank()) continue
+                val gName = group.optString("name", "")
+                if (gName.isNotBlank()) groupNameCache[groupId] = gName
+                try {
+                    val posts = VrchatAuthManager.fetchGroupPosts(this@VrchatPipelineService, groupId, 20)
+                    if (posts != null) {
+                        for (j in 0 until posts.length()) {
+                            val post = posts.optJSONObject(j) ?: continue
+                            val postId = post.optString("id", "")
+                            val postCreatedAt = post.optString("createdAt", "")
+                            if (postId.isNotBlank() && postCreatedAt.isNotBlank()) {
+                                val k = "${groupId}_post_$postId"
+                                if (!seenMap.has(k)) { seenMap.put(k, postCreatedAt); added++ }
+                            }
+                        }
+                    }
+                    // Only seed PAST events (already happened) so they don't flood.
+                    // Upcoming events are intentionally NOT seeded — the backfill
+                    // sweep right after fires them once so the user sees events
+                    // they missed while closed; per-event dedup stops re-fires.
+                    val events = VrchatAuthManager.fetchGroupCalendarEvents(this@VrchatPipelineService, groupId, 20)
+                    if (events != null) {
+                        val now = System.currentTimeMillis()
+                        for (j in 0 until events.length()) {
+                            val ev = events.optJSONObject(j) ?: continue
+                            val evId = ev.optString("id", "").ifBlank { findIdWithPrefix(ev, "cal_").orEmpty() }
+                            if (evId.isBlank()) continue
+                            val startsAt = ev.optString("startsAt", "")
+                            val startsMs = parseVrcTimestampMs(startsAt)
+                            val isPast = startsMs in 1 until now
+                            if (!isPast) continue
+                            val marker = startsAt.ifBlank { ev.optString("createdAt", "").ifBlank { evId } }
+                            val k = "${groupId}_event_$evId"
+                            if (!seenMap.has(k)) { seenMap.put(k, marker); added++ }
+                        }
+                    }
+                    delay(250)
+                } catch (e: Exception) {
+                    Log.w(TAG, "seedPostsAndEvents: group $groupId failed", e)
+                }
+            }
+            val repo = com.vrca.data.UserPreferencesRepository(this@VrchatPipelineService)
+            repo.saveNotifGroupAnnouncementSeen(seenMap.toString())
+            Log.i(TAG, "Posts/events migration: seeded $added entries into seenMap")
+        } catch (e: Exception) {
+            Log.w(TAG, "seedPostsAndEventsIntoExistingMap failed", e)
+        }
+    }
+
+    /**
+     * Seeds EVERY current calendar event (past and upcoming) into the seen map
+     * AND the event fingerprint set, without firing. One-time baseline for the
+     * corrected calendar endpoint so the first working sweep doesn't flood the
+     * user with every pre-existing upcoming event. After this, only events
+     * created later surface as new.
+     */
+    private suspend fun seedAllCalendarEventsBaseline() {
+        try {
+            val groups = VrchatAuthManager.fetchUserGroups(this@VrchatPipelineService) ?: return
+            val seenKey = androidx.datastore.preferences.core.stringPreferencesKey("notif_group_announcement_seen")
+            val seenRaw = dataStore.data.first()[seenKey] ?: "{}"
+            val seenMap = try { JSONObject(seenRaw) } catch (_: Exception) { JSONObject() }
+            var added = 0
+            val groupCount = minOf(groups.length(), 50)
+            for (i in 0 until groupCount) {
+                val group = groups.optJSONObject(i) ?: continue
+                val groupId = group.optString("groupId", "").ifBlank { group.optString("id", "") }
+                if (groupId.isBlank()) continue
+                try {
+                    val events = VrchatAuthManager.fetchGroupCalendarEvents(this@VrchatPipelineService, groupId, 20)
+                    if (events != null) {
+                        for (j in 0 until events.length()) {
+                            val ev = events.optJSONObject(j) ?: continue
+                            val evId = ev.optString("id", "").ifBlank { findIdWithPrefix(ev, "cal_").orEmpty() }
+                            if (evId.isBlank()) continue
+                            val startsAt = ev.optString("startsAt", "")
+                            val marker = startsAt.ifBlank { ev.optString("createdAt", "").ifBlank { evId } }
+                            val k = "${groupId}_event_$evId"
+                            if (!seenMap.has(k)) { seenMap.put(k, marker); added++ }
+                            addEventFingerprintToSeen(groupId, evId)
+                        }
+                    }
+                    delay(250)
+                } catch (e: Exception) {
+                    Log.w(TAG, "seedAllCalendarEventsBaseline: group $groupId failed", e)
+                }
+            }
+            val repo = com.vrca.data.UserPreferencesRepository(this@VrchatPipelineService)
+            repo.saveNotifGroupAnnouncementSeen(seenMap.toString())
+            persistSeenNotifIds()
+            Log.i(TAG, "Calendar baseline: seeded $added events into seenMap")
+        } catch (e: Exception) {
+            Log.w(TAG, "seedAllCalendarEventsBaseline failed", e)
         }
     }
 
@@ -1898,20 +2235,56 @@ class VrchatPipelineService : Service() {
 
     private fun startGroupAnnouncementPollLoop() {
         serviceScope.launch {
-            delay(5 * 60 * 1000L)
+            // VRChat's notification/announcement endpoints lag behind reality:
+            // an item created moments before reconnect often isn't in the API
+            // response yet during the immediate connect backfill, so a single
+            // sweep misses it. We run several quick catch-up sweeps (15s, 40s,
+            // 90s) to absorb that propagation delay before settling into the
+            // steady 5-min cadence. seenNotifIds dedup keeps each item to one fire.
+            val warmupDelays = longArrayOf(15_000L, 25_000L, 50_000L)
+            for (d in warmupDelays) {
+                delay(d)
+                try {
+                    pollGroupAnnouncements()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Group announcement warmup poll failed", e)
+                }
+            }
             while (true) {
+                delay(5 * 60 * 1000L)
                 try {
                     pollGroupAnnouncements()
                 } catch (e: Exception) {
                     Log.w(TAG, "Group announcement poll failed", e)
                 }
-                delay(5 * 60 * 1000L)
             }
         }
     }
 
     private suspend fun pollGroupAnnouncements() {
         if (!VrchatAuthManager.isLoggedIn(this)) return
+
+        // Retry sweep of pending notification-v2 (events, announcements, role
+        // changes). The one-shot connect backfill can miss these on a transient
+        // 429/timeout or a cold-start race; re-running here every poll cycle is
+        // the retry path. seenNotifIds dedup ensures each fires at most once.
+        // Skipped on the very first connect (baseline not yet established).
+        val initialized = dataStore.data.first()[booleanPreferencesKey("notif_backfill_initialized")] ?: false
+        if (initialized) {
+            try {
+                val v2 = VrchatAuthManager.fetchPendingNotificationsV2(this)
+                if (v2 != null) {
+                    for (i in 0 until v2.length()) {
+                        val obj = v2.optJSONObject(i) ?: continue
+                        processV2Notification(obj)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "poll: V2 notification retry sweep failed", e)
+            }
+            delay(300)
+        }
+
         val groups = VrchatAuthManager.fetchUserGroups(this) ?: return
         val seenKey = androidx.datastore.preferences.core.stringPreferencesKey("notif_group_announcement_seen")
         val seenRaw = dataStore.data.first()[seenKey] ?: "{}"
@@ -1926,62 +2299,48 @@ class VrchatPipelineService : Service() {
             if (groupId.isBlank()) continue
             if (groupName.isNotBlank() && groupName != "A group") groupNameCache[groupId] = groupName
             try {
-                val announcement = VrchatAuthManager.fetchGroupAnnouncement(this, groupId)
-                if (announcement != null) {
-                    val text = announcement.optString("text", "").ifBlank {
-                        announcement.optString("title", "")
-                    }
-                    val aTitle = announcement.optString("title", "").ifBlank { groupName }
-                    val createdAt = announcement.optString("createdAt", "")
-                    val createdMs = parseVrcTimestampMs(createdAt)
-                    val lastSeen = seenMap.optString(groupId, "")
-                    if (createdAt.isNotBlank() && createdAt != lastSeen && text.isNotBlank()) {
-                        fireEventNotification(
-                            id = "ga_${groupId}_${createdAt.hashCode()}".hashCode(),
-                            title = "Announcement from $groupName",
-                            text = "${aTitle}: ${text.take(120)}",
-                            profileUrl = "https://vrchat.com/home/group/$groupId/posts",
-                            prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
-                            channelId = NOTIF_CHANNEL_GROUPS,
-                            groupKey = GROUP_KEY_GROUPS,
-                            dedupId = "ga_${groupId}_$createdAt",
-                            alertGroupKey = "announcement_$groupId",
-                            alertBody = text.ifBlank { null },
-                            alertEventTitle = aTitle.ifBlank { null },
-                            eventTimestampMs = createdMs.takeIf { it > 0 }
-                        )
-                        updatedMap.put(groupId, createdAt)
-                        changed = true
-                    }
-                }
-                val posts = VrchatAuthManager.fetchGroupPosts(this, groupId, 5)
+                // Posts endpoint includes the pinned announcement, so no
+                // separate fetchGroupAnnouncement call — eliminates the
+                // ga_ vs gp_ duplicate dedup-ID problem.
+                val posts = VrchatAuthManager.fetchGroupPosts(this, groupId, 20)
                 if (posts != null) {
                     for (j in 0 until posts.length()) {
                         val post = posts.optJSONObject(j) ?: continue
                         val postId = post.optString("id", "")
                         if (postId.isBlank()) continue
-                        val postTitle = post.optString("title", "").ifBlank { groupName }
+                        val rawPostTitle = post.optString("title", "")
+                        val postTitle = rawPostTitle.ifBlank { groupName }
                         val postText = post.optString("text", "")
                         val postCreatedAt = post.optString("createdAt", "")
                         val postCreatedMs = parseVrcTimestampMs(postCreatedAt)
                         val postSeenKey = "${groupId}_post_$postId"
                         val postLastSeen = seenMap.optString(postSeenKey, "")
-                        if (postCreatedAt.isNotBlank() && postCreatedAt != postLastSeen && postText.isNotBlank()) {
+                        if (postCreatedAt.isNotBlank() && postCreatedAt != postLastSeen &&
+                            (postText.isNotBlank() || rawPostTitle.isNotBlank())) {
                             fireEventNotification(
                                 id = "gp_${postId}".hashCode(),
                                 title = "Announcement from $groupName",
-                                text = "${postTitle}: ${postText.take(120)}",
+                                text = "${postTitle}: ${postText.ifBlank { rawPostTitle }.take(120)}",
                                 profileUrl = "https://vrchat.com/home/group/$groupId/posts",
                                 prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
                                 channelId = NOTIF_CHANNEL_GROUPS,
                                 groupKey = GROUP_KEY_GROUPS,
                                 dedupId = "gp_${postId}_$postCreatedAt",
                                 alertGroupKey = "announcement_$groupId",
-                                alertBody = postText.ifBlank { null },
-                                alertEventTitle = postTitle.ifBlank { null },
+                                alertBody = postText.ifBlank { rawPostTitle.ifBlank { null } },
+                                alertEventTitle = rawPostTitle.ifBlank { null },
                                 eventTimestampMs = postCreatedMs.takeIf { it > 0 }
                             )
                             updatedMap.put(postSeenKey, postCreatedAt)
+                            addContentFingerprintToSeen(groupId, rawPostTitle, postText)
+                            changed = true
+                        }
+                    }
+                }
+                val events = VrchatAuthManager.fetchGroupCalendarEvents(this, groupId, 20)
+                if (events != null) {
+                    for (j in 0 until events.length()) {
+                        if (fireGroupCalendarEvent(events.optJSONObject(j) ?: continue, groupId, groupName, seenMap, updatedMap)) {
                             changed = true
                         }
                     }
@@ -1995,6 +2354,87 @@ class VrchatPipelineService : Service() {
             val repo = com.vrca.data.UserPreferencesRepository(this)
             repo.saveNotifGroupAnnouncementSeen(updatedMap.toString())
         }
+    }
+
+    private fun announcementContentFingerprint(groupId: String, title: String, text: String): String {
+        return "ann_fp_${groupId}_${title.trim().hashCode()}_${text.trim().take(80).hashCode()}"
+    }
+
+    private fun addContentFingerprintToSeen(groupId: String, title: String, text: String) {
+        val fp = announcementContentFingerprint(groupId, title, text)
+        synchronized(seenNotifIds) { seenNotifIds.add(fp) }
+    }
+
+    private fun isContentFingerprintSeen(groupId: String, title: String, text: String): Boolean {
+        val fp = announcementContentFingerprint(groupId, title, text)
+        return synchronized(seenNotifIds) { fp in seenNotifIds }
+    }
+
+    // Event fingerprint is keyed on the EVENT ID (not content) so that two
+    // distinct events with the same generic title (e.g. "Event starting")
+    // don't collide and suppress each other. Used for cross-path dedup of the
+    // SAME event arriving via WebSocket, V2 backfill, and the REST calendar
+    // sweep — all three extract the same `cal_xxx` id for a given event.
+    private fun eventFingerprint(groupId: String, eventId: String): String {
+        return "evt_fp_${groupId}_$eventId"
+    }
+
+    private fun addEventFingerprintToSeen(groupId: String, eventId: String) {
+        if (eventId.isBlank()) return
+        synchronized(seenNotifIds) { seenNotifIds.add(eventFingerprint(groupId, eventId)) }
+    }
+
+    private fun isEventFingerprintSeen(groupId: String, eventId: String): Boolean {
+        if (eventId.isBlank()) return false
+        val fp = eventFingerprint(groupId, eventId)
+        return synchronized(seenNotifIds) { fp in seenNotifIds }
+    }
+
+    // Fires a group calendar event notification if it's new (not in seenMap).
+    // Returns true if it fired (so callers can flag the seen-map dirty).
+    private suspend fun fireGroupCalendarEvent(
+        event: JSONObject,
+        groupId: String,
+        groupName: String,
+        seenMap: JSONObject,
+        updatedMap: JSONObject
+    ): Boolean {
+        val eventId = event.optString("id", "").ifBlank { findIdWithPrefix(event, "cal_").orEmpty() }
+        if (eventId.isBlank()) return false
+        val eventTitle = event.optString("title", "").ifBlank { event.optString("name", "") }
+        val eventDesc = event.optString("description", "").ifBlank { event.optString("text", "") }
+        // Prefer the scheduled start time; fall back to creation time.
+        val startsAt = event.optString("startsAt", "").ifBlank {
+            event.optString("createdAt", "")
+        }
+        val startsMs = parseVrcTimestampMs(startsAt)
+        val seenKey = "${groupId}_event_$eventId"
+        val lastSeen = seenMap.optString(seenKey, "")
+        // Use the event id alone as the change marker so an unchanged event
+        // doesn't re-fire, but an edited startsAt does.
+        val marker = startsAt.ifBlank { eventId }
+        if (marker == lastSeen) return false
+        // Cross-path dedup keyed on the event id (not content) so a sibling
+        // event with the same title doesn't get suppressed.
+        if (isEventFingerprintSeen(groupId, eventId)) return false
+        if (eventTitle.isBlank() && eventDesc.isBlank()) return false
+        fireEventNotification(
+            id = "gce_$eventId".hashCode(),
+            title = "Event from $groupName",
+            text = "${eventTitle.ifBlank { "Event" }}: ${eventDesc.take(120)}",
+            profileUrl = "https://vrchat.com/home/group/$groupId/calendar/$eventId",
+            prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT,
+            channelId = NOTIF_CHANNEL_GROUPS,
+            groupKey = GROUP_KEY_GROUPS,
+            dedupId = "gce_${eventId}_$marker",
+            alertGroupKey = "event_$groupId",
+            alertBody = eventDesc.ifBlank { eventTitle }.ifBlank { null },
+            alertEventTitle = eventTitle.ifBlank { null },
+            eventTimestampMs = startsMs.takeIf { it > 0 }
+        )
+        updatedMap.put(seenKey, marker)
+        addEventFingerprintToSeen(groupId, eventId)
+        return true
     }
 
     private suspend fun fireAppUpdateNotification(title: String, text: String, bigText: String?) {
@@ -2260,18 +2700,37 @@ class VrchatPipelineService : Service() {
         alertEventTitle: String? = null,
         eventTimestampMs: Long? = null
     ) {
+        // Check the toggle BEFORE touching seenNotifIds. Adding the dedup id
+        // first risks permanently poisoning it: if `enabled` reads false for a
+        // transient reason (e.g. DataStore not fully loaded during the cold-start
+        // connect/backfill race), the notification would be dropped AND marked
+        // seen, so it could never fire again on any later path (poll loop,
+        // reconnect backfill). Gate first, then dedup only when we will fire.
+        val prefs = dataStore.data.first()
+        val enabled = prefs[booleanPreferencesKey(prefKey)] ?: false
+        if (!enabled) {
+            Log.d(TAG, "notif drop (toggle off): pref=$prefKey title=$title dedup=$dedupId")
+            return
+        }
+
         if (dedupId != null) {
+            var alreadySeen = false
             synchronized(seenNotifIds) {
-                if (!seenNotifIds.add(dedupId)) return
-                while (seenNotifIds.size > MAX_SEEN_NOTIF_IDS) {
-                    seenNotifIds.iterator().let { it.next(); it.remove() }
+                if (!seenNotifIds.add(dedupId)) {
+                    alreadySeen = true
+                } else {
+                    while (seenNotifIds.size > MAX_SEEN_NOTIF_IDS) {
+                        seenNotifIds.iterator().let { it.next(); it.remove() }
+                    }
                 }
+            }
+            if (alreadySeen) {
+                Log.d(TAG, "notif skip (already seen): dedup=$dedupId title=$title")
+                return
             }
             persistSeenNotifIds()
         }
-        val prefs = dataStore.data.first()
-        val enabled = prefs[booleanPreferencesKey(prefKey)] ?: false
-        if (!enabled) return
+        Log.i(TAG, "notif FIRE: title=$title dedup=$dedupId group=$alertGroupKey")
 
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
@@ -2338,7 +2797,8 @@ class VrchatPipelineService : Service() {
                         beforeText = alertBeforeText,
                         afterText = alertAfterText,
                         timestampMs = displayTs,
-                        eventTitle = alertEventTitle
+                        eventTitle = alertEventTitle,
+                        url = profileUrl
                     )
                 )
             } else {
@@ -2455,7 +2915,9 @@ class VrchatPipelineService : Service() {
             }
         } else ""
         return NotificationCompat.Builder(this, NOTIF_CHANNEL_PERSISTENT)
-            .setSmallIcon(R.drawable.ic_notification)
+            // Distinct sync glyph (matches the Automations tab) so the persistent
+            // background-service notification is visually separate from event alerts.
+            .setSmallIcon(R.drawable.ic_notif_sync)
             .setContentTitle("VRC-A")
             .setContentText(status + rpcSuffix)
             .setContentIntent(tapIntent)

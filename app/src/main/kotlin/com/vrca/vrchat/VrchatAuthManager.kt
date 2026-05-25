@@ -621,6 +621,20 @@ object VrchatAuthManager {
         }
     }
 
+    suspend fun fetchGroupName(context: Context, groupId: String): String? = withContext(Dispatchers.IO) {
+        if (groupId.isBlank()) return@withContext null
+        val cookieHeader = getCookieHeader(context) ?: return@withContext null
+        try {
+            val (code, body, _) = get("$BASE/groups/$groupId", null, cookieHeader)
+            if (code == 200 && body.startsWith("{")) {
+                org.json.JSONObject(body).optString("name", "").takeIf { it.isNotBlank() }
+            } else null
+        } catch (e: Exception) {
+            Log.w(TAG, "fetchGroupName($groupId) failed", e)
+            null
+        }
+    }
+
     suspend fun fetchGroupAnnouncement(context: Context, groupId: String): org.json.JSONObject? = withContext(Dispatchers.IO) {
         val cookieHeader = getCookieHeader(context) ?: return@withContext null
         try {
@@ -642,11 +656,58 @@ object VrchatAuthManager {
                 "$BASE/groups/$groupId/posts?n=$n",
                 null, cookieHeader
             )
-            if (code == 200 && body.startsWith("[")) org.json.JSONArray(body) else null
+            if (code != 200) return@withContext null
+            // VRChat wraps posts in an object: {"posts":[...],"total":N}.
+            // Older/edge responses may return a bare array — handle both.
+            when {
+                body.startsWith("[") -> org.json.JSONArray(body)
+                body.startsWith("{") -> org.json.JSONObject(body).optJSONArray("posts")
+                else -> null
+            }
         } catch (e: Exception) {
             Log.w(TAG, "fetchGroupPosts($groupId) failed", e)
             null
         }
+    }
+
+    // Group calendar events. VRChat exposes group events at
+    // GET /groups/{groupId}/calendar — used to backfill events created while
+    // the app was closed (they don't reliably appear in the per-user
+    // notifications-v2 feed). Response may be a bare array or an object
+    // wrapping the list under "results"/"events".
+    suspend fun fetchGroupCalendarEvents(context: Context, groupId: String, n: Int = 20): org.json.JSONArray? = withContext(Dispatchers.IO) {
+        val cookieHeader = getCookieHeader(context) ?: return@withContext null
+        // Correct VRChat group-calendar endpoint is GET /calendar/{groupId}
+        // (returns {"results":[...]}). The older /groups/{id}/events paths 404,
+        // which is why events created while the app was closed never surfaced.
+        val endpoints = arrayOf(
+            "$BASE/calendar/$groupId?n=$n",
+            "$BASE/groups/$groupId/events?n=$n",
+            "$BASE/groups/$groupId/calendar?n=$n"
+        )
+        for (url in endpoints) {
+            try {
+                val (code, body, _) = get(url, null, cookieHeader)
+                Log.i(TAG, "fetchGroupCalendarEvents($groupId) url=${url.substringAfter("groups/")} http=$code bodyHead=${body.take(80)}")
+                if (code == 404) continue
+                if (code != 200) continue
+                val result = when {
+                    body.startsWith("[") -> org.json.JSONArray(body)
+                    body.startsWith("{") -> {
+                        val obj = org.json.JSONObject(body)
+                        obj.optJSONArray("results")
+                            ?: obj.optJSONArray("events")
+                            ?: obj.optJSONArray("calendarEvents")
+                            ?: obj.optJSONArray("scheduledEvents")
+                    }
+                    else -> null
+                }
+                if (result != null && result.length() > 0) return@withContext result
+            } catch (e: Exception) {
+                Log.w(TAG, "fetchGroupCalendarEvents($groupId) ${url.substringAfterLast("/")} failed", e)
+            }
+        }
+        null
     }
 
     // ------------------------------------------------------------------

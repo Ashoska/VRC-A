@@ -103,8 +103,10 @@ internal suspend fun githubCreateRelease(
     tagName: String, releaseName: String, body: String
 ): GithubReleaseResult = withContext(Dispatchers.IO) {
     val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
         .build()
 
     val payload = JSONObject().apply {
@@ -143,7 +145,11 @@ internal suspend fun githubCreateRelease(
             lastError = Exception("GitHub create release failed (${response.code}): $responseBody")
             response.close()
         } catch (e: Exception) {
-            lastError = e
+            lastError = Exception(
+                "Release create attempt $attempt failed (${e::class.simpleName}): ${e.message}" +
+                    (e.cause?.let { " caused by ${it::class.simpleName}: ${it.message}" } ?: ""),
+                e
+            )
         }
 
         if (attempt < 5) {
@@ -160,9 +166,12 @@ internal suspend fun githubUploadAsset(
     onProgress: (Float) -> Unit
 ): String = withContext(Dispatchers.IO) {
     val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(300, TimeUnit.SECONDS)
         .writeTimeout(300, TimeUnit.SECONDS)
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .retryOnConnectionFailure(true)
         .build()
 
     val encodedName = java.net.URLEncoder.encode(fileName, "UTF-8")
@@ -172,7 +181,7 @@ internal suspend fun githubUploadAsset(
     for (attempt in 1..5) {
         try {
             onProgress(0f)
-            val body = object : RequestBody() {
+            fun buildBody() = object : RequestBody() {
                 override fun contentType() = "application/vnd.android.package-archive".toMediaType()
                 override fun contentLength() = apkFile.length()
                 override fun writeTo(sink: BufferedSink) {
@@ -191,15 +200,24 @@ internal suspend fun githubUploadAsset(
                 }
             }
 
-            val request = Request.Builder()
-                .url(url)
+            fun buildReq(target: String) = Request.Builder()
+                .url(target)
                 .header("Authorization", "Bearer $pat")
                 .header("Accept", "application/vnd.github+json")
                 .header("X-GitHub-Api-Version", "2022-11-28")
-                .post(body)
+                .post(buildBody())
                 .build()
 
-            val response = client.newCall(request).execute()
+            var response = client.newCall(buildReq(url)).execute()
+            var redirects = 0
+            while (response.code in intArrayOf(301, 302, 307, 308) && redirects < 3) {
+                val location = response.header("Location")
+                response.close()
+                if (location.isNullOrBlank()) break
+                redirects++
+                onProgress(0f)
+                response = client.newCall(buildReq(location)).execute()
+            }
             val responseBody = response.body?.string().orEmpty()
 
             if (response.isSuccessful) {
@@ -209,7 +227,11 @@ internal suspend fun githubUploadAsset(
             lastError = Exception("GitHub upload failed (${response.code}): $responseBody")
             response.close()
         } catch (e: Exception) {
-            lastError = e
+            lastError = Exception(
+                "Upload attempt $attempt failed (${e::class.simpleName}): ${e.message}" +
+                    (e.cause?.let { " caused by ${it::class.simpleName}: ${it.message}" } ?: ""),
+                e
+            )
         }
 
         if (attempt < 5) {

@@ -13,6 +13,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import com.vrca.BuildConfig
 import com.vrca.keepalive.KeepAliveService
 import com.vrca.overlay.OverlayDaemon
 import com.vrca.ui.theme.VrcaTheme
@@ -98,11 +99,35 @@ private const val KEY_DEVICE_HASH_FALLBACK_RANDOM = "device_id_hash_fallback_ran
  */
 private fun ensureDeviceHash(ctx: Context): String {
     val prefs = ctx.getSharedPreferences(REMOTE_PREFS, Context.MODE_PRIVATE)
-
-    // If already present, return it.
     val existing = prefs.getString(KEY_DEVICE_HASH, "")?.trim().orEmpty()
-    if (existing.isNotBlank()) return existing
 
+    if (BuildConfig.IS_ADMIN_BUILD) {
+        // The admin build must use a DISTINCT device hash from the public build.
+        // Both share the same ANDROID_ID + signing key, so without this they'd
+        // resolve to the same Firestore doc — the two installs on one phone would
+        // overwrite each other's presets/content, and the admin self-filter
+        // (it.id != myDeviceHash) would hide the public install from the admin
+        // user list. We namespace the admin hash and force-normalise it (the
+        // admin app may have previously cached the public-equal hash). Public
+        // users are unaffected. The admin build never writes a user doc, so no
+        // orphan doc is created under this hash.
+        val adminHash = sha256Hex("admin:" + computeBaseDeviceHash(ctx, prefs))
+        if (existing != adminHash) {
+            prefs.edit().putString(KEY_DEVICE_HASH, adminHash).apply()
+        }
+        return adminHash
+    }
+
+    // Public build: unchanged — return the cached hash if present for continuity.
+    if (existing.isNotBlank()) return existing
+    val base = computeBaseDeviceHash(ctx, prefs)
+    prefs.edit().putString(KEY_DEVICE_HASH, base).apply()
+    return base
+}
+
+/** The reinstall-stable base hash (ANDROID_ID + signing cert), with a stored
+ *  random fallback for devices that report a blank ANDROID_ID. */
+private fun computeBaseDeviceHash(ctx: Context, prefs: android.content.SharedPreferences): String {
     val androidId = runCatching {
         Settings.Secure.getString(ctx.contentResolver, Settings.Secure.ANDROID_ID)
             ?.trim()
@@ -111,18 +136,15 @@ private fun ensureDeviceHash(ctx: Context): String {
 
     val signingDigest = runCatching { signingCertSha256Hex(ctx) }.getOrDefault("")
 
-    // Primary (reinstall-stable if ANDROID_ID is stable):
     val computedStable = if (androidId.isNotBlank() && signingDigest.isNotBlank()) {
         sha256Hex("v2:$androidId:$signingDigest")
     } else if (androidId.isNotBlank()) {
-        // Still stable-ish if we can't read cert for some reason.
         sha256Hex("v2:$androidId:no_signing")
     } else {
         ""
     }
 
-    // Fallback: stored random (NOT reinstall stable, but keeps app functional on devices with blank ANDROID_ID)
-    val finalHash = if (computedStable.isNotBlank()) {
+    return if (computedStable.isNotBlank()) {
         computedStable
     } else {
         val fallbackExisting = prefs.getString(KEY_DEVICE_HASH_FALLBACK_RANDOM, "")?.trim().orEmpty()
@@ -133,9 +155,6 @@ private fun ensureDeviceHash(ctx: Context): String {
             r
         }
     }
-
-    prefs.edit().putString(KEY_DEVICE_HASH, finalHash).apply()
-    return finalHash
 }
 
 /**

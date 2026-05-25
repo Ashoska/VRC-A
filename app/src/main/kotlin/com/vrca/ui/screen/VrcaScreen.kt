@@ -73,6 +73,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -1040,6 +1041,12 @@ private fun SetupIncompleteBanner(
    Shows presence card + login/logout controls
    ========================= */
 
+private object StatusBannerState {
+    // Shared, observable so the banner on every tab (Home, VRChat) collapses
+    // and expands together instead of tracking independent local state.
+    var expanded by mutableStateOf(true)
+}
+
 @Composable
 internal fun VrchatStatusBanner() {
     val statusData by VrchatPipelineState.statusPageFlow.collectAsState()
@@ -1064,9 +1071,6 @@ internal fun VrchatStatusBanner() {
     }
 
     val ctx = LocalContext.current
-    // Defaults to expanded; `remember` resets when the composable is recreated
-    // on app reopen, so a new outage is always shown expanded the next launch.
-    var expanded by remember { mutableStateOf(true) }
 
     val title = data.description.ifBlank {
         when (data.indicator) {
@@ -1077,20 +1081,24 @@ internal fun VrchatStatusBanner() {
     }
     val affected = data.components.filter { it.status != "operational" }
 
-    Card(colors = CardDefaults.cardColors(containerColor = containerColor)) {
+    val innerCardColor = lerp(containerColor, onContainerColor, 0.12f)
+
+    ElevatedCard(
+        colors = CardDefaults.elevatedCardColors(containerColor = containerColor),
+        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 4.dp)
+    ) {
         Column(
             Modifier
                 .fillMaxWidth()
                 .padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // Header row: status dot + title + collapse/expand chevron
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { expanded = !expanded },
+                    .clickable { StatusBannerState.expanded = !StatusBannerState.expanded },
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Canvas(Modifier.size(10.dp)) {
                     drawCircle(color = bannerColor)
@@ -1101,90 +1109,146 @@ internal fun VrchatStatusBanner() {
                     color = onContainerColor,
                     modifier = Modifier.weight(1f)
                 )
-                if (!expanded && affected.isNotEmpty()) {
-                    Text(
-                        "${affected.size} affected",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = onContainerColor.copy(alpha = 0.7f)
-                    )
+                if (!StatusBannerState.expanded && affected.isNotEmpty()) {
+                    Surface(
+                        shape = MaterialTheme.shapes.small,
+                        color = onContainerColor.copy(alpha = 0.12f)
+                    ) {
+                        Text(
+                            "${affected.size} affected",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = onContainerColor,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                        )
+                    }
                 }
                 Icon(
-                    imageVector = if (expanded) Icons.Filled.KeyboardArrowUp
+                    imageVector = if (StatusBannerState.expanded) Icons.Filled.KeyboardArrowUp
                         else Icons.Filled.KeyboardArrowDown,
-                    contentDescription = if (expanded) "Collapse" else "Expand",
-                    tint = onContainerColor
+                    contentDescription = if (StatusBannerState.expanded) "Collapse" else "Expand",
+                    tint = onContainerColor,
+                    modifier = Modifier.size(20.dp)
                 )
             }
 
-            AnimatedVisibility(visible = expanded) {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    // Affected components, grouped under a clear sub-heading so the
-                    // separate VRChat systems read as distinct rows rather than a clump.
+            AnimatedVisibility(visible = StatusBannerState.expanded) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     if (affected.isNotEmpty()) {
-                        Text(
-                            "Affected systems",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = onContainerColor.copy(alpha = 0.8f)
-                        )
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            for (c in affected) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        c.name,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = onContainerColor,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    Text(
-                                        c.status.replace("_", " ")
-                                            .replaceFirstChar { it.uppercase() },
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = bannerColor
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    // Active incidents, grouped under their own sub-heading.
-                    if (data.incidents.isNotEmpty()) {
-                        Text(
-                            "Latest updates",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = onContainerColor.copy(alpha = 0.8f)
-                        )
-                        for (inc in data.incidents.take(2)) {
-                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Surface(
+                            shape = MaterialTheme.shapes.medium,
+                            color = innerCardColor,
+                            shadowElevation = 1.dp
+                        ) {
+                            Column(Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
                                 Text(
-                                    inc.name,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = onContainerColor
+                                    "Affected systems",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = onContainerColor.copy(alpha = 0.6f),
+                                    modifier = Modifier.padding(vertical = 6.dp)
                                 )
-                                if (inc.latestUpdate.isNotBlank()) {
-                                    Text(
-                                        inc.latestUpdate,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = onContainerColor.copy(alpha = 0.7f)
-                                    )
+                                for ((idx, c) in affected.withIndex()) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 8.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            c.name
+                                                .replace("Realtime Player State Changes",
+                                                    "Realtime Player State"),
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = onContainerColor,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        Surface(
+                                            shape = MaterialTheme.shapes.small,
+                                            color = bannerColor.copy(alpha = 0.15f)
+                                        ) {
+                                            Text(
+                                                c.status.replace("_", " ")
+                                                    .replaceFirstChar { it.uppercase() },
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = bannerColor,
+                                                modifier = Modifier.padding(
+                                                    horizontal = 8.dp, vertical = 3.dp)
+                                            )
+                                        }
+                                    }
+                                    if (idx < affected.lastIndex) {
+                                        Divider(
+                                            color = onContainerColor.copy(alpha = 0.1f),
+                                            thickness = 0.5.dp
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
 
-                    Text(
-                        "View VRChat Status Page",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = bannerColor,
+                    if (data.incidents.isNotEmpty()) {
+                        Surface(
+                            shape = MaterialTheme.shapes.medium,
+                            color = innerCardColor,
+                            shadowElevation = 1.dp
+                        ) {
+                            Column(Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
+                                Text(
+                                    "Latest updates",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = onContainerColor.copy(alpha = 0.6f),
+                                    modifier = Modifier.padding(vertical = 6.dp)
+                                )
+                                val incidents = data.incidents.take(2)
+                                for ((idx, inc) in incidents.withIndex()) {
+                                    Column(
+                                        Modifier.padding(vertical = 6.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Text(
+                                            inc.name,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = onContainerColor
+                                        )
+                                        if (inc.latestUpdate.isNotBlank()) {
+                                            Text(
+                                                inc.latestUpdate,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = onContainerColor.copy(alpha = 0.7f)
+                                            )
+                                        }
+                                    }
+                                    if (idx < incidents.lastIndex) {
+                                        Divider(
+                                            color = onContainerColor.copy(alpha = 0.1f),
+                                            thickness = 0.5.dp
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Surface(
+                        shape = MaterialTheme.shapes.small,
+                        color = innerCardColor,
+                        shadowElevation = 1.dp,
                         modifier = Modifier.clickable {
                             val intent = Intent(Intent.ACTION_VIEW,
                                 Uri.parse("https://status.vrchat.com"))
                             ctx.startActivity(intent)
                         }
-                    )
+                    ) {
+                        Text(
+                            "View VRChat Status Page",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = onContainerColor,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                        )
+                    }
                 }
             }
         }
