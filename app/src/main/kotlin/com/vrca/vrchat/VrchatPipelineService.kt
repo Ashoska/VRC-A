@@ -116,6 +116,11 @@ class VrchatPipelineService : Service() {
         // Extras passed when starting
         const val EXTRA_DEVICE_HASH = "device_hash"
 
+        // Set when the app is swiped away; a sticky restart within this window
+        // is treated as the deliberate kill and aborts instead of resurrecting.
+        const val KEY_MANUAL_KILL_AT = "manual_kill_at"
+        const val MANUAL_KILL_WINDOW_MS = 15_000L
+
         /** Send this intent to check if the service is running */
         fun isRunning(context: Context): Boolean {
             // Simple flag stored in application-level state
@@ -243,6 +248,20 @@ class VrchatPipelineService : Service() {
                 return START_NOT_STICKY
             }
             else -> {
+                // A null intent means Android is sticky-restarting us. If the user
+                // just swiped the app away (manual_kill flag fresh), honour the
+                // kill instead of resurrecting the service — otherwise START_STICKY
+                // brings the whole process straight back and it looks "not killed".
+                if (intent == null) {
+                    val killedAt = applicationContext
+                        .getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
+                        .getLong(KEY_MANUAL_KILL_AT, 0L)
+                    if (System.currentTimeMillis() - killedAt < MANUAL_KILL_WINDOW_MS) {
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        stopSelf()
+                        return START_NOT_STICKY
+                    }
+                }
                 // Prefer deviceHash from the intent extra, but fall back to the
                 // SharedPreferences value so a sticky restart with null intent
                 // (Android killed the service due to memory pressure) still
@@ -277,6 +296,15 @@ class VrchatPipelineService : Service() {
         // (users were confused seeing it still alive). The write is awaited with
         // a short timeout on a background thread so the offline state has a
         // chance to reach Firestore before we hard-stop everything.
+        // Mark this as a deliberate kill so a START_STICKY restart (null intent)
+        // aborts instead of resurrecting either service.
+        try {
+            applicationContext
+                .getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
+                .edit()
+                .putLong(KEY_MANUAL_KILL_AT, System.currentTimeMillis())
+                .commit()
+        } catch (_: Throwable) {}
         stopRpcService()
         Thread {
             try {

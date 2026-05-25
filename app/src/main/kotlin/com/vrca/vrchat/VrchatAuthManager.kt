@@ -677,9 +677,12 @@ object VrchatAuthManager {
     // wrapping the list under "results"/"events".
     suspend fun fetchGroupCalendarEvents(context: Context, groupId: String, n: Int = 20): org.json.JSONArray? = withContext(Dispatchers.IO) {
         val cookieHeader = getCookieHeader(context) ?: return@withContext null
+        // Correct VRChat group-calendar endpoint is GET /calendar/{groupId}
+        // (returns {"results":[...]}). The older /groups/{id}/events paths 404,
+        // which is why events created while the app was closed never surfaced.
         val endpoints = arrayOf(
+            "$BASE/calendar/$groupId?n=$n",
             "$BASE/groups/$groupId/events?n=$n",
-            "$BASE/groups/$groupId/scheduledEvents?n=$n",
             "$BASE/groups/$groupId/calendar?n=$n"
         )
         for (url in endpoints) {

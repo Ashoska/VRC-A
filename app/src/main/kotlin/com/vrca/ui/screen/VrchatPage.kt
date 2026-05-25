@@ -599,90 +599,129 @@ private fun formatRelativeTime(timestampMs: Long): String {
 }
 
 private fun wordDiff(before: String, after: String): Pair<androidx.compose.ui.text.AnnotatedString, androidx.compose.ui.text.AnnotatedString> {
-    // Tokenize keeping whitespace runs (including newlines) as their own tokens
-    // so multi-line bios diff word-by-word AND preserve their original layout.
-    // Splitting on " " alone left newlines glued to adjacent words ("bio\n\nMy"),
-    // which broke alignment and falsely flagged unchanged words as changed.
-    val tokenRegex = Regex("\\s+|\\S+")
-    val bWords = tokenRegex.findAll(before).map { it.value }.toList()
-    val aWords = tokenRegex.findAll(after).map { it.value }.toList()
-
-    // LCS (Longest Common Subsequence) to find which tokens are unchanged
-    val m = bWords.size
-    val n = aWords.size
-    val dp = Array(m + 1) { IntArray(n + 1) }
-    for (i in 1..m) for (j in 1..n) {
-        dp[i][j] = if (bWords[i - 1] == aWords[j - 1]) dp[i - 1][j - 1] + 1
-        else maxOf(dp[i - 1][j], dp[i][j - 1])
-    }
-    val lcsSet = mutableSetOf<Int>()
-    val lcsSetAfter = mutableSetOf<Int>()
-    var i = m; var j = n
-    while (i > 0 && j > 0) {
-        when {
-            bWords[i - 1] == aWords[j - 1] -> { lcsSet.add(i - 1); lcsSetAfter.add(j - 1); i--; j-- }
-            dp[i - 1][j] > dp[i][j - 1] -> i--
-            else -> j--
-        }
-    }
-
     val removedColor = Color(0xFFEF5350)
     val addedColor = Color(0xFF4CAF50)
     val neutralColor = Color(0xFFB0B0B0)
-    val movedColor = Color(0xFFB388FF) // purple — token was moved, not added/removed
+    val movedColor = Color(0xFFB388FF) // purple — line was moved, not added/removed
 
-    // Move detection: tokens outside the LCS are candidate removals/additions.
-    // A token that appears as BOTH a removal and an addition was just moved (or
-    // is an identical token the LCS aligned elsewhere), not deleted or added —
-    // render those in purple on both sides so reordering a bio reads as "moved"
-    // instead of red/green. Matching is multiset-based so counts stay balanced.
-    // Only MEANINGFUL tokens are move-eligible: common short words/punctuation
-    val moveBlocklist = setOf(
-        "i", "a", "an", "the", "my", "me", "he", "we", "be", "it", "is", "in",
-        "to", "of", "or", "on", "at", "by", "no", "do", "so", "as", "up", "if",
-        "am", "us", "and", "for", "but", "not", "you", "are", "was", "has", "had",
-        "its", "our", "her", "his", "all", "can", "who", "got", "get", "the",
-        "|", "-", "~", "/", "<3", ":3", ":)", ":D", ":(", ";)", "^^", "xd",
-        "lol", "omg", "ily", "uwu", "owo"
-    )
-    fun moveEligible(w: String) = w.trim().lowercase() !in moveBlocklist
-    val removedIdx = bWords.indices.filter { it !in lcsSet && moveEligible(bWords[it]) }
-    val addedIdx = aWords.indices.filter { it !in lcsSetAfter && moveEligible(aWords[it]) }
-
-    val addedCounts = HashMap<String, Int>()
-    for (k in addedIdx) addedCounts[aWords[k]] = (addedCounts[aWords[k]] ?: 0) + 1
-    val movedBefore = HashSet<Int>()
-    for (k in removedIdx) {
-        val c = addedCounts[bWords[k]] ?: 0
-        if (c > 0) { movedBefore.add(k); addedCounts[bWords[k]] = c - 1 }
+    // Diff at the LINE level, not the word level. Bios are usually multi-line
+    // lists; word-level LCS matched common words ("the", "my", "get") across
+    // DIFFERENT lines and painted the result an inconsistent red/green/purple
+    // mess. Whole lines are far more unique, so a line-level diff is stable and
+    // readable: each line is unchanged, removed, added, or moved.
+    fun lcs(b: List<String>, a: List<String>): Pair<HashSet<Int>, HashSet<Int>> {
+        val m = b.size; val n = a.size
+        val dp = Array(m + 1) { IntArray(n + 1) }
+        for (i in 1..m) for (j in 1..n) {
+            dp[i][j] = if (b[i - 1] == a[j - 1]) dp[i - 1][j - 1] + 1
+            else maxOf(dp[i - 1][j], dp[i][j - 1])
+        }
+        val sb = HashSet<Int>(); val sa = HashSet<Int>()
+        var i = m; var j = n
+        while (i > 0 && j > 0) {
+            when {
+                b[i - 1] == a[j - 1] -> { sb.add(i - 1); sa.add(j - 1); i--; j-- }
+                dp[i - 1][j] >= dp[i][j - 1] -> i--
+                else -> j--
+            }
+        }
+        return sb to sa
     }
-    val removedCounts = HashMap<String, Int>()
-    for (k in removedIdx) removedCounts[bWords[k]] = (removedCounts[bWords[k]] ?: 0) + 1
-    val movedAfter = HashSet<Int>()
-    for (k in addedIdx) {
-        val c = removedCounts[aWords[k]] ?: 0
-        if (c > 0) { movedAfter.add(k); removedCounts[aWords[k]] = c - 1 }
+
+    // Word-level diff for a SINGLE edited line: short, single-line text doesn't
+    // suffer the cross-line scramble, so a plain red/green token diff is clean.
+    fun lineWordDiff(b: String, a: String): Pair<androidx.compose.ui.text.AnnotatedString, androidx.compose.ui.text.AnnotatedString> {
+        val tk = Regex("\\s+|\\S+")
+        val bw = tk.findAll(b).map { it.value }.toList()
+        val aw = tk.findAll(a).map { it.value }.toList()
+        val (cb, ca) = lcs(bw, aw)
+        val bs = buildAnnotatedString {
+            for ((idx, w) in bw.withIndex()) {
+                val c = if (w.isBlank() || idx in cb) neutralColor else removedColor
+                withStyle(SpanStyle(color = c)) { append(w) }
+            }
+        }
+        val asr = buildAnnotatedString {
+            for ((idx, w) in aw.withIndex()) {
+                val c = if (w.isBlank() || idx in ca) neutralColor else addedColor
+                withStyle(SpanStyle(color = c)) { append(w) }
+            }
+        }
+        return bs to asr
+    }
+
+    val bLines = before.split("\n")
+    val aLines = after.split("\n")
+    val (lcsB, lcsA) = lcs(bLines, aLines)
+
+    val removedLineIdx = bLines.indices.filter { it !in lcsB }
+    val addedLineIdx = aLines.indices.filter { it !in lcsA }
+
+    // Move detection on whole lines: a removed line whose exact trimmed content
+    // reappears as an added line was moved (purple), not deleted+added. Whole-line
+    // matching is unambiguous, so no blocklist is needed.
+    val movedB = HashSet<Int>(); val movedA = HashSet<Int>()
+    val addedByContent = HashMap<String, ArrayDeque<Int>>()
+    for (k in addedLineIdx) {
+        val key = aLines[k].trim()
+        if (key.isNotEmpty()) addedByContent.getOrPut(key) { ArrayDeque() }.add(k)
+    }
+    for (k in removedLineIdx) {
+        val key = bLines[k].trim()
+        if (key.isEmpty()) continue
+        val dq = addedByContent[key] ?: continue
+        if (dq.isNotEmpty()) { movedA.add(dq.removeFirst()); movedB.add(k) }
+    }
+
+    // Pair each remaining removed line with the most similar remaining added line
+    // (token Jaccard > 0.3) so a single edited line shows word-level changes
+    // instead of an entire red line plus an entire green line.
+    fun tokens(s: String) = s.lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }.toSet()
+    fun sim(b: String, a: String): Double {
+        val tb = tokens(b); val ta = tokens(a)
+        val union = tb.union(ta).size
+        return if (union == 0) 0.0 else tb.intersect(ta).size.toDouble() / union
+    }
+    val realRemoved = removedLineIdx.filter { it !in movedB }
+    val realAdded = addedLineIdx.filter { it !in movedA }
+    val pairBtoA = HashMap<Int, Int>()
+    val usedA = HashSet<Int>()
+    for (rb in realRemoved) {
+        var best = -1; var bestScore = 0.3
+        for (ra in realAdded) {
+            if (ra in usedA) continue
+            val s = sim(bLines[rb], aLines[ra])
+            if (s > bestScore) { bestScore = s; best = ra }
+        }
+        if (best >= 0) { pairBtoA[rb] = best; usedA.add(best) }
+    }
+    val pairAtoB = HashMap<Int, Int>()
+    val pairDiff = HashMap<Int, Pair<androidx.compose.ui.text.AnnotatedString, androidx.compose.ui.text.AnnotatedString>>()
+    for ((b, a) in pairBtoA) {
+        pairAtoB[a] = b
+        pairDiff[b] = lineWordDiff(bLines[b], aLines[a])
     }
 
     val beforeAnnotated = buildAnnotatedString {
-        for ((idx, w) in bWords.withIndex()) {
-            // Whitespace tokens always render neutral so only real words get colored.
-            val color = when {
-                w.isBlank() || idx in lcsSet -> neutralColor
-                idx in movedBefore -> movedColor
-                else -> removedColor
+        for ((idx, line) in bLines.withIndex()) {
+            if (idx > 0) withStyle(SpanStyle(color = neutralColor)) { append("\n") }
+            when {
+                idx in lcsB -> withStyle(SpanStyle(color = neutralColor)) { append(line) }
+                idx in movedB -> withStyle(SpanStyle(color = movedColor)) { append(line) }
+                idx in pairDiff -> append(pairDiff[idx]!!.first)
+                else -> withStyle(SpanStyle(color = removedColor)) { append(line) }
             }
-            withStyle(SpanStyle(color = color)) { append(w) }
         }
     }
     val afterAnnotated = buildAnnotatedString {
-        for ((idx, w) in aWords.withIndex()) {
-            val color = when {
-                w.isBlank() || idx in lcsSetAfter -> neutralColor
-                idx in movedAfter -> movedColor
-                else -> addedColor
+        for ((idx, line) in aLines.withIndex()) {
+            if (idx > 0) withStyle(SpanStyle(color = neutralColor)) { append("\n") }
+            when {
+                idx in lcsA -> withStyle(SpanStyle(color = neutralColor)) { append(line) }
+                idx in movedA -> withStyle(SpanStyle(color = movedColor)) { append(line) }
+                pairAtoB.containsKey(idx) -> append(pairDiff[pairAtoB.getValue(idx)]!!.second)
+                else -> withStyle(SpanStyle(color = addedColor)) { append(line) }
             }
-            withStyle(SpanStyle(color = color)) { append(w) }
         }
     }
     return beforeAnnotated to afterAnnotated

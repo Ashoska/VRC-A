@@ -115,6 +115,20 @@ class DiscordRpcService : Service() {
                 return START_NOT_STICKY
             }
         }
+        // A null intent is a START_STICKY restart. If the user just swiped the app
+        // away, the pipeline service stamped a manual-kill flag — honour it so this
+        // WebView-backed service doesn't resurrect itself and keep the app alive.
+        if (intent == null) {
+            val killedAt = applicationContext
+                .getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
+                .getLong("manual_kill_at", 0L)
+            if (System.currentTimeMillis() - killedAt < 15_000L) {
+                teardown()
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+                return START_NOT_STICKY
+            }
+        }
         ensureChannel()
         startForeground(NOTIF_ID, buildNotif("Discord RPC starting..."))
 
