@@ -916,10 +916,15 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
             LaunchedEffect(docId) {
                 if (docId.isBlank()) return@LaunchedEffect
                 runCatching {
-                    val snap = db.collection("users").document(docId).get(Source.SERVER).await()
-                    val url = snap.getString("targetedUpdateUrl").orEmpty()
-                    hasTargeted = url.isNotBlank()
-                    if (hasTargeted) { targetUrl = url; targetNotes = snap.getString("targetedUpdateNotes").orEmpty() }
+                    val snap = db.collection("releases").document(docId).get(Source.SERVER).await()
+                    if (snap.exists()) {
+                        val url = snap.getString("downloadUrl").orEmpty()
+                        hasTargeted = url.isNotBlank()
+                        if (hasTargeted) {
+                            targetUrl = url
+                            targetNotes = snap.getString("notes").orEmpty()
+                        }
+                    }
                     loadedTarget = true
                 }
             }
@@ -989,16 +994,19 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                         )
 
                         tUploadPhase = "Pushing to user..."
+                        val releaseData = hashMapOf<String, Any>(
+                            "versionCode"       to tParsedCode,
+                            "versionName"       to tParsedName.ifBlank { tParsedCode.toString() },
+                            "downloadUrl"       to downloadUrl,
+                            "requiredMinCode"   to 0L,
+                            "notes"             to targetNotes.trim(),
+                            "publishedAt"       to com.google.firebase.firestore.FieldValue.serverTimestamp(),
+                            "publishedByDevice" to BuildConfig.APPLICATION_ID
+                        )
                         FirebaseFirestore.getInstance()
-                            .collection("users")
+                            .collection("releases")
                             .document(docId)
-                            .set(
-                                mapOf(
-                                    "targetedUpdateUrl" to downloadUrl,
-                                    "targetedUpdateNotes" to targetNotes.trim()
-                                ),
-                                SetOptions.merge()
-                            )
+                            .set(releaseData, SetOptions.merge())
                             .await()
 
                         targetUrl = downloadUrl
@@ -1037,15 +1045,9 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                     scope.launch {
                         runCatching {
                             FirebaseFirestore.getInstance()
-                                .collection("users")
+                                .collection("releases")
                                 .document(docId)
-                                .set(
-                                    mapOf(
-                                        "targetedUpdateUrl" to "",
-                                        "targetedUpdateNotes" to ""
-                                    ),
-                                    SetOptions.merge()
-                                )
+                                .delete()
                                 .await()
                             hasTargeted = false; targetUrl = ""; targetNotes = ""
                         }.onFailure { e -> setError("Remove failed: ${e.message}") }
@@ -1178,16 +1180,19 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                     if (targetUrl.trim().isNotBlank()) {
                         scope.launch {
                             runCatching {
+                                val releaseData = hashMapOf<String, Any>(
+                                    "versionCode"       to Long.MAX_VALUE,
+                                    "versionName"       to "Targeted Update",
+                                    "downloadUrl"       to targetUrl.trim(),
+                                    "requiredMinCode"   to 0L,
+                                    "notes"             to targetNotes.trim(),
+                                    "publishedAt"       to com.google.firebase.firestore.FieldValue.serverTimestamp(),
+                                    "publishedByDevice" to BuildConfig.APPLICATION_ID
+                                )
                                 FirebaseFirestore.getInstance()
-                                    .collection("users")
+                                    .collection("releases")
                                     .document(docId)
-                                    .set(
-                                        mapOf(
-                                            "targetedUpdateUrl" to targetUrl.trim(),
-                                            "targetedUpdateNotes" to targetNotes.trim()
-                                        ),
-                                        SetOptions.merge()
-                                    )
+                                    .set(releaseData, SetOptions.merge())
                                     .await()
                                 hasTargeted = true
                             }.onFailure { e -> setError("Push failed: ${e.message}") }

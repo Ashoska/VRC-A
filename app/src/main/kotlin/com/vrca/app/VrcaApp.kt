@@ -43,7 +43,6 @@ import com.vrca.ui.viewmodel.VrcaViewModel
 import com.vrca.update.ReleaseCheckResult
 import com.vrca.update.ReleaseInfo
 import com.vrca.update.checkFirestoreRelease
-import com.vrca.update.checkTargetedUpdate
 import com.vrca.vrchat.VrchatAuthManager
 import com.vrca.vrchat.VrchatBanChecker
 import com.vrca.vrchat.VrchatLoginScreen
@@ -301,19 +300,41 @@ fun VrcaApp() {
     var downloadDone       by remember { mutableStateOf(false) }
 
     if (!BuildConfig.IS_ADMIN_BUILD) {
+        val prefs = remember { ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE) }
+        val deviceHash = remember { prefs.getString("device_id_hash", "") ?: "" }
+
         LaunchedEffect(Unit) {
-            val globalResult = checkFirestoreRelease(BuildConfig.VERSION_CODE)
-            val prefs = ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
-            val deviceHash = prefs.getString("device_id_hash", "") ?: ""
-            val targetedResult = checkTargetedUpdate(deviceHash)
-            releaseCheckResult = if (targetedResult is ReleaseCheckResult.UpdateAvailable) {
-                targetedResult
-            } else {
-                globalResult
+            releaseCheckResult = checkFirestoreRelease(BuildConfig.VERSION_CODE, deviceHash)
+        }
+
+        // Real-time detection: snapshot listener on releases/{deviceHash}
+        if (deviceHash.isNotBlank()) {
+            DisposableEffect(deviceHash) {
+                val reg = FirebaseFirestore.getInstance()
+                    .collection("releases").document(deviceHash)
+                    .addSnapshotListener { snap, _ ->
+                        if (snap == null || !snap.exists()) return@addSnapshotListener
+                        val url = snap.getString("downloadUrl").orEmpty()
+                        if (url.isBlank()) return@addSnapshotListener
+                        val code = snap.getLong("versionCode") ?: return@addSnapshotListener
+                        if (code <= BuildConfig.VERSION_CODE) return@addSnapshotListener
+                        val info = ReleaseInfo(
+                            versionCode     = code,
+                            versionName     = snap.getString("versionName").orEmpty(),
+                            downloadUrl     = url,
+                            requiredMinCode = snap.getLong("requiredMinCode") ?: 0L,
+                            notes           = snap.getString("notes").orEmpty()
+                        )
+                        releaseCheckResult = ReleaseCheckResult.UpdateAvailable(
+                            info, forced = BuildConfig.VERSION_CODE < info.requiredMinCode
+                        )
+                        updateDismissed = false
+                    }
+                onDispose { reg.remove() }
             }
         }
 
-        // Real-time targeted update detection via snapshot listener
+        // Backwards compat: real-time detection via targetedUpdateUrl on user doc
         val liveTargetedUrl = vm.targetedUpdateUrl
         val liveTargetedNotes = vm.targetedUpdateNotes
         LaunchedEffect(liveTargetedUrl) {
