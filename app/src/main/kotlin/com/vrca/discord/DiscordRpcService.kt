@@ -126,6 +126,13 @@ class DiscordRpcService : Service() {
                 teardown()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
+                // Kill the resurrected process so it doesn't linger in the
+                // background; START_NOT_STICKY (returned below) prevents a re-restart.
+                Thread {
+                    try { Thread.sleep(300) } catch (_: Throwable) {}
+                    android.os.Process.killProcess(android.os.Process.myPid())
+                    kotlin.system.exitProcess(0)
+                }.start()
                 return START_NOT_STICKY
             }
         }

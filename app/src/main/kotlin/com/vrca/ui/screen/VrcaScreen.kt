@@ -1042,7 +1042,9 @@ private fun SetupIncompleteBanner(
    ========================= */
 
 private object StatusBannerState {
-    var expanded = true
+    // Shared, observable so the banner on every tab (Home, VRChat) collapses
+    // and expands together instead of tracking independent local state.
+    var expanded by mutableStateOf(true)
 }
 
 @Composable
@@ -1069,10 +1071,6 @@ internal fun VrchatStatusBanner() {
     }
 
     val ctx = LocalContext.current
-    var expanded by remember { mutableStateOf(StatusBannerState.expanded) }
-    DisposableEffect(Unit) {
-        onDispose { StatusBannerState.expanded = expanded }
-    }
 
     val title = data.description.ifBlank {
         when (data.indicator) {
@@ -1098,7 +1096,7 @@ internal fun VrchatStatusBanner() {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { expanded = !expanded },
+                    .clickable { StatusBannerState.expanded = !StatusBannerState.expanded },
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
@@ -1111,7 +1109,7 @@ internal fun VrchatStatusBanner() {
                     color = onContainerColor,
                     modifier = Modifier.weight(1f)
                 )
-                if (!expanded && affected.isNotEmpty()) {
+                if (!StatusBannerState.expanded && affected.isNotEmpty()) {
                     Surface(
                         shape = MaterialTheme.shapes.small,
                         color = onContainerColor.copy(alpha = 0.12f)
@@ -1125,15 +1123,15 @@ internal fun VrchatStatusBanner() {
                     }
                 }
                 Icon(
-                    imageVector = if (expanded) Icons.Filled.KeyboardArrowUp
+                    imageVector = if (StatusBannerState.expanded) Icons.Filled.KeyboardArrowUp
                         else Icons.Filled.KeyboardArrowDown,
-                    contentDescription = if (expanded) "Collapse" else "Expand",
+                    contentDescription = if (StatusBannerState.expanded) "Collapse" else "Expand",
                     tint = onContainerColor,
                     modifier = Modifier.size(20.dp)
                 )
             }
 
-            AnimatedVisibility(visible = expanded) {
+            AnimatedVisibility(visible = StatusBannerState.expanded) {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     if (affected.isNotEmpty()) {
                         Surface(

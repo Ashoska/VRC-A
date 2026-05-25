@@ -259,6 +259,16 @@ class VrchatPipelineService : Service() {
                     if (System.currentTimeMillis() - killedAt < MANUAL_KILL_WINDOW_MS) {
                         stopForeground(STOP_FOREGROUND_REMOVE)
                         stopSelf()
+                        // Android sticky-restarted us into a fresh process that would
+                        // otherwise linger as a cached background process. Kill it
+                        // outright after this method returns START_NOT_STICKY (so it
+                        // won't be recreated again). The brief delay lets the return
+                        // value register before the process dies.
+                        Thread {
+                            try { Thread.sleep(300) } catch (_: Throwable) {}
+                            android.os.Process.killProcess(android.os.Process.myPid())
+                            kotlin.system.exitProcess(0)
+                        }.start()
                         return START_NOT_STICKY
                     }
                 }
