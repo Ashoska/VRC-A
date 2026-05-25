@@ -1,22 +1,23 @@
-// app/src/main/kotlin/com/vrca/InAppUpdate.kt
 package com.vrca.update
 
 import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.tasks.await
 
 /**
- * Firestore release document: releases/latest
+ * Firestore release document: releases/latest  (global)
+ *                              releases/{deviceHash}  (per-device targeted)
  *
- * Fields:
- *   versionCode       (Long)   - integer build number of the latest public release
+ * Both use the same fields:
+ *   versionCode       (Long)   - integer build number
  *   versionName       (String) - display label e.g. "v1.4.2"
  *   downloadUrl       (String) - direct APK download URL
- *   requiredMinCode   (Long)   - users with versionCode < this are FORCE-updated (cannot dismiss)
+ *   requiredMinCode   (Long)   - users with versionCode < this are FORCE-updated
  *   notes             (String) - optional release notes shown in the dialog
  *   publishedAt       (Timestamp)
  *
- * Only admin build can write this doc (enforced by Firestore rules).
- * Public build reads it on every launch.
+ * Directed releases write to releases/{deviceHash} so they ride the same
+ * infrastructure as global releases.  The client checks the per-device doc
+ * first, falling back to releases/latest.
  */
 
 data class ReleaseInfo(
@@ -33,62 +34,49 @@ sealed class ReleaseCheckResult {
     data class Failed(val reason: String) : ReleaseCheckResult()
 }
 
-suspend fun checkFirestoreRelease(currentVersionCode: Int): ReleaseCheckResult {
-    return try {
-        val db = FirebaseFirestore.getInstance()
-        val snap = db.collection("releases").document("latest").get().await()
+private fun parseReleaseSnap(
+    snap: com.google.firebase.firestore.DocumentSnapshot,
+    currentVersionCode: Int
+): ReleaseCheckResult? {
+    if (!snap.exists()) return null
 
-        if (!snap.exists()) return ReleaseCheckResult.UpToDate
+    val latestCode  = snap.getLong("versionCode") ?: return null
+    val versionName = snap.getString("versionName").orEmpty()
+    val downloadUrl = snap.getString("downloadUrl").orEmpty()
+    val requiredMin = snap.getLong("requiredMinCode") ?: 0L
+    val notes       = snap.getString("notes").orEmpty()
 
-        val latestCode   = snap.getLong("versionCode") ?: return ReleaseCheckResult.UpToDate
-        val versionName  = snap.getString("versionName").orEmpty()
-        val downloadUrl  = snap.getString("downloadUrl").orEmpty()
-        val requiredMin  = snap.getLong("requiredMinCode") ?: 0L
-        val notes        = snap.getString("notes").orEmpty()
+    if (downloadUrl.isBlank() || latestCode <= currentVersionCode) return null
 
-        if (downloadUrl.isBlank() || latestCode <= currentVersionCode) {
-            return ReleaseCheckResult.UpToDate
-        }
-
-        val info = ReleaseInfo(
-            versionCode    = latestCode,
-            versionName    = versionName,
-            downloadUrl    = downloadUrl,
-            requiredMinCode = requiredMin,
-            notes          = notes
-        )
-        val forced = currentVersionCode < requiredMin
-        ReleaseCheckResult.UpdateAvailable(info, forced)
-
-    } catch (e: Exception) {
-        ReleaseCheckResult.Failed(e.message ?: "Unknown error")
-    }
+    val info = ReleaseInfo(
+        versionCode     = latestCode,
+        versionName     = versionName,
+        downloadUrl     = downloadUrl,
+        requiredMinCode = requiredMin,
+        notes           = notes
+    )
+    val forced = currentVersionCode < requiredMin
+    return ReleaseCheckResult.UpdateAvailable(info, forced)
 }
 
-/**
- * Check if the admin has pushed a targeted update specifically for this device.
- * Reads `targetedUpdateUrl` and `targetedUpdateNotes` from `users/{deviceHash}`.
- */
-suspend fun checkTargetedUpdate(deviceHash: String): ReleaseCheckResult {
-    if (deviceHash.isBlank()) return ReleaseCheckResult.UpToDate
+suspend fun checkFirestoreRelease(
+    currentVersionCode: Int,
+    deviceHash: String = ""
+): ReleaseCheckResult {
     return try {
         val db = FirebaseFirestore.getInstance()
-        val snap = db.collection("users").document(deviceHash).get().await()
-        if (!snap.exists()) return ReleaseCheckResult.UpToDate
 
-        val url   = snap.getString("targetedUpdateUrl").orEmpty()
-        val notes = snap.getString("targetedUpdateNotes").orEmpty()
+        // Per-device release takes priority over global
+        if (deviceHash.isNotBlank()) {
+            val deviceSnap = db.collection("releases").document(deviceHash).get().await()
+            val deviceResult = parseReleaseSnap(deviceSnap, currentVersionCode)
+            if (deviceResult != null) return deviceResult
+        }
 
-        if (url.isBlank()) return ReleaseCheckResult.UpToDate
+        // Fall back to global release
+        val globalSnap = db.collection("releases").document("latest").get().await()
+        parseReleaseSnap(globalSnap, currentVersionCode) ?: ReleaseCheckResult.UpToDate
 
-        val info = ReleaseInfo(
-            versionCode     = Long.MAX_VALUE,
-            versionName     = "Targeted Update",
-            downloadUrl     = url,
-            requiredMinCode = 0L,
-            notes           = notes
-        )
-        ReleaseCheckResult.UpdateAvailable(info, forced = false)
     } catch (e: Exception) {
         ReleaseCheckResult.Failed(e.message ?: "Unknown error")
     }
