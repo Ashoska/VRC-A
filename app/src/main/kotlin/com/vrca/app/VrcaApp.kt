@@ -298,6 +298,7 @@ fun VrcaApp() {
     var updateDismissed    by remember { mutableStateOf(false) }
     var downloadId         by remember { mutableLongStateOf(-1L) }
     var downloadDone       by remember { mutableStateOf(false) }
+    var downloadError      by remember { mutableStateOf<String?>(null) }
 
     if (!BuildConfig.IS_ADMIN_BUILD) {
         val prefs = remember { ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE) }
@@ -364,27 +365,56 @@ fun VrcaApp() {
                     val cursor = dm.query(query)
                     if (cursor.moveToFirst()) {
                         val statusCol = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
-                        val localUriCol = cursor.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI)
                         val status = cursor.getInt(statusCol)
-                        val localUri = cursor.getString(localUriCol)
-                        if (status == DownloadManager.STATUS_SUCCESSFUL && localUri != null) {
-                            val file = File(Uri.parse(localUri).path!!)
-                            val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                                FileProvider.getUriForFile(
-                                    context,
-                                    "${context.packageName}.fileprovider",
-                                    file
-                                )
-                            } else {
-                                Uri.fromFile(file)
+
+                        if (status == DownloadManager.STATUS_FAILED) {
+                            val reasonCol = cursor.getColumnIndex(DownloadManager.COLUMN_REASON)
+                            val reason = cursor.getInt(reasonCol)
+                            downloadError = when (reason) {
+                                DownloadManager.ERROR_HTTP_DATA_ERROR,
+                                DownloadManager.ERROR_UNHANDLED_HTTP_CODE ->
+                                    "Download failed — the download URL may require authentication (is the GitHub repo private?)"
+                                DownloadManager.ERROR_FILE_ERROR ->
+                                    "Download failed — could not write file to storage"
+                                else -> "Download failed (error code $reason)"
                             }
-                            val install = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
-                                setDataAndType(uri, "application/vnd.android.package-archive")
-                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            }
-                            context.startActivity(install)
                             downloadDone = true
+                            cursor.close()
+                            return
+                        }
+
+                        if (status == DownloadManager.STATUS_SUCCESSFUL) {
+                            val localUriCol = cursor.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI)
+                            val localUri = cursor.getString(localUriCol)
+                            if (localUri != null) {
+                                val file = File(Uri.parse(localUri).path!!)
+                                // GitHub private repos redirect unauthenticated requests
+                                // to the login page — DownloadManager downloads the HTML
+                                // and reports success. Catch it: real APKs are >100 KB.
+                                if (file.length() < 100_000L) {
+                                    downloadError = "Download failed — got a web page instead of an APK. The GitHub repo is likely private. Make the repo public or use a public download URL."
+                                    downloadDone = true
+                                    file.delete()
+                                    cursor.close()
+                                    return
+                                }
+                                val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                                    FileProvider.getUriForFile(
+                                        context,
+                                        "${context.packageName}.fileprovider",
+                                        file
+                                    )
+                                } else {
+                                    Uri.fromFile(file)
+                                }
+                                val install = Intent(Intent.ACTION_VIEW).apply {
+                                    setDataAndType(uri, "application/vnd.android.package-archive")
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                context.startActivity(install)
+                                downloadDone = true
+                            }
                         }
                     }
                     cursor.close()
@@ -412,11 +442,12 @@ fun VrcaApp() {
             info = updateToShow.info,
             forced = updateToShow.forced,
             downloading = downloadId >= 0L && !downloadDone,
+            error = downloadError,
             onDismiss = { updateDismissed = true },
             onDownload = { url ->
+                downloadError = null
                 val dm = ctx.getSystemService(android.content.Context.DOWNLOAD_SERVICE) as DownloadManager
                 val fileName = "vrc-a-update.apk"
-                // Delete any previous partial download
                 val dest = File(ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), fileName)
                 if (dest.exists()) dest.delete()
                 val request = DownloadManager.Request(Uri.parse(url)).apply {
@@ -443,6 +474,7 @@ private fun UpdateDialog(
     info: ReleaseInfo,
     forced: Boolean,
     downloading: Boolean = false,
+    error: String? = null,
     onDismiss: () -> Unit,
     onDownload: (String) -> Unit
 ) {
@@ -468,6 +500,13 @@ private fun UpdateDialog(
                         color = MaterialTheme.colorScheme.error
                     )
                 }
+                if (error != null) {
+                    Text(
+                        error,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
             }
         },
         confirmButton = {
@@ -475,7 +514,7 @@ private fun UpdateDialog(
                 onClick = { if (!downloading) onDownload(info.downloadUrl) },
                 enabled = !downloading
             ) {
-                Text(if (downloading) "Downloading..." else "Download")
+                Text(if (downloading) "Downloading..." else if (error != null) "Retry" else "Download")
             }
         },
         dismissButton = if (!forced) ({
