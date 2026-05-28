@@ -65,6 +65,14 @@ object AppShutdown {
                 .commit()
         } catch (_: Throwable) {}
 
+        // Clear the process-lifetime ViewModelStore so VrcaViewModel.onCleared()
+        // runs exactly once on a genuine shutdown — cancels the chatbox senders and
+        // sync loops and fires the going-offline write. (onTaskRemoved is delivered
+        // on the main thread, which is the correct thread to clear a ViewModelStore.)
+        try {
+            (app as? VrcaApplication)?.viewModelStore?.clear()
+        } catch (_: Throwable) {}
+
         // Ask the other foreground services to stop. killProcess below tears the
         // whole process down regardless, but stopping first releases wakelocks
         // and removes their notifications promptly.

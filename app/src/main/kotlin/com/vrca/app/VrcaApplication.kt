@@ -4,6 +4,8 @@ import android.app.Application
 import android.content.Context
 import android.os.Build
 import android.os.Process
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.ViewModelStoreOwner
 import com.vrca.BuildConfig
 import com.vrca.data.UserPreferencesRepository
 import java.io.PrintWriter
@@ -13,12 +15,22 @@ import java.util.Date
 import java.util.Locale
 import kotlin.system.exitProcess
 
-class VrcaApplication : Application() {
+/**
+ * Application is also a [ViewModelStoreOwner] so the core runtime ViewModel
+ * ([com.vrca.ui.viewmodel.VrcaViewModel]) can be scoped to the PROCESS, not the
+ * Activity. This keeps the chatbox senders, moderation/kill listener, NowPlaying
+ * consumer and Firestore sync loops alive while the app is backgrounded and the
+ * Activity is destroyed — they are torn down only by [AppShutdown] on a real swipe.
+ */
+class VrcaApplication : Application(), ViewModelStoreOwner {
 
     companion object {
         const val CRASH_PREFS_FILE = "vrca_crash"
         const val CRASH_KEY_TEXT = "last_crash_text"
     }
+
+    // Process-lifetime ViewModelStore. Cleared only by AppShutdown on swipe.
+    override val viewModelStore: ViewModelStore = ViewModelStore()
 
     lateinit var userPreferencesRepository: UserPreferencesRepository
         private set

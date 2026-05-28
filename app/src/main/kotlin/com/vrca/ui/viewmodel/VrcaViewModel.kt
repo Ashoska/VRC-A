@@ -19,7 +19,6 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
-import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
@@ -128,10 +127,15 @@ class VrcaViewModel(
         val Factory: ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 val application = (this[APPLICATION_KEY] as VrcaApplication)
+                // NOTE: a plain SavedStateHandle() is used (not createSavedStateHandle()).
+                // This VM is owned by the Application's process-lifetime ViewModelStore,
+                // which has no SavedStateRegistry, so createSavedStateHandle() would throw.
+                // Toggles intentionally start OFF on a fresh process anyway; the in-memory
+                // singleton preserves them across Activity recreation.
                 instance = VrcaViewModel(
                     app = application,
                     userPreferencesRepository = application.userPreferencesRepository,
-                    savedState = createSavedStateHandle()
+                    savedState = SavedStateHandle()
                 )
                 Log.d("VrcaViewModel", "Init")
                 instance

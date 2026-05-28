@@ -38,6 +38,7 @@ import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.vrca.R
+import com.vrca.app.VrcaApplication
 import com.vrca.overlay.ui.ButtonOverlay
 import com.vrca.overlay.ui.MessengerOverlay
 import com.vrca.ui.viewmodel.VrcaViewModel
@@ -211,11 +212,16 @@ class OverlayService : Service() {
         }
 
         msgComposeView.setContent {
+            // Always resolve the SAME process-scoped runtime ViewModel the rest of
+            // the app uses. Prefer the already-initialized singleton; otherwise create
+            // it against the Application's ViewModelStore (never the ComposeView's local
+            // store) so the overlay and the main UI share one instance.
             val chatboxViewModel: VrcaViewModel =
-                if (!VrcaViewModel.isInstanceInitialized()) {
-                    viewModel(factory = VrcaViewModel.Factory)
-                } else {
+                if (VrcaViewModel.isInstanceInitialized()) {
                     VrcaViewModel.getInstance()
+                } else {
+                    val appOwner = applicationContext as VrcaApplication
+                    viewModel(viewModelStoreOwner = appOwner, factory = VrcaViewModel.Factory)
                 }
 
             OverlayTheme {

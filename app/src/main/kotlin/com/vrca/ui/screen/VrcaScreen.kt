@@ -330,16 +330,13 @@ fun VrcaScreen(
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // Apply persisted music UI settings once
+    // Restore demo + preset (idempotent). NOTE: we intentionally do NOT reset the
+    // Spotify/Time toggles here anymore. The runtime ViewModel is now scoped to the
+    // process (Application ViewModelStore), so this composable re-enters on every
+    // Activity recreation; resetting toggles here would wrongly kill a chatbox the
+    // user left running when they backgrounded the app. Toggles already start OFF on
+    // a fresh process (VM defaults) and must survive Activity recreation.
     LaunchedEffect(Unit) {
-        // Do NOT persist Now Playing toggle across app restarts.
-        UiPrefs.writeSpotifyEnabled(ctx, false)
-        chatboxViewModel.setSpotifyEnabledFlag(false)
-
-        // Time toggle also resets on restart (timezone persists, toggle does not).
-        chatboxViewModel.updateTimeEnabled(false)
-
-        // Keep demo + preset restore.
         chatboxViewModel.setSpotifyDemoFlag(UiPrefs.readSpotifyDemo(ctx))
         chatboxViewModel.updateSpotifyPreset(UiPrefs.readSpotifyPreset(ctx))
     }

@@ -15,6 +15,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import com.vrca.BuildConfig
 import com.vrca.keepalive.KeepAliveService
+import com.vrca.keepalive.PipelineWatchdogWorker
 import com.vrca.overlay.OverlayDaemon
 import com.vrca.ui.theme.VrcaTheme
 import java.security.MessageDigest
@@ -72,6 +73,9 @@ class MainActivity : ComponentActivity() {
         } else {
             KeepAliveService.start(applicationContext)
         }
+
+        // Periodic watchdog: re-arms the pipeline/keep-alive if an OEM kills the process.
+        PipelineWatchdogWorker.ensureScheduled(applicationContext)
 
         setContent {
             VrcaTheme(themeMode = com.vrca.ui.theme.ThemeMode.Dark) {
