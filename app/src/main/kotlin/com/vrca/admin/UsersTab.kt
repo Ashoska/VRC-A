@@ -302,22 +302,13 @@ internal fun UsersTab(
         onDispose { reg.remove() }
     }
 
-    // Watcher heartbeat: write watcherActiveAt every 30s while a user is selected
+    // Watcher heartbeat (writes watcherActiveAt every 30s while a user is selected)
+    // now runs in AdminRuntime at process lifetime, so it keeps the watched user in
+    // live-sync mode even when the admin app is backgrounded. We only register the
+    // current selection here; clearing it on dispose stops the heartbeat when the
+    // detail view truly goes away within the same process.
     LaunchedEffect(selectedDocId) {
-        val docId = selectedDocId
-        if (docId.isNullOrBlank()) return@LaunchedEffect
-        while (true) {
-            try {
-                db.collection("users").document(docId)
-                    .set(
-                        mapOf("watcherActiveAt" to FieldValue.serverTimestamp()),
-                        SetOptions.merge()
-                    ).await()
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (_: Throwable) {}
-            delay(30_000L)
-        }
+        AdminRuntime.setSelectedUser(selectedDocId)
     }
 
     val selectedRow by remember {

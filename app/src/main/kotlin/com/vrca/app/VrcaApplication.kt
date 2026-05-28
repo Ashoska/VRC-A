@@ -27,6 +27,12 @@ class VrcaApplication : Application(), ViewModelStoreOwner {
     companion object {
         const val CRASH_PREFS_FILE = "vrca_crash"
         const val CRASH_KEY_TEXT = "last_crash_text"
+
+        // Process-wide handle so the runtime ViewModel factory can resolve the
+        // Application without relying on CreationExtras[APPLICATION_KEY], which is
+        // absent when the VM is obtained against the app-scoped ViewModelStore.
+        lateinit var instance: VrcaApplication
+            private set
     }
 
     // Process-lifetime ViewModelStore. Cleared only by AppShutdown on swipe.
@@ -40,6 +46,8 @@ class VrcaApplication : Application(), ViewModelStoreOwner {
         installCrashHandler()
 
         super.onCreate()
+
+        instance = this
 
         // Your repo expects Context
         userPreferencesRepository = UserPreferencesRepository(applicationContext)

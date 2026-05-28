@@ -18,7 +18,6 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
-import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
@@ -126,7 +125,11 @@ class VrcaViewModel(
 
         val Factory: ViewModelProvider.Factory = viewModelFactory {
             initializer {
-                val application = (this[APPLICATION_KEY] as VrcaApplication)
+                // Resolve the Application from the process-wide handle rather than
+                // CreationExtras[APPLICATION_KEY]: this VM is created against the
+                // Application's own ViewModelStore, whose CreationExtras do NOT carry
+                // APPLICATION_KEY, so reading it here would NPE.
+                val application = VrcaApplication.instance
                 // NOTE: a plain SavedStateHandle() is used (not createSavedStateHandle()).
                 // This VM is owned by the Application's process-lifetime ViewModelStore,
                 // which has no SavedStateRegistry, so createSavedStateHandle() would throw.
