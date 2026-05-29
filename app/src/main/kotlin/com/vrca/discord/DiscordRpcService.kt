@@ -453,19 +453,23 @@ class DiscordRpcService : Service() {
         if (isOnline) {
             val savedStart = rpcPrefs.getLong("online_start_epoch", 0L)
             val lastSeen = rpcPrefs.getLong("last_online_seen", 0L)
-            val carriesOn = savedStart > 0L && lastSeen > 0L && (nowMs - lastSeen) <= ONLINE_GRACE_MS
+            // If last_online_seen was lost (async apply() not flushed before a
+            // kill), fall back to savedStart — the user was definitely online then.
+            val effectiveLastSeen = if (lastSeen > 0L) lastSeen
+                                    else if (savedStart > 0L) savedStart
+                                    else 0L
+            val carriesOn = savedStart > 0L && effectiveLastSeen > 0L &&
+                (nowMs - effectiveLastSeen) <= ONLINE_GRACE_MS
             onlineStartEpochMs = if (carriesOn) {
                 savedStart
             } else {
-                // First session ever, or away longer than the grace window → fresh start.
-                // commit() (not apply()) so the start survives an abrupt kill that lands
-                // moments later — an async apply() can be lost, which then read back as 0
-                // and reset the counter on the very next launch.
                 rpcPrefs.edit().putLong("online_start_epoch", nowMs).commit()
                 nowMs
             }
-            // Heartbeat the away-time marker.
-            rpcPrefs.edit().putLong("last_online_seen", nowMs).apply()
+            // commit() so this survives a force-kill / SIGKILL — apply() is async
+            // and can be lost, which makes the grace check fail on the next launch
+            // (last_online_seen reads back as 0 → carriesOn = false → timer resets).
+            rpcPrefs.edit().putLong("last_online_seen", nowMs).commit()
         } else {
             // Not in VRChat: hide the timer (no timestamps below) but DON'T clear the
             // saved start — a return within the grace window resumes exactly where it was.
