@@ -78,13 +78,17 @@ fun IpField(
         }
     }
 
-    // editBuffer keyed directly to currentSlot + the DataStore address for that slot
+    // editBuffer keyed directly to currentSlot + the DataStore address for that slot.
+    // It reflects ONLY the selected slot's saved address (blank if unset). It must
+    // NOT fall back to uiState.ipAddress (the last-applied RUNTIME ip, which belongs
+    // to whatever slot was last equipped): during a tab re-entry currentSlot briefly
+    // defaults to 1 while the slot's DataStore value is still the placeholder "",
+    // and that fallback would fill the field with a DIFFERENT slot's ip — which an
+    // Apply then writes into the wrong slot (the "slot 2 overrides slot 1" bug). The
+    // legitimate slot-1 migration is handled separately above by writing to DataStore.
     val activeAddress = dsAddrForSlot(currentSlot)
-    val resolvedAddress = activeAddress.ifBlank {
-        uiState.ipAddress.takeIf { it != "127.0.0.1" } ?: ""
-    }
 
-    var editBuffer by remember { mutableStateOf(resolvedAddress) }
+    var editBuffer by remember { mutableStateOf(activeAddress) }
     // Track which slot the editBuffer was last set from, so we only update it
     // when the slot genuinely changes or DataStore emits a NEW value for the
     // same slot — never when a stale emission from the old slot arrives.
@@ -92,15 +96,11 @@ fun IpField(
     var editBufferAddr by remember { mutableStateOf(activeAddress) }
     LaunchedEffect(currentSlot, activeAddress) {
         if (currentSlot != editBufferSlot) {
-            editBuffer = activeAddress.ifBlank {
-                uiState.ipAddress.takeIf { it != "127.0.0.1" } ?: ""
-            }
+            editBuffer = activeAddress
             editBufferSlot = currentSlot
             editBufferAddr = activeAddress
         } else if (activeAddress != editBufferAddr) {
-            editBuffer = activeAddress.ifBlank {
-                uiState.ipAddress.takeIf { it != "127.0.0.1" } ?: ""
-            }
+            editBuffer = activeAddress
             editBufferAddr = activeAddress
         }
     }

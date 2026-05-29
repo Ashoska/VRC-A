@@ -274,12 +274,22 @@ class VrchatPipelineService : Service() {
                         .getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
                         .getString("device_id_hash", "") ?: ""
                 }
-                startForeground(NOTIF_ID_PERSISTENT, buildPersistentNotification("Connecting..."))
                 // If the pipeline is already connected (duplicate ACTION_START
-                // from a reconnect or system restart), don't tear it down and
-                // start over — that's what causes friend caches to flush and
-                // VRChat presence to flicker.
-                if (!VrchatPipelineState.isConnected) {
+                // from a reconnect, system restart, or the user reopening the app
+                // after pressing Back), don't tear it down and start over — that's
+                // what causes friend caches to flush and VRChat presence to flicker.
+                // Crucially, do NOT reset the notification to "Connecting..." in
+                // that case: onOpen won't fire again to restore "Connected as X",
+                // so the notification would get permanently stuck on "Connecting..."
+                // even though presence and RPC are live. Re-assert foreground with
+                // the CURRENT connected status instead.
+                if (VrchatPipelineState.isConnected) {
+                    startForeground(
+                        NOTIF_ID_PERSISTENT,
+                        buildPersistentNotification(lastConnectedNotifText ?: "Connected")
+                    )
+                } else {
+                    startForeground(NOTIF_ID_PERSISTENT, buildPersistentNotification("Connecting..."))
                     startPipeline()
                 }
             }

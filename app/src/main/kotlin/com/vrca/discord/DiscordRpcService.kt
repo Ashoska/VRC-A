@@ -169,11 +169,16 @@ class DiscordRpcService : Service() {
             return START_NOT_STICKY
         }
         ensureChannel()
-        startForeground(NOTIF_ID, buildNotif("Discord RPC starting..."))
 
         if (isRunning && webView != null) {
+            // Duplicate START while already running (app reopened after Back, or a
+            // sticky restart). startForeground must still be called, but post the
+            // CURRENT "active" text — not "starting..." — so the shared persistent
+            // notification (NOTIF_ID 1001) isn't reset to a stale startup state.
+            startForeground(NOTIF_ID, buildNotif("Discord RPC active"))
             return START_STICKY
         }
+        startForeground(NOTIF_ID, buildNotif("Discord RPC starting..."))
 
         sessionRecoveryCount = 0
         // Start from 0; buildActivityJson() re-resolves the start from persisted
