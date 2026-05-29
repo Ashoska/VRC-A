@@ -186,17 +186,29 @@ class NowPlayingListenerService : NotificationListenerService() {
      * No stall-based heuristics — those caused false positives on song skips.
      */
     private fun classifySpecial(pkg: String, title: String, artist: String): SpecialKind? {
-        if (pkg != "com.spotify.music") return null
-
         val t = title.trim().lowercase()
         val a = artist.trim().lowercase()
 
+        // Player-agnostic ad detection. The now-playing UI for an ad surfaces the
+        // ADVERTISER in the title/artist — e.g. "Advertisement • 1 of 1 — IONOS UK"
+        // (Spotify now puts the brand in the artist field). Showing that would leak
+        // brand/targeting info, so ANY title or artist beginning with "advertisement"
+        // is treated as an ad regardless of player or which field the brand lands in.
+        // A normal song's now-playing line doesn't start with that word, so false
+        // positives are very unlikely.
+        if (t.startsWith("advertisement") || a.startsWith("advertisement")) return SpecialKind.AD
+
+        // Beyond that universal case, only Spotify gets the looser keyword matching —
+        // other players legitimately use these words in real song titles.
+        if (pkg != "com.spotify.music") return null
+
         val looksLikeAd =
-            t == "advertisement" ||
-                t == "ad" ||
+            t == "ad" ||
                 t == "spotify" ||
                 t == "spotify ad" ||
-                (t.startsWith("advert") && (a.isBlank() || a == "spotify"))
+                // No longer gated on the artist field: Spotify puts the advertiser
+                // brand there during ads, which previously let the ad leak through.
+                t.startsWith("advert")
 
         val looksLikeDj =
             (t == "dj" && (a.isBlank() || a == "spotify")) ||
