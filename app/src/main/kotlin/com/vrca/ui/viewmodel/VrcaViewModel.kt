@@ -27,6 +27,7 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
 import com.vrca.BuildConfig
+import com.vrca.app.FeatureSessionStore
 import com.vrca.app.VrcaApplication
 import com.vrca.nowplaying.NowPlayingState
 import com.vrca.data.UserPreferencesRepository
@@ -1195,6 +1196,7 @@ class VrcaViewModel(
         if (isBanned) return
         timeEnabled = enabled
         savedState["timeEnabled"] = enabled
+        persistFeatureSession()
         rebuildAndMaybeSendCombined(forceSend = true)
         startSelfSyncLoopIfNeeded()
         manageKeepaliveLoop()
@@ -1375,6 +1377,12 @@ class VrcaViewModel(
                 timeMode = userPreferencesRepository.timeMode.first()
             }
             initialDataLoaded = true
+            // Auto-restore feature toggles after an unexpected process death (OS
+            // memory pressure / Doze / OEM killer). A deliberate swipe disarms this
+            // (AppShutdown), so an intentional close still starts clean. This is what
+            // makes the chatbox resume on its own — including headlessly, when a
+            // service (KeepAliveService) recreated this ViewModel without any UI.
+            restoreFeatureSession()
             // Read-before-write: fetch the Firestore doc so admin edits
             // made while the user was offline aren't clobbered by our
             // app-open write. Toggles always start OFF per design, so we
@@ -1660,10 +1668,35 @@ class VrcaViewModel(
         cycleEnabled = false; savedState["cycleEnabled"] = false
         spotifyEnabled = false; savedState["spotifyEnabled"] = false
         timeEnabled = false; savedState["timeEnabled"] = false
+        persistFeatureSession()
         keepaliveJob?.cancel(); keepaliveJob = null
         if (!isBanned) clearChatbox(local)
         rebuildCombinedPreviewOnly(forceClearIfAllOff = true)
         startSelfSyncLoopIfNeeded()
+    }
+
+    /** Persist the current toggle set so it survives an unexpected process death.
+     *  A deliberate swipe disarms restore via AppShutdown. */
+    private fun persistFeatureSession() {
+        FeatureSessionStore.save(
+            app.applicationContext,
+            afk = afkEnabled,
+            cycle = cycleEnabled,
+            spotify = spotifyEnabled,
+            time = timeEnabled
+        )
+    }
+
+    /** Re-enable whatever toggles were active before an unexpected kill and start
+     *  their sender loops. No-op on a fresh/intentional launch (restore not armed). */
+    private fun restoreFeatureSession() {
+        val pending = FeatureSessionStore.pendingRestore(app.applicationContext) ?: return
+        if (!pending.anyEnabled) return
+        if (isBanned) return
+        if (pending.afk) setAfkEnabledFlag(true)
+        if (pending.cycle) setCycleEnabledFlag(true)
+        if (pending.spotify) setSpotifyEnabledFlag(true)
+        if (pending.time) updateTimeEnabled(true)
     }
 
     // =========================
@@ -1675,6 +1708,7 @@ class VrcaViewModel(
         savedState["afkEnabled"] = enabled
         if (!enabled) stopAfkSender(clearFromChatbox = true)
         else startAfkSender()
+        persistFeatureSession()
         rebuildAndMaybeSendCombined(forceSend = true)
         startSelfSyncLoopIfNeeded()
         manageKeepaliveLoop()
@@ -1686,6 +1720,7 @@ class VrcaViewModel(
         savedState["cycleEnabled"] = enabled
         if (!enabled) stopCycle(clearFromChatbox = true)
         else { lastCyclePreviewAdvanceMs = 0L; startCycle() }
+        persistFeatureSession()
         rebuildAndMaybeSendCombined(forceSend = true)
         startSelfSyncLoopIfNeeded()
         manageKeepaliveLoop()
@@ -1697,6 +1732,7 @@ class VrcaViewModel(
         savedState["spotifyEnabled"] = enabled
         if (!enabled) stopNowPlayingSender(clearFromChatbox = true)
         else startNowPlayingSender()
+        persistFeatureSession()
         rebuildAndMaybeSendCombined(forceSend = true)
         startSelfSyncLoopIfNeeded()
         manageKeepaliveLoop()

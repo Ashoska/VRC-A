@@ -3,11 +3,15 @@ package com.vrca.app
 import android.app.Application
 import android.content.Context
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.Process
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
 import com.vrca.BuildConfig
 import com.vrca.data.UserPreferencesRepository
+import com.vrca.ui.viewmodel.VrcaViewModel
 import java.io.PrintWriter
 import java.io.StringWriter
 import java.text.SimpleDateFormat
@@ -51,6 +55,30 @@ class VrcaApplication : Application(), ViewModelStoreOwner {
 
         // Your repo expects Context
         userPreferencesRepository = UserPreferencesRepository(applicationContext)
+    }
+
+    /**
+     * Instantiate the process-scoped runtime [VrcaViewModel] without any UI.
+     *
+     * After an OS-initiated process kill, a service (KeepAliveService) is brought
+     * back by START_STICKY / the watchdog / boot — but the chatbox senders live in
+     * this ViewModel, which is otherwise only created when the Activity opens. Calling
+     * this from the service recreates the VM headlessly; its init loads content and
+     * (if feature-session restore is armed) re-enables the toggles and starts the OSC
+     * senders, so the chatbox resumes on its own with no tab-in required.
+     *
+     * Idempotent: ViewModelProvider returns the existing instance if one already
+     * exists (e.g. the Activity later opens). Must run on the main thread.
+     */
+    fun ensureRuntimeViewModel() {
+        val create = Runnable {
+            try {
+                ViewModelProvider(this, VrcaViewModel.Factory)[VrcaViewModel::class.java]
+            } catch (_: Throwable) {
+            }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) create.run()
+        else Handler(Looper.getMainLooper()).post(create)
     }
 
     private fun installCrashHandler() {

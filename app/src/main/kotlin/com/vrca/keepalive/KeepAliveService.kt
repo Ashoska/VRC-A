@@ -89,6 +89,19 @@ class KeepAliveService : Service() {
             }.start()
             return START_NOT_STICKY
         }
+        // After an OS-initiated kill the process is brought back here (START_STICKY /
+        // watchdog / boot) with no Activity, so the chatbox senders — which live in the
+        // app-scoped VrcaViewModel — would stay dead until the user reopened the app.
+        // If a feature session was armed (toggles were running and the stop wasn't a
+        // deliberate swipe), recreate the ViewModel headlessly so its init restores the
+        // toggles and resumes OSC sending on its own.
+        try {
+            val pending = com.vrca.app.FeatureSessionStore.pendingRestore(this)
+            if (pending != null && pending.anyEnabled) {
+                (applicationContext as? com.vrca.app.VrcaApplication)?.ensureRuntimeViewModel()
+            }
+        } catch (_: Throwable) {}
+
         // If killed, try to come back.
         return START_STICKY
     }

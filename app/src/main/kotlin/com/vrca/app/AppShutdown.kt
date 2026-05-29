@@ -65,6 +65,12 @@ object AppShutdown {
                 .commit()
         } catch (_: Throwable) {}
 
+        // A deliberate swipe is an intentional stop — disarm feature-session restore
+        // so the next launch starts clean (matches "toggles start OFF on a fresh
+        // launch"). An OS-initiated kill never runs this, so it stays armed and the
+        // chatbox auto-resumes on the next process start.
+        FeatureSessionStore.disarm(app)
+
         // Clear the process-lifetime ViewModelStore so VrcaViewModel.onCleared()
         // runs exactly once on a genuine shutdown — cancels the chatbox senders and
         // sync loops and fires the going-offline write. (onTaskRemoved is delivered
