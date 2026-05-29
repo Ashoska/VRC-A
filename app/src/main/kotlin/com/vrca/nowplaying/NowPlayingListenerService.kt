@@ -57,6 +57,10 @@ class NowPlayingListenerService : NotificationListenerService() {
         return SystemClock.elapsedRealtime() < until
     }
 
+    private fun clearSpecialWindow(pkg: String) {
+        specialUntilElapsedByPackage.remove(pkg)
+    }
+
     override fun onListenerConnected() {
         super.onListenerConnected()
         NowPlayingState.setConnected(true)
@@ -262,10 +266,19 @@ class NowPlayingListenerService : NotificationListenerService() {
             }
             markSpecialWindow(pkg, 10_000L)
             if (controller != null) startPollForRealTrack(pkg, controller)
-        } else if (isSpecialWindowActive(pkg) && pkg == "com.spotify.music") {
-            // Still in a special window from a previous ad/DJ — keep polling
-            // to catch the real track as soon as it starts
-            if (controller != null) startPollForRealTrack(pkg, controller)
+        } else if (isSpecialWindowActive(pkg)) {
+            // The ad/DJ segment just ended. As soon as a real track with genuine
+            // metadata appears, end the special window IMMEDIATELY — otherwise the
+            // downstream builder keeps showing "Ad N" (and hides the progress bar)
+            // for the remainder of the 10s window even though a normal song is now
+            // playing. While the metadata is still blank (mid-transition), keep the
+            // window + polling so the chatbox doesn't flicker to empty/"Paused".
+            if (title.isNotBlank() || artist.isNotBlank()) {
+                clearSpecialWindow(pkg)
+                stopPoll(pkg)
+            } else if (pkg == "com.spotify.music" && controller != null) {
+                startPollForRealTrack(pkg, controller)
+            }
         } else {
             // Normal track — stop polling if we were
             stopPoll(pkg)
