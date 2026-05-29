@@ -8,16 +8,11 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.graphics.PixelFormat
-import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.provider.Settings
 import android.util.Log
-import android.view.Gravity
 import android.view.View
-import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
@@ -95,12 +90,6 @@ class DiscordRpcService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mainHandler = Handler(Looper.getMainLooper())
     private var webView: WebView? = null
-    // The WebView is attached to the WindowManager as a 1x1 transparent, non-touchable
-    // overlay so Chromium treats it as "visible" and does NOT throttle/freeze its JS
-    // timers when the app is backgrounded. The Discord gateway (and its heartbeat) lives
-    // in this WebView's JS, so without this it drops ~45s after the screen goes off.
-    private var windowManager: WindowManager? = null
-    private var webViewAttached = false
     private var presenceWatchJob: Job? = null
     private var presenceTimerJob: Job? = null
     private var sessionMonitorJob: Job? = null
@@ -199,7 +188,6 @@ class DiscordRpcService : Service() {
             webView?.let { old ->
                 old.stopLoading()
                 old.loadUrl("about:blank")
-                detachWebViewFromWindow(old)
                 old.destroy()
                 webView = null
             }
@@ -208,7 +196,19 @@ class DiscordRpcService : Service() {
             shimRetryCount = 0
             consecutivePushFailures = 0
 
-            val wv = WebView(applicationContext).apply {
+            val wv = object : WebView(applicationContext) {
+                // Chromium background-throttles (and eventually freezes) JS timers when
+                // it thinks the page is hidden, which kills Discord's gateway heartbeat
+                // ~45s after the screen turns off. A detached WebView is always "hidden".
+                // Instead of parking it in a 1x1 system overlay (which forces Android's
+                // "displaying over other apps" notification and looks sketchy), we simply
+                // lie to the engine: always report the window as VISIBLE so timers keep
+                // running at full rate. The foreground service + KeepAlive wakelock keep
+                // the process itself alive.
+                override fun onWindowVisibilityChanged(visibility: Int) {
+                    super.onWindowVisibilityChanged(View.VISIBLE)
+                }
+            }.apply {
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
                 settings.databaseEnabled = true
@@ -250,57 +250,13 @@ class DiscordRpcService : Service() {
             }
             webView = wv
             // Keep JS timers running in the background (global to the process; never
-            // call pauseTimers) and attach the WebView to a 1x1 transparent overlay so
-            // Chromium doesn't background-throttle the Discord gateway heartbeat.
+            // call pauseTimers) and seed the visibility signal as VISIBLE so Chromium
+            // doesn't background-throttle the Discord gateway heartbeat. No overlay
+            // window is used, so there's no "displaying over other apps" notification.
             wv.resumeTimers()
-            attachWebViewToWindow(wv)
+            wv.dispatchWindowVisibilityChanged(View.VISIBLE)
             isRunning = true
             updateNotif("Discord RPC connecting...")
-        }
-    }
-
-    /** Attach the WebView as a 1x1, transparent, non-focusable, non-touchable overlay
-     *  so the OS keeps its JS context active while the app is backgrounded. Requires the
-     *  overlay permission (already used by OverlayService); if not granted we skip
-     *  attaching — RPC still works in the foreground, just not reliably backgrounded. */
-    private fun attachWebViewToWindow(wv: WebView) {
-        if (webViewAttached) return
-        if (!Settings.canDrawOverlays(this)) {
-            Log.w(TAG, "No overlay permission — WebView not attached; background RPC may be throttled")
-            return
-        }
-        try {
-            val wm = (windowManager ?: (getSystemService(Context.WINDOW_SERVICE) as WindowManager))
-                .also { windowManager = it }
-            val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            else
-                @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
-            val params = WindowManager.LayoutParams(
-                1, 1, type,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
-                PixelFormat.TRANSLUCENT
-            ).apply {
-                gravity = Gravity.TOP or Gravity.START
-                x = 0; y = 0
-            }
-            wv.visibility = View.VISIBLE
-            wm.addView(wv, params)
-            webViewAttached = true
-        } catch (t: Throwable) {
-            Log.w(TAG, "attachWebViewToWindow failed", t)
-        }
-    }
-
-    private fun detachWebViewFromWindow(wv: WebView) {
-        if (!webViewAttached) return
-        try {
-            windowManager?.removeView(wv)
-        } catch (_: Throwable) {
-        } finally {
-            webViewAttached = false
         }
     }
 
@@ -592,7 +548,6 @@ class DiscordRpcService : Service() {
                 mainHandler.postDelayed({
                     wv.stopLoading()
                     wv.loadUrl("about:blank")
-                    detachWebViewFromWindow(wv)
                     wv.destroy()
                     webView = null
                 }, 1500)
