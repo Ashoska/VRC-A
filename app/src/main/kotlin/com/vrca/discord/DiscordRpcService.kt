@@ -105,8 +105,40 @@ class DiscordRpcService : Service() {
     private var lastShimResult = ""
 
     private var onlineStartEpochMs = 0L
+    private var offlineStartEpochMs = 0L
     private val rpcPrefs by lazy {
         applicationContext.getSharedPreferences("discord_rpc_state", Context.MODE_PRIVATE)
+    }
+
+    /**
+     * Resolves the elapsed-counter start for a given state (in-VRChat or
+     * not-in-VRChat) from persisted prefs, applying the [ONLINE_GRACE_MS]
+     * grace window so the counter survives an in-process state blip AND a full
+     * process death/reboot identically. [startKey] is the canonical start sent
+     * as timestamps.start; [lastSeenKey] is refreshed every tick this state is
+     * active and freezes the instant we stop ticking, so (now - lastSeen) is the
+     * real away-time regardless of WHY we stopped. Within the grace window the
+     * original start is kept (counter carries on); beyond it a fresh start is
+     * recorded. Both use commit() so they survive a force-kill / SIGKILL that
+     * lands moments later — an async apply() can be lost, which reads back as 0
+     * and resets the counter on the next launch.
+     */
+    private fun resolveElapsedStart(startKey: String, lastSeenKey: String, nowMs: Long): Long {
+        val savedStart = rpcPrefs.getLong(startKey, 0L)
+        val lastSeen = rpcPrefs.getLong(lastSeenKey, 0L)
+        // If lastSeen was lost (apply() not flushed before a kill), fall back to
+        // savedStart — this state was definitely active at that time.
+        val effectiveLastSeen = if (lastSeen > 0L) lastSeen
+                                else if (savedStart > 0L) savedStart
+                                else 0L
+        val carriesOn = savedStart > 0L && effectiveLastSeen > 0L &&
+            (nowMs - effectiveLastSeen) <= ONLINE_GRACE_MS
+        val start = if (carriesOn) savedStart else {
+            rpcPrefs.edit().putLong(startKey, nowMs).commit()
+            nowMs
+        }
+        rpcPrefs.edit().putLong(lastSeenKey, nowMs).commit()
+        return start
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -145,10 +177,11 @@ class DiscordRpcService : Service() {
 
         sessionRecoveryCount = 0
         // Start from 0; buildActivityJson() re-resolves the start from persisted
-        // online_start_epoch + last_online_seen on the first online tick, applying the
-        // grace window. Preloading the persisted epoch directly here would ship a stale
-        // (e.g. day-old) start to Discord as a bogus timer before the grace check ran.
+        // prefs on the first tick of each state, applying the grace window. Preloading
+        // the persisted epoch directly here would ship a stale (e.g. day-old) start to
+        // Discord as a bogus timer before the grace check ran.
         onlineStartEpochMs = 0L
+        offlineStartEpochMs = 0L
         DiscordRpcState.status = DiscordRpcStatus.CONNECTING
         DiscordRpcState.failureMessage = null
 
@@ -441,38 +474,21 @@ class DiscordRpcService : Service() {
         val isOnline = vrcPresence?.isOnlineInVRChat == true
 
         val nowMs = System.currentTimeMillis()
-        // The "elapsed online" start is resolved from PERSISTED state on EVERY online
-        // tick (not just on the 0L→online transition), so it survives both an in-process
-        // VRChat offline blip AND a full process death/reboot identically:
-        //   • online_start_epoch — the canonical start, the value sent as timestamps.start.
-        //   • last_online_seen   — refreshed every online tick; it freezes the instant we
-        //     stop ticking (VRChat offline, swipe, process death), so (now - lastSeen) is
-        //     the real away-time regardless of WHY we stopped.
-        // Within ONLINE_GRACE_MS the original start is kept (counter carries on); beyond
-        // it, a fresh start is recorded (so we never show a bogus multi-hour timer).
+        // Two independent elapsed counters, each resolved from PERSISTED state on
+        // EVERY tick of its state so both survive an in-process blip AND a full
+        // process death/reboot identically (see resolveElapsedStart):
+        //   • in-VRChat   counter → online_start_epoch / last_online_seen
+        //   • not-in-VRChat counter → offline_start_epoch / offline_last_seen
+        // Only the ACTIVE state's lastSeen is refreshed; the other freezes, so when
+        // the state flips back the grace window measures real away-time. Within the
+        // 10-min grace the original start carries on; beyond it, a fresh start.
         if (isOnline) {
-            val savedStart = rpcPrefs.getLong("online_start_epoch", 0L)
-            val lastSeen = rpcPrefs.getLong("last_online_seen", 0L)
-            // If last_online_seen was lost (async apply() not flushed before a
-            // kill), fall back to savedStart — the user was definitely online then.
-            val effectiveLastSeen = if (lastSeen > 0L) lastSeen
-                                    else if (savedStart > 0L) savedStart
-                                    else 0L
-            val carriesOn = savedStart > 0L && effectiveLastSeen > 0L &&
-                (nowMs - effectiveLastSeen) <= ONLINE_GRACE_MS
-            onlineStartEpochMs = if (carriesOn) {
-                savedStart
-            } else {
-                rpcPrefs.edit().putLong("online_start_epoch", nowMs).commit()
-                nowMs
-            }
-            // commit() so this survives a force-kill / SIGKILL — apply() is async
-            // and can be lost, which makes the grace check fail on the next launch
-            // (last_online_seen reads back as 0 → carriesOn = false → timer resets).
-            rpcPrefs.edit().putLong("last_online_seen", nowMs).commit()
+            onlineStartEpochMs = resolveElapsedStart("online_start_epoch", "last_online_seen", nowMs)
+            // Freeze the offline counter (don't touch offline_last_seen) so a brief
+            // VRChat session doesn't reset a not-in-VRChat counter we may resume.
+            offlineStartEpochMs = 0L
         } else {
-            // Not in VRChat: hide the timer (no timestamps below) but DON'T clear the
-            // saved start — a return within the grace window resumes exactly where it was.
+            offlineStartEpochMs = resolveElapsedStart("offline_start_epoch", "offline_last_seen", nowMs)
             onlineStartEpochMs = 0L
         }
 
@@ -531,6 +547,11 @@ class DiscordRpcService : Service() {
             } else {
                 put("details", "Not in VRChat")
                 put("state", "Using VRC-A")
+                if (offlineStartEpochMs > 0) {
+                    put("timestamps", JSONObject().apply {
+                        put("start", offlineStartEpochMs)
+                    })
+                }
                 put("assets", JSONObject().apply {
                     put("large_image", DEFAULT_VRCHAT_IMAGE_URL)
                     put("large_text", "VRChat")
