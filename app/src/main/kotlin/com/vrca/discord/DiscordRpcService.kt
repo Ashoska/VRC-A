@@ -475,17 +475,27 @@ class DiscordRpcService : Service() {
 
         val nowMs = System.currentTimeMillis()
         // Two independent elapsed counters, each resolved from PERSISTED state on
-        // EVERY tick of its state so both survive an in-process blip AND a full
-        // process death/reboot identically (see resolveElapsedStart):
+        // EVERY tick of its state (see resolveElapsedStart):
         //   • in-VRChat   counter → online_start_epoch / last_online_seen
         //   • not-in-VRChat counter → offline_start_epoch / offline_last_seen
-        // Only the ACTIVE state's lastSeen is refreshed; the other freezes, so when
-        // the state flips back the grace window measures real away-time. Within the
-        // 10-min grace the original start carries on; beyond it, a fresh start.
+        // The two behave deliberately differently:
+        //   - The in-VRChat timer CARRIES ON across a brief VRChat-offline blip
+        //     (crash/world-hop) within the grace window — its prefs are never
+        //     cleared when offline, only superseded after the grace expires.
+        //   - The not-in-VRChat timer RESTARTS every time the user leaves VRChat,
+        //     so it never bleeds into / inflates the real in-VRChat time. We force
+        //     that by clearing its prefs while online; it still survives an app
+        //     death *while offline* because this branch isn't running then, so the
+        //     prefs persist and a reopen within the grace window resumes them.
         if (isOnline) {
             onlineStartEpochMs = resolveElapsedStart("online_start_epoch", "last_online_seen", nowMs)
-            // Freeze the offline counter (don't touch offline_last_seen) so a brief
-            // VRChat session doesn't reset a not-in-VRChat counter we may resume.
+            if (rpcPrefs.getLong("offline_start_epoch", 0L) != 0L ||
+                rpcPrefs.getLong("offline_last_seen", 0L) != 0L) {
+                rpcPrefs.edit()
+                    .remove("offline_start_epoch")
+                    .remove("offline_last_seen")
+                    .commit()
+            }
             offlineStartEpochMs = 0L
         } else {
             offlineStartEpochMs = resolveElapsedStart("offline_start_epoch", "offline_last_seen", nowMs)
