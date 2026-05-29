@@ -149,8 +149,10 @@ Both stop instantly when `isWatched` flips back to false (`collectLatest` cancel
 VRChat's chatbox update limit is 0.5 seconds (`SEND_FLOOR_MS = 500L`). Music refresh is locked at 1 second (`MUSIC_REFRESH_SECONDS_LOCKED = 1`).
 
 ### NowPlaying
-- Ad/DJ detection restricted to Spotify only (`com.spotify.music`) to prevent false positives on regular songs
-- Special window reduced to 10s (from 30s) for faster recovery after ads
+- Ad/DJ detection restricted to Spotify only (`com.spotify.music`) to prevent false positives on regular songs — EXCEPT a player-agnostic `advertisement*` (title OR artist) check, since Spotify now puts the advertiser brand in the artist field
+- **Ad number display**: ads render as `"Ad 1 of 1"` using the player's OWN ad index, parsed via `parseAdIndex()` (regex `(\d+)\s*of\s*(\d+)`) from the ORIGINAL title+artist BEFORE they're blanked to `"AD"`, carried through `NowPlayingSnapshot.adInfo` → `nowPlayingAdInfo`. Falls back to the session `adSegmentCount` (coerced to ≥1, so it never shows "Ad 0") when the player exposes no index. The brand is never shown (location-leak prevention)
+- Special window reduced to 10s (from 30s) for faster recovery after ads; cleared immediately once a real track with genuine metadata plays so "Ad N" doesn't linger over the next song
+- **YouTube / YouTube Music without Premium cannot be detected**: free tier publishes no `MediaSession` with metadata in the background (and blocks background playback entirely), so there is no track title/artist to read — no API exposes another app's now-playing without a MediaSession. The only ways to get the title (accessibility-service screen scraping) are invasive, require a scary permission, and only work while the app is foregrounded (which conflicts with being in VRChat), so they are intentionally NOT implemented
 - Motion-based play detection with YouTube-specific stall tracking
 - Crystal progress bar (preset 3) uses filled diamonds (U+25C6) before the marker position
 

@@ -1181,6 +1181,9 @@ class VrcaViewModel(
     private var adSegmentCount by mutableIntStateOf(0)
     private var lastSpecialWasAd = false
         private set
+    // The player's own ad index ("1 of 1", "2 of 3") parsed from the ad metadata,
+    // preferred over the session counter when available.
+    private var nowPlayingAdInfo by mutableStateOf("")
 
     // =========================
     // Time feature
@@ -1500,6 +1503,7 @@ class VrcaViewModel(
                 }
 
                 nowPlayingSpecialActive = s.specialActive
+                nowPlayingAdInfo = s.adInfo
 
                 // Track ad segment count: increment only when transitioning INTO an ad,
                 // not on every tick. Reset when ad ends so next ad gets a fresh count.
@@ -2186,7 +2190,14 @@ class VrcaViewModel(
         // always suppress all content â€" title, artist, progress bar, timestamps.
         // This catches every Spotify ad variant regardless of the title text.
         if (nowPlayingSpecialActive && !isSpotifyDj) {
-            return listOf("Ad $adSegmentCount")
+            // Prefer the player's real ad index ("Ad 1 of 1"); else fall back to the
+            // session counter, coerced to at least 1 so it never shows "Ad 0".
+            val label = if (nowPlayingAdInfo.isNotBlank()) {
+                "Ad $nowPlayingAdInfo"
+            } else {
+                "Ad ${adSegmentCount.coerceAtLeast(1)}"
+            }
+            return listOf(label)
         }
 
         val effectiveIsPlaying = if (nowPlayingSpecialActive || isSpotifyDj) true else nowPlayingIsPlaying

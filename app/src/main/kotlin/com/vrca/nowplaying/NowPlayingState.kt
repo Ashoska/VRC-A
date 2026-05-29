@@ -26,7 +26,12 @@ data class NowPlayingSnapshot(
 
     // True when the active package is in a known "special" state (e.g. Spotify DJ or Ad).
     // Set by NowPlayingListenerService; used downstream to suppress flicker.
-    val specialActive: Boolean = false
+    val specialActive: Boolean = false,
+
+    // For ads: the player's own ad index parsed from the original metadata
+    // (e.g. "1 of 1", "2 of 3") BEFORE the title was redacted to "AD". Blank
+    // when the player didn't expose one. Used to render "Ad 1 of 1".
+    val adInfo: String = ""
 )
 
 object NowPlayingState {

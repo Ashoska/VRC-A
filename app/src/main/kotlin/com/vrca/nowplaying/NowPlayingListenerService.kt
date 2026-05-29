@@ -259,10 +259,17 @@ class NowPlayingListenerService : NotificationListenerService() {
 
         // Spotify ad/DJ: only trigger on explicit metadata match
         val special = classifySpecial(pkg, title, artist)
+        var adInfo = ""
         if (special != null) {
             when (special) {
                 SpecialKind.DJ -> { title = "DJ"; artist = "" }
-                SpecialKind.AD -> { title = "AD"; artist = "" }
+                SpecialKind.AD -> {
+                    // Parse the player's own ad index (e.g. "1 of 1", "2 of 3")
+                    // from the ORIGINAL metadata BEFORE we blank it, so the chatbox
+                    // can show "Ad 1 of 1" instead of leaking the advertiser brand.
+                    adInfo = parseAdIndex("$title $artist")
+                    title = "AD"; artist = ""
+                }
             }
             markSpecialWindow(pkg, 10_000L)
             if (controller != null) startPollForRealTrack(pkg, controller)
@@ -298,9 +305,18 @@ class NowPlayingListenerService : NotificationListenerService() {
                 positionUpdateTimeMs = snapshotUpdateTime,
                 playbackSpeed = speed,
                 isPlaying = isPlaying,
-                specialActive = isSpecialWindowActive(pkg)
+                specialActive = isSpecialWindowActive(pkg),
+                adInfo = adInfo
             )
         )
+    }
+
+    private val adIndexRegex = Regex("""(\d+)\s*of\s*(\d+)""", RegexOption.IGNORE_CASE)
+
+    /** Extracts a "X of Y" ad index from the raw ad metadata, or "" if none. */
+    private fun parseAdIndex(raw: String): String {
+        val m = adIndexRegex.find(raw) ?: return ""
+        return "${m.groupValues[1]} of ${m.groupValues[2]}"
     }
 
     private fun startPollForRealTrack(pkg: String, controller: MediaController) {
