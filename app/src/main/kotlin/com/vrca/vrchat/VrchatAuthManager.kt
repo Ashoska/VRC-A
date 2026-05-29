@@ -45,8 +45,10 @@ object VrchatAuthManager {
     private const val KEY_PASSWORD = "vrchat_password"
 
     private const val COOKIE_REFRESH_MS = 12L * 24 * 60 * 60 * 1000
+    // Timestamp of when the trusted-device 2FA cookie was last (re)issued. Kept
+    // for diagnostics only — the cookie is ALWAYS sent regardless of age (VRChat
+    // is the authority on trusted-device validity; see getCookieHeader).
     private const val KEY_2FA_COOKIE_STORED_AT = "twofa_cookie_stored_at_ms"
-    private const val TWO_FA_COOKIE_MAX_AGE_MS = 30L * 24 * 60 * 60 * 1000
 
     sealed class AuthResult {
         data class Success(val userId: String, val displayName: String) : AuthResult()
@@ -115,41 +117,34 @@ object VrchatAuthManager {
     fun getCookieHeader(context: Context): String? {
         val prefs = getPrefs(context) ?: return null
         val auth  = prefs.getString(KEY_AUTH_COOKIE, null)
+        // ALWAYS send the trusted-device 2FA cookie if we have one — never drop
+        // it on a client-side age guess. VRChat's web client keeps a remembered
+        // device trusted indefinitely (and rolls it forward on use); a hard
+        // client-side cutoff only ever HURTS — it forces a 2FA prompt VRChat
+        // itself would not have asked for. Sending a stale cookie is harmless:
+        // worst case VRChat ignores it and returns requiresTwoFactorAuth, which
+        // is exactly what dropping it would have produced. Let the SERVER decide.
         val twoFa = prefs.getString(KEY_2FA_COOKIE, null)
-        // Drop 2FA cookie if older than 30 days (VRChat's server expiry)
-        val twoFaValid = if (twoFa != null) {
-            val storedAt = prefs.getLong(KEY_2FA_COOKIE_STORED_AT, 0L)
-            storedAt == 0L || System.currentTimeMillis() - storedAt < TWO_FA_COOKIE_MAX_AGE_MS
-        } else false
-        val effectiveTwoFa = if (twoFaValid) twoFa else null
         return when {
-            auth != null && effectiveTwoFa != null -> "$auth; $effectiveTwoFa"
-            auth != null                           -> auth
-            effectiveTwoFa != null                 -> effectiveTwoFa
-            else                                   -> null
+            auth != null && twoFa != null -> "$auth; $twoFa"
+            auth != null                  -> auth
+            twoFa != null                 -> twoFa
+            else                          -> null
         }
     }
 
     /**
      * Cookie header for the Basic-auth re-login path. Sends ONLY the trusted-
-     * device 2FA cookie (if still valid) — never the saved auth cookie. An
-     * expired auth cookie sent alongside Basic credentials can cause VRChat
-     * to reject the request as a session conflict, even though the
-     * twoFactorAuth cookie alone would let the new login skip the 2FA prompt.
+     * device 2FA cookie — never the saved auth cookie. An expired auth cookie
+     * sent alongside Basic credentials can cause VRChat to reject the request
+     * as a session conflict, even though the twoFactorAuth cookie alone lets
+     * the new login skip the 2FA prompt. The cookie is sent regardless of age:
+     * VRChat is the authority on whether the trusted device is still valid, so
+     * we never proactively drop it (which would force an avoidable 2FA prompt).
      */
     private fun getTwoFaOnlyCookieHeader(context: Context): String? {
         val prefs = getPrefs(context) ?: return null
-        val twoFa = prefs.getString(KEY_2FA_COOKIE, null) ?: return null
-        val storedAt = prefs.getLong(KEY_2FA_COOKIE_STORED_AT, 0L)
-        if (storedAt == 0L) {
-            // Migration case: cookie exists but was never timestamped.
-            // Give it a fresh 30-day window from now.
-            Log.i(TAG, "getTwoFaOnlyCookieHeader: migrating 2FA cookie with missing timestamp")
-            prefs.edit().putLong(KEY_2FA_COOKIE_STORED_AT, System.currentTimeMillis()).apply()
-            return twoFa
-        }
-        val valid = System.currentTimeMillis() - storedAt < TWO_FA_COOKIE_MAX_AGE_MS
-        return if (valid) twoFa else null
+        return prefs.getString(KEY_2FA_COOKIE, null)
     }
 
     fun shouldRefreshCookies(context: Context): Boolean {
