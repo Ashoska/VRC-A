@@ -629,12 +629,26 @@ class VrchatPipelineService : Service() {
             reconnectAttempt++
             updatePersistentNotif("Reconnecting in ${backoffMs / 1000}s...")
             delay(backoffMs)
-            if (VrchatAuthManager.isLoggedIn(this@VrchatPipelineService)) {
-                updatePersistentNotif("Connecting...")
-                connectWebSocket()
-            } else {
+            if (!VrchatAuthManager.isLoggedIn(this@VrchatPipelineService)) {
                 startPipeline()
+                return@launch
             }
+            // isLoggedIn() only checks the auth cookie is PRESENT, not valid.
+            // VRChat binds the auth cookie to the client IP, which changes
+            // constantly on mobile — so a present cookie is often already dead,
+            // and reconnecting with it just fails again forever. After the first
+            // (likely transient) failure, validate the session and auto-relogin
+            // before reconnecting so an expired/IP-invalidated session recovers
+            // on its own instead of looping on a dead authToken.
+            if (reconnectAttempt >= 2) {
+                val valid = VrchatAuthManager.validateSession(this@VrchatPipelineService)
+                if (!valid) {
+                    updatePersistentNotif("Refreshing VRChat session...")
+                    VrchatAuthManager.autoRelogin(this@VrchatPipelineService)
+                }
+            }
+            updatePersistentNotif("Connecting...")
+            connectWebSocket()
         }
     }
 
@@ -2213,11 +2227,22 @@ class VrchatPipelineService : Service() {
             delay(6 * 60 * 60 * 1000L)
             while (true) {
                 try {
-                    if (VrchatAuthManager.shouldRefreshCookies(this@VrchatPipelineService)) {
-                        Log.i(TAG, "Auth cookies stale (>12 days) — proactively refreshing")
-                        VrchatAuthManager.diagnoseAuthState(this@VrchatPipelineService)
-                        val refreshed = VrchatAuthManager.autoRelogin(this@VrchatPipelineService)
-                        Log.i(TAG, "Proactive auth refresh result: $refreshed")
+                    // The 12-day age threshold rarely fires before the auth cookie
+                    // actually dies (VRChat expires it far sooner, and any IP change
+                    // invalidates it immediately). So also actively validate the
+                    // session each cycle and re-login when it's dead, regardless of
+                    // cookie age — this is what keeps the session alive 24/7 without
+                    // a fresh 2FA prompt. autoRelogin sends only the trusted-device
+                    // 2FA cookie, so VRChat skips the 2FA challenge.
+                    if (VrchatAuthManager.isLoggedIn(this@VrchatPipelineService)) {
+                        val stale = VrchatAuthManager.shouldRefreshCookies(this@VrchatPipelineService)
+                        val valid = VrchatAuthManager.validateSession(this@VrchatPipelineService)
+                        if (stale || !valid) {
+                            Log.i(TAG, "Auth refresh (stale=$stale, valid=$valid) — re-logging in")
+                            VrchatAuthManager.diagnoseAuthState(this@VrchatPipelineService)
+                            val refreshed = VrchatAuthManager.autoRelogin(this@VrchatPipelineService)
+                            Log.i(TAG, "Proactive auth refresh result: $refreshed")
+                        }
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "Auth refresh check failed", e)

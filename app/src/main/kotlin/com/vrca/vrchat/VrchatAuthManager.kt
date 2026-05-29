@@ -223,8 +223,13 @@ object VrchatAuthManager {
                 // the post-response processing.
                 saveCredentials(context, username, password)
 
+                // VRChat requires the username and password to each be
+                // URI-encoded (encodeURIComponent-style) BEFORE base64 for Basic
+                // auth — its backend URL-decodes them. Passing raw bytes breaks
+                // any credential containing @ + # : & % etc., which VRChat then
+                // rejects with 401 → auto-relogin dies → forced manual 2FA.
                 val credentials = Base64.getEncoder()
-                    .encodeToString("$username:$password".toByteArray())
+                    .encodeToString("${encodeUriComponent(username)}:${encodeUriComponent(password)}".toByteArray(Charsets.UTF_8))
 
                 val (responseCode, body, rawCookies) = get(
                     url = "$BASE/auth/user",
@@ -266,17 +271,27 @@ object VrchatAuthManager {
                         val displayName = json.optString("displayName")
 
                         if (authCookieValue != null && userId.isNotBlank()) {
-                            // Update only the auth cookie + user info — preserve the
-                            // existing 2FA trusted-device cookie and its original
-                            // stored-at timestamp so future auto-relogins after
-                            // subsequent auth-cookie expiries still work.
+                            // Update the auth cookie + user info. If VRChat re-issued
+                            // a twoFactorAuth (trusted-device) cookie on this login,
+                            // capture it and RESET its 30-day clock so the trusted
+                            // window keeps extending. If it did NOT (the common case
+                            // for a bypass login), leave the existing 2FA cookie and
+                            // its original stored-at untouched so future auto-relogins
+                            // still work.
                             val now = System.currentTimeMillis()
-                            getPrefs(context)?.edit()
+                            val newTwoFa = rawCookies
+                                .mapNotNull { extractCookieValue(it, "twoFactorAuth") }
+                                .firstOrNull()
+                            val editor = getPrefs(context)?.edit()
                                 ?.putString(KEY_AUTH_COOKIE, authCookieValue)
                                 ?.putString(KEY_USER_ID, userId)
                                 ?.putString(KEY_DISPLAY_NAME, displayName)
                                 ?.putLong(KEY_COOKIE_STORED_AT, now)
-                                ?.apply()
+                            if (newTwoFa != null) {
+                                editor?.putString(KEY_2FA_COOKIE, newTwoFa)
+                                    ?.putLong(KEY_2FA_COOKIE_STORED_AT, now)
+                            }
+                            editor?.apply()
                             AuthResult.Success(userId, displayName)
                         } else {
                             // Unusual: 200 but no id or cookie - log the body for diagnosis
@@ -286,10 +301,27 @@ object VrchatAuthManager {
                     }
 
                     401 -> {
-                        // Wrong credentials — clear saved credentials so auto-relogin
-                        // doesn't keep retrying with invalid creds
-                        clearCredentials(context)
-                        AuthResult.Error("Incorrect username or password.")
+                        // A 401 is NOT always wrong credentials. VRChat also returns
+                        // 401 for an IP-invalidated / conflicting session ("authToken
+                        // doesn't correspond with an active session"). Only wipe the
+                        // saved credentials when the error clearly says the credentials
+                        // are bad — otherwise keep them so auto-relogin can recover the
+                        // session instead of forcing a full manual login (with 2FA).
+                        val msg = try {
+                            JSONObject(body).optJSONObject("error")?.optString("message") ?: body
+                        } catch (_: Exception) { body }
+                        val badCreds = msg.contains("invalid", true) ||
+                            msg.contains("incorrect", true) ||
+                            msg.contains("credential", true) ||
+                            msg.contains("password", true) ||
+                            msg.contains("username", true)
+                        if (badCreds) {
+                            clearCredentials(context)
+                            AuthResult.Error("Incorrect username or password.")
+                        } else {
+                            Log.w(TAG, "401 (non-credential, keeping creds): ${msg.take(140)}")
+                            AuthResult.Error("Session expired — retrying.")
+                        }
                     }
 
                     else -> {
@@ -744,6 +776,21 @@ object VrchatAuthManager {
         if (!nameValue.startsWith("$name=", ignoreCase = true)) return null
         return nameValue // returns "auth=authcookie_xxx" or "twoFactorAuth=xxx"
     }
+
+    /**
+     * JS encodeURIComponent-equivalent. Java's URLEncoder uses
+     * application/x-www-form-urlencoded (space → "+", and it escapes
+     * !'()~ while leaving *-._ alone), so we fix those up to match what
+     * VRChat's backend expects when it URI-decodes the Basic-auth credentials.
+     */
+    private fun encodeUriComponent(s: String): String =
+        java.net.URLEncoder.encode(s, "UTF-8")
+            .replace("+", "%20")
+            .replace("%21", "!")
+            .replace("%27", "'")
+            .replace("%28", "(")
+            .replace("%29", ")")
+            .replace("%7E", "~")
 
     private fun saveSession(
         context: Context,
