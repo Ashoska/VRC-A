@@ -36,7 +36,7 @@ service cloud.firestore {
     function selfMutableKeys() {
       return [
         // Identity / debug
-        "lastSeenAt", "updatedAt",
+        "lastActiveAt", "lastSeenAt", "updatedAt",
         "appId", "adminBuild", "versionName", "versionCode",
         "docId", "docIdType",
         "authUid", "uid", "currentUid",
@@ -133,6 +133,16 @@ service cloud.firestore {
         && deviceIdentityConsistent(deviceHash);
 
       allow delete: if false;
+
+      // Live/volatile subdoc — presence, nowPlaying, preview.
+      // Written by the user's app when an admin is watching;
+      // read by admin or the user who owns the parent doc.
+      match /live/{doc} {
+        allow read: if isOwner() || isOwnerOfDeviceDoc(deviceHash);
+        allow create, update: if signedIn() && isOwnerOfDeviceDoc(deviceHash);
+        allow create, update: if isOwner();
+        allow delete: if false;
+      }
     }
 
     /* =========================

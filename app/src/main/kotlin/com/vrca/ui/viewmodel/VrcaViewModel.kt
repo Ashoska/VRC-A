@@ -45,6 +45,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.tasks.await
+import org.json.JSONObject
 import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
@@ -125,6 +126,7 @@ class VrcaViewModel(
         private const val REMOTE_PREFS_FILE = "vrca_remote"
         private const val PREF_DEVICE_ID_HASH = "device_id_hash"
         private const val PREF_AUTH_UID = "auth_uid"
+        private const val PREF_LAST_SYNCED_JSON = "last_synced_values_json"
 
         // Collections (MUST MATCH YOUR RULES)
         private const val COL_USERS = "users"             // users/{deviceHash}
@@ -203,7 +205,6 @@ class VrcaViewModel(
     private var syncTriggerJob: Job? = null
     private var hourlyHeartbeatJob: Job? = null
     private var lastSelfSyncAtMs: Long = 0L
-    private var lastSelfSyncFingerprint: String = ""
     private var usersByIdLinkWritten: Boolean = false
     private var lastSelfSyncError: String = ""
 
@@ -238,6 +239,44 @@ class VrcaViewModel(
         return s.length in 16..128
     }
 
+    private fun persistLastSyncedValues() {
+        runCatching {
+            val obj = JSONObject()
+            for ((key, value) in lastSyncedValues) {
+                when (value) {
+                    null -> obj.put(key, JSONObject.NULL)
+                    is Boolean -> obj.put(key, value)
+                    is Int -> obj.put(key, value)
+                    is Long -> obj.put(key, value)
+                    is String -> obj.put(key, value)
+                    else -> obj.put(key, value.toString())
+                }
+            }
+            prefs().edit().putString(PREF_LAST_SYNCED_JSON, obj.toString()).apply()
+        }
+    }
+
+    private fun loadLastSyncedValues() {
+        runCatching {
+            val json = prefs().getString(PREF_LAST_SYNCED_JSON, null) ?: return
+            val obj = JSONObject(json)
+            lastSyncedValues.clear()
+            for (key in obj.keys()) {
+                if (obj.isNull(key)) {
+                    lastSyncedValues[key] = null
+                    continue
+                }
+                val v = obj.get(key)
+                lastSyncedValues[key] = when (v) {
+                    is Boolean -> v
+                    is Number -> v.toInt()
+                    is String -> v
+                    else -> v.toString()
+                }
+            }
+        }
+    }
+
     private suspend fun ensureAnonAuth(): String? {
         return runCatching {
             if (auth.currentUser == null) auth.signInAnonymously().await()
@@ -245,30 +284,6 @@ class VrcaViewModel(
             if (!uid.isNullOrBlank()) writeCachedUid(uid)
             uid
         }.getOrNull()
-    }
-
-    private fun computeSelfFingerprint(authUid: String, deviceHash: String): String {
-        val cycleClean = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(10)
-        val afkP = (1..3).joinToString("|") { getAfkPresetPreview(it) }
-        val cycP = (1..5).joinToString("|") { getCyclePresetPreview(it) }
-
-        return listOf(
-            "doc=$deviceHash",
-            "dev=$deviceHash",
-            "auth=$authUid",
-            "afkE=$afkEnabled",
-            "afkM=${afkMessage.trim()}",
-            "cycE=$cycleEnabled",
-            "cycI=$cycleIntervalSeconds",
-            "cycL=${cycleClean.joinToString("\\n")}",
-            "spE=$spotifyEnabled",
-            "spD=$spotifyDemoEnabled",
-            "spP=$spotifyPreset",
-            "afkP=$afkP",
-            "cycP=$cycP",
-            "timeE=$timeEnabled",
-            "timeM=$timeMode"
-        ).joinToString("||")
     }
 
     /**
@@ -413,7 +428,7 @@ class VrcaViewModel(
      * toggle. Now content is persisted ONLY to local DataStore on edit (which
      * already happens at every call site) and pushed to Firestore on the next
      * app-open write or the hourly heartbeat ([startHourlyHeartbeat]) — and
-     * only if it actually changed (fingerprint guard in [performSelfSync]).
+     * only if it actually changed (delta comparison in [performSelfSync]).
      *
      * The 47 call sites are intentionally left in place so the edit→DataStore
      * paths and preview rebuilds at those sites are untouched; this function
@@ -488,6 +503,7 @@ class VrcaViewModel(
         "cycleIntervalSeconds" to cycleIntervalSeconds,
         "cycleLinesText" to cycleLines.joinToString("\n").trim(),
         "spotifyEnabled" to spotifyEnabled,
+        "spotifyDemoEnabled" to spotifyDemoEnabled,
         "spotifyPreset" to spotifyPreset,
         "timeEnabled" to timeEnabled,
         "timeMode" to timeMode,
@@ -572,14 +588,10 @@ class VrcaViewModel(
     }
 
     private suspend fun performSelfSync() {
-        // Admin build never writes its own user doc — content lives in DataStore
-        // only. Writing it would create an orphan doc AND feed the round-trip
-        // (write → snapshot echo → applyRemoteConfig) that wipes local presets.
         if (BuildConfig.IS_ADMIN_BUILD) return
         if (!initialDataLoaded) return
         runCatching {
             val authUid = ensureAnonAuth() ?: return@runCatching
-
             val deviceHash = readDeviceHashFromPrefs()
             if (!isValidDeviceHash(deviceHash)) {
                 lastSelfSyncError =
@@ -587,35 +599,68 @@ class VrcaViewModel(
                 return@runCatching
             }
 
-            val fp = computeSelfFingerprint(authUid, deviceHash)
-            if (fp == lastSelfSyncFingerprint) return@runCatching
+            val currentState = captureStateForSync()
+            val uidChanged = lastSyncedValues["_authUid"]?.let { it != authUid } ?: false
+            val isFirstSync = lastSyncedValues.isEmpty()
 
-            val stateSnapshot = captureStateForSync()
-            lastSelfSyncFingerprint = fp
+            if (isFirstSync || uidChanged) {
+                // Full write: first ever install, first cold-open with no
+                // persisted baseline, or auth UID changed. Handles doc
+                // creation and writes all fields for backward compat.
+                try {
+                    db.collection(COL_USERS).document(deviceHash)
+                        .set(buildUserSnapshot(authUid, deviceHash), SetOptions.merge())
+                        .await()
+
+                    if (!usersByIdLinkWritten || uidChanged) {
+                        runCatching {
+                            db.collection(COL_USERS_BY_ID).document(authUid)
+                                .set(buildUsersByIdLink(authUid, deviceHash), SetOptions.merge())
+                                .await()
+                            usersByIdLinkWritten = true
+                        }
+                    }
+
+                    lastSyncedValues.clear()
+                    lastSyncedValues.putAll(currentState)
+                    lastSyncedValues["_authUid"] = authUid
+                    persistLastSyncedValues()
+                    lastSelfSyncAtMs = System.currentTimeMillis()
+                    lastSelfSyncError = ""
+                } catch (e: Throwable) {
+                    throw e
+                }
+                return@runCatching
+            }
+
+            // Delta write: liveness fields always, content only if changed.
+            val delta = mutableMapOf<String, Any>(
+                "isOnlineInApp" to true,
+                "lastActiveAt" to FieldValue.serverTimestamp(),
+                "lastSeenAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            for ((key, value) in currentState) {
+                if (value != lastSyncedValues[key] && value != null) {
+                    delta[key] = value
+                }
+            }
+            if (delta.containsKey("cycleLinesText")) {
+                delta["cycleLines"] = cycleLines.map { it.trim() }
+                    .filter { it.isNotEmpty() }.take(10)
+            }
 
             try {
                 db.collection(COL_USERS).document(deviceHash)
-                    .set(buildUserSnapshot(authUid, deviceHash), SetOptions.merge())
+                    .set(delta, SetOptions.merge())
                     .await()
-
-                // usersById link is static (deviceHash, authUid, appId, adminBuild
-                // never change per device). Write it once per session, not on
-                // every debounced content sync.
-                if (!usersByIdLinkWritten) {
-                    runCatching {
-                        db.collection(COL_USERS_BY_ID).document(authUid)
-                            .set(buildUsersByIdLink(authUid, deviceHash), SetOptions.merge())
-                            .await()
-                        usersByIdLinkWritten = true
-                    }
-                }
-
                 lastSyncedValues.clear()
-                lastSyncedValues.putAll(stateSnapshot)
+                lastSyncedValues.putAll(currentState)
+                lastSyncedValues["_authUid"] = authUid
+                persistLastSyncedValues()
                 lastSelfSyncAtMs = System.currentTimeMillis()
                 lastSelfSyncError = ""
             } catch (e: Throwable) {
-                lastSelfSyncFingerprint = ""
                 throw e
             }
         }.onFailure { e ->
@@ -624,16 +669,12 @@ class VrcaViewModel(
     }
 
     /**
-     * Starts the once-per-hour liveness loop. Idempotent; started once from
-     * init after the cold-open write. Each tick:
-     *   1. Always writes lastActiveAt (+ isOnlineInApp=true) so the admin's
-     *      online/offline determination stays fresh — this is the one write
-     *      that must happen even when nothing changed.
-     *   2. Calls performSelfSync(), which pushes content ONLY if it changed
-     *      since the last write (fingerprint guard), so unchanged presets/
-     *      chatbox aren't rewritten.
-     * In-process only — dies with the process, which is exactly how a
-     * swiped/killed app correctly stops reporting online.
+     * Once-per-hour liveness + delta sync. Each tick calls [performSelfSync]
+     * which always writes liveness (lastActiveAt, isOnlineInApp) and includes
+     * any content fields that changed since the last write. This merges the
+     * old separate heartbeat + sync into a single Firestore write per hour.
+     * In-process only — dies with the process, so a swiped/killed app
+     * correctly stops reporting online.
      */
     private fun startHourlyHeartbeat() {
         if (BuildConfig.IS_ADMIN_BUILD) return
@@ -641,28 +682,8 @@ class VrcaViewModel(
         hourlyHeartbeatJob = viewModelScope.launch {
             while (true) {
                 delay(HOURLY_HEARTBEAT_MS)
-                performHourlyHeartbeat()
                 performSelfSync()
             }
-        }
-    }
-
-    private suspend fun performHourlyHeartbeat() {
-        if (BuildConfig.IS_ADMIN_BUILD) return
-        if (!initialDataLoaded) return
-        runCatching {
-            val deviceHash = readDeviceHashFromPrefs()
-            if (!isValidDeviceHash(deviceHash)) return@runCatching
-            db.collection(COL_USERS).document(deviceHash)
-                .set(
-                    mapOf(
-                        "isOnlineInApp" to true,
-                        "lastActiveAt" to FieldValue.serverTimestamp(),
-                        "lastSeenAt" to FieldValue.serverTimestamp()
-                    ),
-                    SetOptions.merge()
-                )
-                .await()
         }
     }
 
@@ -1406,6 +1427,12 @@ class VrcaViewModel(
     )
 
     init {
+        // Restore the last-synced baseline from the previous session so the
+        // delta writer knows what Firestore already has. Enables cold-open
+        // delta writes (only changed content + liveness) instead of full
+        // 40-field snapshots on every app restart.
+        loadLastSyncedValues()
+
         // Public build: attach moderation listeners (also drives watcher detection
         // and remote-config snapshots). Admin build skips self-sync entirely.
         attachModerationListenersLoopOnce()
