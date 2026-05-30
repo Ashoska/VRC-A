@@ -29,6 +29,7 @@ service cloud.firestore {
         "warned", "warnReason",
         "banned", "banReason",
         "watcherActiveAt",
+        "killSignal",
         "targetedUpdateUrl", "targetedUpdateNotes"
       ];
     }
@@ -174,7 +175,14 @@ service cloud.firestore {
        ========================= */
 
     match /announcements/{id} {
-      allow get, list: if true;
+      // Owner sees everything (incl. drafts). Signed-in users may only read
+      // ACTIVE announcements: for a list query, Firestore evaluates this rule
+      // against each matched doc, so a non-owner query must filter active==true
+      // (both client listeners already do `whereEqualTo("active", true)`) — an
+      // attempt to list drafts matches an active==false doc and is denied.
+      // Requiring signedIn() also blocks unauthenticated scraping (the app is
+      // always anon-authed before any Firestore read).
+      allow get, list: if isOwner() || (signedIn() && resource.data.active == true);
       allow create, update, delete: if isOwner();
     }
 
@@ -202,6 +210,16 @@ service cloud.firestore {
        ========================= */
 
     match /bannedIdentifiers/{identifier} {
+      // get stays signed-in (not owner-only): the client ban check
+      // (VrchatBanChecker.checkPhase1/2) must read its OWN deviceHash, authUid,
+      // AND vrchatId by exact id. The vrchatId path can't be ownership-verified
+      // in rules (no server-side vrchatId->auth mapping), so we can't narrow get
+      // to "only your own ids" without breaking new-device/same-VRChat detection.
+      // This is acceptable: `list` is owner-only (the collection can't be dumped),
+      // the doc payload is only {banId, type, active}, and identifiers are
+      // high-entropy (sha256 / Firebase UID / usr_ ids) so blind probing is
+      // impractical. A banned user can at most confirm their own already-known
+      // flags.
       allow get: if signedIn();
       allow list: if isOwner();
       allow create, update, delete: if isOwner();
