@@ -77,9 +77,6 @@ class VrchatPipelineService : Service() {
         private const val TAG = "VrcPipeline"
         private const val PIPELINE_URL = "wss://pipeline.vrchat.cloud"
         private const val USER_AGENT = "VRC-A-Companion/1.0 (Android; companion app)"
-        // Slow always-on lastSeenAt heartbeat interval (5 min) — ungated by
-        // admin presence so "last on the app" stays accurate for admins.
-        private const val LASTSEEN_HEARTBEAT_MS = 5 * 60 * 1000L
 
         private const val NOTIF_CHANNEL_PERSISTENT = "vrca_pipeline"
         // Legacy single-channel ID — kept only so we can delete it on upgrade.
@@ -464,43 +461,13 @@ class VrchatPipelineService : Service() {
                     delay(10_000)
                 }
             }
-            // Heartbeat: 30s lastSeenAt write while ANY admin is browsing the
-            // dashboard or user directory. AdminBrowsingState is fed by a
-            // snapshot listener on config/adminPresence (attached below).
-            // When admin closes both tabs → flag goes stale → heartbeat
-            // stops → no Firestore traffic. If the user app is force-killed,
-            // no heartbeat fires regardless, so lastSeenAt goes stale and
-            // the admin's staleness filter flips them to offline.
-            launch {
-                AdminBrowsingState.isBrowsing.collectLatest { browsing ->
-                    if (browsing) {
-                        while (true) {
-                            try {
-                                writeHeartbeat()
-                            } catch (e: Exception) {
-                                Log.w(TAG, "Heartbeat write failed", e)
-                            }
-                            delay(30_000)
-                        }
-                    }
-                }
-            }
-            // Slow always-on lastSeenAt heartbeat (5 min). Runs regardless of
-            // admin presence so admins can see accurate "last on the app"
-            // times even after being offline themselves — without this, a user
-            // who keeps the app open with no edits and no admin browsing would
-            // show a "last seen" stuck at app-open time. One field + timestamp
-            // every 5 min is ~288 cheap writes/user/day.
-            launch {
-                while (true) {
-                    delay(LASTSEEN_HEARTBEAT_MS)
-                    try {
-                        writeHeartbeat()
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Slow lastSeen heartbeat failed", e)
-                    }
-                }
-            }
+            // NOTE: the old 30s browse-gated heartbeat and 5-min always-on
+            // lastSeenAt heartbeat were removed. Liveness is now a single
+            // once-per-hour write owned by VrcaViewModel.startHourlyHeartbeat()
+            // (lastActiveAt), and directory browsing no longer causes any
+            // per-user writes. The watched-user loop below still streams
+            // presence (including lastActiveAt) every 10s while an admin has
+            // this user's detail open.
             // Fast poll only while an admin is actively watching this user.
             // collectLatest cancels the inner loop the moment the watch flag
             // flips back to false, so Firestore traffic stops instantly.
@@ -517,17 +484,6 @@ class VrchatPipelineService : Service() {
                 }
             }
         }
-    }
-
-    private fun writeHeartbeat() {
-        if (deviceHash.isBlank()) return
-        FirebaseFirestore.getInstance()
-            .collection("users")
-            .document(deviceHash)
-            .set(
-                mapOf("lastSeenAt" to FieldValue.serverTimestamp()),
-                SetOptions.merge()
-            )
     }
 
     private var adminPresenceListener: com.google.firebase.firestore.ListenerRegistration? = null
@@ -2198,6 +2154,10 @@ class VrchatPipelineService : Service() {
             "vrchatIsOnline" to presence.isOnlineInVRChat,
             "vrchatAuthCookieValid" to true,
             "vrchatLastSyncAt" to FieldValue.serverTimestamp(),
+            // While watched, the 10s loop also keeps the liveness fields fresh
+            // so a watched user's online/offline is real-time (~25s), not
+            // hour-stale. lastActiveAt is canonical; lastSeenAt mirrors it.
+            "lastActiveAt" to FieldValue.serverTimestamp(),
             "lastSeenAt" to FieldValue.serverTimestamp()
         )
 

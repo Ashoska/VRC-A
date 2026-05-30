@@ -99,14 +99,24 @@ class VrcaViewModel(
         // Firestore sync throttles
         private const val SELF_SYNC_DEBOUNCE_MS = 500L
         // Live-mode write interval — only used when an admin is watching.
-        // No constant background heartbeat: app-open and app-close writes
-        // (the latter from VrchatPipelineService.onTaskRemoved) maintain
-        // online/offline state with two writes per session.
         private const val LIVE_SYNC_INTERVAL_MS = 10_000L
         // When an admin is browsing (dashboard/users list) but not actively
         // watching this user's detail, push volatile preview/nowPlaying at a
         // slower cadence so the directory shows current output cheaply.
         private const val BROWSE_VOLATILE_SYNC_INTERVAL_MS = 30_000L
+
+        // Hourly liveness heartbeat. This is the SOLE periodic write in the
+        // steady state: one write per hour, anchored to when the user opened
+        // the app (the cold-open write at init), then +1h, +2h, … It refreshes
+        // lastActiveAt so admins can determine online/offline (online =
+        // lastActiveAt within ~65 min) and pushes any content that changed
+        // since the last write. Critically this is an in-PROCESS coroutine
+        // loop (NOT an AlarmManager wakeup): a swiped/OS-killed app simply
+        // stops firing it, so it goes stale and is correctly counted offline.
+        // An AlarmManager wakeup would resurrect a dead app to write a
+        // heartbeat, making it report "online" forever and breaking offline
+        // detection entirely.
+        private const val HOURLY_HEARTBEAT_MS = 60L * 60L * 1000L
 
         // Moderation attach retry
         private const val MOD_ATTACH_RETRY_MS = 1_250L
@@ -156,6 +166,7 @@ class VrcaViewModel(
     override fun onCleared() {
         uiTickJob?.cancel()
         syncTriggerJob?.cancel()
+        hourlyHeartbeatJob?.cancel()
         liveSyncJob?.cancel()
         keepaliveJob?.cancel()
         moderationAttachJob?.cancel()
@@ -190,6 +201,7 @@ class VrcaViewModel(
     private val db: FirebaseFirestore by lazy { FirebaseFirestore.getInstance() }
 
     private var syncTriggerJob: Job? = null
+    private var hourlyHeartbeatJob: Job? = null
     private var lastSelfSyncAtMs: Long = 0L
     private var lastSelfSyncFingerprint: String = ""
     private var usersByIdLinkWritten: Boolean = false
@@ -282,6 +294,11 @@ class VrcaViewModel(
             "versionCode" to BuildConfig.VERSION_CODE,
 
             "isOnlineInApp" to true,
+            // lastActiveAt is the canonical liveness field for the hourly
+            // model. lastSeenAt/updatedAt are still written (same timestamp,
+            // zero extra write cost) so older admin builds that read them keep
+            // working — additive migration, nothing removed.
+            "lastActiveAt" to FieldValue.serverTimestamp(),
             "lastSeenAt" to FieldValue.serverTimestamp(),
             "updatedAt" to FieldValue.serverTimestamp(),
 
@@ -391,20 +408,21 @@ class VrcaViewModel(
     }
 
     /**
-     * Schedules a debounced self-sync write. No periodic loops — content
-     * is only written when something actually changes (toggles, edits) or
-     * once at app open. Live/volatile fields are handled separately by the
-     * watcher-gated live loop ([startLiveSyncWatcher]).
+     * No-op under the hourly model. Edits and toggles used to trigger a
+     * debounced Firestore write here; that produced a write per keystroke/
+     * toggle. Now content is persisted ONLY to local DataStore on edit (which
+     * already happens at every call site) and pushed to Firestore on the next
+     * app-open write or the hourly heartbeat ([startHourlyHeartbeat]) — and
+     * only if it actually changed (fingerprint guard in [performSelfSync]).
+     *
+     * The 47 call sites are intentionally left in place so the edit→DataStore
+     * paths and preview rebuilds at those sites are untouched; this function
+     * simply no longer schedules a network write. While an admin is actively
+     * watching this user, the 10s live-sync loop still streams volatile output.
      */
     private fun startSelfSyncLoopIfNeeded() {
-        if (BuildConfig.IS_ADMIN_BUILD) return
-        if (!initialDataLoaded) return
-
-        syncTriggerJob?.cancel()
-        syncTriggerJob = viewModelScope.launch {
-            delay(SELF_SYNC_DEBOUNCE_MS)
-            performSelfSync()
-        }
+        // Intentionally empty — see KDoc above. (SELF_SYNC_DEBOUNCE_MS retained
+        // for reference; no debounced write is scheduled anymore.)
     }
 
     /**
@@ -452,21 +470,15 @@ class VrcaViewModel(
      */
     private var browseVolatileJob: Job? = null
 
+    /**
+     * Disabled under the hourly model. An admin merely browsing the directory
+     * must NOT cause this user to emit writes — only opening this specific
+     * user's detail (which flips [AdminWatchState.isWatched]) starts the 10s
+     * live-sync loop. Directory rows are populated from the admin's one-shot
+     * fetch, not from a per-user browse heartbeat.
+     */
     private fun startBrowseVolatileSyncWatcher() {
-        if (BuildConfig.IS_ADMIN_BUILD) return
-        if (browseVolatileJob != null) return
-        browseVolatileJob = viewModelScope.launch {
-            com.vrca.sync.AdminBrowsingState.isBrowsing.collectLatest { browsing ->
-                if (browsing) {
-                    while (true) {
-                        if (!com.vrca.sync.AdminWatchState.isWatched.value) {
-                            performLiveSync()
-                        }
-                        delay(BROWSE_VOLATILE_SYNC_INTERVAL_MS)
-                    }
-                }
-            }
-        }
+        // Intentionally empty — directory browsing no longer triggers writes.
     }
 
     private fun captureStateForSync(): Map<String, Any?> = mapOf(
@@ -608,6 +620,49 @@ class VrcaViewModel(
             }
         }.onFailure { e ->
             lastSelfSyncError = (e.message ?: e.toString()).take(4000)
+        }
+    }
+
+    /**
+     * Starts the once-per-hour liveness loop. Idempotent; started once from
+     * init after the cold-open write. Each tick:
+     *   1. Always writes lastActiveAt (+ isOnlineInApp=true) so the admin's
+     *      online/offline determination stays fresh — this is the one write
+     *      that must happen even when nothing changed.
+     *   2. Calls performSelfSync(), which pushes content ONLY if it changed
+     *      since the last write (fingerprint guard), so unchanged presets/
+     *      chatbox aren't rewritten.
+     * In-process only — dies with the process, which is exactly how a
+     * swiped/killed app correctly stops reporting online.
+     */
+    private fun startHourlyHeartbeat() {
+        if (BuildConfig.IS_ADMIN_BUILD) return
+        if (hourlyHeartbeatJob != null) return
+        hourlyHeartbeatJob = viewModelScope.launch {
+            while (true) {
+                delay(HOURLY_HEARTBEAT_MS)
+                performHourlyHeartbeat()
+                performSelfSync()
+            }
+        }
+    }
+
+    private suspend fun performHourlyHeartbeat() {
+        if (BuildConfig.IS_ADMIN_BUILD) return
+        if (!initialDataLoaded) return
+        runCatching {
+            val deviceHash = readDeviceHashFromPrefs()
+            if (!isValidDeviceHash(deviceHash)) return@runCatching
+            db.collection(COL_USERS).document(deviceHash)
+                .set(
+                    mapOf(
+                        "isOnlineInApp" to true,
+                        "lastActiveAt" to FieldValue.serverTimestamp(),
+                        "lastSeenAt" to FieldValue.serverTimestamp()
+                    ),
+                    SetOptions.merge()
+                )
+                .await()
         }
     }
 
@@ -1399,7 +1454,10 @@ class VrcaViewModel(
             kotlinx.coroutines.withTimeoutOrNull(5_000L) {
                 applyRemoteContentBeforeSync()
             }
+            // Cold-open write: this is the "user got online" write, anchored to
+            // app open. The hourly heartbeat then fires every hour after this.
             performSelfSync()
+            startHourlyHeartbeat()
         }
 
         viewModelScope.launch {
