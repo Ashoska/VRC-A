@@ -114,6 +114,19 @@ Key fields written by the app:
 - Settings: Full page accessed via gear icon in top app bar. Contains Permissions, About, Help, and collapsible Debug section
 - Admin: Full page accessed via gavel icon in top app bar (admin build only). Includes targeted APK push per user and release retraction.
 
+### Admin UI (Phase 6 redesign)
+The admin panel shares one visual language defined in **`AdminUiKit.kt`** — all admin surfaces compose from these primitives so density + clarity stay consistent:
+- `AdminTone` (Neutral/Primary/Success/Warn/Error/Info) + `toneColors(tone)` map a semantic tone to M3 container/on/accent colors.
+- `AdminSectionCard(title, icon, tone, trailing) { content }` — an `ElevatedCard` with an icon-in-tinted-circle header. `AdminCardHeader(...)` is the standalone header for use inside an existing card/column (used to re-skin the detail sections without restructuring their bodies).
+- `AdminStatTile(label, value, icon, tone)` — big-number dashboard tile.
+- `StatusPill(text, tone)` — rounded status chip (replaces raw `Badge`s for ONLINE/VRC/BAN/WARN).
+- `AdminLabeledRow(label, value, mono)` — label→value row (ids monospaced).
+- `AdminAvatar(name, online, size)` — initial-circle with an online/offline status dot.
+
+**Dashboard** (`DashboardTab.kt`): a "Live overview" hero (large online count + total), a 2×2 stat grid (Users/Online/Warned/Banned via `AdminStatTile`), and a ban-evasion alert section. Refresh in the hero trailing slot.
+**Directory** (`UsersTab.kt` list): rows show `AdminAvatar` + name/secondary + world + a pill row (ONLINE/VRC/BAN/WARN) and relative `lastActiveAt`. Header has search, warned/banned filters, count, refresh, +500 paging.
+**Detail** (`UsersTab.kt` detail): header card with avatar, identity, status pills, `AdminLabeledRow`s, and the **Send to Moderation** (Gavel) + **Kill App** (Power) actions. Below it, `DetailBlock` renders iconed sections: VRChat presence, Live Chatbox Output + remote toggles, Pinned message + presets, Cycle (interval/lines/presets), App & Updates + targeted APK push (file upload → GitHub release → per-device `releases/{docId}`, URL push, fill-from-latest, remove), and moderation flags. All prior admin capabilities are preserved — the redesign is presentation-only over the same action logic.
+
 ### Firestore Sync Architecture
 The sync model is intentionally minimal — Firestore costs money and we only push to it when we have to. Three classes of writes:
 

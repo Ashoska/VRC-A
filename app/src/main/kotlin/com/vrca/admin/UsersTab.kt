@@ -20,9 +20,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ChevronRight
@@ -30,10 +31,14 @@ import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Gavel
+import androidx.compose.material.icons.filled.Loop
+import androidx.compose.material.icons.filled.Power
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material3.Badge
+import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -63,6 +68,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.google.firebase.Timestamp
@@ -339,73 +345,50 @@ internal fun UsersTab(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             ElevatedCard {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.weight(1f)) {
-                            IconButton(onClick = { selectedDocId = null }) {
-                                Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
-                            }
-                            Column(Modifier.weight(1f)) {
-                                val primaryLabel = row.vrchatDisplayName.ifBlank {
-                                    row.displayName.ifBlank { shortId(row.docId) }
-                                }
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = { selectedDocId = null }, modifier = Modifier.size(36.dp)) {
+                            Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
+                        }
+                        val primaryLabel = row.vrchatDisplayName.ifBlank {
+                            row.displayName.ifBlank { shortId(row.docId) }
+                        }
+                        AdminAvatar(name = primaryLabel, online = isUserOnline(row, nowMs), size = 44)
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                primaryLabel,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis
+                            )
+                            if (row.vrchatUserId.isNotBlank()) {
                                 Text(
-                                    primaryLabel,
-                                    style = MaterialTheme.typography.titleMedium,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis
-                                )
-                                if (row.vrchatUserId.isNotBlank()) {
-                                    Text(
-                                        row.vrchatUserId,
-                                        fontFamily = FontFamily.Monospace,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                }
-                                Text(
-                                    shortId(row.docId),
+                                    row.vrchatUserId,
                                     fontFamily = FontFamily.Monospace,
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    color = MaterialTheme.colorScheme.primary,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis
                                 )
                             }
-                        }
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            if (row.banned) {
-                                Badge(
-                                    containerColor = MaterialTheme.colorScheme.error
-                                ) { Text("BANNED", style = MaterialTheme.typography.labelSmall) }
-                            }
-                            if (row.warned) {
-                                Badge(
-                                    containerColor = MaterialTheme.colorScheme.tertiary
-                                ) { Text("WARNED", style = MaterialTheme.typography.labelSmall) }
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                if (isUserOnline(row, nowMs)) StatusPill("ONLINE", AdminTone.Primary)
+                                if (row.vrchatIsOnline) StatusPill("VRC", AdminTone.Info)
+                                if (row.banned) StatusPill("BANNED", AdminTone.Error)
+                                if (row.warned) StatusPill("WARNED", AdminTone.Warn)
                             }
                         }
                     }
 
                     Divider()
 
-                    @Composable
-                    fun InfoRow(label: String, value: String) {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(label,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.width(72.dp))
-                            Text(value,
-                                fontFamily = FontFamily.Monospace,
-                                style = MaterialTheme.typography.bodySmall,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f))
-                        }
-                    }
-
-                    InfoRow("authUid", shortId(row.authUid.ifBlank { "(blank)" }))
-                    InfoRow("device",  shortId(row.deviceHash.ifBlank { "(blank)" }))
-                    InfoRow("lastSeen", relativeTime(row.lastSeenAt, nowMs))
-                    InfoRow("updated",  relativeTime(row.updatedAt, nowMs))
+                    AdminLabeledRow("authUid", shortId(row.authUid.ifBlank { "(blank)" }), mono = true)
+                    AdminLabeledRow("device",  shortId(row.deviceHash.ifBlank { "(blank)" }), mono = true)
+                    AdminLabeledRow("active",  relativeTime(row.lastActiveAt ?: row.lastSeenAt, nowMs))
+                    AdminLabeledRow("updated", relativeTime(row.updatedAt, nowMs))
 
                     Divider()
 
@@ -423,7 +406,7 @@ internal fun UsersTab(
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Icon(Icons.Filled.ArrowForward, contentDescription = null)
+                        Icon(Icons.Filled.Gavel, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
                         Text("Send to Moderation")
                     }
@@ -450,6 +433,8 @@ internal fun UsersTab(
                             contentColor = MaterialTheme.colorScheme.error
                         )
                     ) {
+                        Icon(Icons.Filled.Power, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
                         Text("Kill App (force-quit)")
                     }
                 }
@@ -572,28 +557,30 @@ internal fun UsersTab(
         }
 
         items(filteredUsers, key = { it.docId }) { u ->
+            val appOnline = isUserOnline(u, nowMs)
             Card(
                 colors = CardDefaults.cardColors(
                     containerColor = when {
-                        u.banned -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f)
-                        u.warned -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f)
-                        else     -> MaterialTheme.colorScheme.surfaceVariant
+                        u.banned -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f)
+                        u.warned -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f)
+                        else     -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
                     }
                 ),
                 modifier = Modifier.fillMaxWidth().clickable { selectedDocId = u.docId }
             ) {
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                        // VRChat display name is primary identifier; fall back to displayName then docId
-                        val primaryName = u.vrchatDisplayName.ifBlank { u.displayName.ifBlank { shortId(u.docId) } }
+                    val primaryName = u.vrchatDisplayName.ifBlank { u.displayName.ifBlank { shortId(u.docId) } }
+                    AdminAvatar(name = primaryName, online = appOnline)
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         val secondaryName = if (u.vrchatDisplayName.isNotBlank() && u.displayName.isNotBlank() && u.vrchatDisplayName != u.displayName) u.displayName else null
                         Text(
                             primaryName,
                             style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
                             maxLines = 1, overflow = TextOverflow.Ellipsis
                         )
                         if (secondaryName != null) {
@@ -608,41 +595,26 @@ internal fun UsersTab(
                                 color = MaterialTheme.colorScheme.primary,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                        Text(
-                            relativeTime(u.lastActiveAt ?: u.lastSeenAt, nowMs),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        // Status pills + relative time on one wrapping row.
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            if (appOnline) StatusPill("ONLINE", AdminTone.Primary)
+                            if (u.vrchatIsOnline) StatusPill("VRC", AdminTone.Info)
+                            if (u.banned) StatusPill("BAN", AdminTone.Error)
+                            if (u.warned) StatusPill("WARN", AdminTone.Warn)
+                            Text(
+                                relativeTime(u.lastActiveAt ?: u.lastSeenAt, nowMs),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        if (u.vrchatIsOnline) {
-                            Badge(
-                                containerColor = MaterialTheme.colorScheme.tertiary
-                            ) { Text("VRC", style = MaterialTheme.typography.labelSmall) }
-                        }
-                        if (isUserOnline(u, nowMs)) {
-                            Badge(
-                                containerColor = MaterialTheme.colorScheme.primary
-                            ) { Text("ONLINE", style = MaterialTheme.typography.labelSmall) }
-                        }
-                        if (u.banned) {
-                            Badge(
-                                containerColor = MaterialTheme.colorScheme.error
-                            ) { Text("BAN", style = MaterialTheme.typography.labelSmall) }
-                        }
-                        if (u.warned) {
-                            Badge(
-                                containerColor = MaterialTheme.colorScheme.tertiary
-                            ) { Text("WARN", style = MaterialTheme.typography.labelSmall) }
-                        }
-                        Icon(
-                            Icons.Filled.ChevronRight,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
+                    Icon(
+                        Icons.Filled.ChevronRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp)
+                    )
                 }
             }
         }
@@ -665,7 +637,7 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
     // ── VRChat ──────────────────────────────────────────────────────
     ElevatedCard {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("VRChat", style = MaterialTheme.typography.titleSmall)
+            AdminCardHeader("VRChat", Icons.Filled.SportsEsports, AdminTone.Info)
             if (d.vrchatUserId.isBlank()) {
                 Text("Not linked", style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -706,7 +678,7 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
     // ── Live Output + Feature Toggles ───────────────────────────────
     ElevatedCard {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Live Chatbox Output", style = MaterialTheme.typography.titleSmall)
+            AdminCardHeader("Live Chatbox Output", Icons.Filled.Chat, AdminTone.Primary)
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Text(d.combinedPreviewText.ifBlank { "(nothing sending)" },
                     modifier = Modifier.padding(10.dp),
@@ -780,7 +752,7 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
     // ── Pinned Message ───────────────────────────────────────────────
     ElevatedCard {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Pinned Message", style = MaterialTheme.typography.titleSmall)
+            AdminCardHeader("Pinned Message", Icons.Filled.PushPin, AdminTone.Primary)
             var pinnedEdit by remember(d.pinnedMessage) { mutableStateOf(d.pinnedMessage) }
             OutlinedTextField(
                 value = pinnedEdit,
@@ -822,7 +794,13 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically) {
-                Text("Cycle", style = MaterialTheme.typography.titleSmall)
+                Row(verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(Icons.Filled.Loop, contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                    Text("Cycle", style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold)
+                }
                 Row(verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     var intEdit by remember(d.cycleIntervalSeconds) { mutableStateOf(d.cycleIntervalSeconds.toString()) }
@@ -898,7 +876,7 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
     // ── App Info + Targeted Push ────────────────────────────────────
     ElevatedCard {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("App", style = MaterialTheme.typography.titleSmall)
+            AdminCardHeader("App & Updates", Icons.Filled.Android, AdminTone.Primary)
             Text("${d.versionName} (${d.versionCode})", fontFamily = FontFamily.Monospace,
                 style = MaterialTheme.typography.bodySmall)
             Text(d.appId, fontFamily = FontFamily.Monospace,
