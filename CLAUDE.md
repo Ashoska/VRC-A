@@ -127,9 +127,9 @@ The sync model is intentionally minimal — Firestore costs money and we only pu
 - `VrcaViewModel.startLiveSyncWatcher` writes `buildLivePayload` (nowPlaying, preview, `lastReportedTime`, `lastSeenAt`) every 10s (`LIVE_SYNC_INTERVAL_MS`)
 - `VrchatPipelineService.startPresenceRefreshLoop` writes VRChat presence every 10s
 
-`VrcaViewModel.startBrowseVolatileSyncWatcher` covers the browse-only case: when `AdminBrowsingState.isBrowsing` is true but `AdminWatchState.isWatched` is false, it writes `buildLivePayload` every 30s (`BROWSE_VOLATILE_SYNC_INTERVAL_MS`) so a browsing admin sees current preview/nowPlaying without the cost of the 10s watched loop. It skips entirely when watched (the 10s loop covers it) and when no admin is browsing (zero writes).
+`VrcaViewModel.startBrowseVolatileSyncWatcher` is now a **no-op** (Phase 1): an admin merely browsing the directory no longer causes this user to emit any writes. The directory is populated from the admin's own one-shot fetch; only opening this user's detail (which flips `isWatched`) starts the 10s live loop.
 
-Both stop instantly when `isWatched` flips back to false (`collectLatest` cancels the inner loop). When nobody is watching, neither loop touches Firestore.
+The live loop stops instantly when `isWatched` flips back to false (`collectLatest` cancels the inner loop). When nobody is watching, neither loop touches Firestore — the only periodic write is the hourly `lastActiveAt`.
 
 **Force-kill detection (hourly model)**: If the user's app is force-killed, neither `onTaskRemoved` nor `onCleared` fires, so `isOnlineInApp` stays `true` in Firestore — but the in-process hourly loop stops, so `lastActiveAt` goes stale. The admin determines offline by `lastActiveAt` age (>~65 min, or ~25s for a currently-watched user whose 10s loop stopped). NOTE: the admin-side staleness sweep window (`AdminRuntime`) will be re-tuned to the hourly threshold in the Phase 3 admin-read rework; until then a force-killed user simply ages out of "online" by `lastActiveAt`.
 
