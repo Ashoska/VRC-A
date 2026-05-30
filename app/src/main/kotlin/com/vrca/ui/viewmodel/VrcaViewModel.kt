@@ -1184,6 +1184,10 @@ class VrcaViewModel(
     // The player's own ad index ("1 of 1", "2 of 3") parsed from the ad metadata,
     // preferred over the session counter when available.
     private var nowPlayingAdInfo by mutableStateOf("")
+    // True only while the current special segment is an actual AD (not a DJ
+    // segment). The builder checks this BEFORE isSpotifyDj — an ad blanks the
+    // artist, which would otherwise make isSpotifyDj true and swallow the label.
+    private var nowPlayingIsAd by mutableStateOf(false)
 
     // =========================
     // Time feature
@@ -1512,6 +1516,7 @@ class VrcaViewModel(
                 } || (s.specialActive && s.activePackage == "com.spotify.music" && s.title.trim() == "AD")
                 if (isAdNow && !lastSpecialWasAd) adSegmentCount++
                 lastSpecialWasAd = isAdNow
+                nowPlayingIsAd = isAdNow
 
                 // Special window only gates playing-state (prevents Paused flicker during DJ/ads).
                 // Title updates always go through stabilize so real track shows immediately
@@ -2182,14 +2187,12 @@ class VrcaViewModel(
         // normal logic resumes.
         // nowPlayingSpecialActive covers DJ/ads for any supported player.
         // isSpotifyDj is a secondary check for blank-metadata edge cases.
-        val isSpotifyDj = activePackage == "com.spotify.music" &&
-            nowPlayingDetected &&
-            (safeTitle.isBlank() || safeArtist.isBlank())
-
-        // Ad suppression: if the special window is active and it's not a DJ segment,
-        // always suppress all content â€" title, artist, progress bar, timestamps.
-        // This catches every Spotify ad variant regardless of the title text.
-        if (nowPlayingSpecialActive && !isSpotifyDj) {
+        // Ad suppression takes PRIORITY over the DJ check below. An ad blanks the
+        // artist (title="AD", artist=""), which makes isSpotifyDj true — so gating
+        // the ad label on `!isSpotifyDj` swallowed it and rendered a bare "AD"
+        // title with a progress bar instead of "Ad 1 of 1". Check the explicit ad
+        // flag FIRST and return early so ads always show their index.
+        if (nowPlayingIsAd) {
             // Prefer the player's real ad index ("Ad 1 of 1"); else fall back to the
             // session counter, coerced to at least 1 so it never shows "Ad 0".
             val label = if (nowPlayingAdInfo.isNotBlank()) {
@@ -2199,6 +2202,10 @@ class VrcaViewModel(
             }
             return listOf(label)
         }
+
+        val isSpotifyDj = activePackage == "com.spotify.music" &&
+            nowPlayingDetected &&
+            (safeTitle.isBlank() || safeArtist.isBlank())
 
         val effectiveIsPlaying = if (nowPlayingSpecialActive || isSpotifyDj) true else nowPlayingIsPlaying
 

@@ -1943,22 +1943,33 @@ class VrchatPipelineService : Service() {
                                 // title-only announcement was previously skipped.
                                 if (postCreatedAt.isNotBlank() && postCreatedAt != postLastSeen &&
                                     (postText.isNotBlank() || rawPostTitle.isNotBlank())) {
-                                    fireEventNotification(
-                                        id = "gp_${postId}".hashCode(),
-                                        title = "Announcement from $groupName",
-                                        text = "${postTitle}: ${postText.ifBlank { rawPostTitle }.take(120)}",
-                                        profileUrl = "https://vrchat.com/home/group/$groupId/posts",
-                                        prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
-                                        channelId = NOTIF_CHANNEL_GROUPS,
-                                        groupKey = GROUP_KEY_GROUPS,
-                                        dedupId = "gp_${postId}_$postCreatedAt",
-                                        alertGroupKey = "announcement_$groupId",
-                                        alertBody = postText.ifBlank { rawPostTitle.ifBlank { null } },
-                                        alertEventTitle = rawPostTitle.ifBlank { null },
-                                        eventTimestampMs = postCreatedMs.takeIf { it > 0 }
-                                    )
-                                    updatedMap.put(postSeenKey, postCreatedAt)
-                                    addContentFingerprintToSeen(groupId, rawPostTitle, postText)
+                                    // Cross-path dedup: the live notification-v2
+                                    // handler fires this announcement the instant
+                                    // the group posts and records its content
+                                    // fingerprint. If we see that fingerprint here,
+                                    // the live path already fired it — just record
+                                    // the seen timestamp and skip so the 5-min poll
+                                    // doesn't fire a duplicate a few minutes later.
+                                    if (isContentFingerprintSeen(groupId, rawPostTitle, postText)) {
+                                        updatedMap.put(postSeenKey, postCreatedAt)
+                                    } else {
+                                        fireEventNotification(
+                                            id = "gp_${postId}".hashCode(),
+                                            title = "Announcement from $groupName",
+                                            text = "${postTitle}: ${postText.ifBlank { rawPostTitle }.take(120)}",
+                                            profileUrl = "https://vrchat.com/home/group/$groupId/posts",
+                                            prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
+                                            channelId = NOTIF_CHANNEL_GROUPS,
+                                            groupKey = GROUP_KEY_GROUPS,
+                                            dedupId = "gp_${postId}_$postCreatedAt",
+                                            alertGroupKey = "announcement_$groupId",
+                                            alertBody = postText.ifBlank { rawPostTitle.ifBlank { null } },
+                                            alertEventTitle = rawPostTitle.ifBlank { null },
+                                            eventTimestampMs = postCreatedMs.takeIf { it > 0 }
+                                        )
+                                        updatedMap.put(postSeenKey, postCreatedAt)
+                                        addContentFingerprintToSeen(groupId, rawPostTitle, postText)
+                                    }
                                 }
                             }
                         }
@@ -2386,7 +2397,19 @@ class VrchatPipelineService : Service() {
     }
 
     private fun announcementContentFingerprint(groupId: String, title: String, text: String): String {
-        return "ann_fp_${groupId}_${title.trim().hashCode()}_${text.trim().take(80).hashCode()}"
+        // Identity is the post BODY (falling back to the title when the body is
+        // blank), normalized so the SAME announcement produces the SAME key no
+        // matter which path saw it: the live notification-v2 `message` field or
+        // the REST group-post `text` field. The two sources also title a post
+        // differently, so the title is intentionally excluded from the key —
+        // including it broke cross-path dedup and double-fired announcements
+        // (once live the instant the group posted, once on the 5-min poll).
+        val body = text.ifBlank { title }
+            .trim()
+            .lowercase()
+            .replace(Regex("\\s+"), " ")
+            .take(120)
+        return "ann_fp_${groupId}_${body.hashCode()}"
     }
 
     private fun addContentFingerprintToSeen(groupId: String, title: String, text: String) {
@@ -2432,16 +2455,20 @@ class VrchatPipelineService : Service() {
         if (eventId.isBlank()) return false
         val eventTitle = event.optString("title", "").ifBlank { event.optString("name", "") }
         val eventDesc = event.optString("description", "").ifBlank { event.optString("text", "") }
-        // Prefer the scheduled start time; fall back to creation time.
-        val startsAt = event.optString("startsAt", "").ifBlank {
-            event.optString("createdAt", "")
-        }
-        val startsMs = parseVrcTimestampMs(startsAt)
+        val startsAt = event.optString("startsAt", "")
+        val createdAt = event.optString("createdAt", "")
+        // DISPLAY timestamp = when the event was POSTED (createdAt), NOT its
+        // scheduled start. startsAt is normally in the FUTURE, so feeding it to
+        // formatRelativeTime produced a negative delta that clamped to a
+        // permanent "just now" that never advanced. Fall back to startsAt only
+        // when createdAt is missing.
+        val postedMs = parseVrcTimestampMs(createdAt).takeIf { it > 0 }
+            ?: parseVrcTimestampMs(startsAt)
         val seenKey = "${groupId}_event_$eventId"
         val lastSeen = seenMap.optString(seenKey, "")
-        // Use the event id alone as the change marker so an unchanged event
-        // doesn't re-fire, but an edited startsAt does.
-        val marker = startsAt.ifBlank { eventId }
+        // Change marker still tracks startsAt (then createdAt) so an unchanged
+        // event doesn't re-fire, but an edited start time does.
+        val marker = startsAt.ifBlank { createdAt }.ifBlank { eventId }
         if (marker == lastSeen) return false
         // Cross-path dedup keyed on the event id (not content) so a sibling
         // event with the same title doesn't get suppressed.
@@ -2459,7 +2486,7 @@ class VrchatPipelineService : Service() {
             alertGroupKey = "event_$groupId",
             alertBody = eventDesc.ifBlank { eventTitle }.ifBlank { null },
             alertEventTitle = eventTitle.ifBlank { null },
-            eventTimestampMs = startsMs.takeIf { it > 0 }
+            eventTimestampMs = postedMs.takeIf { it > 0 }
         )
         updatedMap.put(seenKey, marker)
         addEventFingerprintToSeen(groupId, eventId)
