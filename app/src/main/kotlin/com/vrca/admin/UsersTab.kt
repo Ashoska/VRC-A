@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Badge
@@ -49,7 +50,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -87,6 +87,7 @@ internal data class UserRow(
     val deviceHash: String,
     val warned: Boolean,
     val banned: Boolean,
+    val lastActiveAt: Timestamp?,
     val lastSeenAt: Timestamp?,
     val updatedAt: Timestamp?,
     // VRChat
@@ -163,17 +164,19 @@ internal data class ModerationTarget(
 
 /**
  * A user counts as online only when [UserRow.isOnlineInApp] is true AND
- * [UserRow.lastSeenAt] is within the staleness window. The user app emits
- * a 30s heartbeat (writes lastSeenAt) while any admin is browsing the
- * Dashboard or Users tab; 75s = 2.5x the heartbeat interval, giving one
- * missed beat of grace before flipping force-killed users to offline.
+ * [UserRow.lastActiveAt] is within the staleness window. Under the hourly
+ * liveness model an unwatched user writes `lastActiveAt` once per hour (a
+ * watched user every 10s), so the window is ~65 min — 5 min of grace past the
+ * 60-min heartbeat. A force-killed unwatched user therefore ages out of
+ * "online" within ~65 min; a watched user within ~25s. Falls back to
+ * `lastSeenAt` for docs written by pre-hourly app versions.
  */
-internal const val ONLINE_STALENESS_WINDOW_MS = 75_000L
+internal const val ONLINE_STALENESS_WINDOW_MS = 65L * 60L * 1000L
 
 internal fun isUserOnline(u: UserRow, nowMs: Long = System.currentTimeMillis()): Boolean {
     if (!u.isOnlineInApp) return false
-    val seenMs = u.lastSeenAt?.toDate()?.time ?: return false
-    return nowMs - seenMs < ONLINE_STALENESS_WINDOW_MS
+    val activeMs = (u.lastActiveAt ?: u.lastSeenAt)?.toDate()?.time ?: return false
+    return nowMs - activeMs < ONLINE_STALENESS_WINDOW_MS
 }
 
 internal fun parseUserRow(d: com.google.firebase.firestore.DocumentSnapshot): UserRow {
@@ -185,6 +188,7 @@ internal fun parseUserRow(d: com.google.firebase.firestore.DocumentSnapshot): Us
         deviceHash = (d.getString("deviceHash") ?: "").trim(),
         warned = d.getBoolean("warned") ?: false,
         banned = d.getBoolean("banned") ?: false,
+        lastActiveAt = d.getTimestamp("lastActiveAt"),
         lastSeenAt = d.getTimestamp("lastSeenAt"),
         updatedAt = d.getTimestamp("updatedAt"),
         vrchatUserId = (d.getString("vrchatUserId") ?: "").trim(),
@@ -206,8 +210,10 @@ internal fun UsersTab(
     db: FirebaseFirestore,
     myDeviceHash: String,
     users: List<UserRow>,
+    usersLoading: Boolean,
     liveLimit: Int,
     onIncreaseLiveLimit: () -> Unit,
+    onRefresh: () -> Unit,
     setGlobalLoading: (Boolean) -> Unit,
     setError: (String?) -> Unit,
     onSendToModeration: (ModerationTarget) -> Unit
@@ -277,29 +283,36 @@ internal fun UsersTab(
             vrchatLastSyncAt = snap.getTimestamp("vrchatLastSyncAt")
         )
     }
-    // Selected user detail: snapshot listener for real-time updates + 30s watcherActiveAt heartbeat
-    DisposableEffect(selectedDocId) {
+    // Selected user detail: Phase 3 read model — the ONLY live read in the admin
+    // panel, scoped to the single open user and polled every 10s from the server.
+    // This replaces the per-doc snapshot listener (which, combined with the old
+    // collection listener, kept reads flowing for the whole directory). The loop
+    // is keyed on selectedDocId, so backing out (selectedDocId -> null) cancels
+    // this coroutine and the reads stop INSTANTLY. The watcher heartbeat
+    // (AdminRuntime) puts the user app into 10s live-sync, so 10s polling here
+    // matches the cadence at which the user's volatile fields refresh.
+    LaunchedEffect(selectedDocId) {
         val docId = selectedDocId
         if (docId.isNullOrBlank()) {
             selectedDetail = null; selectedDetailLoading = false
-            return@DisposableEffect onDispose { }
+            return@LaunchedEffect
         }
         selectedDetailLoading = true
-        val reg = db.collection("users").document(docId)
-            .addSnapshotListener { snap, err ->
-                if (err != null) {
-                    setError(err.message ?: "User detail load failed")
-                    selectedDetailLoading = false
-                    return@addSnapshotListener
-                }
-                if (snap != null && snap.exists()) {
-                    selectedDetail = parseUserDetail(snap)
-                } else {
-                    selectedDetail = null
-                }
+        while (true) {
+            try {
+                val snap = db.collection("users").document(docId)
+                    .get(Source.SERVER)
+                    .await()
+                selectedDetail = if (snap.exists()) parseUserDetail(snap) else null
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                setError(e.message ?: "User detail load failed")
+            } finally {
                 selectedDetailLoading = false
             }
-        onDispose { reg.remove() }
+            delay(10_000L)
+        }
     }
 
     // Watcher heartbeat (writes watcherActiveAt every 30s while a user is selected)
@@ -485,6 +498,23 @@ internal fun UsersTab(
                                 fontFamily = FontFamily.Monospace,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                            if (usersLoading) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                IconButton(
+                                    onClick = onRefresh,
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Filled.Refresh,
+                                        contentDescription = "Refresh users",
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
                             OutlinedButton(
                                 onClick = onIncreaseLiveLimit,
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
@@ -579,7 +609,7 @@ internal fun UsersTab(
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                         Text(
-                            relativeTime(u.lastSeenAt, nowMs),
+                            relativeTime(u.lastActiveAt ?: u.lastSeenAt, nowMs),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )

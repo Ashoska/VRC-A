@@ -23,9 +23,11 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * Two effects move here:
  *  1. **Browsing heartbeat + force-kill staleness sweep** — while the admin is on the
- *     Dashboard/Users tab, write `config/adminPresence.browsingAt` every 30s (this is
- *     what makes watched user apps run their own heartbeats) and, after a grace period,
- *     flip stale `isOnlineInApp` users offline.
+ *     Dashboard/Users tab, write `config/adminPresence.browsingAt` every 30s and, after
+ *     a grace period, flip stale `isOnlineInApp` users offline. Under the hourly liveness
+ *     model the sweep keys on `lastActiveMs` (canonical `lastActiveAt`, falling back to
+ *     `lastSeenAt`) and uses the ~65-min staleness window — an unwatched user only writes
+ *     `lastActiveAt` once per hour, so a shorter window would false-flag live users.
  *  2. **Watcher heartbeat** — while a user is selected in the detail view, write
  *     `watcherActiveAt` on that user's doc every 30s (this is what puts the user app
  *     into 10s live-sync mode).
@@ -60,7 +62,7 @@ object AdminRuntime {
     // Latest user list (for the force-kill sweep). Minimal fields only.
     @Volatile private var sweepData: List<SweepUser> = emptyList()
 
-    data class SweepUser(val docId: String, val isOnlineInApp: Boolean, val lastSeenMs: Long)
+    data class SweepUser(val docId: String, val isOnlineInApp: Boolean, val lastActiveMs: Long)
 
     private var browseJob: Job? = null
     private var watcherJob: Job? = null
@@ -95,8 +97,8 @@ object AdminRuntime {
                     val now = System.currentTimeMillis()
                     for (u in sweepData) {
                         if (!u.isOnlineInApp) continue
-                        if (u.lastSeenMs <= 0L) continue
-                        if (now - u.lastSeenMs > ONLINE_STALENESS_WINDOW_MS) {
+                        if (u.lastActiveMs <= 0L) continue
+                        if (now - u.lastActiveMs > ONLINE_STALENESS_WINDOW_MS) {
                             try {
                                 db.collection("users").document(u.docId)
                                     .set(mapOf("isOnlineInApp" to false), SetOptions.merge())
