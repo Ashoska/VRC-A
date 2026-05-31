@@ -19,6 +19,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.vrca.ui.viewmodel.VrcaViewModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /**
@@ -68,14 +69,28 @@ fun IpField(
         1 -> ip1Address; 2 -> ip2Address; 3 -> ip3Address; else -> ""
     }
 
-    // Auto-migrate: if slot 1 address is empty but the ViewModel has a saved IP, populate slot 1.
-    // Use saveIpSlotAddress so we don't overwrite the user's saved slot-1 name with the
-    // collectAsState placeholder default ("Home") when DataStore hasn't loaded yet.
-    val uiState by chatboxViewModel.messengerUiState.collectAsState()
-    LaunchedEffect(ip1Address, uiState.ipAddress) {
-        if (ip1Address.isBlank() && uiState.ipAddress.isNotBlank() && uiState.ipAddress != "127.0.0.1") {
-            repo.saveIpSlotAddress(1, uiState.ipAddress)
+    // One-shot legacy migration: copy the old single-IP key into slot 1 for
+    // users upgrading from the pre-slots build.
+    //
+    // This MUST be a one-shot reading PERSISTED values — never a reactive
+    // LaunchedEffect on the (slot-resolving) ipAddress flow. The legacy `IP`
+    // key is kept in lock-step with the ACTIVE slot's address by
+    // saveActiveIpSlot/saveIpSlotAddress, so `repo.ipAddress` resolves to
+    // whatever slot is equipped. The old reactive migration therefore fired on
+    // every tab re-entry and, for anyone on slot 2/3 with an empty slot 1,
+    // wrote the ACTIVE slot's IP into slot 1 — the persistent "IP cloning" bug
+    // (slot 1 silently mirrors slot 2). The `ipSlot1Migrated` flag makes it run
+    // at most once, and `slot == 1` guarantees a non-slot-1 address can never be
+    // copied into slot 1 (a genuine legacy upgrader always defaults to slot 1).
+    LaunchedEffect(Unit) {
+        if (repo.ipSlot1Migrated.first()) return@LaunchedEffect
+        val slot = repo.activeIpSlot.first()
+        val slot1 = repo.ip1Address.first()
+        val legacy = repo.ipAddress.first()
+        if (slot == 1 && slot1.isBlank() && legacy.isNotBlank() && legacy != "127.0.0.1") {
+            repo.saveIpSlotAddress(1, legacy)
         }
+        repo.saveIpSlot1Migrated(true)
     }
 
     // editBuffer keyed directly to currentSlot + the DataStore address for that slot.
