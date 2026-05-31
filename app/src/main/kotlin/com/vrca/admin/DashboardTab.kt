@@ -81,6 +81,15 @@ private val dashboardHttp by lazy {
         .build()
 }
 
+/** Reuse window for the activity feed so re-entering the tab doesn't re-read. */
+private const val FEED_CACHE_TTL_MS = 60_000L
+
+/** Process-level cache for the activity feed (survives tab dispose/recreate). */
+private object DashboardFeedCache {
+    @Volatile var events: List<ActivityEvent> = emptyList()
+    @Volatile var fetchedAtMs: Long = 0L
+}
+
 @Composable
 internal fun DashboardTab(
     db: FirebaseFirestore,
@@ -100,8 +109,12 @@ internal fun DashboardTab(
     val bannedCount = bannedUsersCount
     val warnedCount = warnedUsersCount
 
-    var events by remember { mutableStateOf<List<ActivityEvent>>(emptyList()) }
-    var feedLoading by remember { mutableStateOf(true) }
+    // Seed from the process-level cache so re-entering the Dashboard tab doesn't
+    // re-fetch — switching tabs disposes/recreates this composable, and without
+    // the cache every visit would cost ~33 Firestore reads. The cache is reused
+    // for FEED_CACHE_TTL_MS; the refresh button (feedTick) always forces a fetch.
+    var events by remember { mutableStateOf(DashboardFeedCache.events) }
+    var feedLoading by remember { mutableStateOf(DashboardFeedCache.events.isEmpty()) }
     var feedTick by remember { mutableIntStateOf(0) }
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
 
@@ -111,6 +124,14 @@ internal fun DashboardTab(
 
     // Aggregate the activity feed from several sources, then merge + sort.
     LaunchedEffect(feedTick) {
+        val cacheFresh = System.currentTimeMillis() - DashboardFeedCache.fetchedAtMs < FEED_CACHE_TTL_MS
+        // feedTick == 0 is the initial composition (tab entry). Reuse a fresh
+        // cache instead of re-reading; a manual refresh bumps feedTick (> 0).
+        if (feedTick == 0 && cacheFresh && DashboardFeedCache.events.isNotEmpty()) {
+            events = DashboardFeedCache.events
+            feedLoading = false
+            return@LaunchedEffect
+        }
         feedLoading = true
         val merged = mutableListOf<ActivityEvent>()
 
@@ -118,7 +139,7 @@ internal fun DashboardTab(
         runCatching {
             val snap = db.collection("moderationEvents")
                 .orderBy("createdAt", Query.Direction.DESCENDING)
-                .limit(40)
+                .limit(25)
                 .get(Source.SERVER)
                 .await()
             snap.documents.forEach { d ->
@@ -158,7 +179,7 @@ internal fun DashboardTab(
         runCatching {
             val snap = db.collection("announcements")
                 .orderBy("createdAt", Query.Direction.DESCENDING)
-                .limit(10)
+                .limit(8)
                 .get(Source.SERVER)
                 .await()
             snap.documents.forEach { d ->
@@ -220,7 +241,10 @@ internal fun DashboardTab(
             }
         }.onFailure { /* best-effort source */ }
 
-        events = merged.sortedByDescending { it.timeMs }.take(40)
+        val sorted = merged.sortedByDescending { it.timeMs }.take(40)
+        events = sorted
+        DashboardFeedCache.events = sorted
+        DashboardFeedCache.fetchedAtMs = System.currentTimeMillis()
         feedLoading = false
     }
 

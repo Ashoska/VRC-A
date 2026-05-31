@@ -40,6 +40,7 @@ object VrchatAuthManager {
     private const val KEY_2FA_COOKIE   = "twofa_cookie"
     private const val KEY_USER_ID      = "vrchat_user_id"
     private const val KEY_DISPLAY_NAME = "vrchat_display_name"
+    private const val KEY_PROFILE_PIC  = "vrchat_profile_pic"
     private const val KEY_COOKIE_STORED_AT = "cookie_stored_at_ms"
     private const val KEY_USERNAME = "vrchat_username"
     private const val KEY_PASSWORD = "vrchat_password"
@@ -113,6 +114,34 @@ object VrchatAuthManager {
 
     fun getStoredDisplayName(context: Context): String? =
         getPrefs(context)?.getString(KEY_DISPLAY_NAME, null)
+
+    /** The user's VRChat+ custom profile picture URL (blank without VRChat+). */
+    fun getStoredProfilePic(context: Context): String =
+        getPrefs(context)?.getString(KEY_PROFILE_PIC, "")?.trim().orEmpty()
+
+    /**
+     * Cheap one-shot refresh of the stored VRChat+ profile picture via /auth/user.
+     * Lets the admin directory show a logged-in user's pfp WITHOUT needing to
+     * actively watch them (the watched presence sync is otherwise the only writer).
+     * No-op if not logged in or the call fails.
+     */
+    suspend fun refreshProfilePic(context: Context): String = withContext(Dispatchers.IO) {
+        val cookieHeader = getCookieHeader(context) ?: return@withContext ""
+        try {
+            val (code, body, _) = get("$BASE/auth/user", null, cookieHeader)
+            if (code != 200) return@withContext ""
+            val json = JSONObject(body)
+            val pic = json.optString("profilePicOverride", "")
+                .ifBlank { json.optString("userIcon", "") }
+            // Store whatever we got (including blank → no VRChat+, so we don't
+            // keep re-fetching a value that will never appear).
+            getPrefs(context)?.edit()?.putString(KEY_PROFILE_PIC, pic)?.apply()
+            pic
+        } catch (e: Exception) {
+            Log.w(TAG, "refreshProfilePic failed", e)
+            ""
+        }
+    }
 
     fun getCookieHeader(context: Context): String? {
         val prefs = getPrefs(context) ?: return null
@@ -264,6 +293,9 @@ object VrchatAuthManager {
                         // 200 + "id" field = fully logged in
                         val userId = json.optString("id")
                         val displayName = json.optString("displayName")
+                        // VRChat+ custom profile picture (blank without VRChat+).
+                        val profilePic = json.optString("profilePicOverride", "")
+                            .ifBlank { json.optString("userIcon", "") }
 
                         if (authCookieValue != null && userId.isNotBlank()) {
                             // Update the auth cookie + user info. If VRChat re-issued
@@ -282,6 +314,7 @@ object VrchatAuthManager {
                                 ?.putString(KEY_USER_ID, userId)
                                 ?.putString(KEY_DISPLAY_NAME, displayName)
                                 ?.putLong(KEY_COOKIE_STORED_AT, now)
+                            if (profilePic.isNotBlank()) editor?.putString(KEY_PROFILE_PIC, profilePic)
                             if (newTwoFa != null) {
                                 editor?.putString(KEY_2FA_COOKIE, newTwoFa)
                                     ?.putLong(KEY_2FA_COOKIE_STORED_AT, now)
@@ -524,6 +557,12 @@ object VrchatAuthManager {
                 location.startsWith("wrld_") ||
                 location == "private" ||
                 location == "traveling"
+
+            // Persist the profile pic so self-sync can include it even when the
+            // user isn't currently being watched (the directory needs it).
+            if (profilePic.isNotBlank()) {
+                getPrefs(context)?.edit()?.putString(KEY_PROFILE_PIC, profilePic)?.apply()
+            }
 
             VrcUserPresence(
                 userId = userId,

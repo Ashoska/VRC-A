@@ -363,6 +363,13 @@ class VrcaViewModel(
                 .getString("discord_avatar_url", "")?.trim()
         }.getOrNull()?.takeIf { it.isNotBlank() }?.let { data["discordAvatarUrl"] = it }
 
+        // VRChat+ custom profile picture (persisted by VrchatAuthManager at login
+        // / on any presence fetch). Included UNGATED so the admin directory shows
+        // a logged-in user's pfp without needing to actively watch them. Only
+        // written when non-blank so a non-VRChat+ user never clobbers anything.
+        runCatching { com.vrca.vrchat.VrchatAuthManager.getStoredProfilePic(app) }
+            .getOrNull()?.takeIf { it.isNotBlank() }?.let { data["vrchatProfilePic"] = it }
+
         // Multi-IP slots
         val activeSlot = runCatching {
             kotlinx.coroutines.runBlocking { userPreferencesRepository.activeIpSlot.first() }

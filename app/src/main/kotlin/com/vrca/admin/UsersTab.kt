@@ -158,7 +158,16 @@ internal data class UserDetail(
     val vrchatCapacity: Long,
     val vrchatPlatform: String,
     val timeEnabled: Boolean = false,
-    val vrchatLastSyncAt: Timestamp?
+    val vrchatLastSyncAt: Timestamp?,
+    // Live liveness timestamps from the 10s detail poll (the header shows these
+    // so "active/updated" refresh in real time instead of reflecting the stale
+    // one-shot directory snapshot).
+    val lastActiveAt: Timestamp? = null,
+    val lastSeenAt: Timestamp? = null,
+    val updatedAt: Timestamp? = null,
+    val isOnlineInApp: Boolean = false,
+    val vrchatProfilePic: String = "",
+    val discordAvatarUrl: String = ""
 )
 
 internal data class ModerationTarget(
@@ -293,7 +302,13 @@ internal fun UsersTab(
             vrchatPlayerCount = l("vrchatInstancePlayerCount"), vrchatCapacity = l("vrchatInstanceCapacity"),
             vrchatPlatform = s("vrchatPlatform"),
             timeEnabled = b("timeEnabled"),
-            vrchatLastSyncAt = snap.getTimestamp("vrchatLastSyncAt")
+            vrchatLastSyncAt = snap.getTimestamp("vrchatLastSyncAt"),
+            lastActiveAt = snap.getTimestamp("lastActiveAt"),
+            lastSeenAt = snap.getTimestamp("lastSeenAt"),
+            updatedAt = snap.getTimestamp("updatedAt"),
+            isOnlineInApp = snap.getBoolean("isOnlineInApp") ?: false,
+            vrchatProfilePic = s("vrchatProfilePic"),
+            discordAvatarUrl = s("discordAvatarUrl")
         )
     }
     // Selected user detail: Phase 3 read model — the ONLY live read in the admin
@@ -376,12 +391,17 @@ internal fun UsersTab(
                         val primaryLabel = row.vrchatDisplayName.ifBlank {
                             row.displayName.ifBlank { shortId(row.docId) }
                         }
+                        // Prefer the live 10s detail poll for the pfp so it
+                        // appears/refreshes once watching kicks in; fall back to
+                        // the directory snapshot.
+                        val livePfp = (d?.vrchatProfilePic ?: "").ifBlank { row.vrchatProfilePic }
+                        val liveDiscord = (d?.discordAvatarUrl ?: "").ifBlank { row.discordAvatarUrl }
                         AdminAvatar(
                             name = primaryLabel,
                             online = isUserOnline(row, nowMs),
                             size = 60,
-                            vrchatAvatarUrl = row.vrchatProfilePic,
-                            discordAvatarUrl = row.discordAvatarUrl
+                            vrchatAvatarUrl = livePfp,
+                            discordAvatarUrl = liveDiscord
                         )
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(
@@ -417,14 +437,18 @@ internal fun UsersTab(
 
                     Divider()
 
-                    // Identity / liveness facts.
+                    // Identity / liveness facts. Liveness timestamps come from
+                    // the live 10s detail poll (d) so they refresh in real time,
+                    // falling back to the directory snapshot until the first poll.
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         if (row.vrchatUserId.isNotBlank())
                             AdminLabeledRow("VRChat", row.vrchatUserId, mono = true, labelWidth = 64)
                         AdminLabeledRow("authUid", shortId(row.authUid.ifBlank { "(blank)" }), mono = true, labelWidth = 64)
                         AdminLabeledRow("device",  shortId(row.deviceHash.ifBlank { "(blank)" }), mono = true, labelWidth = 64)
-                        AdminLabeledRow("active",  relativeTime(row.lastActiveAt ?: row.lastSeenAt, nowMs), labelWidth = 64)
-                        AdminLabeledRow("updated", relativeTime(row.updatedAt, nowMs), labelWidth = 64)
+                        val activeTs = d?.lastActiveAt ?: d?.lastSeenAt ?: row.lastActiveAt ?: row.lastSeenAt
+                        val updatedTs = d?.updatedAt ?: row.updatedAt
+                        AdminLabeledRow("active",  relativeTime(activeTs, nowMs), labelWidth = 64)
+                        AdminLabeledRow("updated", relativeTime(updatedTs, nowMs), labelWidth = 64)
                     }
 
                     Divider()

@@ -3,8 +3,13 @@ package com.vrca.admin
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.MaterialTheme
@@ -102,6 +107,11 @@ internal fun ConfigTab(
 
     LaunchedEffect(Unit) { load() }
 
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+    ) {
     ElevatedCard {
         Column(
             Modifier.padding(12.dp),
@@ -185,5 +195,7 @@ internal fun ConfigTab(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+    }
+    Spacer(Modifier.height(24.dp))
     }
 }

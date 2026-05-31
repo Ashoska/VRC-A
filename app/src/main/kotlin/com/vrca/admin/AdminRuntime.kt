@@ -77,7 +77,25 @@ object AdminRuntime {
 
     fun setBrowsing(active: Boolean) { browsing.value = active }
 
-    fun setSelectedUser(docId: String?) { selectedUser.value = docId?.trim()?.ifBlank { null } }
+    fun setSelectedUser(docId: String?) {
+        val clean = docId?.trim()?.ifBlank { null }
+        val changed = selectedUser.value != clean
+        selectedUser.value = clean
+        // Fire an immediate watcherActiveAt write the moment a (new) user is
+        // opened, instead of waiting up to WATCHER_HEARTBEAT_MS for the loop's
+        // next tick. This flips the user app into 10s live-sync right away so the
+        // admin sees fresh liveness/presence almost immediately.
+        if (changed && clean != null) {
+            scope.launch {
+                try {
+                    db.collection("users").document(clean)
+                        .set(mapOf("watcherActiveAt" to FieldValue.serverTimestamp()), SetOptions.merge())
+                } catch (_: Throwable) {
+                    Log.w(TAG, "immediate watcher write failed")
+                }
+            }
+        }
+    }
 
     fun updateSweepData(users: List<SweepUser>) { sweepData = users }
 
