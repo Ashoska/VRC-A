@@ -553,25 +553,9 @@ class VrchatPipelineService : Service() {
                     lastConnectedNotifText = notifText
                     updatePersistentNotif(notifText)
                     serviceScope.launch { fireConnectionNotification(true) }
-                    // One-shot: refresh the stored VRChat+ profile pic on connect
-                    // so the admin directory can show it without watching this user.
-                    // It's persisted to prefs (for future self-syncs) AND written
-                    // directly to the user doc now so it appears promptly instead of
-                    // waiting up to an hour for the next self-sync tick. Public
-                    // build only — the admin build never writes a user doc.
-                    if (!BuildConfig.IS_ADMIN_BUILD) {
-                        serviceScope.launch {
-                            runCatching {
-                                val pic = VrchatAuthManager.refreshProfilePic(this@VrchatPipelineService)
-                                if (pic.isNotBlank() && deviceHash.isNotBlank()) {
-                                    FirebaseFirestore.getInstance()
-                                        .collection("users").document(deviceHash)
-                                        .set(mapOf("vrchatProfilePic" to pic), SetOptions.merge())
-                                        .await()
-                                }
-                            }
-                        }
-                    }
+                    // Profile pictures are NOT written to Firestore (cost). The admin
+                    // panel resolves VRChat+ pictures on demand by vrchatUserId using
+                    // the admin's own VRChat session — see AdminAvatar.
                     // Auto-start Discord RPC if enabled
                     serviceScope.launch {
                         try {
@@ -2290,7 +2274,6 @@ class VrchatPipelineService : Service() {
             "vrchatInstanceCapacity" to presence.instanceCapacity,
             "vrchatPlatform" to presence.platform,
             "vrchatAvatarThumb" to presence.currentAvatarThumbnailUrl,
-            "vrchatProfilePic" to presence.profilePicUrl,
             "vrchatIsOnline" to presence.isOnlineInVRChat,
             "vrchatAuthCookieValid" to true,
             "vrchatLastSyncAt" to FieldValue.serverTimestamp(),

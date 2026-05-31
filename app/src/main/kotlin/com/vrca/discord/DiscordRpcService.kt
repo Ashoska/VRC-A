@@ -31,7 +31,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.tasks.await
 import org.json.JSONObject
 
 enum class DiscordRpcStatus {
@@ -84,7 +83,12 @@ class DiscordRpcService : Service() {
         // If VRChat presence drops (crash, world-hop hiccup) or the whole app process
         // dies (reboot, OEM kill) and the user is back online within this window, the
         // Discord "elapsed" counter resumes from its original start instead of resetting.
-        private const val ONLINE_GRACE_MS = 10L * 60 * 1000
+        // 20 min (NOT 15) so it spans the WorkManager watchdog's ~15-min recovery gap:
+        // an OEM kill is recovered by PipelineWatchdogWorker on its next cycle, and the
+        // counter must still be inside the grace window when that happens so the timer
+        // resumes instead of resetting. Applies to BOTH the in-VRChat and the
+        // not-in-VRChat counters (shared via resolveElapsedStart).
+        private const val ONLINE_GRACE_MS = 20L * 60 * 1000
         private const val SESSION_CHECK_INTERVAL_MS = 30_000L
         private const val MAX_CONSECUTIVE_PUSH_FAILURES = 5
 
@@ -363,7 +367,6 @@ class DiscordRpcService : Service() {
                 updateNotif("Discord RPC active")
                 startPresenceUpdates()
                 startSessionMonitor()
-                captureDiscordAvatar()
             } else {
                 shimRetryCount++
                 Log.w(TAG, "JS shim injection failed (attempt $shimRetryCount/$MAX_SHIM_RETRIES): $cleaned")
@@ -371,73 +374,6 @@ class DiscordRpcService : Service() {
                 DiscordRpcState.failureMessage = "Setting up Discord connection... ($shimRetryCount/$MAX_SHIM_RETRIES)"
                 val backoffMs = SHIM_RETRY_BASE_DELAY_MS * shimRetryCount
                 mainHandler.postDelayed({ injectShim() }, backoffMs)
-            }
-        }
-    }
-
-    /**
-     * Resolves the logged-in Discord user's avatar URL via JS and persists it to
-     * the shared `vrca_remote` prefs. The user's self-sync (VrcaViewModel) picks
-     * it up and writes `discordAvatarUrl` to their Firestore doc so the admin
-     * panel can show it as a profile-picture fallback after the VRChat+ avatar.
-     * The Discord token never leaves the JS context — only the public CDN URL is
-     * returned to native.
-     */
-    private var discordAvatarRetries = 0
-    private fun captureDiscordAvatar() {
-        val wv = webView ?: return
-        runCatching {
-            // Kicks off the (async) /users/@me fetch if needed and returns the
-            // cached CDN URL once resolved (blank on the first call).
-            wv.evaluateJavascript(
-                "(function(){ try { window.VRCA_getDiscordAvatar && window.VRCA_getDiscordAvatar(); } catch(e){} return window._vrca_discord_avatar || ''; })()"
-            ) { result ->
-                val url = result?.trim()?.removeSurrounding("\"")?.replace("\\/", "/") ?: ""
-                if (url.startsWith("http")) {
-                    discordAvatarRetries = 0
-                    val prefs = applicationContext
-                        .getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
-                    val previous = prefs.getString("discord_avatar_url", "") ?: ""
-                    runCatching {
-                        prefs.edit().putString("discord_avatar_url", url).apply()
-                    }
-                    // Prompt write: push the Discord avatar straight to the user doc
-                    // (public build only) so the admin directory shows it now instead
-                    // of waiting up to an hour for the next self-sync tick — mirrors
-                    // the vrchatProfilePic one-shot in VrchatPipelineService.onOpen.
-                    // Only when it actually changed, so we don't re-write every poll.
-                    if (!com.vrca.BuildConfig.IS_ADMIN_BUILD && url != previous) {
-                        pushDiscordAvatarToFirestore(url)
-                    }
-                } else if (discordAvatarRetries < 5) {
-                    discordAvatarRetries++
-                    mainHandler.postDelayed({ captureDiscordAvatar() }, 4000)
-                }
-            }
-        }
-    }
-
-    /**
-     * Direct one-field merge write of `discordAvatarUrl` to this device's user
-     * doc so the admin panel shows the Discord avatar promptly. The deviceHash
-     * comes from the same `vrca_remote/device_id_hash` pref the pipeline uses.
-     */
-    private fun pushDiscordAvatarToFirestore(url: String) {
-        scope.launch {
-            runCatching {
-                val deviceHash = applicationContext
-                    .getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
-                    .getString("device_id_hash", "")
-                    ?.trim()
-                    .orEmpty()
-                if (deviceHash.isEmpty()) return@runCatching
-                com.google.firebase.firestore.FirebaseFirestore.getInstance()
-                    .collection("users").document(deviceHash)
-                    .set(
-                        mapOf("discordAvatarUrl" to url),
-                        com.google.firebase.firestore.SetOptions.merge()
-                    )
-                    .await()
             }
         }
     }
@@ -829,35 +765,6 @@ private const val MODULE_FINDER_JS = """
                 }
                 return null;
             }).catch(function() { return null; });
-        };
-
-        // Resolve the logged-in Discord user's avatar URL (cdn.discordapp.com).
-        // Used by the admin panel as a profile-picture fallback after VRChat+.
-        // The token never leaves the JS context; only the resulting public CDN
-        // URL is handed to native via the return value.
-        window.VRCA_getDiscordAvatar = function() {
-            if (window._vrca_discord_avatar) return Promise.resolve(window._vrca_discord_avatar);
-            window._vrca_grabToken();
-            var token = window._vrca_token;
-            if (!token) return Promise.resolve('');
-            return fetch('/api/v9/users/@me', {
-                headers: { 'Authorization': token }
-            }).then(function(r) { return r.json(); })
-            .then(function(u) {
-                if (!u || !u.id) return '';
-                var url = '';
-                if (u.avatar) {
-                    var ext = u.avatar.indexOf('a_') === 0 ? 'gif' : 'png';
-                    url = 'https://cdn.discordapp.com/avatars/' + u.id + '/' + u.avatar + '.' + ext + '?size=128';
-                } else {
-                    // Default avatar (no custom pic) derived from the user id.
-                    var idx = '0';
-                    try { idx = (BigInt(u.id) >> 22n) % 6n; idx = idx.toString(); } catch(e) { idx = '0'; }
-                    url = 'https://cdn.discordapp.com/embed/avatars/' + idx + '.png';
-                }
-                window._vrca_discord_avatar = url;
-                return url;
-            }).catch(function() { return ''; });
         };
 
         window._vrca_sendPresence = function() {

@@ -107,12 +107,9 @@ internal data class UserRow(
     val vrchatCapacity: Int = 0,
     val vrchatPlatform: String = "",
     val vrchatLastSyncAt: Timestamp? = null,
-    val isOnlineInApp: Boolean = false,
-    // Profile pictures: VRChat+ custom profile picture first, Discord avatar as
-    // fallback. `vrchatProfilePic` is blank unless the user has VRChat+ and set
-    // a custom picture — when blank we cascade to Discord, then name letters.
-    val vrchatProfilePic: String = "",
-    val discordAvatarUrl: String = ""
+    val isOnlineInApp: Boolean = false
+    // Profile pictures are NOT stored in Firestore — AdminAvatar resolves the
+    // VRChat+ picture on demand by vrchatUserId via the admin's VRChat session.
 )
 
 internal data class UserDetail(
@@ -165,9 +162,7 @@ internal data class UserDetail(
     val lastActiveAt: Timestamp? = null,
     val lastSeenAt: Timestamp? = null,
     val updatedAt: Timestamp? = null,
-    val isOnlineInApp: Boolean = false,
-    val vrchatProfilePic: String = "",
-    val discordAvatarUrl: String = ""
+    val isOnlineInApp: Boolean = false
 )
 
 internal data class ModerationTarget(
@@ -221,9 +216,7 @@ internal fun parseUserRow(d: com.google.firebase.firestore.DocumentSnapshot): Us
         vrchatCapacity = (d.getLong("vrchatInstanceCapacity") ?: 0).toInt(),
         vrchatPlatform = (d.getString("vrchatPlatform") ?: "").trim(),
         vrchatLastSyncAt = d.getTimestamp("vrchatLastSyncAt"),
-        isOnlineInApp = d.getBoolean("isOnlineInApp") ?: false,
-        vrchatProfilePic = (d.getString("vrchatProfilePic") ?: "").trim(),
-        discordAvatarUrl = (d.getString("discordAvatarUrl") ?: "").trim()
+        isOnlineInApp = d.getBoolean("isOnlineInApp") ?: false
     )
 }
 
@@ -306,9 +299,7 @@ internal fun UsersTab(
             lastActiveAt = snap.getTimestamp("lastActiveAt"),
             lastSeenAt = snap.getTimestamp("lastSeenAt"),
             updatedAt = snap.getTimestamp("updatedAt"),
-            isOnlineInApp = snap.getBoolean("isOnlineInApp") ?: false,
-            vrchatProfilePic = s("vrchatProfilePic"),
-            discordAvatarUrl = s("discordAvatarUrl")
+            isOnlineInApp = snap.getBoolean("isOnlineInApp") ?: false
         )
     }
     // Selected user detail: Phase 3 read model — the ONLY live read in the admin
@@ -394,15 +385,11 @@ internal fun UsersTab(
                         // Prefer the live 10s detail poll for the pfp so it
                         // appears/refreshes once watching kicks in; fall back to
                         // the directory snapshot.
-                        val livePfp = (d?.vrchatProfilePic ?: "").ifBlank { row.vrchatProfilePic }
-                        val liveDiscord = (d?.discordAvatarUrl ?: "").ifBlank { row.discordAvatarUrl }
                         val liveVrcId = (d?.vrchatUserId ?: "").ifBlank { row.vrchatUserId }
                         AdminAvatar(
                             name = primaryLabel,
                             online = isUserOnline(row, nowMs),
                             size = 60,
-                            vrchatAvatarUrl = livePfp,
-                            discordAvatarUrl = liveDiscord,
                             vrchatUserId = liveVrcId
                         )
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -645,8 +632,6 @@ internal fun UsersTab(
                     AdminAvatar(
                         name = primaryName,
                         online = appOnline,
-                        vrchatAvatarUrl = u.vrchatProfilePic,
-                        discordAvatarUrl = u.discordAvatarUrl,
                         vrchatUserId = u.vrchatUserId
                     )
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {

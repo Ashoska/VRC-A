@@ -354,21 +354,9 @@ class VrcaViewModel(
         data["nowPlayingArtist"] = lastNowPlayingArtist.takeIf { it != "(blank)" }?.trim().orEmpty()
         data["activePackage"] = activePackage
 
-        // Discord avatar URL (captured by DiscordRpcService from the logged-in
-        // Discord session and persisted to prefs). Used by the admin panel as a
-        // profile-picture fallback after the VRChat+ avatar. Only write it when
-        // we actually have one so we never clobber an existing value with "".
-        runCatching {
-            app.getSharedPreferences("vrca_remote", android.content.Context.MODE_PRIVATE)
-                .getString("discord_avatar_url", "")?.trim()
-        }.getOrNull()?.takeIf { it.isNotBlank() }?.let { data["discordAvatarUrl"] = it }
-
-        // VRChat+ custom profile picture (persisted by VrchatAuthManager at login
-        // / on any presence fetch). Included UNGATED so the admin directory shows
-        // a logged-in user's pfp without needing to actively watch them. Only
-        // written when non-blank so a non-VRChat+ user never clobbers anything.
-        runCatching { com.vrca.vrchat.VrchatAuthManager.getStoredProfilePic(app) }
-            .getOrNull()?.takeIf { it.isNotBlank() }?.let { data["vrchatProfilePic"] = it }
+        // Profile pictures are intentionally NOT written to Firestore (cost): the
+        // admin panel resolves VRChat+ pictures on demand by vrchatUserId using the
+        // admin's own VRChat session (see AdminAvatar / VrchatImageLoader).
 
         // Multi-IP slots
         val activeSlot = runCatching {
@@ -398,8 +386,6 @@ class VrcaViewModel(
             data["vrchatInstanceCapacity"] = presence.instanceCapacity
             data["vrchatPlatform"] = presence.platform
             data["vrchatAvatarThumb"] = presence.currentAvatarThumbnailUrl
-            // VRChat+ custom profile picture (blank if they have no VRChat+).
-            data["vrchatProfilePic"] = presence.profilePicUrl
             data["vrchatIsOnline"] = presence.isOnlineInVRChat
         }
 
@@ -533,21 +519,9 @@ class VrcaViewModel(
         "cyclePreset3" to (cyclePresetMessages.getOrNull(2)?.trim().orEmpty()),
         "cyclePreset4" to (cyclePresetMessages.getOrNull(3)?.trim().orEmpty()),
         "cyclePreset5" to (cyclePresetMessages.getOrNull(4)?.trim().orEmpty()),
-        // Profile-picture URLs for the admin directory. These MUST be tracked here
-        // (not just in buildUserSnapshot) — the steady-state write is a DELTA over
-        // captureStateForSync(), so a field absent here is never pushed for an
-        // existing user (one with a persisted baseline). That was the bug where
-        // pics only ever reached Firestore on the very first full snapshot (when
-        // the prefs were usually still blank) and never again. Mapped to null when
-        // blank so the delta filter (value != null) skips them and never clobbers
-        // an existing value with "".
-        "vrchatProfilePic" to runCatching {
-            com.vrca.vrchat.VrchatAuthManager.getStoredProfilePic(app)
-        }.getOrNull()?.takeIf { it.isNotBlank() },
-        "discordAvatarUrl" to runCatching {
-            app.getSharedPreferences("vrca_remote", android.content.Context.MODE_PRIVATE)
-                .getString("discord_avatar_url", "")?.trim()
-        }.getOrNull()?.takeIf { it.isNotBlank() },
+        // Profile pictures are deliberately NOT synced to Firestore (cost). The
+        // admin panel resolves VRChat+ pictures on demand by vrchatUserId via the
+        // admin's own VRChat session — see AdminAvatar / VrchatImageLoader.
     )
 
     private suspend fun applyRemoteContentBeforeSync() {

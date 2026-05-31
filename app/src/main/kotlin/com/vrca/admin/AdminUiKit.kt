@@ -20,7 +20,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -224,56 +223,45 @@ internal fun AdminLabeledRow(
 }
 
 /**
- * An identity avatar: a real profile picture (VRChat+ avatar thumbnail, falling
- * back to the user's Discord avatar) with a first-initial circle as the final
- * fallback when no image is available or the load fails. A small online/offline
- * status dot sits in the corner.
+ * An identity avatar: the user's real VRChat+ profile picture with a first-initial
+ * circle as the fallback when there's no picture or the load fails. A small
+ * online/offline status dot sits in the corner.
  *
- * Resolution order is a TRUE cascade: [vrchatAvatarUrl] → [discordAvatarUrl] →
- * letter initial. We don't just pick the first non-blank URL — if an image
- * *fails to load* (e.g. a VRChat thumbnail that 401s on a device with no VRChat
- * session, or an expired URL) we advance to the next candidate, and only show
- * the initial when every candidate is blank or has errored. Profile pictures
- * are stored URLs on the user doc, so they load from the CDN regardless of
- * whether the target user is currently online.
+ * Profile pictures are NOT stored in Firestore (cost). The VRChat+ picture is
+ * resolved ON DEMAND by [vrchatUserId] through the admin's own VRChat session
+ * (`VrchatAuthManager.fetchProfilePicUrl`, per-id cached) and loaded via
+ * [VrchatImageLoader], which attaches that session's cookie so the auth-gated
+ * `api.vrchat.cloud` image resolves. Requires `IS_ADMIN_BUILD` + a logged-in
+ * VRChat session; otherwise (and for users with no VRChat+ picture) it shows the
+ * name initial.
  */
 @Composable
 internal fun AdminAvatar(
     name: String,
     online: Boolean,
     size: Int = 40,
-    vrchatAvatarUrl: String = "",
-    discordAvatarUrl: String = "",
     vrchatUserId: String = ""
 ) {
     val initial = name.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?"
     val cs = MaterialTheme.colorScheme
     val context = LocalContext.current
 
-    // Hybrid VRChat-pfp resolution: prefer the URL stored on the doc (loads the
-    // whole directory with zero API calls); only when it's blank do we fetch the
-    // picture on demand by VRChat userId using the admin's own session (this row
-    // is on screen, so the call is bounded — VrchatAuthManager caches per-id).
+    // Profile pictures are NEVER stored in Firestore (cost). The VRChat+ picture
+    // is fetched ON DEMAND by VRChat userId using the admin's own VRChat session,
+    // and loaded through VrchatImageLoader (which attaches that session's cookie so
+    // the auth-gated api.vrchat.cloud image resolves). Per-id cached in
+    // VrchatAuthManager so scrolling the directory never re-hits the API. Falls
+    // back to the name initial when there's no picture / we're not logged in.
     var fetchedVrchatUrl by remember(vrchatUserId) { mutableStateOf("") }
-    LaunchedEffect(vrchatAvatarUrl, vrchatUserId) {
-        if (vrchatAvatarUrl.isBlank() && vrchatUserId.isNotBlank() &&
+    LaunchedEffect(vrchatUserId) {
+        if (vrchatUserId.isNotBlank() &&
             com.vrca.BuildConfig.IS_ADMIN_BUILD &&
             VrchatAuthManager.isLoggedIn(context)
         ) {
             fetchedVrchatUrl = VrchatAuthManager.fetchProfilePicUrl(context, vrchatUserId)
         }
     }
-    val effectiveVrchat = vrchatAvatarUrl.trim().ifBlank { fetchedVrchatUrl.trim() }
-
-    // Ordered, de-duplicated, non-blank candidate URLs: VRChat first, Discord next.
-    val candidates = remember(effectiveVrchat, discordAvatarUrl) {
-        listOf(effectiveVrchat, discordAvatarUrl.trim())
-            .filter { it.isNotBlank() }
-            .distinct()
-    }
-    // Which candidate we're currently attempting; advances on load error.
-    var attempt by remember(candidates) { mutableIntStateOf(0) }
-    val currentUrl = candidates.getOrNull(attempt)
+    val currentUrl = fetchedVrchatUrl.trim().ifBlank { null }
 
     @Composable
     fun InitialText() {
@@ -292,21 +280,11 @@ internal fun AdminAvatar(
             modifier = Modifier.size(size.dp)
         ) {
             if (currentUrl != null) {
-                // Load through the VRChat-auth image loader so auth-gated
-                // api.vrchat.cloud pictures resolve with the admin's session;
-                // non-VRChat hosts (Discord CDN) pass through untouched.
                 val painter = rememberAsyncImagePainter(
                     model = currentUrl,
                     imageLoader = VrchatImageLoader.get(context)
                 )
                 val state = painter.state
-                // On error, fall through to the next candidate (or the initial
-                // once we've exhausted them).
-                LaunchedEffect(state, attempt) {
-                    if (state is AsyncImagePainter.State.Error && attempt < candidates.size - 1) {
-                        attempt++
-                    }
-                }
                 Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
                     if (state is AsyncImagePainter.State.Success) {
                         androidx.compose.foundation.Image(
@@ -316,7 +294,7 @@ internal fun AdminAvatar(
                             modifier = Modifier.fillMaxSize().clip(CircleShape)
                         )
                     } else {
-                        // Loading, or errored on the last candidate → initial.
+                        // Loading, or errored → name initial.
                         InitialText()
                     }
                 }
