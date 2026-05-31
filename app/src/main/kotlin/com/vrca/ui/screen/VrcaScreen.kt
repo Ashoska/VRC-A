@@ -30,7 +30,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
-import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.Gavel
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -77,6 +76,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -86,6 +86,7 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.Query
 import com.vrca.BuildConfig
+import com.vrca.R
 import com.vrca.admin.AdminScreen
 import com.vrca.vrchat.VrchatAuthManager
 import com.vrca.vrchat.VrchatPipelineState
@@ -389,7 +390,10 @@ fun VrcaScreen(
                                     )
                                 }
                             }) {
-                                Icon(Icons.Filled.Forum, contentDescription = "Join our Discord")
+                                Icon(
+                                    painter = painterResource(id = R.drawable.ic_discord),
+                                    contentDescription = "Join our Discord"
+                                )
                             }
                         }
                     },
