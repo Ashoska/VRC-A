@@ -31,6 +31,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 import org.json.JSONObject
 
 enum class DiscordRpcStatus {
@@ -394,17 +395,49 @@ class DiscordRpcService : Service() {
                 val url = result?.trim()?.removeSurrounding("\"")?.replace("\\/", "/") ?: ""
                 if (url.startsWith("http")) {
                     discordAvatarRetries = 0
+                    val prefs = applicationContext
+                        .getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
+                    val previous = prefs.getString("discord_avatar_url", "") ?: ""
                     runCatching {
-                        applicationContext
-                            .getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
-                            .edit()
-                            .putString("discord_avatar_url", url)
-                            .apply()
+                        prefs.edit().putString("discord_avatar_url", url).apply()
+                    }
+                    // Prompt write: push the Discord avatar straight to the user doc
+                    // (public build only) so the admin directory shows it now instead
+                    // of waiting up to an hour for the next self-sync tick — mirrors
+                    // the vrchatProfilePic one-shot in VrchatPipelineService.onOpen.
+                    // Only when it actually changed, so we don't re-write every poll.
+                    if (!com.vrca.BuildConfig.IS_ADMIN_BUILD && url != previous) {
+                        pushDiscordAvatarToFirestore(url)
                     }
                 } else if (discordAvatarRetries < 5) {
                     discordAvatarRetries++
                     mainHandler.postDelayed({ captureDiscordAvatar() }, 4000)
                 }
+            }
+        }
+    }
+
+    /**
+     * Direct one-field merge write of `discordAvatarUrl` to this device's user
+     * doc so the admin panel shows the Discord avatar promptly. The deviceHash
+     * comes from the same `vrca_remote/device_id_hash` pref the pipeline uses.
+     */
+    private fun pushDiscordAvatarToFirestore(url: String) {
+        scope.launch {
+            runCatching {
+                val deviceHash = applicationContext
+                    .getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
+                    .getString("device_id_hash", "")
+                    ?.trim()
+                    .orEmpty()
+                if (deviceHash.isEmpty()) return@runCatching
+                com.google.firebase.firestore.FirebaseFirestore.getInstance()
+                    .collection("users").document(deviceHash)
+                    .set(
+                        mapOf("discordAvatarUrl" to url),
+                        com.google.firebase.firestore.SetOptions.merge()
+                    )
+                    .await()
             }
         }
     }

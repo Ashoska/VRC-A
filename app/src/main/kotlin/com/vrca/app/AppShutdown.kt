@@ -146,6 +146,11 @@ object AppShutdown {
                 })
             }
         } catch (_: Throwable) {}
+        // Stop the pipeline service too so its "Connected as X" persistent
+        // notification is removed PROMPTLY on swipe — without this it lingered for
+        // up to 5s (the offline-write await) before killProcess tore it down, which
+        // looked like the swiped app was still "running / connected as username".
+        try { app.stopService(Intent(app, com.vrca.vrchat.VrchatPipelineService::class.java)) } catch (_: Throwable) {}
         try { app.stopService(Intent(app, KeepAliveService::class.java)) } catch (_: Throwable) {}
         try { app.stopService(Intent(app, OverlayService::class.java)) } catch (_: Throwable) {}
     }
