@@ -437,18 +437,20 @@ internal fun UsersTab(
 
                     Divider()
 
-                    // Identity / liveness facts. Liveness timestamps come from
-                    // the live 10s detail poll (d) so they refresh in real time,
-                    // falling back to the directory snapshot until the first poll.
+                    // Identity facts + a SINGLE liveness timestamp. "active",
+                    // "updated" and "synced" were three confusingly-similar fields;
+                    // they're collapsed into one "Last seen" (the canonical
+                    // lastActiveAt, falling back to lastSeenAt/updatedAt). It comes
+                    // from the live 10s detail poll (d) so it refreshes in real
+                    // time, falling back to the directory snapshot until the first poll.
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         if (row.vrchatUserId.isNotBlank())
-                            AdminLabeledRow("VRChat", row.vrchatUserId, mono = true, labelWidth = 64)
-                        AdminLabeledRow("authUid", shortId(row.authUid.ifBlank { "(blank)" }), mono = true, labelWidth = 64)
-                        AdminLabeledRow("device",  shortId(row.deviceHash.ifBlank { "(blank)" }), mono = true, labelWidth = 64)
-                        val activeTs = d?.lastActiveAt ?: d?.lastSeenAt ?: row.lastActiveAt ?: row.lastSeenAt
-                        val updatedTs = d?.updatedAt ?: row.updatedAt
-                        AdminLabeledRow("active",  relativeTime(activeTs, nowMs), labelWidth = 64)
-                        AdminLabeledRow("updated", relativeTime(updatedTs, nowMs), labelWidth = 64)
+                            AdminLabeledRow("VRChat", row.vrchatUserId, mono = true, labelWidth = 76)
+                        AdminLabeledRow("authUid", shortId(row.authUid.ifBlank { "(blank)" }), mono = true, labelWidth = 76)
+                        AdminLabeledRow("device",  shortId(row.deviceHash.ifBlank { "(blank)" }), mono = true, labelWidth = 76)
+                        val seenTs = d?.lastActiveAt ?: d?.lastSeenAt ?: d?.updatedAt
+                            ?: row.lastActiveAt ?: row.lastSeenAt ?: row.updatedAt
+                        AdminLabeledRow("last seen", relativeTime(seenTs, nowMs), labelWidth = 76)
                     }
 
                     Divider()
@@ -736,10 +738,8 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                             android.net.Uri.parse("https://vrchat.com/home/user/${d.vrchatUserId}"))
                         ctx.startActivity(intent)
                     })
-                if (d.vrchatLastSyncAt != null)
-                    Text("Synced ${relativeTime(d.vrchatLastSyncAt, System.currentTimeMillis())}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                // (No separate "Synced" line — liveness is the single "last seen"
+                // field in the identity header.)
             }
         }
     }

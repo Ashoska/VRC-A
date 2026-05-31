@@ -1,8 +1,7 @@
 package com.vrca.admin
 
-import androidx.compose.foundation.clickable
+import android.content.Context
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -42,9 +41,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.google.firebase.Timestamp
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.Source
@@ -54,21 +55,57 @@ import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONArray
 import org.json.JSONObject
+import java.util.Date
 import java.util.concurrent.TimeUnit
 
 /* =========================================================
-   DASHBOARD — a unified live activity feed (moderation,
-   ban-evasion, announcements, VRChat platform status) plus
-   the at-a-glance stat grid. Replaces the old redundant
-   "Live overview" count hero.
+   DASHBOARD — a unified activity feed (moderation, ban-evasion,
+   announcements, VRChat platform status) plus the at-a-glance
+   stat grid. Replaces the old redundant "Live overview" hero.
+
+   READ COST: the feed is persisted on the admin's device and
+   only ever fetches events NEWER than the last cached one. A
+   fresh in-memory/disk cache (< TTL) costs ZERO reads; an
+   incremental refresh costs ~1 read per source when nothing is
+   new (Firestore's per-query minimum), scaling only with the
+   number of genuinely new events. The full ~33-doc read happens
+   exactly once (first run), then never again.
    ========================================================= */
+
+/** Serializable event kind → icon + tone are derived at render time so the
+ *  feed can be persisted to disk (an ImageVector/Color can't be). */
+internal enum class ActivityKind {
+    BAN, UNBAN, WARN, REMOVE_WARN, EVASION,
+    ANNOUNCEMENT, ANNOUNCEMENT_DRAFT,
+    VRC_CRITICAL, VRC_MAJOR, VRC_MINOR, VRC_INFO,
+    OTHER
+}
+
+private fun ActivityKind.icon(): ImageVector = when (this) {
+    ActivityKind.BAN, ActivityKind.UNBAN -> Icons.Filled.Gavel
+    ActivityKind.WARN, ActivityKind.REMOVE_WARN -> Icons.Filled.Warning
+    ActivityKind.EVASION -> Icons.Filled.Shield
+    ActivityKind.ANNOUNCEMENT, ActivityKind.ANNOUNCEMENT_DRAFT -> Icons.Filled.Campaign
+    ActivityKind.VRC_CRITICAL, ActivityKind.VRC_MAJOR,
+    ActivityKind.VRC_MINOR, ActivityKind.VRC_INFO -> Icons.Filled.Public
+    ActivityKind.OTHER -> Icons.Filled.History
+}
+
+private fun ActivityKind.tone(): AdminTone = when (this) {
+    ActivityKind.BAN, ActivityKind.EVASION,
+    ActivityKind.VRC_CRITICAL, ActivityKind.VRC_MAJOR -> AdminTone.Error
+    ActivityKind.UNBAN -> AdminTone.Success
+    ActivityKind.WARN, ActivityKind.VRC_MINOR -> AdminTone.Warn
+    ActivityKind.ANNOUNCEMENT, ActivityKind.VRC_INFO -> AdminTone.Info
+    ActivityKind.REMOVE_WARN, ActivityKind.ANNOUNCEMENT_DRAFT, ActivityKind.OTHER -> AdminTone.Neutral
+}
 
 /** One row in the dashboard activity timeline. */
 internal data class ActivityEvent(
     val id: String,
-    val icon: ImageVector,
-    val tone: AdminTone,
+    val kind: ActivityKind,
     val title: String,
     val subtitle: String,
     val timeMs: Long
@@ -81,13 +118,71 @@ private val dashboardHttp by lazy {
         .build()
 }
 
-/** Reuse window for the activity feed so re-entering the tab doesn't re-read. */
+/** Reuse window: within this, opening the tab costs ZERO Firestore reads. */
 private const val FEED_CACHE_TTL_MS = 60_000L
+private const val FEED_PREFS = "vrca_admin_dashboard"
 
-/** Process-level cache for the activity feed (survives tab dispose/recreate). */
+/**
+ * Process-level + on-disk cache for the activity feed. Survives tab
+ * dispose/recreate (process cache) AND app restarts (SharedPreferences), so the
+ * feed renders instantly with no reads and only ever fetches new events.
+ */
 private object DashboardFeedCache {
     @Volatile var events: List<ActivityEvent> = emptyList()
+    @Volatile var newestModMs: Long = 0L   // cursor: newest moderationEvents.createdAt seen
+    @Volatile var newestAnnMs: Long = 0L   // cursor: newest announcements.createdAt seen
     @Volatile var fetchedAtMs: Long = 0L
+    @Volatile private var loaded = false
+
+    fun ensureLoaded(ctx: Context) {
+        if (loaded) return
+        loaded = true
+        runCatching {
+            val p = ctx.getSharedPreferences(FEED_PREFS, Context.MODE_PRIVATE)
+            newestModMs = p.getLong("newest_mod_ms", 0L)
+            newestAnnMs = p.getLong("newest_ann_ms", 0L)
+            fetchedAtMs = p.getLong("fetched_at_ms", 0L)
+            p.getString("events_json", null)?.let { json ->
+                val arr = JSONArray(json)
+                val list = ArrayList<ActivityEvent>(arr.length())
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    list.add(
+                        ActivityEvent(
+                            id = o.getString("id"),
+                            kind = runCatching { ActivityKind.valueOf(o.getString("kind")) }
+                                .getOrDefault(ActivityKind.OTHER),
+                            title = o.optString("title", ""),
+                            subtitle = o.optString("subtitle", ""),
+                            timeMs = o.optLong("timeMs", 0L)
+                        )
+                    )
+                }
+                events = list
+            }
+        }
+    }
+
+    fun save(ctx: Context) {
+        runCatching {
+            val arr = JSONArray()
+            events.forEach { e ->
+                arr.put(JSONObject().apply {
+                    put("id", e.id)
+                    put("kind", e.kind.name)
+                    put("title", e.title)
+                    put("subtitle", e.subtitle)
+                    put("timeMs", e.timeMs)
+                })
+            }
+            ctx.getSharedPreferences(FEED_PREFS, Context.MODE_PRIVATE).edit()
+                .putString("events_json", arr.toString())
+                .putLong("newest_mod_ms", newestModMs)
+                .putLong("newest_ann_ms", newestAnnMs)
+                .putLong("fetched_at_ms", fetchedAtMs)
+                .apply()
+        }
+    }
 }
 
 @Composable
@@ -101,6 +196,9 @@ internal fun DashboardTab(
     onRefresh: () -> Unit,
     setError: (String?) -> Unit
 ) {
+    val ctx = LocalContext.current
+    remember { DashboardFeedCache.ensureLoaded(ctx); true }
+
     val totalUsers  = totalUsersCount
     // Dashboard counter uses the raw isOnlineInApp flag (no staleness window)
     // so online users show immediately when the admin opens the app, before
@@ -109,10 +207,6 @@ internal fun DashboardTab(
     val bannedCount = bannedUsersCount
     val warnedCount = warnedUsersCount
 
-    // Seed from the process-level cache so re-entering the Dashboard tab doesn't
-    // re-fetch — switching tabs disposes/recreates this composable, and without
-    // the cache every visit would cost ~33 Firestore reads. The cache is reused
-    // for FEED_CACHE_TTL_MS; the refresh button (feedTick) always forces a fetch.
     var events by remember { mutableStateOf(DashboardFeedCache.events) }
     var feedLoading by remember { mutableStateOf(DashboardFeedCache.events.isEmpty()) }
     var feedTick by remember { mutableIntStateOf(0) }
@@ -122,26 +216,29 @@ internal fun DashboardTab(
         while (true) { nowMs = System.currentTimeMillis(); delay(15_000L) }
     }
 
-    // Aggregate the activity feed from several sources, then merge + sort.
+    // Incremental feed fetch — only events newer than the cached cursors.
     LaunchedEffect(feedTick) {
-        val cacheFresh = System.currentTimeMillis() - DashboardFeedCache.fetchedAtMs < FEED_CACHE_TTL_MS
-        // feedTick == 0 is the initial composition (tab entry). Reuse a fresh
-        // cache instead of re-reading; a manual refresh bumps feedTick (> 0).
+        val now = System.currentTimeMillis()
+        val cacheFresh = now - DashboardFeedCache.fetchedAtMs < FEED_CACHE_TTL_MS
+        // feedTick == 0 is tab entry: reuse a fresh cache with ZERO reads.
+        // A manual refresh bumps feedTick (> 0) and always does an incremental fetch.
         if (feedTick == 0 && cacheFresh && DashboardFeedCache.events.isNotEmpty()) {
             events = DashboardFeedCache.events
             feedLoading = false
             return@LaunchedEffect
         }
         feedLoading = true
-        val merged = mutableListOf<ActivityEvent>()
+        val fetched = mutableListOf<ActivityEvent>()
+        var maxMod = DashboardFeedCache.newestModMs
+        var maxAnn = DashboardFeedCache.newestAnnMs
 
-        // 1) Moderation events (bans / warns / unbans / ban-evasion captures).
+        // 1) Moderation events — ONLY newer than the cursor (≤1 read when none).
         runCatching {
-            val snap = db.collection("moderationEvents")
+            var q: Query = db.collection("moderationEvents")
                 .orderBy("createdAt", Query.Direction.DESCENDING)
-                .limit(25)
-                .get(Source.SERVER)
-                .await()
+            if (DashboardFeedCache.newestModMs > 0L)
+                q = q.whereGreaterThan("createdAt", Timestamp(Date(DashboardFeedCache.newestModMs)))
+            val snap = q.limit(25).get(Source.SERVER).await()
             snap.documents.forEach { d ->
                 fun s(k: String) = (d.getString(k) ?: "").trim()
                 val action = s("action")
@@ -149,47 +246,48 @@ internal fun DashboardTab(
                 val reason = s("reason")
                 val method = s("method")
                 val tMs = d.getTimestamp("createdAt")?.toDate()?.time ?: 0L
+                if (tMs > maxMod) maxMod = tMs
                 val ev = when (action) {
-                    "ban" -> ActivityEvent(d.id, Icons.Filled.Gavel, AdminTone.Error,
+                    "ban" -> ActivityEvent(d.id, ActivityKind.BAN,
                         "Banned${if (who.isNotBlank()) " · $who" else ""}",
                         reason.ifBlank { "no reason given" }, tMs)
-                    "unban" -> ActivityEvent(d.id, Icons.Filled.Gavel, AdminTone.Success,
+                    "unban" -> ActivityEvent(d.id, ActivityKind.UNBAN,
                         "Unbanned${if (who.isNotBlank()) " · $who" else ""}", "", tMs)
-                    "warn" -> ActivityEvent(d.id, Icons.Filled.Warning, AdminTone.Warn,
+                    "warn" -> ActivityEvent(d.id, ActivityKind.WARN,
                         "Warned${if (who.isNotBlank()) " · $who" else ""}",
                         reason.ifBlank { "no reason given" }, tMs)
-                    "remove_warn" -> ActivityEvent(d.id, Icons.Filled.Warning, AdminTone.Neutral,
+                    "remove_warn" -> ActivityEvent(d.id, ActivityKind.REMOVE_WARN,
                         "Warning removed${if (who.isNotBlank()) " · $who" else ""}", "", tMs)
-                    "ban_evasion_detected" -> ActivityEvent(d.id, Icons.Filled.Shield, AdminTone.Error,
+                    "ban_evasion_detected" -> ActivityEvent(d.id, ActivityKind.EVASION,
                         "Ban evasion detected",
                         buildString {
                             if (method.isNotBlank()) append(method)
                             if (who.isNotBlank()) { if (isNotEmpty()) append(" · "); append(who) }
                         }.ifBlank { "new identifier on a banned record" }, tMs)
-                    else -> ActivityEvent(d.id, Icons.Filled.History, AdminTone.Neutral,
+                    else -> ActivityEvent(d.id, ActivityKind.OTHER,
                         action.replace("_", " ").replaceFirstChar { it.uppercase() }
                             .ifBlank { "Event" } + (if (who.isNotBlank()) " · $who" else ""),
                         reason, tMs)
                 }
-                merged.add(ev)
+                fetched.add(ev)
             }
         }.onFailure { /* best-effort source */ }
 
-        // 2) Announcements posted.
+        // 2) Announcements — ONLY newer than the cursor.
         runCatching {
-            val snap = db.collection("announcements")
+            var q: Query = db.collection("announcements")
                 .orderBy("createdAt", Query.Direction.DESCENDING)
-                .limit(8)
-                .get(Source.SERVER)
-                .await()
+            if (DashboardFeedCache.newestAnnMs > 0L)
+                q = q.whereGreaterThan("createdAt", Timestamp(Date(DashboardFeedCache.newestAnnMs)))
+            val snap = q.limit(8).get(Source.SERVER).await()
             snap.documents.forEach { d ->
                 val title = (d.getString("title") ?: "").trim()
                 val active = d.getBoolean("active") ?: true
                 val tMs = d.getTimestamp("createdAt")?.toDate()?.time ?: 0L
-                merged.add(ActivityEvent(
+                if (tMs > maxAnn) maxAnn = tMs
+                fetched.add(ActivityEvent(
                     id = "ann_${d.id}",
-                    icon = Icons.Filled.Campaign,
-                    tone = AdminTone.Info,
+                    kind = if (active) ActivityKind.ANNOUNCEMENT else ActivityKind.ANNOUNCEMENT_DRAFT,
                     title = "Announcement${if (!active) " (draft)" else ""}",
                     subtitle = title.ifBlank { "(no title)" },
                     timeMs = tMs
@@ -197,7 +295,7 @@ internal fun DashboardTab(
             }
         }.onFailure { /* best-effort source */ }
 
-        // 3) VRChat platform status (incidents + overall indicator).
+        // 3) VRChat platform status — HTTP, NOT Firestore (free).
         runCatching {
             withContext(Dispatchers.IO) {
                 val req = Request.Builder()
@@ -217,16 +315,15 @@ internal fun DashboardTab(
                                 val status = inc.optString("status", "").trim()
                                 val updated = inc.optString("updated_at").ifBlank { inc.optString("created_at") }
                                 val tMs = parseIsoMs(updated)
-                                val tone = when (impact) {
-                                    "critical" -> AdminTone.Error
-                                    "major" -> AdminTone.Error
-                                    "minor" -> AdminTone.Warn
-                                    else -> AdminTone.Info
+                                val kind = when (impact) {
+                                    "critical" -> ActivityKind.VRC_CRITICAL
+                                    "major" -> ActivityKind.VRC_MAJOR
+                                    "minor" -> ActivityKind.VRC_MINOR
+                                    else -> ActivityKind.VRC_INFO
                                 }
-                                merged.add(ActivityEvent(
+                                fetched.add(ActivityEvent(
                                     id = "vrc_${inc.optString("id", name)}",
-                                    icon = Icons.Filled.Public,
-                                    tone = tone,
+                                    kind = kind,
                                     title = "VRChat: ${name.ifBlank { "status update" }}",
                                     subtitle = buildString {
                                         append(impact.replaceFirstChar { it.uppercase() })
@@ -241,10 +338,18 @@ internal fun DashboardTab(
             }
         }.onFailure { /* best-effort source */ }
 
-        val sorted = merged.sortedByDescending { it.timeMs }.take(40)
+        // Merge new events into the cached list (new wins on id), sort, cap 40.
+        val byId = LinkedHashMap<String, ActivityEvent>()
+        DashboardFeedCache.events.forEach { byId[it.id] = it }
+        fetched.forEach { byId[it.id] = it }
+        val sorted = byId.values.sortedByDescending { it.timeMs }.take(40)
+
         events = sorted
         DashboardFeedCache.events = sorted
+        DashboardFeedCache.newestModMs = maxMod
+        DashboardFeedCache.newestAnnMs = maxAnn
         DashboardFeedCache.fetchedAtMs = System.currentTimeMillis()
+        DashboardFeedCache.save(ctx)
         feedLoading = false
     }
 
@@ -324,7 +429,7 @@ internal fun DashboardTab(
 
 @Composable
 private fun ActivityRow(ev: ActivityEvent, nowMs: Long) {
-    val tc = toneColors(ev.tone)
+    val tc = toneColors(ev.kind.tone())
     Row(
         Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -332,7 +437,7 @@ private fun ActivityRow(ev: ActivityEvent, nowMs: Long) {
     ) {
         Surface(color = tc.accent.copy(alpha = 0.16f), shape = CircleShape) {
             Icon(
-                ev.icon, contentDescription = null,
+                ev.kind.icon(), contentDescription = null,
                 tint = tc.accent,
                 modifier = Modifier.padding(7.dp).size(18.dp)
             )
@@ -365,7 +470,6 @@ private fun ActivityRow(ev: ActivityEvent, nowMs: Long) {
 private fun parseIsoMs(iso: String): Long {
     if (iso.isBlank()) return 0L
     return runCatching {
-        // Handles both with/without millis and the trailing Z.
         val fmt = if (iso.contains('.'))
             "yyyy-MM-dd'T'HH:mm:ss.SSSXXX" else "yyyy-MM-dd'T'HH:mm:ssXXX"
         java.text.SimpleDateFormat(fmt, java.util.Locale.US).parse(iso)?.time ?: 0L
