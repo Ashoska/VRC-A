@@ -321,7 +321,16 @@ fun VrcaApp() {
        Update check (public build only)
        ------------------------- */
 
-    val vm: VrcaViewModel = viewModel(factory = VrcaViewModel.Factory)
+    // Scope the runtime ViewModel to the Application (process lifetime), NOT this
+    // Activity. This is what keeps the chatbox senders, moderation/kill listener,
+    // NowPlaying consumer and Firestore sync loops running while the app is
+    // backgrounded and the Activity is destroyed. It is torn down only by
+    // AppShutdown on a real swipe (which calls viewModelStore.clear()).
+    val appOwner = ctx.applicationContext as VrcaApplication
+    val vm: VrcaViewModel = viewModel(
+        viewModelStoreOwner = appOwner,
+        factory = VrcaViewModel.Factory
+    )
 
     var releaseCheckResult by remember { mutableStateOf<ReleaseCheckResult?>(null) }
     var updateDismissed    by remember { mutableStateOf(false) }

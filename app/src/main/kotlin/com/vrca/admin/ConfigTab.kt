@@ -3,8 +3,13 @@ package com.vrca.admin
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.MaterialTheme
@@ -54,6 +59,7 @@ internal fun ConfigTab(
     var tosText by rememberSaveable { mutableStateOf("") }
     var tosUrl by rememberSaveable { mutableStateOf("") }
     var ownerUid by rememberSaveable { mutableStateOf("") }
+    var discordInvite by rememberSaveable { mutableStateOf("") }
     var loadedAt by remember { mutableStateOf<Timestamp?>(null) }
 
     suspend fun load() {
@@ -66,6 +72,7 @@ internal fun ConfigTab(
             tosText = snap.getString("tosText") ?: ""
             tosUrl = snap.getString("tosUrl") ?: ""
             ownerUid = snap.getString("ownerUid") ?: ""
+            discordInvite = snap.getString("discordInvite") ?: ""
             loadedAt = snap.getTimestamp("updatedAt")
             setGlobalLoading(false)
         }.onFailure { e ->
@@ -84,6 +91,7 @@ internal fun ConfigTab(
                 "tosVersion" to tosVersion,
                 "tosText" to tosText,
                 "tosUrl" to tosUrl,
+                "discordInvite" to discordInvite.trim(),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
             db.collection("config").document("app")
@@ -99,6 +107,11 @@ internal fun ConfigTab(
 
     LaunchedEffect(Unit) { load() }
 
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+    ) {
     ElevatedCard {
         Column(
             Modifier.padding(12.dp),
@@ -114,6 +127,20 @@ internal fun ConfigTab(
                 singleLine = true,
                 label = { Text("Owner UID") },
                 placeholder = { Text("paste your UID here") }
+            )
+
+            OutlinedTextField(
+                value = discordInvite,
+                onValueChange = { discordInvite = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("Discord invite link") },
+                placeholder = { Text("https://discord.gg/...") }
+            )
+            Text(
+                "Shown as a Discord button in the public app's top bar. Leave blank to hide it.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
             Row(
@@ -168,5 +195,7 @@ internal fun ConfigTab(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+    }
+    Spacer(Modifier.height(24.dp))
     }
 }

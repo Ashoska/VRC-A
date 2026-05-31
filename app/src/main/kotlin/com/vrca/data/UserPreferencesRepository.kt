@@ -110,6 +110,11 @@ class UserPreferencesRepository(private val context: Context) {
         val TOS_ACCEPTED_AT_EPOCH = longPreferencesKey("tos_accepted_at_epoch")
         val SETUP_VRCHAT_DONE     = booleanPreferencesKey("setup_vrchat_done")
         val SETUP_IP_DONE         = booleanPreferencesKey("setup_ip_done")
+        // One-shot guard for the legacy single-IP → slot-1 migration. Without
+        // this the migration re-runs on every recomposition and, because the
+        // legacy `IP` key is kept in sync with the ACTIVE slot, it clones the
+        // active (non-slot-1) address into slot 1 (the "IP cloning" bug).
+        val IP_SLOT1_MIGRATED     = booleanPreferencesKey("ip_slot1_migrated")
 
         val DISCORD_RPC_ENABLED       = booleanPreferencesKey("discord_rpc_enabled")
         val DISCORD_SESSION_SEEDED    = booleanPreferencesKey("discord_session_seeded")
@@ -216,6 +221,7 @@ class UserPreferencesRepository(private val context: Context) {
 
     val setupVrchatDone: Flow<Boolean> = context.dataStore.data.map { it[Keys.SETUP_VRCHAT_DONE] ?: false }
     val setupIpDone:     Flow<Boolean> = context.dataStore.data.map { it[Keys.SETUP_IP_DONE]     ?: false }
+    val ipSlot1Migrated: Flow<Boolean> = context.dataStore.data.map { it[Keys.IP_SLOT1_MIGRATED] ?: false }
 
     val discordRpcEnabled:     Flow<Boolean> = context.dataStore.data.map { it[Keys.DISCORD_RPC_ENABLED]    ?: false }
     val discordSessionSeeded:  Flow<Boolean> = context.dataStore.data.map { it[Keys.DISCORD_SESSION_SEEDED] ?: false }
@@ -339,6 +345,7 @@ class UserPreferencesRepository(private val context: Context) {
 
     suspend fun saveSetupVrchatDone(v: Boolean) = context.dataStore.edit { it[Keys.SETUP_VRCHAT_DONE] = v }
     suspend fun saveSetupIpDone(v: Boolean)     = context.dataStore.edit { it[Keys.SETUP_IP_DONE]     = v }
+    suspend fun saveIpSlot1Migrated(v: Boolean) = context.dataStore.edit { it[Keys.IP_SLOT1_MIGRATED] = v }
 
     fun tosAcceptedStateFlow(currentVersion: Int): StateFlow<Boolean> =
         context.dataStore.data

@@ -18,8 +18,6 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
-import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
-import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
@@ -29,6 +27,7 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
 import com.vrca.BuildConfig
+import com.vrca.app.FeatureSessionStore
 import com.vrca.app.VrcaApplication
 import com.vrca.nowplaying.NowPlayingState
 import com.vrca.data.UserPreferencesRepository
@@ -46,6 +45,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.tasks.await
+import org.json.JSONObject
 import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
@@ -100,14 +100,24 @@ class VrcaViewModel(
         // Firestore sync throttles
         private const val SELF_SYNC_DEBOUNCE_MS = 500L
         // Live-mode write interval — only used when an admin is watching.
-        // No constant background heartbeat: app-open and app-close writes
-        // (the latter from VrchatPipelineService.onTaskRemoved) maintain
-        // online/offline state with two writes per session.
         private const val LIVE_SYNC_INTERVAL_MS = 10_000L
         // When an admin is browsing (dashboard/users list) but not actively
         // watching this user's detail, push volatile preview/nowPlaying at a
         // slower cadence so the directory shows current output cheaply.
         private const val BROWSE_VOLATILE_SYNC_INTERVAL_MS = 30_000L
+
+        // Hourly liveness heartbeat. This is the SOLE periodic write in the
+        // steady state: one write per hour, anchored to when the user opened
+        // the app (the cold-open write at init), then +1h, +2h, … It refreshes
+        // lastActiveAt so admins can determine online/offline (online =
+        // lastActiveAt within ~65 min) and pushes any content that changed
+        // since the last write. Critically this is an in-PROCESS coroutine
+        // loop (NOT an AlarmManager wakeup): a swiped/OS-killed app simply
+        // stops firing it, so it goes stale and is correctly counted offline.
+        // An AlarmManager wakeup would resurrect a dead app to write a
+        // heartbeat, making it report "online" forever and breaking offline
+        // detection entirely.
+        private const val HOURLY_HEARTBEAT_MS = 60L * 60L * 1000L
 
         // Moderation attach retry
         private const val MOD_ATTACH_RETRY_MS = 1_250L
@@ -116,6 +126,7 @@ class VrcaViewModel(
         private const val REMOTE_PREFS_FILE = "vrca_remote"
         private const val PREF_DEVICE_ID_HASH = "device_id_hash"
         private const val PREF_AUTH_UID = "auth_uid"
+        private const val PREF_LAST_SYNCED_JSON = "last_synced_values_json"
 
         // Collections (MUST MATCH YOUR RULES)
         private const val COL_USERS = "users"             // users/{deviceHash}
@@ -127,11 +138,20 @@ class VrcaViewModel(
 
         val Factory: ViewModelProvider.Factory = viewModelFactory {
             initializer {
-                val application = (this[APPLICATION_KEY] as VrcaApplication)
+                // Resolve the Application from the process-wide handle rather than
+                // CreationExtras[APPLICATION_KEY]: this VM is created against the
+                // Application's own ViewModelStore, whose CreationExtras do NOT carry
+                // APPLICATION_KEY, so reading it here would NPE.
+                val application = VrcaApplication.instance
+                // NOTE: a plain SavedStateHandle() is used (not createSavedStateHandle()).
+                // This VM is owned by the Application's process-lifetime ViewModelStore,
+                // which has no SavedStateRegistry, so createSavedStateHandle() would throw.
+                // Toggles intentionally start OFF on a fresh process anyway; the in-memory
+                // singleton preserves them across Activity recreation.
                 instance = VrcaViewModel(
                     app = application,
                     userPreferencesRepository = application.userPreferencesRepository,
-                    savedState = createSavedStateHandle()
+                    savedState = SavedStateHandle()
                 )
                 Log.d("VrcaViewModel", "Init")
                 instance
@@ -148,6 +168,7 @@ class VrcaViewModel(
     override fun onCleared() {
         uiTickJob?.cancel()
         syncTriggerJob?.cancel()
+        hourlyHeartbeatJob?.cancel()
         liveSyncJob?.cancel()
         keepaliveJob?.cancel()
         moderationAttachJob?.cancel()
@@ -182,8 +203,8 @@ class VrcaViewModel(
     private val db: FirebaseFirestore by lazy { FirebaseFirestore.getInstance() }
 
     private var syncTriggerJob: Job? = null
+    private var hourlyHeartbeatJob: Job? = null
     private var lastSelfSyncAtMs: Long = 0L
-    private var lastSelfSyncFingerprint: String = ""
     private var usersByIdLinkWritten: Boolean = false
     private var lastSelfSyncError: String = ""
 
@@ -218,6 +239,44 @@ class VrcaViewModel(
         return s.length in 16..128
     }
 
+    private fun persistLastSyncedValues() {
+        runCatching {
+            val obj = JSONObject()
+            for ((key, value) in lastSyncedValues) {
+                when (value) {
+                    null -> obj.put(key, JSONObject.NULL)
+                    is Boolean -> obj.put(key, value)
+                    is Int -> obj.put(key, value)
+                    is Long -> obj.put(key, value)
+                    is String -> obj.put(key, value)
+                    else -> obj.put(key, value.toString())
+                }
+            }
+            prefs().edit().putString(PREF_LAST_SYNCED_JSON, obj.toString()).apply()
+        }
+    }
+
+    private fun loadLastSyncedValues() {
+        runCatching {
+            val json = prefs().getString(PREF_LAST_SYNCED_JSON, null) ?: return
+            val obj = JSONObject(json)
+            lastSyncedValues.clear()
+            for (key in obj.keys()) {
+                if (obj.isNull(key)) {
+                    lastSyncedValues[key] = null
+                    continue
+                }
+                val v = obj.get(key)
+                lastSyncedValues[key] = when (v) {
+                    is Boolean -> v
+                    is Number -> v.toInt()
+                    is String -> v
+                    else -> v.toString()
+                }
+            }
+        }
+    }
+
     private suspend fun ensureAnonAuth(): String? {
         return runCatching {
             if (auth.currentUser == null) auth.signInAnonymously().await()
@@ -225,30 +284,6 @@ class VrcaViewModel(
             if (!uid.isNullOrBlank()) writeCachedUid(uid)
             uid
         }.getOrNull()
-    }
-
-    private fun computeSelfFingerprint(authUid: String, deviceHash: String): String {
-        val cycleClean = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(10)
-        val afkP = (1..3).joinToString("|") { getAfkPresetPreview(it) }
-        val cycP = (1..5).joinToString("|") { getCyclePresetPreview(it) }
-
-        return listOf(
-            "doc=$deviceHash",
-            "dev=$deviceHash",
-            "auth=$authUid",
-            "afkE=$afkEnabled",
-            "afkM=${afkMessage.trim()}",
-            "cycE=$cycleEnabled",
-            "cycI=$cycleIntervalSeconds",
-            "cycL=${cycleClean.joinToString("\\n")}",
-            "spE=$spotifyEnabled",
-            "spD=$spotifyDemoEnabled",
-            "spP=$spotifyPreset",
-            "afkP=$afkP",
-            "cycP=$cycP",
-            "timeE=$timeEnabled",
-            "timeM=$timeMode"
-        ).joinToString("||")
     }
 
     /**
@@ -274,6 +309,11 @@ class VrcaViewModel(
             "versionCode" to BuildConfig.VERSION_CODE,
 
             "isOnlineInApp" to true,
+            // lastActiveAt is the canonical liveness field for the hourly
+            // model. lastSeenAt/updatedAt are still written (same timestamp,
+            // zero extra write cost) so older admin builds that read them keep
+            // working — additive migration, nothing removed.
+            "lastActiveAt" to FieldValue.serverTimestamp(),
             "lastSeenAt" to FieldValue.serverTimestamp(),
             "updatedAt" to FieldValue.serverTimestamp(),
 
@@ -313,6 +353,10 @@ class VrcaViewModel(
         data["nowPlayingTitle"] = lastNowPlayingTitle.takeIf { it != "(blank)" }?.trim().orEmpty()
         data["nowPlayingArtist"] = lastNowPlayingArtist.takeIf { it != "(blank)" }?.trim().orEmpty()
         data["activePackage"] = activePackage
+
+        // Profile pictures are intentionally NOT written to Firestore (cost): the
+        // admin panel resolves VRChat+ pictures on demand by vrchatUserId using the
+        // admin's own VRChat session (see AdminAvatar / VrchatImageLoader).
 
         // Multi-IP slots
         val activeSlot = runCatching {
@@ -383,20 +427,21 @@ class VrcaViewModel(
     }
 
     /**
-     * Schedules a debounced self-sync write. No periodic loops — content
-     * is only written when something actually changes (toggles, edits) or
-     * once at app open. Live/volatile fields are handled separately by the
-     * watcher-gated live loop ([startLiveSyncWatcher]).
+     * No-op under the hourly model. Edits and toggles used to trigger a
+     * debounced Firestore write here; that produced a write per keystroke/
+     * toggle. Now content is persisted ONLY to local DataStore on edit (which
+     * already happens at every call site) and pushed to Firestore on the next
+     * app-open write or the hourly heartbeat ([startHourlyHeartbeat]) — and
+     * only if it actually changed (delta comparison in [performSelfSync]).
+     *
+     * The 47 call sites are intentionally left in place so the edit→DataStore
+     * paths and preview rebuilds at those sites are untouched; this function
+     * simply no longer schedules a network write. While an admin is actively
+     * watching this user, the 10s live-sync loop still streams volatile output.
      */
     private fun startSelfSyncLoopIfNeeded() {
-        if (BuildConfig.IS_ADMIN_BUILD) return
-        if (!initialDataLoaded) return
-
-        syncTriggerJob?.cancel()
-        syncTriggerJob = viewModelScope.launch {
-            delay(SELF_SYNC_DEBOUNCE_MS)
-            performSelfSync()
-        }
+        // Intentionally empty — see KDoc above. (SELF_SYNC_DEBOUNCE_MS retained
+        // for reference; no debounced write is scheduled anymore.)
     }
 
     /**
@@ -444,21 +489,15 @@ class VrcaViewModel(
      */
     private var browseVolatileJob: Job? = null
 
+    /**
+     * Disabled under the hourly model. An admin merely browsing the directory
+     * must NOT cause this user to emit writes — only opening this specific
+     * user's detail (which flips [AdminWatchState.isWatched]) starts the 10s
+     * live-sync loop. Directory rows are populated from the admin's one-shot
+     * fetch, not from a per-user browse heartbeat.
+     */
     private fun startBrowseVolatileSyncWatcher() {
-        if (BuildConfig.IS_ADMIN_BUILD) return
-        if (browseVolatileJob != null) return
-        browseVolatileJob = viewModelScope.launch {
-            com.vrca.sync.AdminBrowsingState.isBrowsing.collectLatest { browsing ->
-                if (browsing) {
-                    while (true) {
-                        if (!com.vrca.sync.AdminWatchState.isWatched.value) {
-                            performLiveSync()
-                        }
-                        delay(BROWSE_VOLATILE_SYNC_INTERVAL_MS)
-                    }
-                }
-            }
-        }
+        // Intentionally empty — directory browsing no longer triggers writes.
     }
 
     private fun captureStateForSync(): Map<String, Any?> = mapOf(
@@ -468,6 +507,7 @@ class VrcaViewModel(
         "cycleIntervalSeconds" to cycleIntervalSeconds,
         "cycleLinesText" to cycleLines.joinToString("\n").trim(),
         "spotifyEnabled" to spotifyEnabled,
+        "spotifyDemoEnabled" to spotifyDemoEnabled,
         "spotifyPreset" to spotifyPreset,
         "timeEnabled" to timeEnabled,
         "timeMode" to timeMode,
@@ -479,6 +519,9 @@ class VrcaViewModel(
         "cyclePreset3" to (cyclePresetMessages.getOrNull(2)?.trim().orEmpty()),
         "cyclePreset4" to (cyclePresetMessages.getOrNull(3)?.trim().orEmpty()),
         "cyclePreset5" to (cyclePresetMessages.getOrNull(4)?.trim().orEmpty()),
+        // Profile pictures are deliberately NOT synced to Firestore (cost). The
+        // admin panel resolves VRChat+ pictures on demand by vrchatUserId via the
+        // admin's own VRChat session — see AdminAvatar / VrchatImageLoader.
     )
 
     private suspend fun applyRemoteContentBeforeSync() {
@@ -552,14 +595,10 @@ class VrcaViewModel(
     }
 
     private suspend fun performSelfSync() {
-        // Admin build never writes its own user doc — content lives in DataStore
-        // only. Writing it would create an orphan doc AND feed the round-trip
-        // (write → snapshot echo → applyRemoteConfig) that wipes local presets.
         if (BuildConfig.IS_ADMIN_BUILD) return
         if (!initialDataLoaded) return
         runCatching {
             val authUid = ensureAnonAuth() ?: return@runCatching
-
             val deviceHash = readDeviceHashFromPrefs()
             if (!isValidDeviceHash(deviceHash)) {
                 lastSelfSyncError =
@@ -567,39 +606,91 @@ class VrcaViewModel(
                 return@runCatching
             }
 
-            val fp = computeSelfFingerprint(authUid, deviceHash)
-            if (fp == lastSelfSyncFingerprint) return@runCatching
+            val currentState = captureStateForSync()
+            val uidChanged = lastSyncedValues["_authUid"]?.let { it != authUid } ?: false
+            val isFirstSync = lastSyncedValues.isEmpty()
 
-            val stateSnapshot = captureStateForSync()
-            lastSelfSyncFingerprint = fp
+            if (isFirstSync || uidChanged) {
+                // Full write: first ever install, first cold-open with no
+                // persisted baseline, or auth UID changed. Handles doc
+                // creation and writes all fields for backward compat.
+                try {
+                    db.collection(COL_USERS).document(deviceHash)
+                        .set(buildUserSnapshot(authUid, deviceHash), SetOptions.merge())
+                        .await()
+
+                    if (!usersByIdLinkWritten || uidChanged) {
+                        runCatching {
+                            db.collection(COL_USERS_BY_ID).document(authUid)
+                                .set(buildUsersByIdLink(authUid, deviceHash), SetOptions.merge())
+                                .await()
+                            usersByIdLinkWritten = true
+                        }
+                    }
+
+                    lastSyncedValues.clear()
+                    lastSyncedValues.putAll(currentState)
+                    lastSyncedValues["_authUid"] = authUid
+                    persistLastSyncedValues()
+                    lastSelfSyncAtMs = System.currentTimeMillis()
+                    lastSelfSyncError = ""
+                } catch (e: Throwable) {
+                    throw e
+                }
+                return@runCatching
+            }
+
+            // Delta write: liveness fields always, content only if changed.
+            val delta = mutableMapOf<String, Any>(
+                "isOnlineInApp" to true,
+                "lastActiveAt" to FieldValue.serverTimestamp(),
+                "lastSeenAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            for ((key, value) in currentState) {
+                if (value != lastSyncedValues[key] && value != null) {
+                    delta[key] = value
+                }
+            }
+            if (delta.containsKey("cycleLinesText")) {
+                delta["cycleLines"] = cycleLines.map { it.trim() }
+                    .filter { it.isNotEmpty() }.take(10)
+            }
 
             try {
                 db.collection(COL_USERS).document(deviceHash)
-                    .set(buildUserSnapshot(authUid, deviceHash), SetOptions.merge())
+                    .set(delta, SetOptions.merge())
                     .await()
-
-                // usersById link is static (deviceHash, authUid, appId, adminBuild
-                // never change per device). Write it once per session, not on
-                // every debounced content sync.
-                if (!usersByIdLinkWritten) {
-                    runCatching {
-                        db.collection(COL_USERS_BY_ID).document(authUid)
-                            .set(buildUsersByIdLink(authUid, deviceHash), SetOptions.merge())
-                            .await()
-                        usersByIdLinkWritten = true
-                    }
-                }
-
                 lastSyncedValues.clear()
-                lastSyncedValues.putAll(stateSnapshot)
+                lastSyncedValues.putAll(currentState)
+                lastSyncedValues["_authUid"] = authUid
+                persistLastSyncedValues()
                 lastSelfSyncAtMs = System.currentTimeMillis()
                 lastSelfSyncError = ""
             } catch (e: Throwable) {
-                lastSelfSyncFingerprint = ""
                 throw e
             }
         }.onFailure { e ->
             lastSelfSyncError = (e.message ?: e.toString()).take(4000)
+        }
+    }
+
+    /**
+     * Once-per-hour liveness + delta sync. Each tick calls [performSelfSync]
+     * which always writes liveness (lastActiveAt, isOnlineInApp) and includes
+     * any content fields that changed since the last write. This merges the
+     * old separate heartbeat + sync into a single Firestore write per hour.
+     * In-process only — dies with the process, so a swiped/killed app
+     * correctly stops reporting online.
+     */
+    private fun startHourlyHeartbeat() {
+        if (BuildConfig.IS_ADMIN_BUILD) return
+        if (hourlyHeartbeatJob != null) return
+        hourlyHeartbeatJob = viewModelScope.launch {
+            while (true) {
+                delay(HOURLY_HEARTBEAT_MS)
+                performSelfSync()
+            }
         }
     }
 
@@ -1173,6 +1264,13 @@ class VrcaViewModel(
     private var adSegmentCount by mutableIntStateOf(0)
     private var lastSpecialWasAd = false
         private set
+    // The player's own ad index ("1 of 1", "2 of 3") parsed from the ad metadata,
+    // preferred over the session counter when available.
+    private var nowPlayingAdInfo by mutableStateOf("")
+    // True only while the current special segment is an actual AD (not a DJ
+    // segment). The builder checks this BEFORE isSpotifyDj — an ad blanks the
+    // artist, which would otherwise make isSpotifyDj true and swallow the label.
+    private var nowPlayingIsAd by mutableStateOf(false)
 
     // =========================
     // Time feature
@@ -1188,6 +1286,7 @@ class VrcaViewModel(
         if (isBanned) return
         timeEnabled = enabled
         savedState["timeEnabled"] = enabled
+        persistFeatureSession()
         rebuildAndMaybeSendCombined(forceSend = true)
         startSelfSyncLoopIfNeeded()
         manageKeepaliveLoop()
@@ -1335,6 +1434,12 @@ class VrcaViewModel(
     )
 
     init {
+        // Restore the last-synced baseline from the previous session so the
+        // delta writer knows what Firestore already has. Enables cold-open
+        // delta writes (only changed content + liveness) instead of full
+        // 40-field snapshots on every app restart.
+        loadLastSyncedValues()
+
         // Public build: attach moderation listeners (also drives watcher detection
         // and remote-config snapshots). Admin build skips self-sync entirely.
         attachModerationListenersLoopOnce()
@@ -1368,6 +1473,12 @@ class VrcaViewModel(
                 timeMode = userPreferencesRepository.timeMode.first()
             }
             initialDataLoaded = true
+            // Auto-restore feature toggles after an unexpected process death (OS
+            // memory pressure / Doze / OEM killer). A deliberate swipe disarms this
+            // (AppShutdown), so an intentional close still starts clean. This is what
+            // makes the chatbox resume on its own — including headlessly, when a
+            // service (KeepAliveService) recreated this ViewModel without any UI.
+            restoreFeatureSession()
             // Read-before-write: fetch the Firestore doc so admin edits
             // made while the user was offline aren't clobbered by our
             // app-open write. Toggles always start OFF per design, so we
@@ -1377,7 +1488,10 @@ class VrcaViewModel(
             kotlinx.coroutines.withTimeoutOrNull(5_000L) {
                 applyRemoteContentBeforeSync()
             }
+            // Cold-open write: this is the "user got online" write, anchored to
+            // app open. The hourly heartbeat then fires every hour after this.
             performSelfSync()
+            startHourlyHeartbeat()
         }
 
         viewModelScope.launch {
@@ -1485,6 +1599,7 @@ class VrcaViewModel(
                 }
 
                 nowPlayingSpecialActive = s.specialActive
+                nowPlayingAdInfo = s.adInfo
 
                 // Track ad segment count: increment only when transitioning INTO an ad,
                 // not on every tick. Reset when ad ends so next ad gets a fresh count.
@@ -1493,6 +1608,7 @@ class VrcaViewModel(
                 } || (s.specialActive && s.activePackage == "com.spotify.music" && s.title.trim() == "AD")
                 if (isAdNow && !lastSpecialWasAd) adSegmentCount++
                 lastSpecialWasAd = isAdNow
+                nowPlayingIsAd = isAdNow
 
                 // Special window only gates playing-state (prevents Paused flicker during DJ/ads).
                 // Title updates always go through stabilize so real track shows immediately
@@ -1653,10 +1769,35 @@ class VrcaViewModel(
         cycleEnabled = false; savedState["cycleEnabled"] = false
         spotifyEnabled = false; savedState["spotifyEnabled"] = false
         timeEnabled = false; savedState["timeEnabled"] = false
+        persistFeatureSession()
         keepaliveJob?.cancel(); keepaliveJob = null
         if (!isBanned) clearChatbox(local)
         rebuildCombinedPreviewOnly(forceClearIfAllOff = true)
         startSelfSyncLoopIfNeeded()
+    }
+
+    /** Persist the current toggle set so it survives an unexpected process death.
+     *  A deliberate swipe disarms restore via AppShutdown. */
+    private fun persistFeatureSession() {
+        FeatureSessionStore.save(
+            app.applicationContext,
+            afk = afkEnabled,
+            cycle = cycleEnabled,
+            spotify = spotifyEnabled,
+            time = timeEnabled
+        )
+    }
+
+    /** Re-enable whatever toggles were active before an unexpected kill and start
+     *  their sender loops. No-op on a fresh/intentional launch (restore not armed). */
+    private fun restoreFeatureSession() {
+        val pending = FeatureSessionStore.pendingRestore(app.applicationContext) ?: return
+        if (!pending.anyEnabled) return
+        if (isBanned) return
+        if (pending.afk) setAfkEnabledFlag(true)
+        if (pending.cycle) setCycleEnabledFlag(true)
+        if (pending.spotify) setSpotifyEnabledFlag(true)
+        if (pending.time) updateTimeEnabled(true)
     }
 
     // =========================
@@ -1668,6 +1809,7 @@ class VrcaViewModel(
         savedState["afkEnabled"] = enabled
         if (!enabled) stopAfkSender(clearFromChatbox = true)
         else startAfkSender()
+        persistFeatureSession()
         rebuildAndMaybeSendCombined(forceSend = true)
         startSelfSyncLoopIfNeeded()
         manageKeepaliveLoop()
@@ -1679,6 +1821,7 @@ class VrcaViewModel(
         savedState["cycleEnabled"] = enabled
         if (!enabled) stopCycle(clearFromChatbox = true)
         else { lastCyclePreviewAdvanceMs = 0L; startCycle() }
+        persistFeatureSession()
         rebuildAndMaybeSendCombined(forceSend = true)
         startSelfSyncLoopIfNeeded()
         manageKeepaliveLoop()
@@ -1690,6 +1833,7 @@ class VrcaViewModel(
         savedState["spotifyEnabled"] = enabled
         if (!enabled) stopNowPlayingSender(clearFromChatbox = true)
         else startNowPlayingSender()
+        persistFeatureSession()
         rebuildAndMaybeSendCombined(forceSend = true)
         startSelfSyncLoopIfNeeded()
         manageKeepaliveLoop()
@@ -2135,16 +2279,25 @@ class VrcaViewModel(
         // normal logic resumes.
         // nowPlayingSpecialActive covers DJ/ads for any supported player.
         // isSpotifyDj is a secondary check for blank-metadata edge cases.
+        // Ad suppression takes PRIORITY over the DJ check below. An ad blanks the
+        // artist (title="AD", artist=""), which makes isSpotifyDj true — so gating
+        // the ad label on `!isSpotifyDj` swallowed it and rendered a bare "AD"
+        // title with a progress bar instead of "Ad 1 of 1". Check the explicit ad
+        // flag FIRST and return early so ads always show their index.
+        if (nowPlayingIsAd) {
+            // Prefer the player's real ad index ("Ad 1 of 1"); else fall back to the
+            // session counter, coerced to at least 1 so it never shows "Ad 0".
+            val label = if (nowPlayingAdInfo.isNotBlank()) {
+                "Ad $nowPlayingAdInfo"
+            } else {
+                "Ad ${adSegmentCount.coerceAtLeast(1)}"
+            }
+            return listOf(label)
+        }
+
         val isSpotifyDj = activePackage == "com.spotify.music" &&
             nowPlayingDetected &&
             (safeTitle.isBlank() || safeArtist.isBlank())
-
-        // Ad suppression: if the special window is active and it's not a DJ segment,
-        // always suppress all content â€" title, artist, progress bar, timestamps.
-        // This catches every Spotify ad variant regardless of the title text.
-        if (nowPlayingSpecialActive && !isSpotifyDj) {
-            return listOf("Ad $adSegmentCount")
-        }
 
         val effectiveIsPlaying = if (nowPlayingSpecialActive || isSpotifyDj) true else nowPlayingIsPlaying
 

@@ -210,6 +210,13 @@ dependencies {
     implementation "com.google.firebase:firebase-auth-ktx"
     implementation "com.google.firebase:firebase-firestore-ktx"
 
+    // WorkManager — periodic watchdog that re-arms the foreground pipeline service
+    // if an aggressive OEM kills the process while the user is logged in.
+    implementation "androidx.work:work-runtime-ktx:2.9.1"
+
+    // Coil — async image loading for admin profile pictures
+    implementation "io.coil-kt:coil-compose:2.6.0"
+
     // Tests
     testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test.ext:junit:1.1.5'

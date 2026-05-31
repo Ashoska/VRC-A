@@ -20,9 +20,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ChevronRight
@@ -30,9 +31,14 @@ import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Gavel
+import androidx.compose.material.icons.filled.Loop
+import androidx.compose.material.icons.filled.Power
+import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material3.Badge
+import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -49,7 +55,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -63,6 +68,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.google.firebase.Timestamp
@@ -87,6 +93,7 @@ internal data class UserRow(
     val deviceHash: String,
     val warned: Boolean,
     val banned: Boolean,
+    val lastActiveAt: Timestamp?,
     val lastSeenAt: Timestamp?,
     val updatedAt: Timestamp?,
     // VRChat
@@ -101,6 +108,8 @@ internal data class UserRow(
     val vrchatPlatform: String = "",
     val vrchatLastSyncAt: Timestamp? = null,
     val isOnlineInApp: Boolean = false
+    // Profile pictures are NOT stored in Firestore — AdminAvatar resolves the
+    // VRChat+ picture on demand by vrchatUserId via the admin's VRChat session.
 )
 
 internal data class UserDetail(
@@ -146,7 +155,14 @@ internal data class UserDetail(
     val vrchatCapacity: Long,
     val vrchatPlatform: String,
     val timeEnabled: Boolean = false,
-    val vrchatLastSyncAt: Timestamp?
+    val vrchatLastSyncAt: Timestamp?,
+    // Live liveness timestamps from the 10s detail poll (the header shows these
+    // so "active/updated" refresh in real time instead of reflecting the stale
+    // one-shot directory snapshot).
+    val lastActiveAt: Timestamp? = null,
+    val lastSeenAt: Timestamp? = null,
+    val updatedAt: Timestamp? = null,
+    val isOnlineInApp: Boolean = false
 )
 
 internal data class ModerationTarget(
@@ -163,17 +179,19 @@ internal data class ModerationTarget(
 
 /**
  * A user counts as online only when [UserRow.isOnlineInApp] is true AND
- * [UserRow.lastSeenAt] is within the staleness window. The user app emits
- * a 30s heartbeat (writes lastSeenAt) while any admin is browsing the
- * Dashboard or Users tab; 75s = 2.5x the heartbeat interval, giving one
- * missed beat of grace before flipping force-killed users to offline.
+ * [UserRow.lastActiveAt] is within the staleness window. Under the hourly
+ * liveness model an unwatched user writes `lastActiveAt` once per hour (a
+ * watched user every 10s), so the window is ~65 min — 5 min of grace past the
+ * 60-min heartbeat. A force-killed unwatched user therefore ages out of
+ * "online" within ~65 min; a watched user within ~25s. Falls back to
+ * `lastSeenAt` for docs written by pre-hourly app versions.
  */
-internal const val ONLINE_STALENESS_WINDOW_MS = 75_000L
+internal const val ONLINE_STALENESS_WINDOW_MS = 65L * 60L * 1000L
 
 internal fun isUserOnline(u: UserRow, nowMs: Long = System.currentTimeMillis()): Boolean {
     if (!u.isOnlineInApp) return false
-    val seenMs = u.lastSeenAt?.toDate()?.time ?: return false
-    return nowMs - seenMs < ONLINE_STALENESS_WINDOW_MS
+    val activeMs = (u.lastActiveAt ?: u.lastSeenAt)?.toDate()?.time ?: return false
+    return nowMs - activeMs < ONLINE_STALENESS_WINDOW_MS
 }
 
 internal fun parseUserRow(d: com.google.firebase.firestore.DocumentSnapshot): UserRow {
@@ -185,6 +203,7 @@ internal fun parseUserRow(d: com.google.firebase.firestore.DocumentSnapshot): Us
         deviceHash = (d.getString("deviceHash") ?: "").trim(),
         warned = d.getBoolean("warned") ?: false,
         banned = d.getBoolean("banned") ?: false,
+        lastActiveAt = d.getTimestamp("lastActiveAt"),
         lastSeenAt = d.getTimestamp("lastSeenAt"),
         updatedAt = d.getTimestamp("updatedAt"),
         vrchatUserId = (d.getString("vrchatUserId") ?: "").trim(),
@@ -206,8 +225,10 @@ internal fun UsersTab(
     db: FirebaseFirestore,
     myDeviceHash: String,
     users: List<UserRow>,
+    usersLoading: Boolean,
     liveLimit: Int,
     onIncreaseLiveLimit: () -> Unit,
+    onRefresh: () -> Unit,
     setGlobalLoading: (Boolean) -> Unit,
     setError: (String?) -> Unit,
     onSendToModeration: (ModerationTarget) -> Unit
@@ -274,50 +295,52 @@ internal fun UsersTab(
             vrchatPlayerCount = l("vrchatInstancePlayerCount"), vrchatCapacity = l("vrchatInstanceCapacity"),
             vrchatPlatform = s("vrchatPlatform"),
             timeEnabled = b("timeEnabled"),
-            vrchatLastSyncAt = snap.getTimestamp("vrchatLastSyncAt")
+            vrchatLastSyncAt = snap.getTimestamp("vrchatLastSyncAt"),
+            lastActiveAt = snap.getTimestamp("lastActiveAt"),
+            lastSeenAt = snap.getTimestamp("lastSeenAt"),
+            updatedAt = snap.getTimestamp("updatedAt"),
+            isOnlineInApp = snap.getBoolean("isOnlineInApp") ?: false
         )
     }
-    // Selected user detail: snapshot listener for real-time updates + 30s watcherActiveAt heartbeat
-    DisposableEffect(selectedDocId) {
+    // Selected user detail: Phase 3 read model — the ONLY live read in the admin
+    // panel, scoped to the single open user and polled every 10s from the server.
+    // This replaces the per-doc snapshot listener (which, combined with the old
+    // collection listener, kept reads flowing for the whole directory). The loop
+    // is keyed on selectedDocId, so backing out (selectedDocId -> null) cancels
+    // this coroutine and the reads stop INSTANTLY. The watcher heartbeat
+    // (AdminRuntime) puts the user app into 10s live-sync, so 10s polling here
+    // matches the cadence at which the user's volatile fields refresh.
+    LaunchedEffect(selectedDocId) {
         val docId = selectedDocId
         if (docId.isNullOrBlank()) {
             selectedDetail = null; selectedDetailLoading = false
-            return@DisposableEffect onDispose { }
+            return@LaunchedEffect
         }
         selectedDetailLoading = true
-        val reg = db.collection("users").document(docId)
-            .addSnapshotListener { snap, err ->
-                if (err != null) {
-                    setError(err.message ?: "User detail load failed")
-                    selectedDetailLoading = false
-                    return@addSnapshotListener
-                }
-                if (snap != null && snap.exists()) {
-                    selectedDetail = parseUserDetail(snap)
-                } else {
-                    selectedDetail = null
-                }
-                selectedDetailLoading = false
-            }
-        onDispose { reg.remove() }
-    }
-
-    // Watcher heartbeat: write watcherActiveAt every 30s while a user is selected
-    LaunchedEffect(selectedDocId) {
-        val docId = selectedDocId
-        if (docId.isNullOrBlank()) return@LaunchedEffect
         while (true) {
             try {
-                db.collection("users").document(docId)
-                    .set(
-                        mapOf("watcherActiveAt" to FieldValue.serverTimestamp()),
-                        SetOptions.merge()
-                    ).await()
+                val snap = db.collection("users").document(docId)
+                    .get(Source.SERVER)
+                    .await()
+                selectedDetail = if (snap.exists()) parseUserDetail(snap) else null
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
-            } catch (_: Throwable) {}
-            delay(30_000L)
+            } catch (e: Throwable) {
+                setError(e.message ?: "User detail load failed")
+            } finally {
+                selectedDetailLoading = false
+            }
+            delay(10_000L)
         }
+    }
+
+    // Watcher heartbeat (writes watcherActiveAt every 30s while a user is selected)
+    // now runs in AdminRuntime at process lifetime, so it keeps the watched user in
+    // live-sync mode even when the admin app is backgrounded. We only register the
+    // current selection here; clearing it on dispose stops the heartbeat when the
+    // detail view truly goes away within the same process.
+    LaunchedEffect(selectedDocId) {
+        AdminRuntime.setSelectedUser(selectedDocId)
     }
 
     val selectedRow by remember {
@@ -334,119 +357,140 @@ internal fun UsersTab(
             modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
+            // Back row sits above the identity card for a clear hierarchy.
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                IconButton(onClick = { selectedDocId = null }, modifier = Modifier.size(36.dp)) {
+                    Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
+                }
+                Text("Back to directory",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+
             ElevatedCard {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            modifier = Modifier.weight(1f)) {
-                            IconButton(onClick = { selectedDocId = null }) {
-                                Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
-                            }
-                            Column(Modifier.weight(1f)) {
-                                val primaryLabel = row.vrchatDisplayName.ifBlank {
-                                    row.displayName.ifBlank { shortId(row.docId) }
-                                }
-                                Text(
-                                    primaryLabel,
-                                    style = MaterialTheme.typography.titleMedium,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis
-                                )
-                                if (row.vrchatUserId.isNotBlank()) {
-                                    Text(
-                                        row.vrchatUserId,
-                                        fontFamily = FontFamily.Monospace,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                }
-                                Text(
-                                    shortId(row.docId),
-                                    fontFamily = FontFamily.Monospace,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            if (row.banned) {
-                                Badge(
-                                    containerColor = MaterialTheme.colorScheme.error
-                                ) { Text("BANNED", style = MaterialTheme.typography.labelSmall) }
-                            }
-                            if (row.warned) {
-                                Badge(
-                                    containerColor = MaterialTheme.colorScheme.tertiary
-                                ) { Text("WARNED", style = MaterialTheme.typography.labelSmall) }
-                            }
-                        }
-                    }
-
-                    Divider()
-
-                    @Composable
-                    fun InfoRow(label: String, value: String) {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(label,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.width(72.dp))
-                            Text(value,
-                                fontFamily = FontFamily.Monospace,
-                                style = MaterialTheme.typography.bodySmall,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f))
-                        }
-                    }
-
-                    InfoRow("authUid", shortId(row.authUid.ifBlank { "(blank)" }))
-                    InfoRow("device",  shortId(row.deviceHash.ifBlank { "(blank)" }))
-                    InfoRow("lastSeen", relativeTime(row.lastSeenAt, nowMs))
-                    InfoRow("updated",  relativeTime(row.updatedAt, nowMs))
-
-                    Divider()
-
-                    Button(
-                        onClick = {
-                            onSendToModeration(ModerationTarget(
-                                docId = row.docId, authUid = row.authUid,
-                                deviceHash = row.deviceHash,
-                                displayName = row.vrchatDisplayName.ifBlank { row.displayName },
-                                vrchatUserId = row.vrchatUserId,
-                                banned = row.banned, warned = row.warned,
-                                banReason = selectedDetail?.banReason ?: "",
-                                warnReason = selectedDetail?.warnReason ?: ""
-                            ))
-                        },
-                        modifier = Modifier.fillMaxWidth()
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    // Identity: large avatar + name + VRChat id + status pills.
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(14.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(Icons.Filled.ArrowForward, contentDescription = null)
-                        Spacer(Modifier.width(6.dp))
-                        Text("Send to Moderation")
-                    }
-
-                    OutlinedButton(
-                        onClick = {
-                            scope.launch {
-                                setGlobalLoading(true)
-                                runCatching {
-                                    db.collection("users").document(row.docId)
-                                        .set(
-                                            mapOf("killSignal" to com.google.firebase.firestore.FieldValue.serverTimestamp()),
-                                            com.google.firebase.firestore.SetOptions.merge()
-                                        )
-                                        .await()
-                                }.onFailure { e ->
-                                    setError(e.message ?: "Kill failed")
-                                }
-                                setGlobalLoading(false)
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.outlinedButtonColors(
-                            contentColor = MaterialTheme.colorScheme.error
+                        val primaryLabel = row.vrchatDisplayName.ifBlank {
+                            row.displayName.ifBlank { shortId(row.docId) }
+                        }
+                        // Prefer the live 10s detail poll for the pfp so it
+                        // appears/refreshes once watching kicks in; fall back to
+                        // the directory snapshot.
+                        val liveVrcId = (d?.vrchatUserId ?: "").ifBlank { row.vrchatUserId }
+                        AdminAvatar(
+                            name = primaryLabel,
+                            online = isUserOnline(row, nowMs),
+                            size = 60,
+                            vrchatUserId = liveVrcId
                         )
-                    ) {
-                        Text("Kill App (force-quit)")
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(
+                                primaryLabel,
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis
+                            )
+                            val secondary = if (row.vrchatDisplayName.isNotBlank() &&
+                                row.displayName.isNotBlank() && row.vrchatDisplayName != row.displayName)
+                                row.displayName else null
+                            if (secondary != null) {
+                                Text(secondary,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                if (isUserOnline(row, nowMs)) StatusPill("ONLINE", AdminTone.Primary)
+                                if (row.vrchatIsOnline) StatusPill("VRC", AdminTone.Info)
+                                if (row.banned) StatusPill("BANNED", AdminTone.Error)
+                                if (row.warned) StatusPill("WARNED", AdminTone.Warn)
+                            }
+                        }
+                    }
+
+                    if (row.vrchatWorld.isNotBlank()) {
+                        Text("📍 ${row.vrchatWorld}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+
+                    Divider()
+
+                    // Identity facts + a SINGLE liveness timestamp. "active",
+                    // "updated" and "synced" were three confusingly-similar fields;
+                    // they're collapsed into one "Last seen" (the canonical
+                    // lastActiveAt, falling back to lastSeenAt/updatedAt). It comes
+                    // from the live 10s detail poll (d) so it refreshes in real
+                    // time, falling back to the directory snapshot until the first poll.
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        if (row.vrchatUserId.isNotBlank())
+                            AdminLabeledRow("VRChat", row.vrchatUserId, mono = true, labelWidth = 76)
+                        AdminLabeledRow("authUid", shortId(row.authUid.ifBlank { "(blank)" }), mono = true, labelWidth = 76)
+                        AdminLabeledRow("device",  shortId(row.deviceHash.ifBlank { "(blank)" }), mono = true, labelWidth = 76)
+                        val seenTs = d?.lastActiveAt ?: d?.lastSeenAt ?: d?.updatedAt
+                            ?: row.lastActiveAt ?: row.lastSeenAt ?: row.updatedAt
+                        AdminLabeledRow("last seen", relativeTime(seenTs, nowMs), labelWidth = 76)
+                    }
+
+                    Divider()
+
+                    // Actions side-by-side for a tidy footer.
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = {
+                                onSendToModeration(ModerationTarget(
+                                    docId = row.docId, authUid = row.authUid,
+                                    deviceHash = row.deviceHash,
+                                    displayName = row.vrchatDisplayName.ifBlank { row.displayName },
+                                    vrchatUserId = row.vrchatUserId,
+                                    banned = row.banned, warned = row.warned,
+                                    banReason = selectedDetail?.banReason ?: "",
+                                    warnReason = selectedDetail?.warnReason ?: ""
+                                ))
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Filled.Gavel, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Moderate")
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                scope.launch {
+                                    setGlobalLoading(true)
+                                    runCatching {
+                                        db.collection("users").document(row.docId)
+                                            .set(
+                                                mapOf("killSignal" to com.google.firebase.firestore.FieldValue.serverTimestamp()),
+                                                com.google.firebase.firestore.SetOptions.merge()
+                                            )
+                                            .await()
+                                    }.onFailure { e ->
+                                        setError(e.message ?: "Kill failed")
+                                    }
+                                    setGlobalLoading(false)
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error
+                            )
+                        ) {
+                            Icon(Icons.Filled.Power, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Kill App")
+                        }
                     }
                 }
             }
@@ -494,6 +538,23 @@ internal fun UsersTab(
                                 fontFamily = FontFamily.Monospace,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                            if (usersLoading) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                IconButton(
+                                    onClick = onRefresh,
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Filled.Refresh,
+                                        contentDescription = "Refresh users",
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
                             OutlinedButton(
                                 onClick = onIncreaseLiveLimit,
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
@@ -551,28 +612,34 @@ internal fun UsersTab(
         }
 
         items(filteredUsers, key = { it.docId }) { u ->
+            val appOnline = isUserOnline(u, nowMs)
             Card(
                 colors = CardDefaults.cardColors(
                     containerColor = when {
-                        u.banned -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f)
-                        u.warned -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f)
-                        else     -> MaterialTheme.colorScheme.surfaceVariant
+                        u.banned -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f)
+                        u.warned -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f)
+                        else     -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
                     }
                 ),
                 modifier = Modifier.fillMaxWidth().clickable { selectedDocId = u.docId }
             ) {
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-                        // VRChat display name is primary identifier; fall back to displayName then docId
-                        val primaryName = u.vrchatDisplayName.ifBlank { u.displayName.ifBlank { shortId(u.docId) } }
+                    val primaryName = u.vrchatDisplayName.ifBlank { u.displayName.ifBlank { shortId(u.docId) } }
+                    AdminAvatar(
+                        name = primaryName,
+                        online = appOnline,
+                        vrchatUserId = u.vrchatUserId
+                    )
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         val secondaryName = if (u.vrchatDisplayName.isNotBlank() && u.displayName.isNotBlank() && u.vrchatDisplayName != u.displayName) u.displayName else null
                         Text(
                             primaryName,
                             style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
                             maxLines = 1, overflow = TextOverflow.Ellipsis
                         )
                         if (secondaryName != null) {
@@ -587,41 +654,26 @@ internal fun UsersTab(
                                 color = MaterialTheme.colorScheme.primary,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                        Text(
-                            relativeTime(u.lastSeenAt, nowMs),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        // Status pills + relative time on one wrapping row.
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            if (appOnline) StatusPill("ONLINE", AdminTone.Primary)
+                            if (u.vrchatIsOnline) StatusPill("VRC", AdminTone.Info)
+                            if (u.banned) StatusPill("BAN", AdminTone.Error)
+                            if (u.warned) StatusPill("WARN", AdminTone.Warn)
+                            Text(
+                                relativeTime(u.lastActiveAt ?: u.lastSeenAt, nowMs),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        if (u.vrchatIsOnline) {
-                            Badge(
-                                containerColor = MaterialTheme.colorScheme.tertiary
-                            ) { Text("VRC", style = MaterialTheme.typography.labelSmall) }
-                        }
-                        if (isUserOnline(u, nowMs)) {
-                            Badge(
-                                containerColor = MaterialTheme.colorScheme.primary
-                            ) { Text("ONLINE", style = MaterialTheme.typography.labelSmall) }
-                        }
-                        if (u.banned) {
-                            Badge(
-                                containerColor = MaterialTheme.colorScheme.error
-                            ) { Text("BAN", style = MaterialTheme.typography.labelSmall) }
-                        }
-                        if (u.warned) {
-                            Badge(
-                                containerColor = MaterialTheme.colorScheme.tertiary
-                            ) { Text("WARN", style = MaterialTheme.typography.labelSmall) }
-                        }
-                        Icon(
-                            Icons.Filled.ChevronRight,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
+                    Icon(
+                        Icons.Filled.ChevronRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp)
+                    )
                 }
             }
         }
@@ -644,7 +696,7 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
     // ── VRChat ──────────────────────────────────────────────────────
     ElevatedCard {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("VRChat", style = MaterialTheme.typography.titleSmall)
+            AdminCardHeader("VRChat", Icons.Filled.SportsEsports, AdminTone.Info)
             if (d.vrchatUserId.isBlank()) {
                 Text("Not linked", style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -674,10 +726,8 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                             android.net.Uri.parse("https://vrchat.com/home/user/${d.vrchatUserId}"))
                         ctx.startActivity(intent)
                     })
-                if (d.vrchatLastSyncAt != null)
-                    Text("Synced ${relativeTime(d.vrchatLastSyncAt, System.currentTimeMillis())}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                // (No separate "Synced" line — liveness is the single "last seen"
+                // field in the identity header.)
             }
         }
     }
@@ -685,7 +735,7 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
     // ── Live Output + Feature Toggles ───────────────────────────────
     ElevatedCard {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Live Chatbox Output", style = MaterialTheme.typography.titleSmall)
+            AdminCardHeader("Live Chatbox Output", Icons.Filled.Chat, AdminTone.Primary)
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Text(d.combinedPreviewText.ifBlank { "(nothing sending)" },
                     modifier = Modifier.padding(10.dp),
@@ -759,7 +809,7 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
     // ── Pinned Message ───────────────────────────────────────────────
     ElevatedCard {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Pinned Message", style = MaterialTheme.typography.titleSmall)
+            AdminCardHeader("Pinned Message", Icons.Filled.PushPin, AdminTone.Primary)
             var pinnedEdit by remember(d.pinnedMessage) { mutableStateOf(d.pinnedMessage) }
             OutlinedTextField(
                 value = pinnedEdit,
@@ -799,9 +849,7 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
     // ── Cycle ────────────────────────────────────────────────────────
     ElevatedCard {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically) {
-                Text("Cycle", style = MaterialTheme.typography.titleSmall)
+            AdminCardHeader("Cycle", Icons.Filled.Loop, AdminTone.Primary, trailing = {
                 Row(verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     var intEdit by remember(d.cycleIntervalSeconds) { mutableStateOf(d.cycleIntervalSeconds.toString()) }
@@ -814,7 +862,7 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                             Icon(Icons.Filled.Check, "Save", modifier = Modifier.size(18.dp))
                         }
                 }
-            }
+            })
             if (d.cycleLinesText.isNotBlank()) {
                 var cycleEdit by remember(d.cycleLinesText) { mutableStateOf(d.cycleLinesText) }
                 OutlinedTextField(value = cycleEdit, onValueChange = { cycleEdit = it },
@@ -877,7 +925,7 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
     // ── App Info + Targeted Push ────────────────────────────────────
     ElevatedCard {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("App", style = MaterialTheme.typography.titleSmall)
+            AdminCardHeader("App & Updates", Icons.Filled.Android, AdminTone.Primary)
             Text("${d.versionName} (${d.versionCode})", fontFamily = FontFamily.Monospace,
                 style = MaterialTheme.typography.bodySmall)
             Text(d.appId, fontFamily = FontFamily.Monospace,

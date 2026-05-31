@@ -15,6 +15,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import com.vrca.BuildConfig
 import com.vrca.keepalive.KeepAliveService
+import com.vrca.keepalive.PipelineWatchdogWorker
 import com.vrca.overlay.OverlayDaemon
 import com.vrca.ui.theme.VrcaTheme
 import java.security.MessageDigest
@@ -57,6 +58,12 @@ class MainActivity : ComponentActivity() {
         //Ensure device hash exists early (before any screen reads it).
         runCatching { ensureDeviceHash(applicationContext) }
 
+        // A real user open clears the persistent swipe-dismissal flag so the
+        // watchdog and services may run again (a swipe set it true to keep the app
+        // dead; opening the app is the explicit "bring it back"). Must run BEFORE
+        // starting KeepAliveService / scheduling the watchdog below.
+        runCatching { AppShutdown.clearSwipedAway(applicationContext) }
+
         // Keep-alive for screen-off reliability.
         if (Build.VERSION.SDK_INT >= 33) {
             val granted = ContextCompat.checkSelfPermission(
@@ -72,6 +79,9 @@ class MainActivity : ComponentActivity() {
         } else {
             KeepAliveService.start(applicationContext)
         }
+
+        // Periodic watchdog: re-arms the pipeline/keep-alive if an OEM kills the process.
+        PipelineWatchdogWorker.ensureScheduled(applicationContext)
 
         setContent {
             VrcaTheme(themeMode = com.vrca.ui.theme.ThemeMode.Dark) {

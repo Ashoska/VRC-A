@@ -167,27 +167,38 @@ object VrchatBanChecker {
         evasionMethod: String
     ) {
         try {
+            // All ban-evasion writes go through ONE atomic WriteBatch: the up-to-3
+            // identifier-index entries, the ban-record array unions, and the
+            // moderationEvent. Previously these were 5 sequential awaited writes —
+            // if the process died (or a write was rejected) partway, the record
+            // could end up inconsistent: an identifier index pointing at a banId
+            // whose record never listed it, or a captured identifier with no audit
+            // event. A batch commits all-or-nothing, so the ban record is never
+            // left half-updated.
+            val batch = db.batch()
             val recordRef = db.collection(COL_RECORDS).document(banId)
             val updates = mutableMapOf<String, Any>()
 
             if (newDeviceHash != null) {
                 updates["deviceHashes"] = FieldValue.arrayUnion(newDeviceHash)
-                // Also add identifier index entry
-                db.collection(COL_IDENTIFIERS).document(newDeviceHash)
-                    .set(mapOf("banId" to banId, "type" to "deviceHash", "active" to true))
-                    .await()
+                batch.set(
+                    db.collection(COL_IDENTIFIERS).document(newDeviceHash),
+                    mapOf("banId" to banId, "type" to "deviceHash", "active" to true)
+                )
             }
             if (newAuthUid != null) {
                 updates["authUids"] = FieldValue.arrayUnion(newAuthUid)
-                db.collection(COL_IDENTIFIERS).document(newAuthUid)
-                    .set(mapOf("banId" to banId, "type" to "authUid", "active" to true))
-                    .await()
+                batch.set(
+                    db.collection(COL_IDENTIFIERS).document(newAuthUid),
+                    mapOf("banId" to banId, "type" to "authUid", "active" to true)
+                )
             }
             if (newVrchatId != null) {
                 updates["vrchatIds"] = FieldValue.arrayUnion(newVrchatId)
-                db.collection(COL_IDENTIFIERS).document(newVrchatId)
-                    .set(mapOf("banId" to banId, "type" to "vrchatId", "active" to true))
-                    .await()
+                batch.set(
+                    db.collection(COL_IDENTIFIERS).document(newVrchatId),
+                    mapOf("banId" to banId, "type" to "vrchatId", "active" to true)
+                )
             }
             if (newDisplayName != null) {
                 updates["displayNames"] = FieldValue.arrayUnion(newDisplayName)
@@ -203,10 +214,12 @@ object VrchatBanChecker {
             )
             updates["evasionAttempts"] = FieldValue.arrayUnion(evasionEntry)
 
-            recordRef.update(updates).await()
+            batch.update(recordRef, updates)
 
-            // Log moderation event for admin review
-            db.collection(COL_EVENTS).add(
+            // Moderation event for admin review — auto-id doc included in the batch.
+            val eventRef = db.collection(COL_EVENTS).document()
+            batch.set(
+                eventRef,
                 mapOf(
                     "action" to "ban_evasion_detected",
                     "banId" to banId,
@@ -216,9 +229,11 @@ object VrchatBanChecker {
                     "newDisplayName" to (newDisplayName ?: ""),
                     "createdAt" to FieldValue.serverTimestamp()
                 )
-            ).await()
+            )
 
-            Log.w(TAG, "Ban evasion captured: banId=$banId method=$evasionMethod")
+            batch.commit().await()
+
+            Log.w(TAG, "Ban evasion captured (atomic): banId=$banId method=$evasionMethod")
         } catch (e: Exception) {
             Log.e(TAG, "appendIdentifiersToRecord failed", e)
         }

@@ -17,6 +17,7 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.SetOptions
+import kotlinx.coroutines.tasks.await
 import com.vrca.BuildConfig
 import com.vrca.app.MainActivity
 import com.vrca.R
@@ -77,9 +78,6 @@ class VrchatPipelineService : Service() {
         private const val TAG = "VrcPipeline"
         private const val PIPELINE_URL = "wss://pipeline.vrchat.cloud"
         private const val USER_AGENT = "VRC-A-Companion/1.0 (Android; companion app)"
-        // Slow always-on lastSeenAt heartbeat interval (5 min) — ungated by
-        // admin presence so "last on the app" stays accurate for admins.
-        private const val LASTSEEN_HEARTBEAT_MS = 5 * 60 * 1000L
 
         private const val NOTIF_CHANNEL_PERSISTENT = "vrca_pipeline"
         // Legacy single-channel ID — kept only so we can delete it on upgrade.
@@ -247,7 +245,9 @@ class VrchatPipelineService : Service() {
                 // just swiped the app away (manual_kill flag fresh), honour the
                 // kill instead of resurrecting the service — otherwise START_STICKY
                 // brings the whole process straight back and it looks "not killed".
-                if (intent == null && com.vrca.app.AppShutdown.isManualKillFresh(this)) {
+                if (intent == null &&
+                    (com.vrca.app.AppShutdown.isManualKillFresh(this) ||
+                        com.vrca.app.AppShutdown.isSwipedAway(this))) {
                     stopForeground(STOP_FOREGROUND_REMOVE)
                     stopSelf()
                     // Android sticky-restarted us into a fresh process that would
@@ -274,12 +274,22 @@ class VrchatPipelineService : Service() {
                         .getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
                         .getString("device_id_hash", "") ?: ""
                 }
-                startForeground(NOTIF_ID_PERSISTENT, buildPersistentNotification("Connecting..."))
                 // If the pipeline is already connected (duplicate ACTION_START
-                // from a reconnect or system restart), don't tear it down and
-                // start over — that's what causes friend caches to flush and
-                // VRChat presence to flicker.
-                if (!VrchatPipelineState.isConnected) {
+                // from a reconnect, system restart, or the user reopening the app
+                // after pressing Back), don't tear it down and start over — that's
+                // what causes friend caches to flush and VRChat presence to flicker.
+                // Crucially, do NOT reset the notification to "Connecting..." in
+                // that case: onOpen won't fire again to restore "Connected as X",
+                // so the notification would get permanently stuck on "Connecting..."
+                // even though presence and RPC are live. Re-assert foreground with
+                // the CURRENT connected status instead.
+                if (VrchatPipelineState.isConnected) {
+                    startForeground(
+                        NOTIF_ID_PERSISTENT,
+                        buildPersistentNotification(lastConnectedNotifText ?: "Connected")
+                    )
+                } else {
+                    startForeground(NOTIF_ID_PERSISTENT, buildPersistentNotification("Connecting..."))
                     startPipeline()
                 }
             }
@@ -454,43 +464,13 @@ class VrchatPipelineService : Service() {
                     delay(10_000)
                 }
             }
-            // Heartbeat: 30s lastSeenAt write while ANY admin is browsing the
-            // dashboard or user directory. AdminBrowsingState is fed by a
-            // snapshot listener on config/adminPresence (attached below).
-            // When admin closes both tabs → flag goes stale → heartbeat
-            // stops → no Firestore traffic. If the user app is force-killed,
-            // no heartbeat fires regardless, so lastSeenAt goes stale and
-            // the admin's staleness filter flips them to offline.
-            launch {
-                AdminBrowsingState.isBrowsing.collectLatest { browsing ->
-                    if (browsing) {
-                        while (true) {
-                            try {
-                                writeHeartbeat()
-                            } catch (e: Exception) {
-                                Log.w(TAG, "Heartbeat write failed", e)
-                            }
-                            delay(30_000)
-                        }
-                    }
-                }
-            }
-            // Slow always-on lastSeenAt heartbeat (5 min). Runs regardless of
-            // admin presence so admins can see accurate "last on the app"
-            // times even after being offline themselves — without this, a user
-            // who keeps the app open with no edits and no admin browsing would
-            // show a "last seen" stuck at app-open time. One field + timestamp
-            // every 5 min is ~288 cheap writes/user/day.
-            launch {
-                while (true) {
-                    delay(LASTSEEN_HEARTBEAT_MS)
-                    try {
-                        writeHeartbeat()
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Slow lastSeen heartbeat failed", e)
-                    }
-                }
-            }
+            // NOTE: the old 30s browse-gated heartbeat and 5-min always-on
+            // lastSeenAt heartbeat were removed. Liveness is now a single
+            // once-per-hour write owned by VrcaViewModel.startHourlyHeartbeat()
+            // (lastActiveAt), and directory browsing no longer causes any
+            // per-user writes. The watched-user loop below still streams
+            // presence (including lastActiveAt) every 10s while an admin has
+            // this user's detail open.
             // Fast poll only while an admin is actively watching this user.
             // collectLatest cancels the inner loop the moment the watch flag
             // flips back to false, so Firestore traffic stops instantly.
@@ -507,17 +487,6 @@ class VrchatPipelineService : Service() {
                 }
             }
         }
-    }
-
-    private fun writeHeartbeat() {
-        if (deviceHash.isBlank()) return
-        FirebaseFirestore.getInstance()
-            .collection("users")
-            .document(deviceHash)
-            .set(
-                mapOf("lastSeenAt" to FieldValue.serverTimestamp()),
-                SetOptions.merge()
-            )
     }
 
     private var adminPresenceListener: com.google.firebase.firestore.ListenerRegistration? = null
@@ -584,6 +553,9 @@ class VrchatPipelineService : Service() {
                     lastConnectedNotifText = notifText
                     updatePersistentNotif(notifText)
                     serviceScope.launch { fireConnectionNotification(true) }
+                    // Profile pictures are NOT written to Firestore (cost). The admin
+                    // panel resolves VRChat+ pictures on demand by vrchatUserId using
+                    // the admin's own VRChat session — see AdminAvatar.
                     // Auto-start Discord RPC if enabled
                     serviceScope.launch {
                         try {
@@ -629,12 +601,26 @@ class VrchatPipelineService : Service() {
             reconnectAttempt++
             updatePersistentNotif("Reconnecting in ${backoffMs / 1000}s...")
             delay(backoffMs)
-            if (VrchatAuthManager.isLoggedIn(this@VrchatPipelineService)) {
-                updatePersistentNotif("Connecting...")
-                connectWebSocket()
-            } else {
+            if (!VrchatAuthManager.isLoggedIn(this@VrchatPipelineService)) {
                 startPipeline()
+                return@launch
             }
+            // isLoggedIn() only checks the auth cookie is PRESENT, not valid.
+            // VRChat binds the auth cookie to the client IP, which changes
+            // constantly on mobile — so a present cookie is often already dead,
+            // and reconnecting with it just fails again forever. After the first
+            // (likely transient) failure, validate the session and auto-relogin
+            // before reconnecting so an expired/IP-invalidated session recovers
+            // on its own instead of looping on a dead authToken.
+            if (reconnectAttempt >= 2) {
+                val valid = VrchatAuthManager.validateSession(this@VrchatPipelineService)
+                if (!valid) {
+                    updatePersistentNotif("Refreshing VRChat session...")
+                    VrchatAuthManager.autoRelogin(this@VrchatPipelineService)
+                }
+            }
+            updatePersistentNotif("Connecting...")
+            connectWebSocket()
         }
     }
 
@@ -828,11 +814,17 @@ class VrchatPipelineService : Service() {
                     }
 
                     val myId = VrchatAuthManager.getStoredUserId(this@VrchatPipelineService)
-                    if (userId == myId && AdminWatchState.isWatched.value) syncPresenceToFirestore()
+                    if (userId == myId) {
+                        // Reactively update our OWN presence from the event payload so
+                        // the Discord RPC / UI reflect the world change instantly, even
+                        // if REST polls are failing in the background. Also writes to
+                        // Firestore directly when watched (instant admin update).
+                        applySelfLocationEvent(content)
+                    }
                 }
 
                 "user-update" -> {
-                    if (AdminWatchState.isWatched.value) syncPresenceToFirestore()
+                    applySelfUserUpdate(content)
                 }
 
                 "friend-update" -> {
@@ -852,7 +844,15 @@ class VrchatPipelineService : Service() {
                     )
                 }
 
-                "user-location", "see-notification", "hide-notification",
+                "user-location" -> {
+                    // The current user's OWN world-hop. No notification, but patch our
+                    // own presence reactively from the payload so the Discord RPC and
+                    // the admin view follow the user into the new world immediately
+                    // (the REST poll is unreliable when backgrounded on mobile).
+                    applySelfLocationEvent(content)
+                }
+
+                "see-notification", "hide-notification",
                 "clear-notification", "response-notification", "content-refresh" -> {
                     // Known pipeline events that don't need user notifications.
                 }
@@ -1919,22 +1919,33 @@ class VrchatPipelineService : Service() {
                                 // title-only announcement was previously skipped.
                                 if (postCreatedAt.isNotBlank() && postCreatedAt != postLastSeen &&
                                     (postText.isNotBlank() || rawPostTitle.isNotBlank())) {
-                                    fireEventNotification(
-                                        id = "gp_${postId}".hashCode(),
-                                        title = "Announcement from $groupName",
-                                        text = "${postTitle}: ${postText.ifBlank { rawPostTitle }.take(120)}",
-                                        profileUrl = "https://vrchat.com/home/group/$groupId/posts",
-                                        prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
-                                        channelId = NOTIF_CHANNEL_GROUPS,
-                                        groupKey = GROUP_KEY_GROUPS,
-                                        dedupId = "gp_${postId}_$postCreatedAt",
-                                        alertGroupKey = "announcement_$groupId",
-                                        alertBody = postText.ifBlank { rawPostTitle.ifBlank { null } },
-                                        alertEventTitle = rawPostTitle.ifBlank { null },
-                                        eventTimestampMs = postCreatedMs.takeIf { it > 0 }
-                                    )
-                                    updatedMap.put(postSeenKey, postCreatedAt)
-                                    addContentFingerprintToSeen(groupId, rawPostTitle, postText)
+                                    // Cross-path dedup: the live notification-v2
+                                    // handler fires this announcement the instant
+                                    // the group posts and records its content
+                                    // fingerprint. If we see that fingerprint here,
+                                    // the live path already fired it — just record
+                                    // the seen timestamp and skip so the 5-min poll
+                                    // doesn't fire a duplicate a few minutes later.
+                                    if (isContentFingerprintSeen(groupId, rawPostTitle, postText)) {
+                                        updatedMap.put(postSeenKey, postCreatedAt)
+                                    } else {
+                                        fireEventNotification(
+                                            id = "gp_${postId}".hashCode(),
+                                            title = "Announcement from $groupName",
+                                            text = "${postTitle}: ${postText.ifBlank { rawPostTitle }.take(120)}",
+                                            profileUrl = "https://vrchat.com/home/group/$groupId/posts",
+                                            prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_ANNOUNCEMENT,
+                                            channelId = NOTIF_CHANNEL_GROUPS,
+                                            groupKey = GROUP_KEY_GROUPS,
+                                            dedupId = "gp_${postId}_$postCreatedAt",
+                                            alertGroupKey = "announcement_$groupId",
+                                            alertBody = postText.ifBlank { rawPostTitle.ifBlank { null } },
+                                            alertEventTitle = rawPostTitle.ifBlank { null },
+                                            eventTimestampMs = postCreatedMs.takeIf { it > 0 }
+                                        )
+                                        updatedMap.put(postSeenKey, postCreatedAt)
+                                        addContentFingerprintToSeen(groupId, rawPostTitle, postText)
+                                    }
                                 }
                             }
                         }
@@ -2137,6 +2148,109 @@ class VrchatPipelineService : Service() {
     // Firestore presence sync
     // ------------------------------------------------------------------
 
+    /**
+     * Reactively patch the CURRENT USER's own presence from a WebSocket pipeline
+     * payload (`user-location` / self `friend-location`), WITHOUT a REST call.
+     *
+     * Why this exists: the user's own world-hop (`user-location`) used to be a no-op,
+     * and self presence was refreshed ONLY by the periodic `fetchPresence()` REST
+     * poll. On mobile the auth cookie is frequently IP-invalidated, so that poll
+     * returns null and `VrchatPipelineState.presence` freezes — yet the Discord RPC
+     * keeps pushing (its online timer is independent), so the RPC shows a stale world
+     * while the user is actually somewhere else. The event payload already carries the
+     * new location/world, so we patch presence straight from it: the RPC's
+     * `presenceFlow.collectLatest` fires immediately and reflects the real state even
+     * when REST is failing. When an admin is watching, the fresh fields are also
+     * pushed to Firestore so the admin directory updates instantly too.
+     */
+    private fun applySelfLocationEvent(content: JSONObject?) {
+        content ?: return
+        val location = content.optString("location", "")
+            .ifBlank { content.optString("instance", "") }
+        val user = content.optJSONObject("user")
+        val worldName = content.optJSONObject("world")?.optString("name").orEmpty()
+            .ifBlank { user?.optString("worldName").orEmpty() }
+            .ifBlank { user?.optJSONObject("world")?.optString("name").orEmpty() }
+        if (location.isBlank() && worldName.isBlank()) return
+
+        val prev = VrchatPipelineState.presence
+        val newState = when {
+            location.equals("offline", true) -> "offline"
+            location.isNotBlank() -> "online"
+            else -> prev?.state ?: "online"
+        }
+        val patched = if (prev != null) {
+            prev.copy(
+                location = if (location.isNotBlank()) location else prev.location,
+                worldName = if (worldName.isNotBlank()) worldName else prev.worldName,
+                state = newState,
+                isOnlineInVRChat = newState != "offline"
+            )
+        } else {
+            VrchatAuthManager.VrcUserPresence(
+                userId = VrchatAuthManager.getStoredUserId(this) ?: "",
+                displayName = VrchatAuthManager.getStoredDisplayName(this) ?: "",
+                state = newState,
+                status = "",
+                statusDescription = "",
+                location = location,
+                platform = "",
+                worldName = worldName,
+                instancePlayerCount = 0,
+                instanceCapacity = 0,
+                currentAvatarThumbnailUrl = "",
+                isOnlineInVRChat = newState != "offline"
+            )
+        }
+        VrchatPipelineState.presence = patched
+        pushSelfPresenceToFirestoreIfWatched()
+    }
+
+    /** Reactively patch own status/state from a self `user-update` payload. */
+    private fun applySelfUserUpdate(content: JSONObject?) {
+        content ?: return
+        val user = content.optJSONObject("user") ?: content
+        val prev = VrchatPipelineState.presence ?: return
+        val status = user.optString("status", prev.status).ifBlank { prev.status }
+        val statusDesc = user.optString("statusDescription", prev.statusDescription)
+        val state = user.optString("state", prev.state).ifBlank { prev.state }
+        VrchatPipelineState.presence = prev.copy(
+            status = status,
+            statusDescription = statusDesc,
+            state = state,
+            isOnlineInVRChat = state != "offline"
+        )
+        pushSelfPresenceToFirestoreIfWatched()
+    }
+
+    /**
+     * When an admin is watching, push the just-patched presence fields to Firestore
+     * directly (no REST round-trip) so the admin sees the new location/world/state
+     * instantly and resiliently — even if the next `fetchPresence()` REST poll fails.
+     */
+    private fun pushSelfPresenceToFirestoreIfWatched() {
+        if (deviceHash.isBlank() || !AdminWatchState.isWatched.value) return
+        val p = VrchatPipelineState.presence ?: return
+        val updates = mapOf(
+            "vrchatState" to p.state,
+            "vrchatStatus" to p.status,
+            "vrchatStatusDescription" to p.statusDescription,
+            "vrchatWorld" to p.worldName,
+            "vrchatLocation" to p.location,
+            "vrchatIsOnline" to p.isOnlineInVRChat,
+            "vrchatLastSyncAt" to FieldValue.serverTimestamp(),
+            "lastActiveAt" to FieldValue.serverTimestamp(),
+            "lastSeenAt" to FieldValue.serverTimestamp()
+        )
+        try {
+            FirebaseFirestore.getInstance()
+                .collection("users").document(deviceHash)
+                .set(updates, SetOptions.merge())
+        } catch (e: Exception) {
+            Log.w(TAG, "pushSelfPresence failed", e)
+        }
+    }
+
     private suspend fun syncPresenceToFirestore(forceLocalUpdate: Boolean = false) {
         if (!forceLocalUpdate && deviceHash.isBlank()) return
         if (!forceLocalUpdate && !AdminWatchState.isWatched.value) return
@@ -2163,6 +2277,10 @@ class VrchatPipelineService : Service() {
             "vrchatIsOnline" to presence.isOnlineInVRChat,
             "vrchatAuthCookieValid" to true,
             "vrchatLastSyncAt" to FieldValue.serverTimestamp(),
+            // While watched, the 10s loop also keeps the liveness fields fresh
+            // so a watched user's online/offline is real-time (~25s), not
+            // hour-stale. lastActiveAt is canonical; lastSeenAt mirrors it.
+            "lastActiveAt" to FieldValue.serverTimestamp(),
             "lastSeenAt" to FieldValue.serverTimestamp()
         )
 
@@ -2213,11 +2331,22 @@ class VrchatPipelineService : Service() {
             delay(6 * 60 * 60 * 1000L)
             while (true) {
                 try {
-                    if (VrchatAuthManager.shouldRefreshCookies(this@VrchatPipelineService)) {
-                        Log.i(TAG, "Auth cookies stale (>12 days) — proactively refreshing")
-                        VrchatAuthManager.diagnoseAuthState(this@VrchatPipelineService)
-                        val refreshed = VrchatAuthManager.autoRelogin(this@VrchatPipelineService)
-                        Log.i(TAG, "Proactive auth refresh result: $refreshed")
+                    // The 12-day age threshold rarely fires before the auth cookie
+                    // actually dies (VRChat expires it far sooner, and any IP change
+                    // invalidates it immediately). So also actively validate the
+                    // session each cycle and re-login when it's dead, regardless of
+                    // cookie age — this is what keeps the session alive 24/7 without
+                    // a fresh 2FA prompt. autoRelogin sends only the trusted-device
+                    // 2FA cookie, so VRChat skips the 2FA challenge.
+                    if (VrchatAuthManager.isLoggedIn(this@VrchatPipelineService)) {
+                        val stale = VrchatAuthManager.shouldRefreshCookies(this@VrchatPipelineService)
+                        val valid = VrchatAuthManager.validateSession(this@VrchatPipelineService)
+                        if (stale || !valid) {
+                            Log.i(TAG, "Auth refresh (stale=$stale, valid=$valid) — re-logging in")
+                            VrchatAuthManager.diagnoseAuthState(this@VrchatPipelineService)
+                            val refreshed = VrchatAuthManager.autoRelogin(this@VrchatPipelineService)
+                            Log.i(TAG, "Proactive auth refresh result: $refreshed")
+                        }
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "Auth refresh check failed", e)
@@ -2351,7 +2480,19 @@ class VrchatPipelineService : Service() {
     }
 
     private fun announcementContentFingerprint(groupId: String, title: String, text: String): String {
-        return "ann_fp_${groupId}_${title.trim().hashCode()}_${text.trim().take(80).hashCode()}"
+        // Identity is the post BODY (falling back to the title when the body is
+        // blank), normalized so the SAME announcement produces the SAME key no
+        // matter which path saw it: the live notification-v2 `message` field or
+        // the REST group-post `text` field. The two sources also title a post
+        // differently, so the title is intentionally excluded from the key —
+        // including it broke cross-path dedup and double-fired announcements
+        // (once live the instant the group posted, once on the 5-min poll).
+        val body = text.ifBlank { title }
+            .trim()
+            .lowercase()
+            .replace(Regex("\\s+"), " ")
+            .take(120)
+        return "ann_fp_${groupId}_${body.hashCode()}"
     }
 
     private fun addContentFingerprintToSeen(groupId: String, title: String, text: String) {
@@ -2397,16 +2538,20 @@ class VrchatPipelineService : Service() {
         if (eventId.isBlank()) return false
         val eventTitle = event.optString("title", "").ifBlank { event.optString("name", "") }
         val eventDesc = event.optString("description", "").ifBlank { event.optString("text", "") }
-        // Prefer the scheduled start time; fall back to creation time.
-        val startsAt = event.optString("startsAt", "").ifBlank {
-            event.optString("createdAt", "")
-        }
-        val startsMs = parseVrcTimestampMs(startsAt)
+        val startsAt = event.optString("startsAt", "")
+        val createdAt = event.optString("createdAt", "")
+        // DISPLAY timestamp = when the event was POSTED (createdAt), NOT its
+        // scheduled start. startsAt is normally in the FUTURE, so feeding it to
+        // formatRelativeTime produced a negative delta that clamped to a
+        // permanent "just now" that never advanced. Fall back to startsAt only
+        // when createdAt is missing.
+        val postedMs = parseVrcTimestampMs(createdAt).takeIf { it > 0 }
+            ?: parseVrcTimestampMs(startsAt)
         val seenKey = "${groupId}_event_$eventId"
         val lastSeen = seenMap.optString(seenKey, "")
-        // Use the event id alone as the change marker so an unchanged event
-        // doesn't re-fire, but an edited startsAt does.
-        val marker = startsAt.ifBlank { eventId }
+        // Change marker still tracks startsAt (then createdAt) so an unchanged
+        // event doesn't re-fire, but an edited start time does.
+        val marker = startsAt.ifBlank { createdAt }.ifBlank { eventId }
         if (marker == lastSeen) return false
         // Cross-path dedup keyed on the event id (not content) so a sibling
         // event with the same title doesn't get suppressed.
@@ -2424,7 +2569,7 @@ class VrchatPipelineService : Service() {
             alertGroupKey = "event_$groupId",
             alertBody = eventDesc.ifBlank { eventTitle }.ifBlank { null },
             alertEventTitle = eventTitle.ifBlank { null },
-            eventTimestampMs = startsMs.takeIf { it > 0 }
+            eventTimestampMs = postedMs.takeIf { it > 0 }
         )
         updatedMap.put(seenKey, marker)
         addEventFingerprintToSeen(groupId, eventId)

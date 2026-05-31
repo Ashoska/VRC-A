@@ -57,6 +57,10 @@ class NowPlayingListenerService : NotificationListenerService() {
         return SystemClock.elapsedRealtime() < until
     }
 
+    private fun clearSpecialWindow(pkg: String) {
+        specialUntilElapsedByPackage.remove(pkg)
+    }
+
     override fun onListenerConnected() {
         super.onListenerConnected()
         NowPlayingState.setConnected(true)
@@ -186,17 +190,29 @@ class NowPlayingListenerService : NotificationListenerService() {
      * No stall-based heuristics — those caused false positives on song skips.
      */
     private fun classifySpecial(pkg: String, title: String, artist: String): SpecialKind? {
-        if (pkg != "com.spotify.music") return null
-
         val t = title.trim().lowercase()
         val a = artist.trim().lowercase()
 
+        // Player-agnostic ad detection. The now-playing UI for an ad surfaces the
+        // ADVERTISER in the title/artist — e.g. "Advertisement • 1 of 1 — IONOS UK"
+        // (Spotify now puts the brand in the artist field). Showing that would leak
+        // brand/targeting info, so ANY title or artist beginning with "advertisement"
+        // is treated as an ad regardless of player or which field the brand lands in.
+        // A normal song's now-playing line doesn't start with that word, so false
+        // positives are very unlikely.
+        if (t.startsWith("advertisement") || a.startsWith("advertisement")) return SpecialKind.AD
+
+        // Beyond that universal case, only Spotify gets the looser keyword matching —
+        // other players legitimately use these words in real song titles.
+        if (pkg != "com.spotify.music") return null
+
         val looksLikeAd =
-            t == "advertisement" ||
-                t == "ad" ||
+            t == "ad" ||
                 t == "spotify" ||
                 t == "spotify ad" ||
-                (t.startsWith("advert") && (a.isBlank() || a == "spotify"))
+                // No longer gated on the artist field: Spotify puts the advertiser
+                // brand there during ads, which previously let the ad leak through.
+                t.startsWith("advert")
 
         val looksLikeDj =
             (t == "dj" && (a.isBlank() || a == "spotify")) ||
@@ -243,17 +259,33 @@ class NowPlayingListenerService : NotificationListenerService() {
 
         // Spotify ad/DJ: only trigger on explicit metadata match
         val special = classifySpecial(pkg, title, artist)
+        var adInfo = ""
         if (special != null) {
             when (special) {
                 SpecialKind.DJ -> { title = "DJ"; artist = "" }
-                SpecialKind.AD -> { title = "AD"; artist = "" }
+                SpecialKind.AD -> {
+                    // Parse the player's own ad index (e.g. "1 of 1", "2 of 3")
+                    // from the ORIGINAL metadata BEFORE we blank it, so the chatbox
+                    // can show "Ad 1 of 1" instead of leaking the advertiser brand.
+                    adInfo = parseAdIndex("$title $artist")
+                    title = "AD"; artist = ""
+                }
             }
             markSpecialWindow(pkg, 10_000L)
             if (controller != null) startPollForRealTrack(pkg, controller)
-        } else if (isSpecialWindowActive(pkg) && pkg == "com.spotify.music") {
-            // Still in a special window from a previous ad/DJ — keep polling
-            // to catch the real track as soon as it starts
-            if (controller != null) startPollForRealTrack(pkg, controller)
+        } else if (isSpecialWindowActive(pkg)) {
+            // The ad/DJ segment just ended. As soon as a real track with genuine
+            // metadata appears, end the special window IMMEDIATELY — otherwise the
+            // downstream builder keeps showing "Ad N" (and hides the progress bar)
+            // for the remainder of the 10s window even though a normal song is now
+            // playing. While the metadata is still blank (mid-transition), keep the
+            // window + polling so the chatbox doesn't flicker to empty/"Paused".
+            if (title.isNotBlank() || artist.isNotBlank()) {
+                clearSpecialWindow(pkg)
+                stopPoll(pkg)
+            } else if (pkg == "com.spotify.music" && controller != null) {
+                startPollForRealTrack(pkg, controller)
+            }
         } else {
             // Normal track — stop polling if we were
             stopPoll(pkg)
@@ -273,9 +305,18 @@ class NowPlayingListenerService : NotificationListenerService() {
                 positionUpdateTimeMs = snapshotUpdateTime,
                 playbackSpeed = speed,
                 isPlaying = isPlaying,
-                specialActive = isSpecialWindowActive(pkg)
+                specialActive = isSpecialWindowActive(pkg),
+                adInfo = adInfo
             )
         )
+    }
+
+    private val adIndexRegex = Regex("""(\d+)\s*of\s*(\d+)""", RegexOption.IGNORE_CASE)
+
+    /** Extracts a "X of Y" ad index from the raw ad metadata, or "" if none. */
+    private fun parseAdIndex(raw: String): String {
+        val m = adIndexRegex.find(raw) ?: return ""
+        return "${m.groupValues[1]} of ${m.groupValues[2]}"
     }
 
     private fun startPollForRealTrack(pkg: String, controller: MediaController) {

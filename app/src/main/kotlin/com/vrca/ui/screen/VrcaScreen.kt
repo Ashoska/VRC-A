@@ -76,6 +76,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -85,6 +86,7 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.Query
 import com.vrca.BuildConfig
+import com.vrca.R
 import com.vrca.admin.AdminScreen
 import com.vrca.vrchat.VrchatAuthManager
 import com.vrca.vrchat.VrchatPipelineState
@@ -330,16 +332,13 @@ fun VrcaScreen(
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // Apply persisted music UI settings once
+    // Restore demo + preset (idempotent). NOTE: we intentionally do NOT reset the
+    // Spotify/Time toggles here anymore. The runtime ViewModel is now scoped to the
+    // process (Application ViewModelStore), so this composable re-enters on every
+    // Activity recreation; resetting toggles here would wrongly kill a chatbox the
+    // user left running when they backgrounded the app. Toggles already start OFF on
+    // a fresh process (VM defaults) and must survive Activity recreation.
     LaunchedEffect(Unit) {
-        // Do NOT persist Now Playing toggle across app restarts.
-        UiPrefs.writeSpotifyEnabled(ctx, false)
-        chatboxViewModel.setSpotifyEnabledFlag(false)
-
-        // Time toggle also resets on restart (timezone persists, toggle does not).
-        chatboxViewModel.updateTimeEnabled(false)
-
-        // Keep demo + preset restore.
         chatboxViewModel.setSpotifyDemoFlag(UiPrefs.readSpotifyDemo(ctx))
         chatboxViewModel.updateSpotifyPreset(UiPrefs.readSpotifyPreset(ctx))
     }
@@ -360,6 +359,19 @@ fun VrcaScreen(
     }
     val showSetupBanner = ipSet.value != null && (!vrcLinked || ipSet.value == false)
 
+    // Discord community invite (public build): the admin sets the link in
+    // config/app.discordInvite; we surface a Discord button in the top bar that
+    // opens it. Empty/blank link → button hidden.
+    val discordInvite = remember { mutableStateOf("") }
+    if (!BuildConfig.IS_ADMIN_BUILD) {
+        LaunchedEffect(Unit) {
+            runCatching {
+                val snap = db.collection("config").document("app").get().await()
+                discordInvite.value = (snap.getString("discordInvite") ?: "").trim()
+            }
+        }
+    }
+
     Scaffold(
             topBar = {
                 CenterAlignedTopAppBar(
@@ -368,6 +380,20 @@ fun VrcaScreen(
                         if (BuildConfig.IS_ADMIN_BUILD) {
                             IconButton(onClick = { page = AppPage.Admin }) {
                                 Icon(Icons.Filled.Gavel, contentDescription = "Admin")
+                            }
+                        } else if (discordInvite.value.isNotBlank()) {
+                            IconButton(onClick = {
+                                runCatching {
+                                    ctx.startActivity(
+                                        Intent(Intent.ACTION_VIEW, Uri.parse(discordInvite.value))
+                                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    )
+                                }
+                            }) {
+                                Icon(
+                                    painter = painterResource(id = R.drawable.ic_discord),
+                                    contentDescription = "Join our Discord"
+                                )
                             }
                         }
                     },

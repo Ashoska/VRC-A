@@ -54,7 +54,6 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -283,16 +282,16 @@ fun AdminScreen() {
     var idsExpanded by rememberSaveable { mutableStateOf(false) }
 
     // ── Shared user list (drives both Dashboard stats and Users directory) ──
-    // Uses a Firestore snapshot listener filtered to online users only.
-    // Polling 500 docs every 30s = 1000 reads/min flat regardless of changes.
-    // Snapshot listener: pays N reads on initial attach, then only delta reads
-    // when docs change. Filtering to isOnlineInApp=true further cuts the
-    // initial fetch (typically <50 online vs hundreds total). The listener
-    // also pushes changes in real-time so the dashboard online counter
-    // updates without requiring a tab switch.
+    // Phase 3 read model: the directory is a ONE-SHOT server fetch, NOT a live
+    // snapshot listener. A collection listener re-reads on every user-doc change
+    // across the whole base — the dominant admin-side Firestore cost. Instead we
+    // fetch once on tab entry (and on manual refresh / page-size bump via
+    // `refreshTick`) and let the admin pull-to-refresh for fresh data. Aggregate
+    // stats (below) and the selected-user 10s detail poll cover the live needs.
     var sharedUsers by remember { mutableStateOf<List<UserRow>>(emptyList()) }
     var sharedLiveLimit by rememberSaveable { mutableIntStateOf(500) }
     var sharedUsersLoading by remember { mutableStateOf(true) }
+    var refreshTick by remember { mutableIntStateOf(0) }
     val needsUsers = tabIndex == 0 || tabIndex == 1
 
     // Stats from count() aggregations — much cheaper than reading all docs.
@@ -300,29 +299,28 @@ fun AdminScreen() {
     var warnedUsersCount by remember { mutableIntStateOf(0) }
     var bannedUsersCount by remember { mutableIntStateOf(0) }
 
-    DisposableEffect(needsUsers, sharedLiveLimit) {
-        if (!needsUsers) {
-            return@DisposableEffect onDispose { }
-        }
+    LaunchedEffect(needsUsers, sharedLiveLimit, refreshTick) {
+        if (!needsUsers) return@LaunchedEffect
         sharedUsersLoading = true
-        val reg = db.collection("users")
-            .limit(sharedLiveLimit.toLong())
-            .addSnapshotListener { snap, err ->
-                if (err != null) {
-                    Log.e("AdminScreen", "Users snapshot listener failed", err)
-                    setErr(err.message ?: "Users load failed")
-                    sharedUsersLoading = false
-                    return@addSnapshotListener
+        try {
+            val snap = db.collection("users")
+                .limit(sharedLiveLimit.toLong())
+                .get(Source.SERVER)
+                .await()
+            sharedUsers = snap.documents
+                .filter { it.id != deviceHash }
+                .map { parseUserRow(it) }
+                .sortedByDescending {
+                    (it.lastActiveAt ?: it.lastSeenAt)?.toDate()?.time ?: 0L
                 }
-                if (snap != null) {
-                    sharedUsers = snap.documents
-                        .filter { it.id != deviceHash }
-                        .map { parseUserRow(it) }
-                        .sortedByDescending { it.lastSeenAt?.toDate()?.time ?: 0L }
-                    sharedUsersLoading = false
-                }
-            }
-        onDispose { reg.remove() }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Log.e("AdminScreen", "Users fetch failed", e)
+            setErr(e.message ?: "Users load failed")
+        } finally {
+            sharedUsersLoading = false
+        }
     }
 
     // Aggregate stats: refresh every 60s while admin is on Dashboard/Users.
@@ -358,45 +356,23 @@ fun AdminScreen() {
         }
     }
 
-    // Admin browsing heartbeat: while on Dashboard or Users tab, write
-    // config/adminPresence.browsingAt every 30s so user apps start their
-    // own lastSeenAt heartbeats. After a 90s grace period, sweep for users
-    // whose isOnlineInApp=true but lastSeenAt is stale — these are
-    // force-killed apps that never wrote their offline state. Force them
-    // offline so the directory stays accurate.
-    LaunchedEffect(needsUsers) {
-        if (!needsUsers) return@LaunchedEffect
-        val browsingStartedAt = System.currentTimeMillis()
-        while (true) {
-            try {
-                db.collection("config")
-                    .document("adminPresence")
-                    .set(
-                        mapOf("browsingAt" to FieldValue.serverTimestamp()),
-                        com.google.firebase.firestore.SetOptions.merge()
-                    )
-            } catch (_: Throwable) {}
-
-            val elapsed = System.currentTimeMillis() - browsingStartedAt
-            if (elapsed > 90_000L) {
-                val now = System.currentTimeMillis()
-                for (u in sharedUsers) {
-                    if (!u.isOnlineInApp) continue
-                    val seenMs = u.lastSeenAt?.toDate()?.time ?: 0L
-                    if (now - seenMs > ONLINE_STALENESS_WINDOW_MS) {
-                        try {
-                            db.collection("users").document(u.docId)
-                                .set(
-                                    mapOf("isOnlineInApp" to false),
-                                    com.google.firebase.firestore.SetOptions.merge()
-                                )
-                        } catch (_: Throwable) {}
-                    }
-                }
+    // Admin browsing heartbeat + force-kill staleness sweep now live in AdminRuntime
+    // (app/process lifetime) so they keep running when the admin app is backgrounded
+    // and its Activity is destroyed — "works as if on screen". The Compose layer only
+    // registers intent (which tab is active) and pushes the latest user list for the
+    // sweep. AdminRuntime is started once below.
+    LaunchedEffect(Unit) { AdminRuntime.start(deviceHash) }
+    LaunchedEffect(needsUsers) { AdminRuntime.setBrowsing(needsUsers) }
+    LaunchedEffect(sharedUsers) {
+        AdminRuntime.updateSweepData(
+            sharedUsers.map {
+                AdminRuntime.SweepUser(
+                    docId = it.docId,
+                    isOnlineInApp = it.isOnlineInApp,
+                    lastActiveMs = (it.lastActiveAt ?: it.lastSeenAt)?.toDate()?.time ?: 0L
+                )
             }
-
-            delay(30_000L)
-        }
+        )
     }
 
     Surface {
@@ -504,7 +480,8 @@ fun AdminScreen() {
                         warnedUsersCount = warnedUsersCount,
                         bannedUsersCount = bannedUsersCount,
                         onRefresh = {
-                            // Snapshot listener auto-refreshes; refresh only re-triggers stats
+                            // One-shot model: re-fetch the directory AND re-run stats.
+                            refreshTick++
                             scope.launch {
                                 try {
                                     val totalSnap = db.collection("users")
@@ -527,10 +504,12 @@ fun AdminScreen() {
                         db = db,
                         myDeviceHash = deviceHash,
                         users = sharedUsers,
+                        usersLoading = sharedUsersLoading,
                         liveLimit = sharedLiveLimit,
                         onIncreaseLiveLimit = {
                             sharedLiveLimit = (sharedLiveLimit + 500).coerceAtMost(10000)
                         },
+                        onRefresh = { refreshTick++ },
                         setGlobalLoading = { globalLoading = it },
                         setError = ::setErr,
                         onSendToModeration = { target ->

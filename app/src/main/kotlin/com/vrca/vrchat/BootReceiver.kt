@@ -4,9 +4,11 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import androidx.core.content.ContextCompat
+import com.vrca.keepalive.KeepAliveService
+import com.vrca.keepalive.PipelineWatchdogWorker
 /**
- * Restarts VrchatPipelineService after device reboot so notifications
- * keep working even if the user never reopens the app.
+ * Restarts the foreground services after device reboot so notifications and the
+ * chatbox keep working even if the user never reopens the app.
  */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -14,6 +16,16 @@ class BootReceiver : BroadcastReceiver() {
             intent.action != "android.intent.action.QUICKBOOT_POWERON") return
 
         if (!VrchatAuthManager.isLoggedIn(context)) return
+
+        // A reboot is a fresh start for an always-on companion app — clear any
+        // lingering swipe-dismissal flag so the services below are allowed to run.
+        runCatching { com.vrca.app.AppShutdown.clearSwipedAway(context) }
+
+        // Always-on keep-alive (holds the wakelock) — previously NOT restarted on boot.
+        runCatching { KeepAliveService.start(context) }
+
+        // Re-arm the periodic watchdog after reboot.
+        runCatching { PipelineWatchdogWorker.ensureScheduled(context) }
 
         val deviceHash = context
             .getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)

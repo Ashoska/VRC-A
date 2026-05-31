@@ -3,9 +3,15 @@ package com.vrca.app
 import android.app.Application
 import android.content.Context
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.Process
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.ViewModelStoreOwner
 import com.vrca.BuildConfig
 import com.vrca.data.UserPreferencesRepository
+import com.vrca.ui.viewmodel.VrcaViewModel
 import java.io.PrintWriter
 import java.io.StringWriter
 import java.text.SimpleDateFormat
@@ -13,12 +19,28 @@ import java.util.Date
 import java.util.Locale
 import kotlin.system.exitProcess
 
-class VrcaApplication : Application() {
+/**
+ * Application is also a [ViewModelStoreOwner] so the core runtime ViewModel
+ * ([com.vrca.ui.viewmodel.VrcaViewModel]) can be scoped to the PROCESS, not the
+ * Activity. This keeps the chatbox senders, moderation/kill listener, NowPlaying
+ * consumer and Firestore sync loops alive while the app is backgrounded and the
+ * Activity is destroyed — they are torn down only by [AppShutdown] on a real swipe.
+ */
+class VrcaApplication : Application(), ViewModelStoreOwner {
 
     companion object {
         const val CRASH_PREFS_FILE = "vrca_crash"
         const val CRASH_KEY_TEXT = "last_crash_text"
+
+        // Process-wide handle so the runtime ViewModel factory can resolve the
+        // Application without relying on CreationExtras[APPLICATION_KEY], which is
+        // absent when the VM is obtained against the app-scoped ViewModelStore.
+        lateinit var instance: VrcaApplication
+            private set
     }
+
+    // Process-lifetime ViewModelStore. Cleared only by AppShutdown on swipe.
+    override val viewModelStore: ViewModelStore = ViewModelStore()
 
     lateinit var userPreferencesRepository: UserPreferencesRepository
         private set
@@ -29,8 +51,34 @@ class VrcaApplication : Application() {
 
         super.onCreate()
 
+        instance = this
+
         // Your repo expects Context
         userPreferencesRepository = UserPreferencesRepository(applicationContext)
+    }
+
+    /**
+     * Instantiate the process-scoped runtime [VrcaViewModel] without any UI.
+     *
+     * After an OS-initiated process kill, a service (KeepAliveService) is brought
+     * back by START_STICKY / the watchdog / boot — but the chatbox senders live in
+     * this ViewModel, which is otherwise only created when the Activity opens. Calling
+     * this from the service recreates the VM headlessly; its init loads content and
+     * (if feature-session restore is armed) re-enables the toggles and starts the OSC
+     * senders, so the chatbox resumes on its own with no tab-in required.
+     *
+     * Idempotent: ViewModelProvider returns the existing instance if one already
+     * exists (e.g. the Activity later opens). Must run on the main thread.
+     */
+    fun ensureRuntimeViewModel() {
+        val create = Runnable {
+            try {
+                ViewModelProvider(this, VrcaViewModel.Factory)[VrcaViewModel::class.java]
+            } catch (_: Throwable) {
+            }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) create.run()
+        else Handler(Looper.getMainLooper()).post(create)
     }
 
     private fun installCrashHandler() {

@@ -12,6 +12,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.util.Log
+import android.view.View
 import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
@@ -79,6 +80,15 @@ class DiscordRpcService : Service() {
         private const val SHIM_RETRY_BASE_DELAY_MS = 3000L
         private const val PUSH_MIN_INTERVAL_MS = 1500L
         private const val PUSH_TIMER_INTERVAL_MS = 10_000L
+        // If VRChat presence drops (crash, world-hop hiccup) or the whole app process
+        // dies (reboot, OEM kill) and the user is back online within this window, the
+        // Discord "elapsed" counter resumes from its original start instead of resetting.
+        // 20 min (NOT 15) so it spans the WorkManager watchdog's ~15-min recovery gap:
+        // an OEM kill is recovered by PipelineWatchdogWorker on its next cycle, and the
+        // counter must still be inside the grace window when that happens so the timer
+        // resumes instead of resetting. Applies to BOTH the in-VRChat and the
+        // not-in-VRChat counters (shared via resolveElapsedStart).
+        private const val ONLINE_GRACE_MS = 20L * 60 * 1000
         private const val SESSION_CHECK_INTERVAL_MS = 30_000L
         private const val MAX_CONSECUTIVE_PUSH_FAILURES = 5
 
@@ -100,8 +110,40 @@ class DiscordRpcService : Service() {
     private var lastShimResult = ""
 
     private var onlineStartEpochMs = 0L
+    private var offlineStartEpochMs = 0L
     private val rpcPrefs by lazy {
         applicationContext.getSharedPreferences("discord_rpc_state", Context.MODE_PRIVATE)
+    }
+
+    /**
+     * Resolves the elapsed-counter start for a given state (in-VRChat or
+     * not-in-VRChat) from persisted prefs, applying the [ONLINE_GRACE_MS]
+     * grace window so the counter survives an in-process state blip AND a full
+     * process death/reboot identically. [startKey] is the canonical start sent
+     * as timestamps.start; [lastSeenKey] is refreshed every tick this state is
+     * active and freezes the instant we stop ticking, so (now - lastSeen) is the
+     * real away-time regardless of WHY we stopped. Within the grace window the
+     * original start is kept (counter carries on); beyond it a fresh start is
+     * recorded. Both use commit() so they survive a force-kill / SIGKILL that
+     * lands moments later — an async apply() can be lost, which reads back as 0
+     * and resets the counter on the next launch.
+     */
+    private fun resolveElapsedStart(startKey: String, lastSeenKey: String, nowMs: Long): Long {
+        val savedStart = rpcPrefs.getLong(startKey, 0L)
+        val lastSeen = rpcPrefs.getLong(lastSeenKey, 0L)
+        // If lastSeen was lost (apply() not flushed before a kill), fall back to
+        // savedStart — this state was definitely active at that time.
+        val effectiveLastSeen = if (lastSeen > 0L) lastSeen
+                                else if (savedStart > 0L) savedStart
+                                else 0L
+        val carriesOn = savedStart > 0L && effectiveLastSeen > 0L &&
+            (nowMs - effectiveLastSeen) <= ONLINE_GRACE_MS
+        val start = if (carriesOn) savedStart else {
+            rpcPrefs.edit().putLong(startKey, nowMs).commit()
+            nowMs
+        }
+        rpcPrefs.edit().putLong(lastSeenKey, nowMs).commit()
+        return start
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -115,10 +157,13 @@ class DiscordRpcService : Service() {
                 return START_NOT_STICKY
             }
         }
-        // A null intent is a START_STICKY restart. If the user just swiped the app
-        // away, honour the deliberate kill so this WebView-backed service doesn't
-        // resurrect itself and keep the app alive.
-        if (intent == null && com.vrca.app.AppShutdown.isManualKillFresh(this)) {
+        // A null intent is a START_STICKY restart. If the user swiped the app away,
+        // honour the deliberate kill so this WebView-backed service doesn't resurrect
+        // itself and keep the app alive. Check both the 15s window and the persistent
+        // swipe flag (a late restart after the window expired).
+        if (intent == null &&
+            (com.vrca.app.AppShutdown.isManualKillFresh(this) ||
+                com.vrca.app.AppShutdown.isSwipedAway(this))) {
             teardown()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
@@ -132,19 +177,24 @@ class DiscordRpcService : Service() {
             return START_NOT_STICKY
         }
         ensureChannel()
-        startForeground(NOTIF_ID, buildNotif("Discord RPC starting..."))
 
         if (isRunning && webView != null) {
+            // Duplicate START while already running (app reopened after Back, or a
+            // sticky restart). startForeground must still be called, but post the
+            // CURRENT "active" text — not "starting..." — so the shared persistent
+            // notification (NOTIF_ID 1001) isn't reset to a stale startup state.
+            startForeground(NOTIF_ID, buildNotif("Discord RPC active"))
             return START_STICKY
         }
+        startForeground(NOTIF_ID, buildNotif("Discord RPC starting..."))
 
         sessionRecoveryCount = 0
-        // Start from 0 so buildActivityJson() runs the grace-window check
-        // against offline_at. Preloading the persisted epoch directly here
-        // bypassed that check (the grace block only runs when the in-memory
-        // value is 0), which let a day-old start epoch ship to Discord as a
-        // bogus "25 hours online" timer after a normal cold start.
+        // Start from 0; buildActivityJson() re-resolves the start from persisted
+        // prefs on the first tick of each state, applying the grace window. Preloading
+        // the persisted epoch directly here would ship a stale (e.g. day-old) start to
+        // Discord as a bogus timer before the grace check ran.
         onlineStartEpochMs = 0L
+        offlineStartEpochMs = 0L
         DiscordRpcState.status = DiscordRpcStatus.CONNECTING
         DiscordRpcState.failureMessage = null
 
@@ -195,7 +245,19 @@ class DiscordRpcService : Service() {
             shimRetryCount = 0
             consecutivePushFailures = 0
 
-            val wv = WebView(applicationContext).apply {
+            val wv = object : WebView(applicationContext) {
+                // Chromium background-throttles (and eventually freezes) JS timers when
+                // it thinks the page is hidden, which kills Discord's gateway heartbeat
+                // ~45s after the screen turns off. A detached WebView is always "hidden".
+                // Instead of parking it in a 1x1 system overlay (which forces Android's
+                // "displaying over other apps" notification and looks sketchy), we simply
+                // lie to the engine: always report the window as VISIBLE so timers keep
+                // running at full rate. The foreground service + KeepAlive wakelock keep
+                // the process itself alive.
+                override fun onWindowVisibilityChanged(visibility: Int) {
+                    super.onWindowVisibilityChanged(View.VISIBLE)
+                }
+            }.apply {
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
                 settings.databaseEnabled = true
@@ -236,6 +298,12 @@ class DiscordRpcService : Service() {
                 loadUrl("https://discord.com/channels/@me")
             }
             webView = wv
+            // Keep JS timers running in the background (global to the process; never
+            // call pauseTimers) and seed the visibility signal as VISIBLE so Chromium
+            // doesn't background-throttle the Discord gateway heartbeat. No overlay
+            // window is used, so there's no "displaying over other apps" notification.
+            wv.resumeTimers()
+            wv.dispatchWindowVisibilityChanged(View.VISIBLE)
             isRunning = true
             updateNotif("Discord RPC connecting...")
         }
@@ -419,32 +487,32 @@ class DiscordRpcService : Service() {
         val isOnline = vrcPresence?.isOnlineInVRChat == true
 
         val nowMs = System.currentTimeMillis()
-        if (isOnline && onlineStartEpochMs == 0L) {
-            val saved = rpcPrefs.getLong("online_start_epoch", 0L)
-            // last_online_seen is refreshed on every confirmed-online tick, so
-            // it freezes the moment the app stops tracking (process death, swipe).
-            // Measuring the gap from it — not from offline_at, which only updates
-            // on explicit transitions the app may miss — means a long untracked
-            // gap correctly resets the counter instead of bridging into a bogus
-            // multi-hour timer.
-            val lastSeen = rpcPrefs.getLong("last_online_seen", 0L)
-            val withinGrace = saved > 0 && lastSeen > 0 &&
-                nowMs - lastSeen < 10L * 60 * 1000
-            if (withinGrace) {
-                onlineStartEpochMs = saved
-            } else {
-                onlineStartEpochMs = nowMs
-                rpcPrefs.edit().putLong("online_start_epoch", onlineStartEpochMs).apply()
-            }
-            rpcPrefs.edit().remove("offline_at").apply()
-        } else if (!isOnline && onlineStartEpochMs != 0L) {
-            rpcPrefs.edit().putLong("offline_at", nowMs).apply()
-            onlineStartEpochMs = 0L
-        }
-        // Heartbeat the last-online marker whenever we confirm online so the
-        // grace window above can tell how long the app was actually away.
+        // Two independent elapsed counters, each resolved from PERSISTED state on
+        // EVERY tick of its state (see resolveElapsedStart):
+        //   • in-VRChat   counter → online_start_epoch / last_online_seen
+        //   • not-in-VRChat counter → offline_start_epoch / offline_last_seen
+        // The two behave deliberately differently:
+        //   - The in-VRChat timer CARRIES ON across a brief VRChat-offline blip
+        //     (crash/world-hop) within the grace window — its prefs are never
+        //     cleared when offline, only superseded after the grace expires.
+        //   - The not-in-VRChat timer RESTARTS every time the user leaves VRChat,
+        //     so it never bleeds into / inflates the real in-VRChat time. We force
+        //     that by clearing its prefs while online; it still survives an app
+        //     death *while offline* because this branch isn't running then, so the
+        //     prefs persist and a reopen within the grace window resumes them.
         if (isOnline) {
-            rpcPrefs.edit().putLong("last_online_seen", nowMs).apply()
+            onlineStartEpochMs = resolveElapsedStart("online_start_epoch", "last_online_seen", nowMs)
+            if (rpcPrefs.getLong("offline_start_epoch", 0L) != 0L ||
+                rpcPrefs.getLong("offline_last_seen", 0L) != 0L) {
+                rpcPrefs.edit()
+                    .remove("offline_start_epoch")
+                    .remove("offline_last_seen")
+                    .commit()
+            }
+            offlineStartEpochMs = 0L
+        } else {
+            offlineStartEpochMs = resolveElapsedStart("offline_start_epoch", "offline_last_seen", nowMs)
+            onlineStartEpochMs = 0L
         }
 
         return JSONObject().apply {
@@ -502,6 +570,11 @@ class DiscordRpcService : Service() {
             } else {
                 put("details", "Not in VRChat")
                 put("state", "Using VRC-A")
+                if (offlineStartEpochMs > 0) {
+                    put("timestamps", JSONObject().apply {
+                        put("start", offlineStartEpochMs)
+                    })
+                }
                 put("assets", JSONObject().apply {
                     put("large_image", DEFAULT_VRCHAT_IMAGE_URL)
                     put("large_text", "VRChat")
@@ -516,12 +589,9 @@ class DiscordRpcService : Service() {
         sessionMonitorJob = null
         shimReady = false
         isRunning = false
-        // Save offline_at so the grace window works on restart.
-        // Without this, if the app is killed while online in VRChat,
-        // offline_at would be 0 on restart and the grace check would fail.
-        if (onlineStartEpochMs != 0L) {
-            rpcPrefs.edit().putLong("offline_at", System.currentTimeMillis()).apply()
-        }
+        // No bookkeeping needed here: online_start_epoch + last_online_seen are already
+        // persisted on every online tick, so the grace-window carry-on works on the next
+        // launch whether this teardown ran (swipe/stop) or the process was killed outright.
         DiscordRpcState.reset()
         mainHandler.post {
             webView?.let { wv ->

@@ -9,6 +9,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.Gavel
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -303,7 +309,7 @@ internal fun ModerationTab(
                 Modifier.padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text("Moderation", style = MaterialTheme.typography.titleMedium)
+                AdminCardHeader("Moderation", Icons.Filled.Gavel, AdminTone.Error)
                 Text(
                     "Lookup accepts docId OR authUid.",
                     style = MaterialTheme.typography.bodySmall,
@@ -355,25 +361,31 @@ internal fun ModerationTab(
                 Modifier.padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text("Target", style = MaterialTheme.typography.titleSmall)
-                Text("displayName=${t.displayName.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
-                Text("docId=${t.docId}", fontFamily = FontFamily.Monospace)
-                Text("authUid=${t.authUid.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
-                Text("deviceHash=${t.deviceHash.ifBlank { "(blank)" }}", fontFamily = FontFamily.Monospace)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AdminAvatar(name = t.displayName.ifBlank { t.docId }, online = false, size = 40)
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(t.displayName.ifBlank { "(no name)" },
+                            style = MaterialTheme.typography.titleSmall)
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            if (liveBanned) StatusPill("BANNED", AdminTone.Error)
+                            if (liveWarned) StatusPill("WARNED", AdminTone.Warn)
+                            if (deviceBanned) StatusPill("DEVICE BAN", AdminTone.Error)
+                            if (!liveBanned && !liveWarned && !deviceBanned)
+                                StatusPill("CLEAN", AdminTone.Success)
+                        }
+                    }
+                }
 
+                AdminLabeledRow("docId", t.docId, mono = true, labelWidth = 72)
+                AdminLabeledRow("authUid", t.authUid.ifBlank { "(blank)" }, mono = true, labelWidth = 72)
+                AdminLabeledRow("device", t.deviceHash.ifBlank { "(blank)" }, mono = true, labelWidth = 72)
+                if (deviceBanned && deviceBanReason.isNotBlank())
+                    AdminLabeledRow("dev. reason", deviceBanReason, labelWidth = 72)
 
                 OutlinedButton(
                     onClick = { scope.launch { loadTarget(t) } },
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("Reload (history + live)") }
-
-                Text(
-                    "warned=$liveWarned  banned=$liveBanned  deviceBanned=$deviceBanned",
-                    fontFamily = FontFamily.Monospace
-                )
-                if (deviceBanned && deviceBanReason.isNotBlank()) {
-                    Text("deviceBanReason=$deviceBanReason", fontFamily = FontFamily.Monospace)
-                }
             }
         }
 
@@ -383,7 +395,7 @@ internal fun ModerationTab(
                 Modifier.padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text("Warn", style = MaterialTheme.typography.titleSmall)
+                AdminCardHeader("Warn", Icons.Filled.Warning, AdminTone.Warn)
 
                 OutlinedTextField(
                     value = editWarnReason,
@@ -483,7 +495,7 @@ internal fun ModerationTab(
                 Modifier.padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text("Ban", style = MaterialTheme.typography.titleSmall)
+                AdminCardHeader("Ban", Icons.Filled.Block, AdminTone.Error)
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -645,13 +657,10 @@ internal fun ModerationTab(
                 Modifier.padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("History", style = MaterialTheme.typography.titleSmall)
-                    OutlinedButton(onClick = { scope.launch { loadHistoryNoIndex(t) } }) { Text("Reload") }
-                }
+                AdminCardHeader("History", Icons.Filled.History, AdminTone.Neutral,
+                    trailing = {
+                        OutlinedButton(onClick = { scope.launch { loadHistoryNoIndex(t) } }) { Text("Reload") }
+                    })
 
                 if (history.isEmpty()) {
                     Text("No history found.", style = MaterialTheme.typography.bodySmall)

@@ -40,13 +40,16 @@ object VrchatAuthManager {
     private const val KEY_2FA_COOKIE   = "twofa_cookie"
     private const val KEY_USER_ID      = "vrchat_user_id"
     private const val KEY_DISPLAY_NAME = "vrchat_display_name"
+    private const val KEY_PROFILE_PIC  = "vrchat_profile_pic"
     private const val KEY_COOKIE_STORED_AT = "cookie_stored_at_ms"
     private const val KEY_USERNAME = "vrchat_username"
     private const val KEY_PASSWORD = "vrchat_password"
 
     private const val COOKIE_REFRESH_MS = 12L * 24 * 60 * 60 * 1000
+    // Timestamp of when the trusted-device 2FA cookie was last (re)issued. Kept
+    // for diagnostics only — the cookie is ALWAYS sent regardless of age (VRChat
+    // is the authority on trusted-device validity; see getCookieHeader).
     private const val KEY_2FA_COOKIE_STORED_AT = "twofa_cookie_stored_at_ms"
-    private const val TWO_FA_COOKIE_MAX_AGE_MS = 30L * 24 * 60 * 60 * 1000
 
     sealed class AuthResult {
         data class Success(val userId: String, val displayName: String) : AuthResult()
@@ -112,44 +115,109 @@ object VrchatAuthManager {
     fun getStoredDisplayName(context: Context): String? =
         getPrefs(context)?.getString(KEY_DISPLAY_NAME, null)
 
+    /** The user's VRChat+ custom profile picture URL (blank without VRChat+). */
+    fun getStoredProfilePic(context: Context): String =
+        getPrefs(context)?.getString(KEY_PROFILE_PIC, "")?.trim().orEmpty()
+
+    /**
+     * Cheap one-shot refresh of the stored VRChat+ profile picture via /auth/user.
+     * Lets the admin directory show a logged-in user's pfp WITHOUT needing to
+     * actively watch them (the watched presence sync is otherwise the only writer).
+     * No-op if not logged in or the call fails.
+     */
+    suspend fun refreshProfilePic(context: Context): String = withContext(Dispatchers.IO) {
+        val cookieHeader = getCookieHeader(context) ?: return@withContext ""
+        try {
+            val (code, body, rawCookies) = get("$BASE/auth/user", null, cookieHeader)
+            if (code != 200) return@withContext ""
+            captureRolledCookies(context, rawCookies)
+            val json = JSONObject(body)
+            val pic = json.optString("profilePicOverride", "")
+                .ifBlank { json.optString("userIcon", "") }
+            // Store whatever we got (including blank → no VRChat+, so we don't
+            // keep re-fetching a value that will never appear).
+            getPrefs(context)?.edit()?.putString(KEY_PROFILE_PIC, pic)?.apply()
+            pic
+        } catch (e: Exception) {
+            Log.w(TAG, "refreshProfilePic failed", e)
+            ""
+        }
+    }
+
+    /**
+     * On-demand profile-pic resolution by VRChat userId, using THIS device's
+     * session (used by the admin directory so it can show any user's VRChat+
+     * picture without that picture ever being stored in Firestore). Returns the
+     * `profilePicOverride` (falling back to `userIcon`) URL, or "" if the user
+     * has no VRChat+ pic / we're not logged in / the fetch failed.
+     *
+     * Results (including blank) are cached per-userId for the process lifetime so
+     * scrolling the directory doesn't re-hit `GET /users/{id}` and risk rate
+     * limits — the caller is expected to only request VISIBLE rows.
+     */
+    private val profilePicUrlCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+    suspend fun fetchProfilePicUrl(context: Context, userId: String): String =
+        withContext(Dispatchers.IO) {
+            if (userId.isBlank()) return@withContext ""
+            profilePicUrlCache[userId]?.let { return@withContext it }
+            val cookieHeader = getCookieHeader(context) ?: return@withContext ""
+            try {
+                val (code, body, rawCookies) = get("$BASE/users/$userId", null, cookieHeader)
+                if (code != 200) return@withContext ""
+                captureRolledCookies(context, rawCookies)
+                val json = JSONObject(body)
+                val pic = json.optString("profilePicOverride", "")
+                    .ifBlank { json.optString("userIcon", "") }
+                profilePicUrlCache[userId] = pic // cache blank too — no refetch storm
+                pic
+            } catch (e: Exception) {
+                Log.w(TAG, "fetchProfilePicUrl failed for $userId", e)
+                ""
+            }
+        }
+
+    /**
+     * Headers required to LOAD an auth-gated VRChat image (`api.vrchat.cloud`
+     * file/image URLs require the session cookie + a User-Agent). Returned to the
+     * Coil image loader so the admin's session can render other users' VRChat+
+     * pictures. Null when not logged in.
+     */
+    fun vrchatImageHeaders(context: Context): Map<String, String>? {
+        val cookie = getCookieHeader(context) ?: return null
+        return mapOf("Cookie" to cookie, "User-Agent" to USER_AGENT)
+    }
+
     fun getCookieHeader(context: Context): String? {
         val prefs = getPrefs(context) ?: return null
         val auth  = prefs.getString(KEY_AUTH_COOKIE, null)
+        // ALWAYS send the trusted-device 2FA cookie if we have one — never drop
+        // it on a client-side age guess. VRChat's web client keeps a remembered
+        // device trusted indefinitely (and rolls it forward on use); a hard
+        // client-side cutoff only ever HURTS — it forces a 2FA prompt VRChat
+        // itself would not have asked for. Sending a stale cookie is harmless:
+        // worst case VRChat ignores it and returns requiresTwoFactorAuth, which
+        // is exactly what dropping it would have produced. Let the SERVER decide.
         val twoFa = prefs.getString(KEY_2FA_COOKIE, null)
-        // Drop 2FA cookie if older than 30 days (VRChat's server expiry)
-        val twoFaValid = if (twoFa != null) {
-            val storedAt = prefs.getLong(KEY_2FA_COOKIE_STORED_AT, 0L)
-            storedAt == 0L || System.currentTimeMillis() - storedAt < TWO_FA_COOKIE_MAX_AGE_MS
-        } else false
-        val effectiveTwoFa = if (twoFaValid) twoFa else null
         return when {
-            auth != null && effectiveTwoFa != null -> "$auth; $effectiveTwoFa"
-            auth != null                           -> auth
-            effectiveTwoFa != null                 -> effectiveTwoFa
-            else                                   -> null
+            auth != null && twoFa != null -> "$auth; $twoFa"
+            auth != null                  -> auth
+            twoFa != null                 -> twoFa
+            else                          -> null
         }
     }
 
     /**
      * Cookie header for the Basic-auth re-login path. Sends ONLY the trusted-
-     * device 2FA cookie (if still valid) — never the saved auth cookie. An
-     * expired auth cookie sent alongside Basic credentials can cause VRChat
-     * to reject the request as a session conflict, even though the
-     * twoFactorAuth cookie alone would let the new login skip the 2FA prompt.
+     * device 2FA cookie — never the saved auth cookie. An expired auth cookie
+     * sent alongside Basic credentials can cause VRChat to reject the request
+     * as a session conflict, even though the twoFactorAuth cookie alone lets
+     * the new login skip the 2FA prompt. The cookie is sent regardless of age:
+     * VRChat is the authority on whether the trusted device is still valid, so
+     * we never proactively drop it (which would force an avoidable 2FA prompt).
      */
     private fun getTwoFaOnlyCookieHeader(context: Context): String? {
         val prefs = getPrefs(context) ?: return null
-        val twoFa = prefs.getString(KEY_2FA_COOKIE, null) ?: return null
-        val storedAt = prefs.getLong(KEY_2FA_COOKIE_STORED_AT, 0L)
-        if (storedAt == 0L) {
-            // Migration case: cookie exists but was never timestamped.
-            // Give it a fresh 30-day window from now.
-            Log.i(TAG, "getTwoFaOnlyCookieHeader: migrating 2FA cookie with missing timestamp")
-            prefs.edit().putLong(KEY_2FA_COOKIE_STORED_AT, System.currentTimeMillis()).apply()
-            return twoFa
-        }
-        val valid = System.currentTimeMillis() - storedAt < TWO_FA_COOKIE_MAX_AGE_MS
-        return if (valid) twoFa else null
+        return prefs.getString(KEY_2FA_COOKIE, null)
     }
 
     fun shouldRefreshCookies(context: Context): Boolean {
@@ -223,8 +291,13 @@ object VrchatAuthManager {
                 // the post-response processing.
                 saveCredentials(context, username, password)
 
+                // VRChat requires the username and password to each be
+                // URI-encoded (encodeURIComponent-style) BEFORE base64 for Basic
+                // auth — its backend URL-decodes them. Passing raw bytes breaks
+                // any credential containing @ + # : & % etc., which VRChat then
+                // rejects with 401 → auto-relogin dies → forced manual 2FA.
                 val credentials = Base64.getEncoder()
-                    .encodeToString("$username:$password".toByteArray())
+                    .encodeToString("${encodeUriComponent(username)}:${encodeUriComponent(password)}".toByteArray(Charsets.UTF_8))
 
                 val (responseCode, body, rawCookies) = get(
                     url = "$BASE/auth/user",
@@ -264,19 +337,33 @@ object VrchatAuthManager {
                         // 200 + "id" field = fully logged in
                         val userId = json.optString("id")
                         val displayName = json.optString("displayName")
+                        // VRChat+ custom profile picture (blank without VRChat+).
+                        val profilePic = json.optString("profilePicOverride", "")
+                            .ifBlank { json.optString("userIcon", "") }
 
                         if (authCookieValue != null && userId.isNotBlank()) {
-                            // Update only the auth cookie + user info — preserve the
-                            // existing 2FA trusted-device cookie and its original
-                            // stored-at timestamp so future auto-relogins after
-                            // subsequent auth-cookie expiries still work.
+                            // Update the auth cookie + user info. If VRChat re-issued
+                            // a twoFactorAuth (trusted-device) cookie on this login,
+                            // capture it and RESET its 30-day clock so the trusted
+                            // window keeps extending. If it did NOT (the common case
+                            // for a bypass login), leave the existing 2FA cookie and
+                            // its original stored-at untouched so future auto-relogins
+                            // still work.
                             val now = System.currentTimeMillis()
-                            getPrefs(context)?.edit()
+                            val newTwoFa = rawCookies
+                                .mapNotNull { extractCookieValue(it, "twoFactorAuth") }
+                                .firstOrNull()
+                            val editor = getPrefs(context)?.edit()
                                 ?.putString(KEY_AUTH_COOKIE, authCookieValue)
                                 ?.putString(KEY_USER_ID, userId)
                                 ?.putString(KEY_DISPLAY_NAME, displayName)
                                 ?.putLong(KEY_COOKIE_STORED_AT, now)
-                                ?.apply()
+                            if (profilePic.isNotBlank()) editor?.putString(KEY_PROFILE_PIC, profilePic)
+                            if (newTwoFa != null) {
+                                editor?.putString(KEY_2FA_COOKIE, newTwoFa)
+                                    ?.putLong(KEY_2FA_COOKIE_STORED_AT, now)
+                            }
+                            editor?.apply()
                             AuthResult.Success(userId, displayName)
                         } else {
                             // Unusual: 200 but no id or cookie - log the body for diagnosis
@@ -286,10 +373,27 @@ object VrchatAuthManager {
                     }
 
                     401 -> {
-                        // Wrong credentials — clear saved credentials so auto-relogin
-                        // doesn't keep retrying with invalid creds
-                        clearCredentials(context)
-                        AuthResult.Error("Incorrect username or password.")
+                        // A 401 is NOT always wrong credentials. VRChat also returns
+                        // 401 for an IP-invalidated / conflicting session ("authToken
+                        // doesn't correspond with an active session"). Only wipe the
+                        // saved credentials when the error clearly says the credentials
+                        // are bad — otherwise keep them so auto-relogin can recover the
+                        // session instead of forcing a full manual login (with 2FA).
+                        val msg = try {
+                            JSONObject(body).optJSONObject("error")?.optString("message") ?: body
+                        } catch (_: Exception) { body }
+                        val badCreds = msg.contains("invalid", true) ||
+                            msg.contains("incorrect", true) ||
+                            msg.contains("credential", true) ||
+                            msg.contains("password", true) ||
+                            msg.contains("username", true)
+                        if (badCreds) {
+                            clearCredentials(context)
+                            AuthResult.Error("Incorrect username or password.")
+                        } else {
+                            Log.w(TAG, "401 (non-credential, keeping creds): ${msg.take(140)}")
+                            AuthResult.Error("Session expired — retrying.")
+                        }
                     }
 
                     else -> {
@@ -379,7 +483,8 @@ object VrchatAuthManager {
     suspend fun validateSession(context: Context): Boolean = withContext(Dispatchers.IO) {
         val cookieHeader = getCookieHeader(context) ?: return@withContext false
         try {
-            val (code, _, _) = get("$BASE/auth", null, cookieHeader)
+            val (code, _, rawCookies) = get("$BASE/auth", null, cookieHeader)
+            if (code == 200) captureRolledCookies(context, rawCookies)
             code == 200
         } catch (e: Exception) {
             Log.e(TAG, "Session validation failed", e)
@@ -404,7 +509,11 @@ object VrchatAuthManager {
         val instanceCapacity: Int,
         val currentAvatarThumbnailUrl: String,
         val isOnlineInVRChat: Boolean,
-        val worldImageUrl: String = ""
+        val worldImageUrl: String = "",
+        // VRChat+ custom profile picture (profilePicOverride, falling back to
+        // userIcon). Blank when the user has no VRChat+ custom picture — in that
+        // case VRChat itself just renders their name letters.
+        val profilePicUrl: String = ""
     )
 
     suspend fun fetchPresence(context: Context): VrcUserPresence? = withContext(Dispatchers.IO) {
@@ -413,11 +522,14 @@ object VrchatAuthManager {
             return@withContext null
         }
         try {
-            val (code, body, _) = get("$BASE/auth/user", null, cookieHeader)
+            val (code, body, rawCookies) = get("$BASE/auth/user", null, cookieHeader)
             if (code != 200) {
                 Log.w(TAG, "fetchPresence: API returned $code, body=${body.take(200)}")
                 return@withContext null
             }
+            // Roll the trusted-device / auth cookies forward if VRChat re-issued
+            // them — keeps the session "remembered" so it never forces a fresh 2FA.
+            captureRolledCookies(context, rawCookies)
             val json = JSONObject(body)
             val userId = json.optString("id")
             var state = json.optString("state", "offline")
@@ -427,6 +539,9 @@ object VrchatAuthManager {
             var platform = json.optString("last_platform", "")
             var displayName = json.optString("displayName")
             var avatarThumb = json.optString("currentAvatarThumbnailImageUrl", "")
+            // VRChat+ profile picture: profilePicOverride wins, then userIcon.
+            var profilePic = json.optString("profilePicOverride", "")
+                .ifBlank { json.optString("userIcon", "") }
 
             Log.d(TAG, "fetchPresence /auth/user: state=$state status=$status location=$location")
 
@@ -449,6 +564,11 @@ object VrchatAuthManager {
                         uj.optString("last_platform", "").let { if (it.isNotBlank()) platform = it }
                         uj.optString("displayName", "").let { if (it.isNotBlank()) displayName = it }
                         uj.optString("currentAvatarThumbnailImageUrl", "").let { if (it.isNotBlank()) avatarThumb = it }
+                        // The /users/{id} endpoint is the authoritative source for
+                        // the VRChat+ profile picture fields.
+                        uj.optString("profilePicOverride", "").let { if (it.isNotBlank()) profilePic = it }
+                        if (profilePic.isBlank())
+                            uj.optString("userIcon", "").let { if (it.isNotBlank()) profilePic = it }
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "Could not fetch /users/$userId", e)
@@ -486,6 +606,12 @@ object VrchatAuthManager {
                 location == "private" ||
                 location == "traveling"
 
+            // Persist the profile pic so self-sync can include it even when the
+            // user isn't currently being watched (the directory needs it).
+            if (profilePic.isNotBlank()) {
+                getPrefs(context)?.edit()?.putString(KEY_PROFILE_PIC, profilePic)?.apply()
+            }
+
             VrcUserPresence(
                 userId = userId,
                 displayName = displayName,
@@ -499,7 +625,8 @@ object VrchatAuthManager {
                 instanceCapacity = capacity,
                 currentAvatarThumbnailUrl = avatarThumb,
                 isOnlineInVRChat = isOnline,
-                worldImageUrl = worldImageUrl
+                worldImageUrl = worldImageUrl,
+                profilePicUrl = profilePic
             )
         } catch (e: Exception) {
             Log.e(TAG, "fetchPresence failed", e)
@@ -743,6 +870,55 @@ object VrchatAuthManager {
         val nameValue = setCookieHeader.split(";").firstOrNull()?.trim() ?: return null
         if (!nameValue.startsWith("$name=", ignoreCase = true)) return null
         return nameValue // returns "auth=authcookie_xxx" or "twoFactorAuth=xxx"
+    }
+
+    /**
+     * JS encodeURIComponent-equivalent. Java's URLEncoder uses
+     * application/x-www-form-urlencoded (space → "+", and it escapes
+     * !'()~ while leaving *-._ alone), so we fix those up to match what
+     * VRChat's backend expects when it URI-decodes the Basic-auth credentials.
+     */
+    private fun encodeUriComponent(s: String): String =
+        java.net.URLEncoder.encode(s, "UTF-8")
+            .replace("+", "%20")
+            .replace("%21", "!")
+            .replace("%27", "'")
+            .replace("%28", "(")
+            .replace("%29", ")")
+            .replace("%7E", "~")
+
+    /**
+     * Roll the stored `auth` and `twoFactorAuth` cookies forward from ANY
+     * authenticated response that re-issues them.
+     *
+     * VRChat's web client stays "trusted" (no repeat 2FA) indefinitely because
+     * the server rolls the `twoFactorAuth` cookie forward every time the client
+     * uses it — the website never lets it reach its ~30-day Max-Age. The app used
+     * to capture that rotation ONLY on the explicit login / verify paths and threw
+     * away the Set-Cookie on every other authenticated call (`fetchPresence`,
+     * `validateSession`, `refreshProfilePic`, …). So the app's stored trusted-device
+     * cookie simply aged out, and ~30 days after the last login VRChat demanded a
+     * fresh 2FA code even though the website would not. Calling this after every
+     * authenticated success keeps the app's cookie as fresh as the browser's.
+     *
+     * It is strictly additive: it only overwrites when a NON-blank refreshed cookie
+     * is actually present in the response, and resets that cookie's stored-at clock.
+     */
+    private fun captureRolledCookies(context: Context, rawCookies: List<String>) {
+        if (rawCookies.isEmpty()) return
+        val auth = rawCookies.mapNotNull { extractCookieValue(it, "auth") }.firstOrNull()
+        val twoFa = rawCookies.mapNotNull { extractCookieValue(it, "twoFactorAuth") }.firstOrNull()
+        if (auth == null && twoFa == null) return
+        val editor = getPrefs(context)?.edit() ?: return
+        val now = System.currentTimeMillis()
+        if (auth != null) {
+            editor.putString(KEY_AUTH_COOKIE, auth).putLong(KEY_COOKIE_STORED_AT, now)
+        }
+        if (twoFa != null) {
+            editor.putString(KEY_2FA_COOKIE, twoFa).putLong(KEY_2FA_COOKIE_STORED_AT, now)
+            Log.d(TAG, "Rolled twoFactorAuth cookie forward (trusted-device window extended)")
+        }
+        editor.apply()
     }
 
     private fun saveSession(
