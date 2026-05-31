@@ -18,6 +18,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -221,9 +226,13 @@ internal fun AdminLabeledRow(
  * fallback when no image is available or the load fails. A small online/offline
  * status dot sits in the corner.
  *
- * Resolution order: [vrchatAvatarUrl] → [discordAvatarUrl] → letter initial.
- * Coil loads the first non-blank URL; if that load errors (404/expired), the
- * initial is shown rather than a broken image.
+ * Resolution order is a TRUE cascade: [vrchatAvatarUrl] → [discordAvatarUrl] →
+ * letter initial. We don't just pick the first non-blank URL — if an image
+ * *fails to load* (e.g. a VRChat thumbnail that 401s on a device with no VRChat
+ * session, or an expired URL) we advance to the next candidate, and only show
+ * the initial when every candidate is blank or has errored. Profile pictures
+ * are stored URLs on the user doc, so they load from the CDN regardless of
+ * whether the target user is currently online.
  */
 @Composable
 internal fun AdminAvatar(
@@ -236,8 +245,25 @@ internal fun AdminAvatar(
     val initial = name.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?"
     val cs = MaterialTheme.colorScheme
 
-    // Pick the best available picture; VRChat first, then Discord.
-    val imageUrl = vrchatAvatarUrl.trim().ifBlank { discordAvatarUrl.trim() }
+    // Ordered, de-duplicated, non-blank candidate URLs: VRChat first, Discord next.
+    val candidates = remember(vrchatAvatarUrl, discordAvatarUrl) {
+        listOf(vrchatAvatarUrl.trim(), discordAvatarUrl.trim())
+            .filter { it.isNotBlank() }
+            .distinct()
+    }
+    // Which candidate we're currently attempting; advances on load error.
+    var attempt by remember(candidates) { mutableIntStateOf(0) }
+    val currentUrl = candidates.getOrNull(attempt)
+
+    @Composable
+    fun InitialText() {
+        Text(
+            initial,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = cs.primary
+        )
+    }
 
     Box(contentAlignment = Alignment.Center) {
         Surface(
@@ -245,9 +271,16 @@ internal fun AdminAvatar(
             color = cs.primary.copy(alpha = 0.16f),
             modifier = Modifier.size(size.dp)
         ) {
-            if (imageUrl.isNotBlank()) {
-                val painter = rememberAsyncImagePainter(model = imageUrl)
+            if (currentUrl != null) {
+                val painter = rememberAsyncImagePainter(model = currentUrl)
                 val state = painter.state
+                // On error, fall through to the next candidate (or the initial
+                // once we've exhausted them).
+                LaunchedEffect(state, attempt) {
+                    if (state is AsyncImagePainter.State.Error && attempt < candidates.size - 1) {
+                        attempt++
+                    }
+                }
                 Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
                     if (state is AsyncImagePainter.State.Success) {
                         androidx.compose.foundation.Image(
@@ -257,24 +290,12 @@ internal fun AdminAvatar(
                             modifier = Modifier.fillMaxSize().clip(CircleShape)
                         )
                     } else {
-                        // Loading or error → initial fallback.
-                        Text(
-                            initial,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = cs.primary
-                        )
+                        // Loading, or errored on the last candidate → initial.
+                        InitialText()
                     }
                 }
             } else {
-                Box(contentAlignment = Alignment.Center) {
-                    Text(
-                        initial,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = cs.primary
-                    )
-                }
+                Box(contentAlignment = Alignment.Center) { InitialText() }
             }
         }
         Box(
