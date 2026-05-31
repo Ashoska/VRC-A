@@ -128,8 +128,9 @@ object VrchatAuthManager {
     suspend fun refreshProfilePic(context: Context): String = withContext(Dispatchers.IO) {
         val cookieHeader = getCookieHeader(context) ?: return@withContext ""
         try {
-            val (code, body, _) = get("$BASE/auth/user", null, cookieHeader)
+            val (code, body, rawCookies) = get("$BASE/auth/user", null, cookieHeader)
             if (code != 200) return@withContext ""
+            captureRolledCookies(context, rawCookies)
             val json = JSONObject(body)
             val pic = json.optString("profilePicOverride", "")
                 .ifBlank { json.optString("userIcon", "") }
@@ -439,7 +440,8 @@ object VrchatAuthManager {
     suspend fun validateSession(context: Context): Boolean = withContext(Dispatchers.IO) {
         val cookieHeader = getCookieHeader(context) ?: return@withContext false
         try {
-            val (code, _, _) = get("$BASE/auth", null, cookieHeader)
+            val (code, _, rawCookies) = get("$BASE/auth", null, cookieHeader)
+            if (code == 200) captureRolledCookies(context, rawCookies)
             code == 200
         } catch (e: Exception) {
             Log.e(TAG, "Session validation failed", e)
@@ -477,11 +479,14 @@ object VrchatAuthManager {
             return@withContext null
         }
         try {
-            val (code, body, _) = get("$BASE/auth/user", null, cookieHeader)
+            val (code, body, rawCookies) = get("$BASE/auth/user", null, cookieHeader)
             if (code != 200) {
                 Log.w(TAG, "fetchPresence: API returned $code, body=${body.take(200)}")
                 return@withContext null
             }
+            // Roll the trusted-device / auth cookies forward if VRChat re-issued
+            // them — keeps the session "remembered" so it never forces a fresh 2FA.
+            captureRolledCookies(context, rawCookies)
             val json = JSONObject(body)
             val userId = json.optString("id")
             var state = json.optString("state", "offline")
@@ -838,6 +843,40 @@ object VrchatAuthManager {
             .replace("%28", "(")
             .replace("%29", ")")
             .replace("%7E", "~")
+
+    /**
+     * Roll the stored `auth` and `twoFactorAuth` cookies forward from ANY
+     * authenticated response that re-issues them.
+     *
+     * VRChat's web client stays "trusted" (no repeat 2FA) indefinitely because
+     * the server rolls the `twoFactorAuth` cookie forward every time the client
+     * uses it — the website never lets it reach its ~30-day Max-Age. The app used
+     * to capture that rotation ONLY on the explicit login / verify paths and threw
+     * away the Set-Cookie on every other authenticated call (`fetchPresence`,
+     * `validateSession`, `refreshProfilePic`, …). So the app's stored trusted-device
+     * cookie simply aged out, and ~30 days after the last login VRChat demanded a
+     * fresh 2FA code even though the website would not. Calling this after every
+     * authenticated success keeps the app's cookie as fresh as the browser's.
+     *
+     * It is strictly additive: it only overwrites when a NON-blank refreshed cookie
+     * is actually present in the response, and resets that cookie's stored-at clock.
+     */
+    private fun captureRolledCookies(context: Context, rawCookies: List<String>) {
+        if (rawCookies.isEmpty()) return
+        val auth = rawCookies.mapNotNull { extractCookieValue(it, "auth") }.firstOrNull()
+        val twoFa = rawCookies.mapNotNull { extractCookieValue(it, "twoFactorAuth") }.firstOrNull()
+        if (auth == null && twoFa == null) return
+        val editor = getPrefs(context)?.edit() ?: return
+        val now = System.currentTimeMillis()
+        if (auth != null) {
+            editor.putString(KEY_AUTH_COOKIE, auth).putLong(KEY_COOKIE_STORED_AT, now)
+        }
+        if (twoFa != null) {
+            editor.putString(KEY_2FA_COOKIE, twoFa).putLong(KEY_2FA_COOKIE_STORED_AT, now)
+            Log.d(TAG, "Rolled twoFactorAuth cookie forward (trusted-device window extended)")
+        }
+        editor.apply()
+    }
 
     private fun saveSession(
         context: Context,

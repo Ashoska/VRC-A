@@ -17,6 +17,10 @@ class BootReceiver : BroadcastReceiver() {
 
         if (!VrchatAuthManager.isLoggedIn(context)) return
 
+        // A reboot is a fresh start for an always-on companion app — clear any
+        // lingering swipe-dismissal flag so the services below are allowed to run.
+        runCatching { com.vrca.app.AppShutdown.clearSwipedAway(context) }
+
         // Always-on keep-alive (holds the wakelock) — previously NOT restarted on boot.
         runCatching { KeepAliveService.start(context) }
 

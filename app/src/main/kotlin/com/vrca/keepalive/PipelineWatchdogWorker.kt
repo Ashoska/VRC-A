@@ -37,8 +37,14 @@ class PipelineWatchdogWorker(
     override fun doWork(): Result {
         val ctx = applicationContext
         try {
-            // Don't resurrect a process the user just swiped away.
-            if (AppShutdown.isManualKillFresh(ctx)) return Result.success()
+            // Don't resurrect a process the user deliberately swiped away. The 15s
+            // freshness window is for immediate sticky restarts; this worker fires
+            // ~15 min after the swipe, so we rely on the PERSISTENT swipe flag (set
+            // in AppShutdown.onTaskSwiped, cleared only on a real reopen/reboot) to
+            // stay dead. An OS/OEM kill never sets it, so recovery still works.
+            if (AppShutdown.isManualKillFresh(ctx) || AppShutdown.isSwipedAway(ctx)) {
+                return Result.success()
+            }
 
             // Admin build doesn't run the pipeline; just keep the wakelock service up.
             if (BuildConfig.IS_ADMIN_BUILD) {
@@ -90,6 +96,16 @@ class PipelineWatchdogWorker(
                     )
             } catch (t: Throwable) {
                 Log.w(TAG, "could not schedule watchdog", t)
+            }
+        }
+
+        /** Cancel the periodic watchdog (best-effort, called on swipe-away). */
+        fun cancel(context: Context) {
+            try {
+                WorkManager.getInstance(context.applicationContext)
+                    .cancelUniqueWork(WORK_NAME)
+            } catch (t: Throwable) {
+                Log.w(TAG, "could not cancel watchdog", t)
             }
         }
     }

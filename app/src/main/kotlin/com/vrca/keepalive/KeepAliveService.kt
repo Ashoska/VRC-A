@@ -75,10 +75,15 @@ class KeepAliveService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // A null intent is a START_STICKY restart. If the user just swiped the app
-        // away, abort instead of resurrecting — this wakelock-holding service was
-        // the main reason the process never died on swipe.
-        if (intent == null && com.vrca.app.AppShutdown.isManualKillFresh(this)) {
+        // A null intent is a START_STICKY restart. If the user swiped the app away,
+        // abort instead of resurrecting — this wakelock-holding service was the main
+        // reason the process never died on swipe. We check BOTH the 15s freshness
+        // window (immediate sticky restart) and the persistent swipe flag (a late
+        // restart after the window expired); a legitimate reopen always passes a
+        // non-null intent, so it bypasses this guard.
+        if (intent == null &&
+            (com.vrca.app.AppShutdown.isManualKillFresh(this) ||
+                com.vrca.app.AppShutdown.isSwipedAway(this))) {
             try { wakeLock?.let { if (it.isHeld) it.release() } } catch (_: Throwable) {}
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()

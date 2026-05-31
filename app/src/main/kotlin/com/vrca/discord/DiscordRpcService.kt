@@ -152,10 +152,13 @@ class DiscordRpcService : Service() {
                 return START_NOT_STICKY
             }
         }
-        // A null intent is a START_STICKY restart. If the user just swiped the app
-        // away, honour the deliberate kill so this WebView-backed service doesn't
-        // resurrect itself and keep the app alive.
-        if (intent == null && com.vrca.app.AppShutdown.isManualKillFresh(this)) {
+        // A null intent is a START_STICKY restart. If the user swiped the app away,
+        // honour the deliberate kill so this WebView-backed service doesn't resurrect
+        // itself and keep the app alive. Check both the 15s window and the persistent
+        // swipe flag (a late restart after the window expired).
+        if (intent == null &&
+            (com.vrca.app.AppShutdown.isManualKillFresh(this) ||
+                com.vrca.app.AppShutdown.isSwipedAway(this))) {
             teardown()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()

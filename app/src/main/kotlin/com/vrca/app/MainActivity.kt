@@ -58,6 +58,12 @@ class MainActivity : ComponentActivity() {
         //Ensure device hash exists early (before any screen reads it).
         runCatching { ensureDeviceHash(applicationContext) }
 
+        // A real user open clears the persistent swipe-dismissal flag so the
+        // watchdog and services may run again (a swipe set it true to keep the app
+        // dead; opening the app is the explicit "bring it back"). Must run BEFORE
+        // starting KeepAliveService / scheduling the watchdog below.
+        runCatching { AppShutdown.clearSwipedAway(applicationContext) }
+
         // Keep-alive for screen-off reliability.
         if (Build.VERSION.SDK_INT >= 33) {
             val granted = ContextCompat.checkSelfPermission(

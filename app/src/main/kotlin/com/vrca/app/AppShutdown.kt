@@ -34,6 +34,7 @@ object AppShutdown {
     private const val TAG = "AppShutdown"
     const val PREFS = "vrca_remote"
     const val KEY_MANUAL_KILL_AT = "manual_kill_at"
+    const val KEY_SWIPED_AWAY = "swiped_away"
     const val MANUAL_KILL_WINDOW_MS = 15_000L
 
     private val shuttingDown = AtomicBoolean(false)
@@ -48,6 +49,36 @@ object AppShutdown {
     }
 
     /**
+     * PERSISTENT deliberate-dismissal flag. Set true on a real swipe-away and
+     * cleared ONLY when the user legitimately reopens the app ([clearSwipedAway]
+     * from `MainActivity.onCreate`) or on reboot.
+     *
+     * The 15s [isManualKillFresh] window is NOT enough on its own: the WorkManager
+     * watchdog ([PipelineWatchdogWorker]) survives the process kill and fires ~15
+     * minutes later in a fresh process, long after the window expired — it would
+     * then see the user still logged in and resurrect the pipeline + keep-alive,
+     * making the swiped app "start running again after a while". This flag lets the
+     * watchdog and the services' sticky-restart guards keep a swiped app dead until
+     * the user actually touches it again. An OS/OEM kill never runs [onTaskSwiped],
+     * so the flag stays false there and the watchdog still recovers the process.
+     */
+    fun isSwipedAway(context: Context): Boolean =
+        context.applicationContext
+            .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getBoolean(KEY_SWIPED_AWAY, false)
+
+    /** Clear the persistent swipe flag — called on a legitimate app open / reboot. */
+    fun clearSwipedAway(context: Context) {
+        try {
+            context.applicationContext
+                .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_SWIPED_AWAY, false)
+                .apply()
+        } catch (_: Throwable) {}
+    }
+
+    /**
      * Called from the `onTaskRemoved` of every foreground service. Stamps the
      * manual-kill flag, stops the other services, writes the user offline, then
      * hard-kills the whole process so nothing lingers in the background.
@@ -57,13 +88,21 @@ object AppShutdown {
         val app = context.applicationContext
 
         // Stamp the deliberate-kill flag synchronously so any START_STICKY
-        // restart (null intent) aborts instead of resurrecting a service.
+        // restart (null intent) aborts instead of resurrecting a service. Also set
+        // the PERSISTENT swipe flag so the ~15-min WorkManager watchdog (which long
+        // outlives the 15s window) doesn't bring the app back from the dead.
         try {
             app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit()
                 .putLong(KEY_MANUAL_KILL_AT, System.currentTimeMillis())
+                .putBoolean(KEY_SWIPED_AWAY, true)
                 .commit()
         } catch (_: Throwable) {}
+
+        // Best-effort: cancel the periodic watchdog outright. The persistent flag
+        // above is the authoritative guard (this cancel may not commit before the
+        // process dies); MainActivity re-schedules it on the next legitimate open.
+        try { com.vrca.keepalive.PipelineWatchdogWorker.cancel(app) } catch (_: Throwable) {}
 
         // A deliberate swipe is an intentional stop — disarm feature-session restore
         // so the next launch starts clean (matches "toggles start OFF on a fresh

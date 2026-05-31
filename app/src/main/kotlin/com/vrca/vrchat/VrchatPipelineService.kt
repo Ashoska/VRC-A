@@ -245,7 +245,9 @@ class VrchatPipelineService : Service() {
                 // just swiped the app away (manual_kill flag fresh), honour the
                 // kill instead of resurrecting the service — otherwise START_STICKY
                 // brings the whole process straight back and it looks "not killed".
-                if (intent == null && com.vrca.app.AppShutdown.isManualKillFresh(this)) {
+                if (intent == null &&
+                    (com.vrca.app.AppShutdown.isManualKillFresh(this) ||
+                        com.vrca.app.AppShutdown.isSwipedAway(this))) {
                     stopForeground(STOP_FOREGROUND_REMOVE)
                     stopSelf()
                     // Android sticky-restarted us into a fresh process that would
@@ -828,11 +830,17 @@ class VrchatPipelineService : Service() {
                     }
 
                     val myId = VrchatAuthManager.getStoredUserId(this@VrchatPipelineService)
-                    if (userId == myId && AdminWatchState.isWatched.value) syncPresenceToFirestore()
+                    if (userId == myId) {
+                        // Reactively update our OWN presence from the event payload so
+                        // the Discord RPC / UI reflect the world change instantly, even
+                        // if REST polls are failing in the background. Also writes to
+                        // Firestore directly when watched (instant admin update).
+                        applySelfLocationEvent(content)
+                    }
                 }
 
                 "user-update" -> {
-                    if (AdminWatchState.isWatched.value) syncPresenceToFirestore()
+                    applySelfUserUpdate(content)
                 }
 
                 "friend-update" -> {
@@ -852,7 +860,15 @@ class VrchatPipelineService : Service() {
                     )
                 }
 
-                "user-location", "see-notification", "hide-notification",
+                "user-location" -> {
+                    // The current user's OWN world-hop. No notification, but patch our
+                    // own presence reactively from the payload so the Discord RPC and
+                    // the admin view follow the user into the new world immediately
+                    // (the REST poll is unreliable when backgrounded on mobile).
+                    applySelfLocationEvent(content)
+                }
+
+                "see-notification", "hide-notification",
                 "clear-notification", "response-notification", "content-refresh" -> {
                     // Known pipeline events that don't need user notifications.
                 }
@@ -2147,6 +2163,109 @@ class VrchatPipelineService : Service() {
     // ------------------------------------------------------------------
     // Firestore presence sync
     // ------------------------------------------------------------------
+
+    /**
+     * Reactively patch the CURRENT USER's own presence from a WebSocket pipeline
+     * payload (`user-location` / self `friend-location`), WITHOUT a REST call.
+     *
+     * Why this exists: the user's own world-hop (`user-location`) used to be a no-op,
+     * and self presence was refreshed ONLY by the periodic `fetchPresence()` REST
+     * poll. On mobile the auth cookie is frequently IP-invalidated, so that poll
+     * returns null and `VrchatPipelineState.presence` freezes — yet the Discord RPC
+     * keeps pushing (its online timer is independent), so the RPC shows a stale world
+     * while the user is actually somewhere else. The event payload already carries the
+     * new location/world, so we patch presence straight from it: the RPC's
+     * `presenceFlow.collectLatest` fires immediately and reflects the real state even
+     * when REST is failing. When an admin is watching, the fresh fields are also
+     * pushed to Firestore so the admin directory updates instantly too.
+     */
+    private fun applySelfLocationEvent(content: JSONObject?) {
+        content ?: return
+        val location = content.optString("location", "")
+            .ifBlank { content.optString("instance", "") }
+        val user = content.optJSONObject("user")
+        val worldName = content.optJSONObject("world")?.optString("name").orEmpty()
+            .ifBlank { user?.optString("worldName").orEmpty() }
+            .ifBlank { user?.optJSONObject("world")?.optString("name").orEmpty() }
+        if (location.isBlank() && worldName.isBlank()) return
+
+        val prev = VrchatPipelineState.presence
+        val newState = when {
+            location.equals("offline", true) -> "offline"
+            location.isNotBlank() -> "online"
+            else -> prev?.state ?: "online"
+        }
+        val patched = if (prev != null) {
+            prev.copy(
+                location = if (location.isNotBlank()) location else prev.location,
+                worldName = if (worldName.isNotBlank()) worldName else prev.worldName,
+                state = newState,
+                isOnlineInVRChat = newState != "offline"
+            )
+        } else {
+            VrchatAuthManager.VrcUserPresence(
+                userId = VrchatAuthManager.getStoredUserId(this) ?: "",
+                displayName = VrchatAuthManager.getStoredDisplayName(this) ?: "",
+                state = newState,
+                status = "",
+                statusDescription = "",
+                location = location,
+                platform = "",
+                worldName = worldName,
+                instancePlayerCount = 0,
+                instanceCapacity = 0,
+                currentAvatarThumbnailUrl = "",
+                isOnlineInVRChat = newState != "offline"
+            )
+        }
+        VrchatPipelineState.presence = patched
+        pushSelfPresenceToFirestoreIfWatched()
+    }
+
+    /** Reactively patch own status/state from a self `user-update` payload. */
+    private fun applySelfUserUpdate(content: JSONObject?) {
+        content ?: return
+        val user = content.optJSONObject("user") ?: content
+        val prev = VrchatPipelineState.presence ?: return
+        val status = user.optString("status", prev.status).ifBlank { prev.status }
+        val statusDesc = user.optString("statusDescription", prev.statusDescription)
+        val state = user.optString("state", prev.state).ifBlank { prev.state }
+        VrchatPipelineState.presence = prev.copy(
+            status = status,
+            statusDescription = statusDesc,
+            state = state,
+            isOnlineInVRChat = state != "offline"
+        )
+        pushSelfPresenceToFirestoreIfWatched()
+    }
+
+    /**
+     * When an admin is watching, push the just-patched presence fields to Firestore
+     * directly (no REST round-trip) so the admin sees the new location/world/state
+     * instantly and resiliently — even if the next `fetchPresence()` REST poll fails.
+     */
+    private fun pushSelfPresenceToFirestoreIfWatched() {
+        if (deviceHash.isBlank() || !AdminWatchState.isWatched.value) return
+        val p = VrchatPipelineState.presence ?: return
+        val updates = mapOf(
+            "vrchatState" to p.state,
+            "vrchatStatus" to p.status,
+            "vrchatStatusDescription" to p.statusDescription,
+            "vrchatWorld" to p.worldName,
+            "vrchatLocation" to p.location,
+            "vrchatIsOnline" to p.isOnlineInVRChat,
+            "vrchatLastSyncAt" to FieldValue.serverTimestamp(),
+            "lastActiveAt" to FieldValue.serverTimestamp(),
+            "lastSeenAt" to FieldValue.serverTimestamp()
+        )
+        try {
+            FirebaseFirestore.getInstance()
+                .collection("users").document(deviceHash)
+                .set(updates, SetOptions.merge())
+        } catch (e: Exception) {
+            Log.w(TAG, "pushSelfPresence failed", e)
+        }
+    }
 
     private suspend fun syncPresenceToFirestore(forceLocalUpdate: Boolean = false) {
         if (!forceLocalUpdate && deviceHash.isBlank()) return
