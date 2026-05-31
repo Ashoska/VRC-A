@@ -79,6 +79,7 @@ service cloud.firestore {
         "vrchatWorld", "vrchatLocation",
         "vrchatInstancePlayerCount", "vrchatInstanceCapacity",
         "vrchatPlatform", "vrchatAvatarThumb",
+        "vrchatProfilePic",
         "vrchatIsOnline",
         "vrchatLastSyncAt", "vrchatAuthCookieValid",
 

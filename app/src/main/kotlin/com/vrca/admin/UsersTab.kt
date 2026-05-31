@@ -108,8 +108,10 @@ internal data class UserRow(
     val vrchatPlatform: String = "",
     val vrchatLastSyncAt: Timestamp? = null,
     val isOnlineInApp: Boolean = false,
-    // Profile pictures: VRChat+ avatar thumb first, Discord avatar as fallback.
-    val vrchatAvatarThumb: String = "",
+    // Profile pictures: VRChat+ custom profile picture first, Discord avatar as
+    // fallback. `vrchatProfilePic` is blank unless the user has VRChat+ and set
+    // a custom picture — when blank we cascade to Discord, then name letters.
+    val vrchatProfilePic: String = "",
     val discordAvatarUrl: String = ""
 )
 
@@ -211,7 +213,7 @@ internal fun parseUserRow(d: com.google.firebase.firestore.DocumentSnapshot): Us
         vrchatPlatform = (d.getString("vrchatPlatform") ?: "").trim(),
         vrchatLastSyncAt = d.getTimestamp("vrchatLastSyncAt"),
         isOnlineInApp = d.getBoolean("isOnlineInApp") ?: false,
-        vrchatAvatarThumb = (d.getString("vrchatAvatarThumb") ?: "").trim(),
+        vrchatProfilePic = (d.getString("vrchatProfilePic") ?: "").trim(),
         discordAvatarUrl = (d.getString("discordAvatarUrl") ?: "").trim()
     )
 }
@@ -378,7 +380,7 @@ internal fun UsersTab(
                             name = primaryLabel,
                             online = isUserOnline(row, nowMs),
                             size = 60,
-                            vrchatAvatarUrl = row.vrchatAvatarThumb,
+                            vrchatAvatarUrl = row.vrchatProfilePic,
                             discordAvatarUrl = row.discordAvatarUrl
                         )
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -615,7 +617,7 @@ internal fun UsersTab(
                     AdminAvatar(
                         name = primaryName,
                         online = appOnline,
-                        vrchatAvatarUrl = u.vrchatAvatarThumb,
+                        vrchatAvatarUrl = u.vrchatProfilePic,
                         discordAvatarUrl = u.discordAvatarUrl
                     )
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {

@@ -391,6 +391,8 @@ class VrcaViewModel(
             data["vrchatInstanceCapacity"] = presence.instanceCapacity
             data["vrchatPlatform"] = presence.platform
             data["vrchatAvatarThumb"] = presence.currentAvatarThumbnailUrl
+            // VRChat+ custom profile picture (blank if they have no VRChat+).
+            data["vrchatProfilePic"] = presence.profilePicUrl
             data["vrchatIsOnline"] = presence.isOnlineInVRChat
         }
 

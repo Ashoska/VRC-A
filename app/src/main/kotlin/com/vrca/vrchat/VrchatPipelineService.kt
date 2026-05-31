@@ -2151,6 +2151,7 @@ class VrchatPipelineService : Service() {
             "vrchatInstanceCapacity" to presence.instanceCapacity,
             "vrchatPlatform" to presence.platform,
             "vrchatAvatarThumb" to presence.currentAvatarThumbnailUrl,
+            "vrchatProfilePic" to presence.profilePicUrl,
             "vrchatIsOnline" to presence.isOnlineInVRChat,
             "vrchatAuthCookieValid" to true,
             "vrchatLastSyncAt" to FieldValue.serverTimestamp(),

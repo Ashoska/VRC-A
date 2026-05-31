@@ -431,7 +431,11 @@ object VrchatAuthManager {
         val instanceCapacity: Int,
         val currentAvatarThumbnailUrl: String,
         val isOnlineInVRChat: Boolean,
-        val worldImageUrl: String = ""
+        val worldImageUrl: String = "",
+        // VRChat+ custom profile picture (profilePicOverride, falling back to
+        // userIcon). Blank when the user has no VRChat+ custom picture — in that
+        // case VRChat itself just renders their name letters.
+        val profilePicUrl: String = ""
     )
 
     suspend fun fetchPresence(context: Context): VrcUserPresence? = withContext(Dispatchers.IO) {
@@ -454,6 +458,9 @@ object VrchatAuthManager {
             var platform = json.optString("last_platform", "")
             var displayName = json.optString("displayName")
             var avatarThumb = json.optString("currentAvatarThumbnailImageUrl", "")
+            // VRChat+ profile picture: profilePicOverride wins, then userIcon.
+            var profilePic = json.optString("profilePicOverride", "")
+                .ifBlank { json.optString("userIcon", "") }
 
             Log.d(TAG, "fetchPresence /auth/user: state=$state status=$status location=$location")
 
@@ -476,6 +483,11 @@ object VrchatAuthManager {
                         uj.optString("last_platform", "").let { if (it.isNotBlank()) platform = it }
                         uj.optString("displayName", "").let { if (it.isNotBlank()) displayName = it }
                         uj.optString("currentAvatarThumbnailImageUrl", "").let { if (it.isNotBlank()) avatarThumb = it }
+                        // The /users/{id} endpoint is the authoritative source for
+                        // the VRChat+ profile picture fields.
+                        uj.optString("profilePicOverride", "").let { if (it.isNotBlank()) profilePic = it }
+                        if (profilePic.isBlank())
+                            uj.optString("userIcon", "").let { if (it.isNotBlank()) profilePic = it }
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "Could not fetch /users/$userId", e)
@@ -526,7 +538,8 @@ object VrchatAuthManager {
                 instanceCapacity = capacity,
                 currentAvatarThumbnailUrl = avatarThumb,
                 isOnlineInVRChat = isOnline,
-                worldImageUrl = worldImageUrl
+                worldImageUrl = worldImageUrl,
+                profilePicUrl = profilePic
             )
         } catch (e: Exception) {
             Log.e(TAG, "fetchPresence failed", e)
