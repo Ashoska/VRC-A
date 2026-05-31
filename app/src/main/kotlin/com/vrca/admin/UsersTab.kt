@@ -107,7 +107,10 @@ internal data class UserRow(
     val vrchatCapacity: Int = 0,
     val vrchatPlatform: String = "",
     val vrchatLastSyncAt: Timestamp? = null,
-    val isOnlineInApp: Boolean = false
+    val isOnlineInApp: Boolean = false,
+    // Profile pictures: VRChat+ avatar thumb first, Discord avatar as fallback.
+    val vrchatAvatarThumb: String = "",
+    val discordAvatarUrl: String = ""
 )
 
 internal data class UserDetail(
@@ -207,7 +210,9 @@ internal fun parseUserRow(d: com.google.firebase.firestore.DocumentSnapshot): Us
         vrchatCapacity = (d.getLong("vrchatInstanceCapacity") ?: 0).toInt(),
         vrchatPlatform = (d.getString("vrchatPlatform") ?: "").trim(),
         vrchatLastSyncAt = d.getTimestamp("vrchatLastSyncAt"),
-        isOnlineInApp = d.getBoolean("isOnlineInApp") ?: false
+        isOnlineInApp = d.getBoolean("isOnlineInApp") ?: false,
+        vrchatAvatarThumb = (d.getString("vrchatAvatarThumb") ?: "").trim(),
+        discordAvatarUrl = (d.getString("discordAvatarUrl") ?: "").trim()
     )
 }
 
@@ -344,35 +349,53 @@ internal fun UsersTab(
             modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
+            // Back row sits above the identity card for a clear hierarchy.
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                IconButton(onClick = { selectedDocId = null }, modifier = Modifier.size(36.dp)) {
+                    Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
+                }
+                Text("Back to directory",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+
             ElevatedCard {
-                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    // Identity: large avatar + name + VRChat id + status pills.
                     Row(
                         Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(14.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        IconButton(onClick = { selectedDocId = null }, modifier = Modifier.size(36.dp)) {
-                            Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
-                        }
                         val primaryLabel = row.vrchatDisplayName.ifBlank {
                             row.displayName.ifBlank { shortId(row.docId) }
                         }
-                        AdminAvatar(name = primaryLabel, online = isUserOnline(row, nowMs), size = 44)
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        AdminAvatar(
+                            name = primaryLabel,
+                            online = isUserOnline(row, nowMs),
+                            size = 60,
+                            vrchatAvatarUrl = row.vrchatAvatarThumb,
+                            discordAvatarUrl = row.discordAvatarUrl
+                        )
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(
                                 primaryLabel,
-                                style = MaterialTheme.typography.titleMedium,
+                                style = MaterialTheme.typography.titleLarge,
                                 fontWeight = FontWeight.SemiBold,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis
                             )
-                            if (row.vrchatUserId.isNotBlank()) {
-                                Text(
-                                    row.vrchatUserId,
-                                    fontFamily = FontFamily.Monospace,
+                            val secondary = if (row.vrchatDisplayName.isNotBlank() &&
+                                row.displayName.isNotBlank() && row.vrchatDisplayName != row.displayName)
+                                row.displayName else null
+                            if (secondary != null) {
+                                Text(secondary,
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis
-                                )
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                 if (isUserOnline(row, nowMs)) StatusPill("ONLINE", AdminTone.Primary)
@@ -383,59 +406,74 @@ internal fun UsersTab(
                         }
                     }
 
-                    Divider()
-
-                    AdminLabeledRow("authUid", shortId(row.authUid.ifBlank { "(blank)" }), mono = true)
-                    AdminLabeledRow("device",  shortId(row.deviceHash.ifBlank { "(blank)" }), mono = true)
-                    AdminLabeledRow("active",  relativeTime(row.lastActiveAt ?: row.lastSeenAt, nowMs))
-                    AdminLabeledRow("updated", relativeTime(row.updatedAt, nowMs))
-
-                    Divider()
-
-                    Button(
-                        onClick = {
-                            onSendToModeration(ModerationTarget(
-                                docId = row.docId, authUid = row.authUid,
-                                deviceHash = row.deviceHash,
-                                displayName = row.vrchatDisplayName.ifBlank { row.displayName },
-                                vrchatUserId = row.vrchatUserId,
-                                banned = row.banned, warned = row.warned,
-                                banReason = selectedDetail?.banReason ?: "",
-                                warnReason = selectedDetail?.warnReason ?: ""
-                            ))
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Icon(Icons.Filled.Gavel, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Send to Moderation")
+                    if (row.vrchatWorld.isNotBlank()) {
+                        Text("📍 ${row.vrchatWorld}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
 
-                    OutlinedButton(
-                        onClick = {
-                            scope.launch {
-                                setGlobalLoading(true)
-                                runCatching {
-                                    db.collection("users").document(row.docId)
-                                        .set(
-                                            mapOf("killSignal" to com.google.firebase.firestore.FieldValue.serverTimestamp()),
-                                            com.google.firebase.firestore.SetOptions.merge()
-                                        )
-                                        .await()
-                                }.onFailure { e ->
-                                    setError(e.message ?: "Kill failed")
+                    Divider()
+
+                    // Identity / liveness facts.
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        if (row.vrchatUserId.isNotBlank())
+                            AdminLabeledRow("VRChat", row.vrchatUserId, mono = true, labelWidth = 64)
+                        AdminLabeledRow("authUid", shortId(row.authUid.ifBlank { "(blank)" }), mono = true, labelWidth = 64)
+                        AdminLabeledRow("device",  shortId(row.deviceHash.ifBlank { "(blank)" }), mono = true, labelWidth = 64)
+                        AdminLabeledRow("active",  relativeTime(row.lastActiveAt ?: row.lastSeenAt, nowMs), labelWidth = 64)
+                        AdminLabeledRow("updated", relativeTime(row.updatedAt, nowMs), labelWidth = 64)
+                    }
+
+                    Divider()
+
+                    // Actions side-by-side for a tidy footer.
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = {
+                                onSendToModeration(ModerationTarget(
+                                    docId = row.docId, authUid = row.authUid,
+                                    deviceHash = row.deviceHash,
+                                    displayName = row.vrchatDisplayName.ifBlank { row.displayName },
+                                    vrchatUserId = row.vrchatUserId,
+                                    banned = row.banned, warned = row.warned,
+                                    banReason = selectedDetail?.banReason ?: "",
+                                    warnReason = selectedDetail?.warnReason ?: ""
+                                ))
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Filled.Gavel, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Moderate")
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                scope.launch {
+                                    setGlobalLoading(true)
+                                    runCatching {
+                                        db.collection("users").document(row.docId)
+                                            .set(
+                                                mapOf("killSignal" to com.google.firebase.firestore.FieldValue.serverTimestamp()),
+                                                com.google.firebase.firestore.SetOptions.merge()
+                                            )
+                                            .await()
+                                    }.onFailure { e ->
+                                        setError(e.message ?: "Kill failed")
+                                    }
+                                    setGlobalLoading(false)
                                 }
-                                setGlobalLoading(false)
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.outlinedButtonColors(
-                            contentColor = MaterialTheme.colorScheme.error
-                        )
-                    ) {
-                        Icon(Icons.Filled.Power, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Kill App (force-quit)")
+                            },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error
+                            )
+                        ) {
+                            Icon(Icons.Filled.Power, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Kill App")
+                        }
                     }
                 }
             }
@@ -574,7 +612,12 @@ internal fun UsersTab(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     val primaryName = u.vrchatDisplayName.ifBlank { u.displayName.ifBlank { shortId(u.docId) } }
-                    AdminAvatar(name = primaryName, online = appOnline)
+                    AdminAvatar(
+                        name = primaryName,
+                        online = appOnline,
+                        vrchatAvatarUrl = u.vrchatAvatarThumb,
+                        discordAvatarUrl = u.discordAvatarUrl
+                    )
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         val secondaryName = if (u.vrchatDisplayName.isNotBlank() && u.displayName.isNotBlank() && u.vrchatDisplayName != u.displayName) u.displayName else null
                         Text(
@@ -792,15 +835,7 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
     // ── Cycle ────────────────────────────────────────────────────────
     ElevatedCard {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically) {
-                Row(verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Icon(Icons.Filled.Loop, contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
-                    Text("Cycle", style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold)
-                }
+            AdminCardHeader("Cycle", Icons.Filled.Loop, AdminTone.Primary, trailing = {
                 Row(verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     var intEdit by remember(d.cycleIntervalSeconds) { mutableStateOf(d.cycleIntervalSeconds.toString()) }
@@ -813,7 +848,7 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                             Icon(Icons.Filled.Check, "Save", modifier = Modifier.size(18.dp))
                         }
                 }
-            }
+            })
             if (d.cycleLinesText.isNotBlank()) {
                 var cycleEdit by remember(d.cycleLinesText) { mutableStateOf(d.cycleLinesText) }
                 OutlinedTextField(value = cycleEdit, onValueChange = { cycleEdit = it },

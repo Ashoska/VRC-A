@@ -354,6 +354,15 @@ class VrcaViewModel(
         data["nowPlayingArtist"] = lastNowPlayingArtist.takeIf { it != "(blank)" }?.trim().orEmpty()
         data["activePackage"] = activePackage
 
+        // Discord avatar URL (captured by DiscordRpcService from the logged-in
+        // Discord session and persisted to prefs). Used by the admin panel as a
+        // profile-picture fallback after the VRChat+ avatar. Only write it when
+        // we actually have one so we never clobber an existing value with "".
+        runCatching {
+            app.getSharedPreferences("vrca_remote", android.content.Context.MODE_PRIVATE)
+                .getString("discord_avatar_url", "")?.trim()
+        }.getOrNull()?.takeIf { it.isNotBlank() }?.let { data["discordAvatarUrl"] = it }
+
         // Multi-IP slots
         val activeSlot = runCatching {
             kotlinx.coroutines.runBlocking { userPreferencesRepository.activeIpSlot.first() }

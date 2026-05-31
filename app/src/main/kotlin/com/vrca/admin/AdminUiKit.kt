@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -19,12 +20,16 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import coil.compose.AsyncImagePainter
+import coil.compose.rememberAsyncImagePainter
 
 /* =========================================================
    ADMIN UI KIT — shared visual language for the admin panel
@@ -211,30 +216,65 @@ internal fun AdminLabeledRow(
 }
 
 /**
- * An identity avatar: a colored circle with the first initial, with a small
- * online/offline status dot in the corner.
+ * An identity avatar: a real profile picture (VRChat+ avatar thumbnail, falling
+ * back to the user's Discord avatar) with a first-initial circle as the final
+ * fallback when no image is available or the load fails. A small online/offline
+ * status dot sits in the corner.
+ *
+ * Resolution order: [vrchatAvatarUrl] → [discordAvatarUrl] → letter initial.
+ * Coil loads the first non-blank URL; if that load errors (404/expired), the
+ * initial is shown rather than a broken image.
  */
 @Composable
 internal fun AdminAvatar(
     name: String,
     online: Boolean,
-    size: Int = 40
+    size: Int = 40,
+    vrchatAvatarUrl: String = "",
+    discordAvatarUrl: String = ""
 ) {
     val initial = name.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?"
     val cs = MaterialTheme.colorScheme
+
+    // Pick the best available picture; VRChat first, then Discord.
+    val imageUrl = vrchatAvatarUrl.trim().ifBlank { discordAvatarUrl.trim() }
+
     Box(contentAlignment = Alignment.Center) {
         Surface(
             shape = CircleShape,
             color = cs.primary.copy(alpha = 0.16f),
             modifier = Modifier.size(size.dp)
         ) {
-            Box(contentAlignment = Alignment.Center) {
-                Text(
-                    initial,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = cs.primary
-                )
+            if (imageUrl.isNotBlank()) {
+                val painter = rememberAsyncImagePainter(model = imageUrl)
+                val state = painter.state
+                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                    if (state is AsyncImagePainter.State.Success) {
+                        androidx.compose.foundation.Image(
+                            painter = painter,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize().clip(CircleShape)
+                        )
+                    } else {
+                        // Loading or error → initial fallback.
+                        Text(
+                            initial,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = cs.primary
+                        )
+                    }
+                }
+            } else {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(
+                        initial,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = cs.primary
+                    )
+                }
             }
         }
         Box(

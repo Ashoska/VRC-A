@@ -359,6 +359,7 @@ class DiscordRpcService : Service() {
                 updateNotif("Discord RPC active")
                 startPresenceUpdates()
                 startSessionMonitor()
+                captureDiscordAvatar()
             } else {
                 shimRetryCount++
                 Log.w(TAG, "JS shim injection failed (attempt $shimRetryCount/$MAX_SHIM_RETRIES): $cleaned")
@@ -366,6 +367,41 @@ class DiscordRpcService : Service() {
                 DiscordRpcState.failureMessage = "Setting up Discord connection... ($shimRetryCount/$MAX_SHIM_RETRIES)"
                 val backoffMs = SHIM_RETRY_BASE_DELAY_MS * shimRetryCount
                 mainHandler.postDelayed({ injectShim() }, backoffMs)
+            }
+        }
+    }
+
+    /**
+     * Resolves the logged-in Discord user's avatar URL via JS and persists it to
+     * the shared `vrca_remote` prefs. The user's self-sync (VrcaViewModel) picks
+     * it up and writes `discordAvatarUrl` to their Firestore doc so the admin
+     * panel can show it as a profile-picture fallback after the VRChat+ avatar.
+     * The Discord token never leaves the JS context — only the public CDN URL is
+     * returned to native.
+     */
+    private var discordAvatarRetries = 0
+    private fun captureDiscordAvatar() {
+        val wv = webView ?: return
+        runCatching {
+            // Kicks off the (async) /users/@me fetch if needed and returns the
+            // cached CDN URL once resolved (blank on the first call).
+            wv.evaluateJavascript(
+                "(function(){ try { window.VRCA_getDiscordAvatar && window.VRCA_getDiscordAvatar(); } catch(e){} return window._vrca_discord_avatar || ''; })()"
+            ) { result ->
+                val url = result?.trim()?.removeSurrounding("\"")?.replace("\\/", "/") ?: ""
+                if (url.startsWith("http")) {
+                    discordAvatarRetries = 0
+                    runCatching {
+                        applicationContext
+                            .getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
+                            .edit()
+                            .putString("discord_avatar_url", url)
+                            .apply()
+                    }
+                } else if (discordAvatarRetries < 5) {
+                    discordAvatarRetries++
+                    mainHandler.postDelayed({ captureDiscordAvatar() }, 4000)
+                }
             }
         }
     }
@@ -757,6 +793,35 @@ private const val MODULE_FINDER_JS = """
                 }
                 return null;
             }).catch(function() { return null; });
+        };
+
+        // Resolve the logged-in Discord user's avatar URL (cdn.discordapp.com).
+        // Used by the admin panel as a profile-picture fallback after VRChat+.
+        // The token never leaves the JS context; only the resulting public CDN
+        // URL is handed to native via the return value.
+        window.VRCA_getDiscordAvatar = function() {
+            if (window._vrca_discord_avatar) return Promise.resolve(window._vrca_discord_avatar);
+            window._vrca_grabToken();
+            var token = window._vrca_token;
+            if (!token) return Promise.resolve('');
+            return fetch('/api/v9/users/@me', {
+                headers: { 'Authorization': token }
+            }).then(function(r) { return r.json(); })
+            .then(function(u) {
+                if (!u || !u.id) return '';
+                var url = '';
+                if (u.avatar) {
+                    var ext = u.avatar.indexOf('a_') === 0 ? 'gif' : 'png';
+                    url = 'https://cdn.discordapp.com/avatars/' + u.id + '/' + u.avatar + '.' + ext + '?size=128';
+                } else {
+                    // Default avatar (no custom pic) derived from the user id.
+                    var idx = '0';
+                    try { idx = (BigInt(u.id) >> 22n) % 6n; idx = idx.toString(); } catch(e) { idx = '0'; }
+                    url = 'https://cdn.discordapp.com/embed/avatars/' + idx + '.png';
+                }
+                window._vrca_discord_avatar = url;
+                return url;
+            }).catch(function() { return ''; });
         };
 
         window._vrca_sendPresence = function() {

@@ -12,6 +12,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material3.Button
@@ -115,7 +116,7 @@ internal fun AnnouncementsTab(
                 Modifier.padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text("Announcements", style = MaterialTheme.typography.titleMedium)
+                AdminCardHeader("Announcements", Icons.Filled.Campaign, AdminTone.Info)
 
                 OutlinedTextField(
                     value = newTitle,
@@ -213,12 +214,17 @@ internal fun AnnouncementsTab(
                             Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Column(Modifier.weight(1f)) {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                                 Text(a.title.ifBlank { "(no title)" }, style = MaterialTheme.typography.titleSmall)
+                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    StatusPill(if (a.active) "LIVE" else "DRAFT",
+                                        if (a.active) AdminTone.Success else AdminTone.Neutral)
+                                    StatusPill("P${a.priority}", AdminTone.Info)
+                                }
                                 Text(
-                                    "priority=${a.priority}  active=${a.active}  createdAt=${formatTimestamp(a.createdAt)}",
+                                    formatTimestamp(a.createdAt),
                                     fontFamily = FontFamily.Monospace,
-                                    style = MaterialTheme.typography.bodySmall,
+                                    style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }

@@ -30,6 +30,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.Gavel
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -357,6 +358,19 @@ fun VrcaScreen(
     }
     val showSetupBanner = ipSet.value != null && (!vrcLinked || ipSet.value == false)
 
+    // Discord community invite (public build): the admin sets the link in
+    // config/app.discordInvite; we surface a Discord button in the top bar that
+    // opens it. Empty/blank link → button hidden.
+    val discordInvite = remember { mutableStateOf("") }
+    if (!BuildConfig.IS_ADMIN_BUILD) {
+        LaunchedEffect(Unit) {
+            runCatching {
+                val snap = db.collection("config").document("app").get().await()
+                discordInvite.value = (snap.getString("discordInvite") ?: "").trim()
+            }
+        }
+    }
+
     Scaffold(
             topBar = {
                 CenterAlignedTopAppBar(
@@ -365,6 +379,17 @@ fun VrcaScreen(
                         if (BuildConfig.IS_ADMIN_BUILD) {
                             IconButton(onClick = { page = AppPage.Admin }) {
                                 Icon(Icons.Filled.Gavel, contentDescription = "Admin")
+                            }
+                        } else if (discordInvite.value.isNotBlank()) {
+                            IconButton(onClick = {
+                                runCatching {
+                                    ctx.startActivity(
+                                        Intent(Intent.ACTION_VIEW, Uri.parse(discordInvite.value))
+                                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    )
+                                }
+                            }) {
+                                Icon(Icons.Filled.Forum, contentDescription = "Join our Discord")
                             }
                         }
                     },

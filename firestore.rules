@@ -82,6 +82,10 @@ service cloud.firestore {
         "vrchatIsOnline",
         "vrchatLastSyncAt", "vrchatAuthCookieValid",
 
+        // Discord avatar URL (captured by DiscordRpcService, synced by self).
+        // Used by the admin panel as a profile-picture fallback after VRChat+.
+        "discordAvatarUrl",
+
         // Friends cache (kept ONLY so FieldValue.delete() cleanup is allowed
         // by the rules — never written with real data anymore, lives locally)
         "savedFriendIds", "savedFriendNames"
