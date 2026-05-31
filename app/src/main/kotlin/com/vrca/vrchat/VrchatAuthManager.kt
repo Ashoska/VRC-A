@@ -144,6 +144,49 @@ object VrchatAuthManager {
         }
     }
 
+    /**
+     * On-demand profile-pic resolution by VRChat userId, using THIS device's
+     * session (used by the admin directory so it can show any user's VRChat+
+     * picture without that picture ever being stored in Firestore). Returns the
+     * `profilePicOverride` (falling back to `userIcon`) URL, or "" if the user
+     * has no VRChat+ pic / we're not logged in / the fetch failed.
+     *
+     * Results (including blank) are cached per-userId for the process lifetime so
+     * scrolling the directory doesn't re-hit `GET /users/{id}` and risk rate
+     * limits — the caller is expected to only request VISIBLE rows.
+     */
+    private val profilePicUrlCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+    suspend fun fetchProfilePicUrl(context: Context, userId: String): String =
+        withContext(Dispatchers.IO) {
+            if (userId.isBlank()) return@withContext ""
+            profilePicUrlCache[userId]?.let { return@withContext it }
+            val cookieHeader = getCookieHeader(context) ?: return@withContext ""
+            try {
+                val (code, body, rawCookies) = get("$BASE/users/$userId", null, cookieHeader)
+                if (code != 200) return@withContext ""
+                captureRolledCookies(context, rawCookies)
+                val json = JSONObject(body)
+                val pic = json.optString("profilePicOverride", "")
+                    .ifBlank { json.optString("userIcon", "") }
+                profilePicUrlCache[userId] = pic // cache blank too — no refetch storm
+                pic
+            } catch (e: Exception) {
+                Log.w(TAG, "fetchProfilePicUrl failed for $userId", e)
+                ""
+            }
+        }
+
+    /**
+     * Headers required to LOAD an auth-gated VRChat image (`api.vrchat.cloud`
+     * file/image URLs require the session cookie + a User-Agent). Returned to the
+     * Coil image loader so the admin's session can render other users' VRChat+
+     * pictures. Null when not logged in.
+     */
+    fun vrchatImageHeaders(context: Context): Map<String, String>? {
+        val cookie = getCookieHeader(context) ?: return null
+        return mapOf("Cookie" to cookie, "User-Agent" to USER_AGENT)
+    }
+
     fun getCookieHeader(context: Context): String? {
         val prefs = getPrefs(context) ?: return null
         val auth  = prefs.getString(KEY_AUTH_COOKIE, null)

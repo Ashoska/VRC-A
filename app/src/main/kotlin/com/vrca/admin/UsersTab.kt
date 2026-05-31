@@ -396,12 +396,14 @@ internal fun UsersTab(
                         // the directory snapshot.
                         val livePfp = (d?.vrchatProfilePic ?: "").ifBlank { row.vrchatProfilePic }
                         val liveDiscord = (d?.discordAvatarUrl ?: "").ifBlank { row.discordAvatarUrl }
+                        val liveVrcId = (d?.vrchatUserId ?: "").ifBlank { row.vrchatUserId }
                         AdminAvatar(
                             name = primaryLabel,
                             online = isUserOnline(row, nowMs),
                             size = 60,
                             vrchatAvatarUrl = livePfp,
-                            discordAvatarUrl = liveDiscord
+                            discordAvatarUrl = liveDiscord,
+                            vrchatUserId = liveVrcId
                         )
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(
@@ -644,7 +646,8 @@ internal fun UsersTab(
                         name = primaryName,
                         online = appOnline,
                         vrchatAvatarUrl = u.vrchatProfilePic,
-                        discordAvatarUrl = u.discordAvatarUrl
+                        discordAvatarUrl = u.discordAvatarUrl,
+                        vrchatUserId = u.vrchatUserId
                     )
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         val secondaryName = if (u.vrchatDisplayName.isNotBlank() && u.displayName.isNotBlank() && u.vrchatDisplayName != u.displayName) u.displayName else null

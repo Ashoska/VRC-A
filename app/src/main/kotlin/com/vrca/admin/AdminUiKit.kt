@@ -21,6 +21,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -29,6 +30,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import com.vrca.vrchat.VrchatAuthManager
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -240,14 +243,31 @@ internal fun AdminAvatar(
     online: Boolean,
     size: Int = 40,
     vrchatAvatarUrl: String = "",
-    discordAvatarUrl: String = ""
+    discordAvatarUrl: String = "",
+    vrchatUserId: String = ""
 ) {
     val initial = name.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?"
     val cs = MaterialTheme.colorScheme
+    val context = LocalContext.current
+
+    // Hybrid VRChat-pfp resolution: prefer the URL stored on the doc (loads the
+    // whole directory with zero API calls); only when it's blank do we fetch the
+    // picture on demand by VRChat userId using the admin's own session (this row
+    // is on screen, so the call is bounded — VrchatAuthManager caches per-id).
+    var fetchedVrchatUrl by remember(vrchatUserId) { mutableStateOf("") }
+    LaunchedEffect(vrchatAvatarUrl, vrchatUserId) {
+        if (vrchatAvatarUrl.isBlank() && vrchatUserId.isNotBlank() &&
+            com.vrca.BuildConfig.IS_ADMIN_BUILD &&
+            VrchatAuthManager.isLoggedIn(context)
+        ) {
+            fetchedVrchatUrl = VrchatAuthManager.fetchProfilePicUrl(context, vrchatUserId)
+        }
+    }
+    val effectiveVrchat = vrchatAvatarUrl.trim().ifBlank { fetchedVrchatUrl.trim() }
 
     // Ordered, de-duplicated, non-blank candidate URLs: VRChat first, Discord next.
-    val candidates = remember(vrchatAvatarUrl, discordAvatarUrl) {
-        listOf(vrchatAvatarUrl.trim(), discordAvatarUrl.trim())
+    val candidates = remember(effectiveVrchat, discordAvatarUrl) {
+        listOf(effectiveVrchat, discordAvatarUrl.trim())
             .filter { it.isNotBlank() }
             .distinct()
     }
@@ -272,7 +292,13 @@ internal fun AdminAvatar(
             modifier = Modifier.size(size.dp)
         ) {
             if (currentUrl != null) {
-                val painter = rememberAsyncImagePainter(model = currentUrl)
+                // Load through the VRChat-auth image loader so auth-gated
+                // api.vrchat.cloud pictures resolve with the admin's session;
+                // non-VRChat hosts (Discord CDN) pass through untouched.
+                val painter = rememberAsyncImagePainter(
+                    model = currentUrl,
+                    imageLoader = VrchatImageLoader.get(context)
+                )
                 val state = painter.state
                 // On error, fall through to the next candidate (or the initial
                 // once we've exhausted them).
