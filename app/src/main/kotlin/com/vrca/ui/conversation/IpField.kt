@@ -143,6 +143,19 @@ fun IpField(
     var prevIp3Name    by remember { mutableStateOf(ip3Name) }
     var prevIp3Address by remember { mutableStateOf(ip3Address) }
 
+    // Per-slot "dirty" flags — set true ONLY when the user actually types in
+    // that slot's editor field. The auto-save debounce below persists a slot
+    // ONLY if it is dirty, so a buffer that merely SYNCED from DataStore (via
+    // the follow effects above) is never written back. Without this, the
+    // debounce runs on every fresh composition (e.g. returning to the Home
+    // tab) and a follow-vs-debounce race could persist a buffer that doesn't
+    // reflect a real edit — overwriting a populated slot 1 with another slot's
+    // value (the "slot contents clone on tab re-entry" bug). The follow effects
+    // deliberately do NOT set these flags.
+    var dirty1 by remember { mutableStateOf(false) }
+    var dirty2 by remember { mutableStateOf(false) }
+    var dirty3 by remember { mutableStateOf(false) }
+
     LaunchedEffect(ip1Name)    { if (n1 == prevIp1Name)    n1 = ip1Name;    prevIp1Name    = ip1Name }
     LaunchedEffect(ip1Address) { if (a1 == prevIp1Address) a1 = ip1Address; prevIp1Address = ip1Address }
     LaunchedEffect(ip2Name)    { if (n2 == prevIp2Name)    n2 = ip2Name;    prevIp2Name    = ip2Name }
@@ -153,16 +166,19 @@ fun IpField(
     // Auto-save edits with a 400ms debounce so the user never has to click
     // an explicit Save button — typing alone persists the change.
     LaunchedEffect(n1, a1) {
+        if (!dirty1) return@LaunchedEffect
         delay(400)
         val n = n1.trim().ifBlank { "Slot 1" }
         if (n != ip1Name || a1 != ip1Address) repo.saveIpSlot(1, n, a1)
     }
     LaunchedEffect(n2, a2) {
+        if (!dirty2) return@LaunchedEffect
         delay(400)
         val n = n2.trim().ifBlank { "Slot 2" }
         if (n != ip2Name || a2 != ip2Address) repo.saveIpSlot(2, n, a2)
     }
     LaunchedEffect(n3, a3) {
+        if (!dirty3) return@LaunchedEffect
         delay(400)
         val n = n3.trim().ifBlank { "Slot 3" }
         if (n != ip3Name || a3 != ip3Address) repo.saveIpSlot(3, n, a3)
@@ -317,7 +333,11 @@ fun IpField(
                                     OutlinedTextField(
                                         value = nameVal,
                                         onValueChange = { v ->
-                                            when (slot) { 1 -> n1 = v; 2 -> n2 = v; 3 -> n3 = v }
+                                            when (slot) {
+                                                1 -> { n1 = v; dirty1 = true }
+                                                2 -> { n2 = v; dirty2 = true }
+                                                3 -> { n3 = v; dirty3 = true }
+                                            }
                                         },
                                         modifier = Modifier.weight(1f),
                                         singleLine = true,
@@ -326,7 +346,11 @@ fun IpField(
                                     OutlinedTextField(
                                         value = addrVal,
                                         onValueChange = { v ->
-                                            when (slot) { 1 -> a1 = v; 2 -> a2 = v; 3 -> a3 = v }
+                                            when (slot) {
+                                                1 -> { a1 = v; dirty1 = true }
+                                                2 -> { a2 = v; dirty2 = true }
+                                                3 -> { a3 = v; dirty3 = true }
+                                            }
                                             if (invalidIpWarning != null) invalidIpWarning = null
                                         },
                                         modifier = Modifier.weight(2f),
