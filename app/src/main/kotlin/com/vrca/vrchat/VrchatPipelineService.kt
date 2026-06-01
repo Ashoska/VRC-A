@@ -27,7 +27,6 @@ import com.vrca.discord.DiscordRpcStatus
 import com.vrca.update.checkFirestoreRelease
 import com.vrca.update.ReleaseCheckResult
 import com.vrca.data.dataStore
-import com.vrca.sync.AdminBrowsingState
 import com.vrca.sync.AdminWatchState
 import com.vrca.vrchat.VrchatNotificationPrefs
 import kotlinx.coroutines.CoroutineScope
@@ -189,7 +188,6 @@ class VrchatPipelineService : Service() {
         loadSeenAnnouncementIds()
         InAppAlertState.load(this)
         createNotificationChannels()
-        attachAdminPresenceListener()
         attachAnnouncementsListener()
         startStatusPagePolling()
         startAppUpdateCheckLoop()
@@ -310,8 +308,6 @@ class VrchatPipelineService : Service() {
         pipelineConnectedAtMs > 0 && System.currentTimeMillis() - pipelineConnectedAtMs < WARMUP_MS
 
     override fun onDestroy() {
-        adminPresenceListener?.remove()
-        adminPresenceListener = null
         announcementsListener?.remove()
         announcementsListener = null
         statusPageJob?.cancel()
@@ -489,32 +485,12 @@ class VrchatPipelineService : Service() {
         }
     }
 
-    private var adminPresenceListener: com.google.firebase.firestore.ListenerRegistration? = null
-
-    private fun attachAdminPresenceListener() {
-        adminPresenceListener?.remove()
-        adminPresenceListener = FirebaseFirestore.getInstance()
-            .collection("config")
-            .document("adminPresence")
-            .addSnapshotListener { snap, err ->
-                if (err != null) {
-                    AdminBrowsingState.updateFromTimestampMs(null)
-                    if (err is com.google.firebase.firestore.FirebaseFirestoreException &&
-                        err.code == com.google.firebase.firestore.FirebaseFirestoreException.Code.PERMISSION_DENIED) {
-                        Log.w(TAG, "adminPresence listener denied — detaching to avoid retry loop")
-                        adminPresenceListener?.remove()
-                        adminPresenceListener = null
-                    }
-                    return@addSnapshotListener
-                }
-                if (snap == null) {
-                    AdminBrowsingState.updateFromTimestampMs(null)
-                    return@addSnapshotListener
-                }
-                val ms = snap.getTimestamp("browsingAt")?.toDate()?.time
-                AdminBrowsingState.updateFromTimestampMs(ms)
-            }
-    }
+    // The public-side `config/adminPresence` listener was REMOVED. Under the
+    // hourly model nothing reads AdminBrowsingState to drive a write (the browse-
+    // volatile loop is a no-op), so the only effect of this listener was that the
+    // admin's 30s `browsingAt` heartbeat fanned a billed read out to EVERY online
+    // user's listener (~120k reads/hour at 1k users) for zero benefit. The admin
+    // side no longer writes `browsingAt` either (see AdminRuntime).
 
     private suspend fun connectWebSocket() {
         val cookieHeader = VrchatAuthManager.getCookieHeader(this)
