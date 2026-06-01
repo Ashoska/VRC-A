@@ -187,9 +187,44 @@ object VrchatAuthManager {
         return mapOf("Cookie" to cookie, "User-Agent" to USER_AGENT)
     }
 
+    /**
+     * Collapse an accidental double name-prefix in a stored cookie, e.g. a
+     * historically mis-stored `"twoFactorAuth=twoFactorAuth=VALUE"` becomes
+     * `"twoFactorAuth=VALUE"`. This is migration self-healing for the old
+     * verify2FA bug that re-wrapped extractCookieValue's already-prefixed
+     * return — VRChat rejected the malformed trusted-device cookie and forced a
+     * fresh 2FA prompt after every global logout. Returns the cleaned value (or
+     * null if input was null). Safe/idempotent on already-correct cookies.
+     */
+    private fun normalizeCookie(raw: String?, name: String): String? {
+        if (raw == null) return null
+        var v = raw.trim()
+        val prefix = "$name="
+        while (v.startsWith(prefix, ignoreCase = true) &&
+               v.substring(prefix.length).startsWith(prefix, ignoreCase = true)) {
+            v = v.substring(prefix.length)
+        }
+        return v
+    }
+
+    /**
+     * Read a stored cookie, self-heal any double-prefix in place (persist the
+     * corrected value so the fix is permanent across all read paths, including
+     * the WebSocket), and return the clean `name=value` pair.
+     */
+    private fun readCookie(prefs: android.content.SharedPreferences, key: String, name: String): String? {
+        val stored = prefs.getString(key, null) ?: return null
+        val clean = normalizeCookie(stored, name) ?: return null
+        if (clean != stored) {
+            prefs.edit().putString(key, clean).apply()
+            Log.i(TAG, "Self-healed malformed $name cookie (collapsed double prefix)")
+        }
+        return clean
+    }
+
     fun getCookieHeader(context: Context): String? {
         val prefs = getPrefs(context) ?: return null
-        val auth  = prefs.getString(KEY_AUTH_COOKIE, null)
+        val auth  = readCookie(prefs, KEY_AUTH_COOKIE, "auth")
         // ALWAYS send the trusted-device 2FA cookie if we have one — never drop
         // it on a client-side age guess. VRChat's web client keeps a remembered
         // device trusted indefinitely (and rolls it forward on use); a hard
@@ -197,7 +232,7 @@ object VrchatAuthManager {
         // itself would not have asked for. Sending a stale cookie is harmless:
         // worst case VRChat ignores it and returns requiresTwoFactorAuth, which
         // is exactly what dropping it would have produced. Let the SERVER decide.
-        val twoFa = prefs.getString(KEY_2FA_COOKIE, null)
+        val twoFa = readCookie(prefs, KEY_2FA_COOKIE, "twoFactorAuth")
         return when {
             auth != null && twoFa != null -> "$auth; $twoFa"
             auth != null                  -> auth
@@ -217,7 +252,7 @@ object VrchatAuthManager {
      */
     private fun getTwoFaOnlyCookieHeader(context: Context): String? {
         val prefs = getPrefs(context) ?: return null
-        return prefs.getString(KEY_2FA_COOKIE, null)
+        return readCookie(prefs, KEY_2FA_COOKIE, "twoFactorAuth")
     }
 
     fun shouldRefreshCookies(context: Context): Boolean {
@@ -430,20 +465,27 @@ object VrchatAuthManager {
                 Log.d(TAG, "verify2FA response=$responseCode")
 
                 if (responseCode == 200) {
+                    // extractCookieValue already returns the full "twoFactorAuth=VALUE"
+                    // pair, ready to drop straight into a Cookie header / storage.
+                    // Do NOT re-wrap it as "twoFactorAuth=$it" — that produces the
+                    // malformed "twoFactorAuth=twoFactorAuth=VALUE" the trusted-device
+                    // check rejects, which forced a fresh 2FA prompt after every
+                    // VRChat global logout even though the website would not have asked.
                     val twoFaCookieValue = rawCookies
                         .mapNotNull { extractCookieValue(it, "twoFactorAuth") }
                         .firstOrNull()
 
                     val cookieHeader = if (twoFaCookieValue != null)
-                        "$partialCookie; twoFactorAuth=$twoFaCookieValue"
+                        "$partialCookie; $twoFaCookieValue"
                     else partialCookie
 
                     // Fetch user info with full cookie set
-                    val (userCode, userBody, _) = get(
+                    val (userCode, userBody, userCookies) = get(
                         url = "$BASE/auth/user",
                         authHeader = null,
                         cookieHeader = cookieHeader
                     )
+                    if (userCode == 200) captureRolledCookies(context, userCookies)
 
                     if (userCode == 200) {
                         val json = JSONObject(userBody)
@@ -452,7 +494,7 @@ object VrchatAuthManager {
 
                         if (userId.isNotBlank()) {
                             saveSession(context, partialCookie,
-                                twoFaCookieValue?.let { "twoFactorAuth=$it" },
+                                twoFaCookieValue,
                                 userId, displayName)
                             TwoFaResult.Success(userId, displayName)
                         } else {
@@ -550,8 +592,9 @@ object VrchatAuthManager {
             // user endpoint which reflects the true live state.
             if (userId.isNotBlank()) {
                 try {
-                    val (uCode, uBody, _) = get("$BASE/users/$userId", null, cookieHeader)
+                    val (uCode, uBody, uCookies) = get("$BASE/users/$userId", null, cookieHeader)
                     if (uCode == 200) {
+                        captureRolledCookies(context, uCookies)
                         val uj = JSONObject(uBody)
                         val uState = uj.optString("state", "")
                         val uLocation = uj.optString("location", "")
@@ -584,8 +627,9 @@ object VrchatAuthManager {
                 location != "traveling" && location.startsWith("wrld_")
             if (hasWorldLocation) {
                 try {
-                    val (wCode, wBody, _) = get("$BASE/instances/$location", null, cookieHeader)
+                    val (wCode, wBody, wCookies) = get("$BASE/instances/$location", null, cookieHeader)
                     if (wCode == 200) {
+                        captureRolledCookies(context, wCookies)
                         val inst = JSONObject(wBody)
                         playerCount = inst.optInt("n_users", 0)
                         capacity = inst.optInt("capacity", 0)
@@ -657,10 +701,11 @@ object VrchatAuthManager {
             var offset = 0
             try {
                 while (true) {
-                    val (code, body, _) = get(
+                    val (code, body, rawCookies) = get(
                         "$BASE/auth/user/friends?offset=$offset&n=$pageSize&offline=$offline",
                         null, cookieHeader
                     )
+                    if (code == 200) captureRolledCookies(context, rawCookies)
                     if (code == 429) {
                         Log.w(TAG, "fetchFriends rate limited, waiting 5s")
                         kotlinx.coroutines.delay(5000)
@@ -708,11 +753,11 @@ object VrchatAuthManager {
     suspend fun fetchPendingNotifications(context: Context): org.json.JSONArray? = withContext(Dispatchers.IO) {
         val cookieHeader = getCookieHeader(context) ?: return@withContext null
         try {
-            val (code, body, _) = get(
+            val (code, body, rawCookies) = get(
                 "$BASE/auth/user/notifications?type=all&hidden=false&n=100",
                 null, cookieHeader
             )
-            if (code == 200) org.json.JSONArray(body) else null
+            if (code == 200) { captureRolledCookies(context, rawCookies); org.json.JSONArray(body) } else null
         } catch (e: Exception) {
             Log.w(TAG, "fetchPendingNotifications failed", e)
             null
@@ -722,11 +767,11 @@ object VrchatAuthManager {
     suspend fun fetchPendingNotificationsV2(context: Context): org.json.JSONArray? = withContext(Dispatchers.IO) {
         val cookieHeader = getCookieHeader(context) ?: return@withContext null
         try {
-            val (code, body, _) = get(
+            val (code, body, rawCookies) = get(
                 "$BASE/auth/user/notifications/v2?n=50",
                 null, cookieHeader
             )
-            if (code == 200) org.json.JSONArray(body) else null
+            if (code == 200) { captureRolledCookies(context, rawCookies); org.json.JSONArray(body) } else null
         } catch (e: Exception) {
             Log.w(TAG, "fetchPendingNotificationsV2 failed", e)
             null
@@ -737,11 +782,11 @@ object VrchatAuthManager {
         val userId = getStoredUserId(context) ?: return@withContext null
         val cookieHeader = getCookieHeader(context) ?: return@withContext null
         try {
-            val (code, body, _) = get(
+            val (code, body, rawCookies) = get(
                 "$BASE/users/$userId/groups?n=50",
                 null, cookieHeader
             )
-            if (code == 200) org.json.JSONArray(body) else null
+            if (code == 200) { captureRolledCookies(context, rawCookies); org.json.JSONArray(body) } else null
         } catch (e: Exception) {
             Log.w(TAG, "fetchUserGroups failed", e)
             null
@@ -752,7 +797,8 @@ object VrchatAuthManager {
         if (groupId.isBlank()) return@withContext null
         val cookieHeader = getCookieHeader(context) ?: return@withContext null
         try {
-            val (code, body, _) = get("$BASE/groups/$groupId", null, cookieHeader)
+            val (code, body, rawCookies) = get("$BASE/groups/$groupId", null, cookieHeader)
+            if (code == 200) captureRolledCookies(context, rawCookies)
             if (code == 200 && body.startsWith("{")) {
                 org.json.JSONObject(body).optString("name", "").takeIf { it.isNotBlank() }
             } else null
@@ -765,10 +811,11 @@ object VrchatAuthManager {
     suspend fun fetchGroupAnnouncement(context: Context, groupId: String): org.json.JSONObject? = withContext(Dispatchers.IO) {
         val cookieHeader = getCookieHeader(context) ?: return@withContext null
         try {
-            val (code, body, _) = get(
+            val (code, body, rawCookies) = get(
                 "$BASE/groups/$groupId/announcement",
                 null, cookieHeader
             )
+            if (code == 200) captureRolledCookies(context, rawCookies)
             if (code == 200 && body.startsWith("{")) org.json.JSONObject(body) else null
         } catch (e: Exception) {
             Log.w(TAG, "fetchGroupAnnouncement($groupId) failed", e)
@@ -779,11 +826,12 @@ object VrchatAuthManager {
     suspend fun fetchGroupPosts(context: Context, groupId: String, n: Int = 10): org.json.JSONArray? = withContext(Dispatchers.IO) {
         val cookieHeader = getCookieHeader(context) ?: return@withContext null
         try {
-            val (code, body, _) = get(
+            val (code, body, rawCookies) = get(
                 "$BASE/groups/$groupId/posts?n=$n",
                 null, cookieHeader
             )
             if (code != 200) return@withContext null
+            captureRolledCookies(context, rawCookies)
             // VRChat wraps posts in an object: {"posts":[...],"total":N}.
             // Older/edge responses may return a bare array — handle both.
             when {
@@ -814,10 +862,11 @@ object VrchatAuthManager {
         )
         for (url in endpoints) {
             try {
-                val (code, body, _) = get(url, null, cookieHeader)
+                val (code, body, rawCookies) = get(url, null, cookieHeader)
                 Log.i(TAG, "fetchGroupCalendarEvents($groupId) url=${url.substringAfter("groups/")} http=$code bodyHead=${body.take(80)}")
                 if (code == 404) continue
                 if (code != 200) continue
+                captureRolledCookies(context, rawCookies)
                 val result = when {
                     body.startsWith("[") -> org.json.JSONArray(body)
                     body.startsWith("{") -> {
@@ -973,9 +1022,10 @@ object VrchatAuthManager {
         if (userId.isBlank()) return@withContext null
         val cookieHeader = getCookieHeader(context) ?: return@withContext null
         try {
-            val (code, body, _) = get("$BASE/users/$userId", null, cookieHeader)
+            val (code, body, rawCookies) = get("$BASE/users/$userId", null, cookieHeader)
             when {
                 code == 200 -> {
+                    captureRolledCookies(context, rawCookies)
                     val json = JSONObject(body)
                     if (json.has("isFriend")) json.optBoolean("isFriend", false) else null
                 }
