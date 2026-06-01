@@ -15,8 +15,10 @@ import android.util.Log
 import android.view.View
 import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
+import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import java.io.File
 import com.vrca.R
 import com.vrca.vrchat.VrchatAuthManager
 import com.vrca.vrchat.VrchatPipelineState
@@ -92,6 +94,19 @@ class DiscordRpcService : Service() {
         private const val SESSION_CHECK_INTERVAL_MS = 30_000L
         private const val MAX_CONSECUTIVE_PUSH_FAILURES = 5
 
+        // WebView cache hygiene. The Discord gateway lives in a long-lived WebView
+        // loading the full discord.com app, which persists an HTTP cache + DOM
+        // storage + IndexedDB + service workers that grow unbounded and are never
+        // cleared — the main source of the app's runaway "cache" size. We check
+        // the WebView data dir hourly and, when it crosses the cap, wipe DOM
+        // storage/IndexedDB + the HTTP cache and reload. The session survives
+        // because the auth COOKIE (CookieManager) is left intact — Discord
+        // re-bootstraps the localStorage token from it on reload; if that ever
+        // fails it lands on /login and the existing onSessionExpired() recovery
+        // kicks in.
+        private const val CACHE_CHECK_INTERVAL_MS = 60L * 60 * 1000   // hourly
+        private const val WEBVIEW_CACHE_CAP_BYTES = 80L * 1024 * 1024  // 80 MB
+
         var isRunning = false
             private set
     }
@@ -102,6 +117,7 @@ class DiscordRpcService : Service() {
     private var presenceWatchJob: Job? = null
     private var presenceTimerJob: Job? = null
     private var sessionMonitorJob: Job? = null
+    private var cacheMaintenanceJob: Job? = null
     private var shimReady = false
     private var shimRetryCount = 0
     private var sessionRecoveryCount = 0
@@ -305,6 +321,7 @@ class DiscordRpcService : Service() {
             wv.resumeTimers()
             wv.dispatchWindowVisibilityChanged(View.VISIBLE)
             isRunning = true
+            startCacheMaintenance()
             updateNotif("Discord RPC connecting...")
         }
     }
@@ -403,6 +420,55 @@ class DiscordRpcService : Service() {
         presenceTimerJob?.cancel()
         presenceWatchJob = null
         presenceTimerJob = null
+    }
+
+    /** Recursive size of a directory in bytes (best-effort). */
+    private fun dirSizeBytes(dir: File): Long {
+        if (!dir.exists()) return 0L
+        var total = 0L
+        val files = dir.listFiles() ?: return 0L
+        for (f in files) {
+            total += if (f.isDirectory) dirSizeBytes(f) else f.length()
+        }
+        return total
+    }
+
+    /**
+     * Hourly WebView cache cap. The Discord WebView's HTTP cache + DOM storage +
+     * IndexedDB + service workers grow without bound and are never cleared, which
+     * is the dominant contributor to the app's on-disk "cache" size. When the
+     * `app_webview` dir crosses [WEBVIEW_CACHE_CAP_BYTES] we wipe web storage +
+     * the HTTP cache and reload. The Discord session survives because the auth
+     * cookie (CookieManager) is left untouched and Discord re-bootstraps from it.
+     */
+    private fun startCacheMaintenance() {
+        cacheMaintenanceJob?.cancel()
+        cacheMaintenanceJob = scope.launch {
+            while (true) {
+                delay(CACHE_CHECK_INTERVAL_MS)
+                try {
+                    val webviewDir = File(applicationInfo.dataDir, "app_webview")
+                    val size = dirSizeBytes(webviewDir)
+                    if (size > WEBVIEW_CACHE_CAP_BYTES) {
+                        Log.i(TAG, "WebView cache ${size / (1024 * 1024)}MB over cap — clearing (cookie/session preserved)")
+                        mainHandler.post {
+                            try {
+                                WebStorage.getInstance().deleteAllData()
+                                webView?.clearCache(true)
+                                // Reload so Discord re-bootstraps its token from the
+                                // preserved auth cookie; onSessionExpired() catches
+                                // the rare case where it can't.
+                                webView?.reload()
+                            } catch (e: Throwable) {
+                                Log.w(TAG, "WebView cache clear failed", e)
+                            }
+                        }
+                    }
+                } catch (e: Throwable) {
+                    Log.w(TAG, "Cache maintenance check failed", e)
+                }
+            }
+        }
     }
 
     private fun startSessionMonitor() {
@@ -587,6 +653,8 @@ class DiscordRpcService : Service() {
         stopPresenceUpdates()
         sessionMonitorJob?.cancel()
         sessionMonitorJob = null
+        cacheMaintenanceJob?.cancel()
+        cacheMaintenanceJob = null
         shimReady = false
         isRunning = false
         // No bookkeeping needed here: online_start_epoch + last_online_seen are already

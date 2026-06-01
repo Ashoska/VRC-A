@@ -22,12 +22,13 @@ import java.util.concurrent.atomic.AtomicBoolean
  * these in `LaunchedEffect`, so they died with the Activity.)
  *
  * Two effects move here:
- *  1. **Browsing heartbeat + force-kill staleness sweep** — while the admin is on the
- *     Dashboard/Users tab, write `config/adminPresence.browsingAt` every 30s and, after
- *     a grace period, flip stale `isOnlineInApp` users offline. Under the hourly liveness
- *     model the sweep keys on `lastActiveMs` (canonical `lastActiveAt`, falling back to
- *     `lastSeenAt`) and uses the ~65-min staleness window — an unwatched user only writes
- *     `lastActiveAt` once per hour, so a shorter window would false-flag live users.
+ *  1. **Force-kill staleness sweep** — while the admin is on the Dashboard/Users tab,
+ *     after a grace period, flip stale `isOnlineInApp` users offline. Under the hourly
+ *     liveness model the sweep keys on `lastActiveMs` (canonical `lastActiveAt`, falling
+ *     back to `lastSeenAt`) and uses the ~65-min staleness window — an unwatched user only
+ *     writes `lastActiveAt` once per hour, so a shorter window would false-flag live users.
+ *     (The old `config/adminPresence.browsingAt` 30s heartbeat was REMOVED — it fanned a
+ *     billed read out to every online user's listener for zero benefit; see below.)
  *  2. **Watcher heartbeat** — while a user is selected in the detail view, write
  *     `watcherActiveAt` on that user's doc every 30s (this is what puts the user app
  *     into 10s live-sync mode).
@@ -106,11 +107,11 @@ object AdminRuntime {
         while (true) {
             if (browsing.value) {
                 if (browsingStartedAt == 0L) browsingStartedAt = System.currentTimeMillis()
-                try {
-                    db.collection("config").document("adminPresence")
-                        .set(mapOf("browsingAt" to FieldValue.serverTimestamp()), SetOptions.merge())
-                } catch (_: Throwable) {}
-
+                // NOTE: the `config/adminPresence.browsingAt` heartbeat was REMOVED.
+                // Every online user held a snapshot listener on that doc, so writing
+                // it every 30s fanned a billed read out to the entire base (~120k
+                // reads/hour at 1k users) for zero benefit under the hourly model.
+                // This loop now only runs the local force-kill staleness sweep.
                 if (System.currentTimeMillis() - browsingStartedAt > SWEEP_GRACE_MS) {
                     val now = System.currentTimeMillis()
                     for (u in sweepData) {

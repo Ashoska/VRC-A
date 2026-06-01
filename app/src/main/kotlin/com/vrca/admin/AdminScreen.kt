@@ -78,7 +78,6 @@ import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
 import com.google.firebase.firestore.Source
 import android.util.Log
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import android.net.Uri
@@ -289,7 +288,9 @@ fun AdminScreen() {
     // `refreshTick`) and let the admin pull-to-refresh for fresh data. Aggregate
     // stats (below) and the selected-user 10s detail poll cover the live needs.
     var sharedUsers by remember { mutableStateOf<List<UserRow>>(emptyList()) }
-    var sharedLiveLimit by rememberSaveable { mutableIntStateOf(500) }
+    // Default fetch ceiling raised from 500 → 2000 so the whole base loads (no
+    // "only the 500 most-recently-active show" cap); +500 can still raise it.
+    var sharedLiveLimit by rememberSaveable { mutableIntStateOf(2000) }
     var sharedUsersLoading by remember { mutableStateOf(true) }
     var refreshTick by remember { mutableIntStateOf(0) }
     val needsUsers = tabIndex == 0 || tabIndex == 1
@@ -299,61 +300,84 @@ fun AdminScreen() {
     var warnedUsersCount by remember { mutableIntStateOf(0) }
     var bannedUsersCount by remember { mutableIntStateOf(0) }
 
+    // The (limit:refreshTick) of the last actual server pull. Initialised to the
+    // first composition's key so plain tab entry/re-entry does NOT trigger a
+    // read — only a manual refresh / +500 (key change) or an empty cache
+    // (first-ever load) does. Opening the directory renders the cached list with
+    // ZERO Firestore reads.
+    var lastFetchedKey by rememberSaveable { mutableStateOf("2000:0") }
+
     LaunchedEffect(needsUsers, sharedLiveLimit, refreshTick) {
         if (!needsUsers) return@LaunchedEffect
-        sharedUsersLoading = true
-        try {
-            val snap = db.collection("users")
-                .limit(sharedLiveLimit.toLong())
-                .get(Source.SERVER)
-                .await()
-            sharedUsers = snap.documents
-                .filter { it.id != deviceHash }
-                .map { parseUserRow(it) }
-                .sortedByDescending {
-                    (it.lastActiveAt ?: it.lastSeenAt)?.toDate()?.time ?: 0L
-                }
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Throwable) {
-            Log.e("AdminScreen", "Users fetch failed", e)
-            setErr(e.message ?: "Users load failed")
-        } finally {
-            sharedUsersLoading = false
+        val key = "$sharedLiveLimit:$refreshTick"
+
+        // 1) Instant render from the local cache (0 reads).
+        if (sharedUsers.isEmpty()) {
+            val cached = UsersDirectoryCache.load(ctx)
+            if (cached.isNotEmpty()) {
+                sharedUsers = cached
+                sharedUsersLoading = false
+            }
         }
-    }
 
-    // Aggregate stats: refresh every 60s while admin is on Dashboard/Users.
-    // count() aggregation costs 1 read per 1000 docs counted (very cheap).
-    LaunchedEffect(needsUsers) {
-        if (!needsUsers) return@LaunchedEffect
-        while (true) {
+        // 2) Hit the server ONLY when there's nothing to show or the admin
+        //    explicitly refreshed / paged (+500). Plain tab re-entry = no read.
+        val explicitRefresh = key != lastFetchedKey
+        if (sharedUsers.isEmpty() || explicitRefresh) {
+            sharedUsersLoading = sharedUsers.isEmpty()
             try {
-                val totalSnap = db.collection("users")
-                    .whereEqualTo("adminBuild", false)
-                    .count()
-                    .get(com.google.firebase.firestore.AggregateSource.SERVER)
+                val snap = db.collection("users")
+                    .limit(sharedLiveLimit.toLong())
+                    .get(Source.SERVER)
                     .await()
-                totalUsersCount = totalSnap.count.toInt()
-
-                val warnedSnap = db.collection("users")
-                    .whereEqualTo("warned", true)
-                    .count()
-                    .get(com.google.firebase.firestore.AggregateSource.SERVER)
-                    .await()
-                warnedUsersCount = warnedSnap.count.toInt()
-
-                val bannedSnap = db.collection("users")
-                    .whereEqualTo("banned", true)
-                    .count()
-                    .get(com.google.firebase.firestore.AggregateSource.SERVER)
-                    .await()
-                bannedUsersCount = bannedSnap.count.toInt()
+                val rows = snap.documents
+                    .filter { it.id != deviceHash }
+                    .map { parseUserRow(it) }
+                    .sortedByDescending {
+                        (it.lastActiveAt ?: it.lastSeenAt)?.toDate()?.time ?: 0L
+                    }
+                sharedUsers = rows
+                UsersDirectoryCache.save(ctx, rows)
+                lastFetchedKey = key
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
-            } catch (_: Throwable) { /* best-effort */ }
-            delay(60_000L)
+            } catch (e: Throwable) {
+                Log.e("AdminScreen", "Users fetch failed", e)
+                setErr(e.message ?: "Users load failed")
+            }
         }
+        sharedUsersLoading = false
+    }
+
+    // Aggregate stats: refreshed ONCE on tab entry and on manual refresh (keyed
+    // on refreshTick) — NOT polled on a timer. count() costs 1 read per 1000 docs
+    // counted; a 60s poll just burned reads for no benefit at this cadence.
+    LaunchedEffect(needsUsers, refreshTick) {
+        if (!needsUsers) return@LaunchedEffect
+        try {
+            val totalSnap = db.collection("users")
+                .whereEqualTo("adminBuild", false)
+                .count()
+                .get(com.google.firebase.firestore.AggregateSource.SERVER)
+                .await()
+            totalUsersCount = totalSnap.count.toInt()
+
+            val warnedSnap = db.collection("users")
+                .whereEqualTo("warned", true)
+                .count()
+                .get(com.google.firebase.firestore.AggregateSource.SERVER)
+                .await()
+            warnedUsersCount = warnedSnap.count.toInt()
+
+            val bannedSnap = db.collection("users")
+                .whereEqualTo("banned", true)
+                .count()
+                .get(com.google.firebase.firestore.AggregateSource.SERVER)
+                .await()
+            bannedUsersCount = bannedSnap.count.toInt()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Throwable) { /* best-effort */ }
     }
 
     // Admin browsing heartbeat + force-kill staleness sweep now live in AdminRuntime
@@ -480,22 +504,10 @@ fun AdminScreen() {
                         warnedUsersCount = warnedUsersCount,
                         bannedUsersCount = bannedUsersCount,
                         onRefresh = {
-                            // One-shot model: re-fetch the directory AND re-run stats.
+                            // One-shot model: bumping refreshTick re-fetches the
+                            // directory AND re-runs the stats aggregations (both
+                            // effects are keyed on refreshTick).
                             refreshTick++
-                            scope.launch {
-                                try {
-                                    val totalSnap = db.collection("users")
-                                        .whereEqualTo("adminBuild", false)
-                                        .count()
-                                        .get(com.google.firebase.firestore.AggregateSource.SERVER)
-                                        .await()
-                                    totalUsersCount = totalSnap.count.toInt()
-                                } catch (e: kotlinx.coroutines.CancellationException) {
-                                    throw e
-                                } catch (e: Throwable) {
-                                    setErr(e.message ?: "Refresh failed")
-                                }
-                            }
                         },
                         setError = ::setErr
                     )
