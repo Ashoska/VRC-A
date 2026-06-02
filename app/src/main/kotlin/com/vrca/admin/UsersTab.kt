@@ -216,20 +216,22 @@ internal const val ONLINE_STALENESS_WINDOW_MS = 65L * 60L * 1000L
 
 /**
  * Tighter liveness window used ONLY while an admin is actively watching a user's
- * detail page. A watched user's app is in 10s live-sync (it writes `lastActiveAt`
- * every 10s), so a `lastActiveAt` that stops advancing for this long while watched
- * is a reliable "the app died" signal — far faster than the 65-min unwatched window.
- * This is what flips the detail dot (and, via the directory row patch, the directory
- * dot) to offline when a watched user's app is killed without a clean swipe.
+ * detail page. A watched user's app writes a liveness timestamp every 10s (the
+ * `lastSeenAt` live-loop write is dependency-free, so it's the reliable heartbeat),
+ * so a heartbeat that stops advancing for this long while watched is a reliable
+ * "the app died/was swiped" signal — far faster than the 65-min unwatched window.
+ * Set to ~2.5 missed 10s ticks: fast enough to feel immediate, with enough slack to
+ * ride out a single delayed write. This is the robust swipe→offline path because it
+ * does NOT depend on the swipe-time `offlineAt` write landing during shutdown.
  */
-internal const val WATCHED_STALE_WINDOW_MS = 45L * 1000L
+internal const val WATCHED_STALE_WINDOW_MS = 25L * 1000L
 
 /**
- * Grace period after the admin opens a user's detail before the tight
- * [WATCHED_STALE_WINDOW_MS] applies. The user app's 10s live-sync loop only starts
- * after the `watcherActiveAt` heartbeat propagates and its snapshot listener flips
- * `isWatched` — up to ~30-60s. Applying the tight window before that would briefly
- * false-flag a genuinely-online user as offline, so we wait out the ramp first.
+ * Grace period before the tight [WATCHED_STALE_WINDOW_MS] applies WHEN the user's
+ * 10s heartbeat has not yet been observed advancing (its live loop starts only after
+ * the `watcherActiveAt` heartbeat propagates — up to ~30-60s). Once the detail poll
+ * HAS seen the heartbeat advance (`loopConfirmed`), this ramp is bypassed and a
+ * stopped heartbeat flips offline after just [WATCHED_STALE_WINDOW_MS].
  */
 internal const val WATCH_RAMP_MS = 90L * 1000L
 
@@ -368,10 +370,19 @@ internal fun UsersTab(
             selectedDetail = null; selectedDetailLoading = false
             return@LaunchedEffect
         }
-        // Anchor the watch-ramp clock to when this user's detail opened, so the tight
-        // WATCHED_STALE_WINDOW_MS only kicks in after the user's 10s live-sync loop has
-        // had time to establish (avoids a false-offline flicker on a live user).
+        // Watched fast-offline tracking. While watched, the user app writes a liveness
+        // timestamp every 10s — `lastSeenAt` via the ViewModel live loop (no external
+        // dependency, so it's the RELIABLE heartbeat) and `lastActiveAt` via the
+        // presence loop. We track the FRESHEST of the two and the wall-clock time it
+        // last advanced. Once we've SEEN it advance (the loop is confirmed running),
+        // a swipe/kill stops it and we flip offline after just WATCHED_STALE_WINDOW_MS
+        // — no need to wait the full ramp. Before the loop is confirmed (e.g. the
+        // user's 10s loop hasn't started yet, or they're already offline), we fall
+        // back to the WATCH_RAMP_MS grace so we don't false-flag a live user mid-ramp.
         val watchStartMs = System.currentTimeMillis()
+        var freshestSeenMs = 0L
+        var lastAdvanceWallMs = watchStartMs
+        var loopConfirmed = false
         selectedDetailLoading = true
         while (true) {
             try {
@@ -380,20 +391,27 @@ internal fun UsersTab(
                     .await()
                 val detail = (if (snap.exists()) parseUserDetail(snap) else null)
                     ?.let { d ->
-                        // A watched user app writes lastActiveAt every 10s. If it has
-                        // gone stale past the tight window (and we've watched long
-                        // enough for its loop to start), the app is dead — synthesize an
-                        // offlineAt so isUserOnline flips offline INSTANTLY here and, via
-                        // onUpdateUserRow, in the directory too. Zero Firestore write; it
-                        // self-heals when the real lastActiveAt advances (→ not stale →
-                        // detail carries the real offlineAt again).
-                        val activeMs = (d.lastActiveAt ?: d.lastSeenAt)?.toDate()?.time ?: 0L
+                        val la = d.lastActiveAt?.toDate()?.time ?: 0L
+                        val ls = d.lastSeenAt?.toDate()?.time ?: 0L
+                        val freshest = maxOf(la, ls)
                         val offMs = d.offlineAt?.toDate()?.time ?: 0L
                         val now = System.currentTimeMillis()
-                        val staleWhileWatched = now - watchStartMs > WATCH_RAMP_MS &&
-                            activeMs > 0L &&
-                            now - activeMs > WATCHED_STALE_WINDOW_MS
-                        if (staleWhileWatched && offMs <= activeMs)
+                        if (freshest > freshestSeenMs) {
+                            if (freshestSeenMs != 0L) loopConfirmed = true
+                            freshestSeenMs = freshest
+                            lastAdvanceWallMs = now
+                        }
+                        // If the heartbeat has stopped advancing, the app died.
+                        // Synthesize offlineAt so isUserOnline flips offline INSTANTLY
+                        // here and, via onUpdateUserRow, in the directory too (zero
+                        // Firestore write). Self-heals when the heartbeat advances again.
+                        val staleWhileWatched = if (loopConfirmed) {
+                            now - lastAdvanceWallMs > WATCHED_STALE_WINDOW_MS
+                        } else {
+                            now - watchStartMs > WATCH_RAMP_MS && freshest > 0L &&
+                                now - freshest > WATCHED_STALE_WINDOW_MS
+                        }
+                        if (staleWhileWatched && offMs <= freshest)
                             d.copy(offlineAt = Timestamp(java.util.Date(now)))
                         else d
                     }

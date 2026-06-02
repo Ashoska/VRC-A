@@ -422,6 +422,14 @@ class VrcaViewModel(
         "activePackage" to activePackage,
         "combinedPreviewText" to combinedPreviewText.trim(),
         "cycleTrimWarning" to cycleTrimWarning.trim(),
+        // Feature toggles stream with the watched 10s loop so the admin's
+        // Pinned/Cycle/Music/Time button states reflect a user's toggle change in
+        // real time while watching. (They also persist via the hourly delta write —
+        // captureStateForSync carries them — so an unwatched toggle still surfaces.)
+        "afkEnabled" to afkEnabled,
+        "cycleEnabled" to cycleEnabled,
+        "spotifyEnabled" to spotifyEnabled,
+        "timeEnabled" to timeEnabled,
         "lastReportedTime" to if (timeEnabled) currentTimeString() else "",
         "lastTimeUpdateAt" to FieldValue.serverTimestamp(),
         "lastSeenAt" to FieldValue.serverTimestamp()
