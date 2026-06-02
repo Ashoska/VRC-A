@@ -107,7 +107,11 @@ internal data class UserRow(
     val vrchatCapacity: Int = 0,
     val vrchatPlatform: String = "",
     val vrchatLastSyncAt: Timestamp? = null,
-    val isOnlineInApp: Boolean = false
+    val isOnlineInApp: Boolean = false,
+    // Clean-shutdown marker (swipe-away). When present AND newer than
+    // lastActiveAt it forces the row offline instantly; a live heartbeat
+    // advances lastActiveAt past it, so it can never false-flag a running app.
+    val offlineAt: Timestamp? = null
     // Profile pictures are NOT stored in Firestore — AdminAvatar resolves the
     // VRChat+ picture on demand by vrchatUserId via the admin's VRChat session.
 )
@@ -162,7 +166,8 @@ internal data class UserDetail(
     val lastActiveAt: Timestamp? = null,
     val lastSeenAt: Timestamp? = null,
     val updatedAt: Timestamp? = null,
-    val isOnlineInApp: Boolean = false
+    val isOnlineInApp: Boolean = false,
+    val offlineAt: Timestamp? = null
 )
 
 internal data class ModerationTarget(
@@ -178,20 +183,40 @@ internal data class ModerationTarget(
 )
 
 /**
- * A user counts as online only when [UserRow.isOnlineInApp] is true AND
- * [UserRow.lastActiveAt] is within the staleness window. Under the hourly
- * liveness model an unwatched user writes `lastActiveAt` once per hour (a
- * watched user every 10s), so the window is ~65 min — 5 min of grace past the
- * 60-min heartbeat. A force-killed unwatched user therefore ages out of
- * "online" within ~65 min; a watched user within ~25s. Falls back to
- * `lastSeenAt` for docs written by pre-hourly app versions.
+ * Online is determined by LIVENESS FRESHNESS, not the `isOnlineInApp` flag.
+ *
+ * `lastActiveAt` is the ground truth: the app's hourly heartbeat (every 10s while
+ * watched) only fires while the process is alive, so a fresh `lastActiveAt` proves
+ * the app is running. The old logic gated on `isOnlineInApp == true` first, but
+ * that flag is unreliable — pre-app-scoped-VM builds wrote `isOnlineInApp = false`
+ * from `onCleared()` on every Activity destruction (normal under memory pressure)
+ * WITHOUT advancing `lastActiveAt`, so a perfectly-live user showed offline with a
+ * fresh timestamp (the "Cherubic shows offline while clearly online" bug). We now
+ * IGNORE `isOnlineInApp` for the online decision.
+ *
+ * Rules:
+ *  - `lastActiveAt` (fallback `lastSeenAt`) within ~65 min  → ONLINE
+ *    (5 min grace past the 60-min hourly heartbeat; a watched user refreshes every
+ *     10s so shows online within ~25s).
+ *  - Stale beyond the window → OFFLINE.
+ *  - A clean shutdown (swipe-away) stamps `offlineAt`. When `offlineAt` is NEWER
+ *    than `lastActiveAt` the row is forced OFFLINE INSTANTLY (no 65-min wait). This
+ *    can never false-flag a live app: the next heartbeat advances `lastActiveAt`
+ *    past `offlineAt`. If the swipe-time offline write never lands (network race —
+ *    the long-standing "swipe doesn't consistently go offline"), the staleness
+ *    window still flips the user offline within ~65 min. Best of both: instant when
+ *    the write succeeds, eventually-consistent when it doesn't.
  */
 internal const val ONLINE_STALENESS_WINDOW_MS = 65L * 60L * 1000L
 
 internal fun isUserOnline(u: UserRow, nowMs: Long = System.currentTimeMillis()): Boolean {
-    if (!u.isOnlineInApp) return false
     val activeMs = (u.lastActiveAt ?: u.lastSeenAt)?.toDate()?.time ?: return false
-    return nowMs - activeMs < ONLINE_STALENESS_WINDOW_MS
+    if (nowMs - activeMs >= ONLINE_STALENESS_WINDOW_MS) return false
+    // Instant-offline on a clean swipe: a shutdown marker newer than the last
+    // liveness write means the app was deliberately closed after that heartbeat.
+    val offlineMs = u.offlineAt?.toDate()?.time ?: 0L
+    if (offlineMs > activeMs) return false
+    return true
 }
 
 internal fun parseUserRow(d: com.google.firebase.firestore.DocumentSnapshot): UserRow {
@@ -216,7 +241,8 @@ internal fun parseUserRow(d: com.google.firebase.firestore.DocumentSnapshot): Us
         vrchatCapacity = (d.getLong("vrchatInstanceCapacity") ?: 0).toInt(),
         vrchatPlatform = (d.getString("vrchatPlatform") ?: "").trim(),
         vrchatLastSyncAt = d.getTimestamp("vrchatLastSyncAt"),
-        isOnlineInApp = d.getBoolean("isOnlineInApp") ?: false
+        isOnlineInApp = d.getBoolean("isOnlineInApp") ?: false,
+        offlineAt = d.getTimestamp("offlineAt")
     )
 }
 
@@ -299,7 +325,8 @@ internal fun UsersTab(
             lastActiveAt = snap.getTimestamp("lastActiveAt"),
             lastSeenAt = snap.getTimestamp("lastSeenAt"),
             updatedAt = snap.getTimestamp("updatedAt"),
-            isOnlineInApp = snap.getBoolean("isOnlineInApp") ?: false
+            isOnlineInApp = snap.getBoolean("isOnlineInApp") ?: false,
+            offlineAt = snap.getTimestamp("offlineAt")
         )
     }
     // Selected user detail: Phase 3 read model — the ONLY live read in the admin
@@ -350,9 +377,18 @@ internal fun UsersTab(
     }
 
     // ---- Detail view ----
-    val row = selectedRow
-    if (row != null) {
+    val rawRow = selectedRow
+    if (rawRow != null) {
         val d = selectedDetail
+        // Prefer the live 10s detail poll's liveness timestamps over the stale
+        // one-shot directory snapshot so the detail online dot is accurate the
+        // moment watching kicks in (the directory row can be up to an hour old).
+        val row = rawRow.copy(
+            lastActiveAt = d?.lastActiveAt ?: rawRow.lastActiveAt,
+            lastSeenAt   = d?.lastSeenAt ?: rawRow.lastSeenAt,
+            offlineAt    = d?.offlineAt ?: rawRow.offlineAt,
+            isOnlineInApp = d?.isOnlineInApp ?: rawRow.isOnlineInApp
+        )
         Column(
             modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(10.dp)

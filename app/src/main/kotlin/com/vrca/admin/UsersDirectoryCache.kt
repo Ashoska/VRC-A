@@ -54,6 +54,7 @@ internal object UsersDirectoryCache {
                 put("vrchatPlatform", u.vrchatPlatform)
                 put("vrchatLastSyncAt", tsMs(u.vrchatLastSyncAt))
                 put("isOnlineInApp", u.isOnlineInApp)
+                put("offlineAt", tsMs(u.offlineAt))
             })
         }
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -87,7 +88,8 @@ internal object UsersDirectoryCache {
                     vrchatCapacity = o.optInt("vrchatCapacity"),
                     vrchatPlatform = o.optString("vrchatPlatform"),
                     vrchatLastSyncAt = msTs(o.optLong("vrchatLastSyncAt")),
-                    isOnlineInApp = o.optBoolean("isOnlineInApp")
+                    isOnlineInApp = o.optBoolean("isOnlineInApp"),
+                    offlineAt = msTs(o.optLong("offlineAt"))
                 )
             }
         } catch (_: Throwable) {

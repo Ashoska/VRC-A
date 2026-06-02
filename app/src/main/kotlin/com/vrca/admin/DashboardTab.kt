@@ -200,10 +200,12 @@ internal fun DashboardTab(
     remember { DashboardFeedCache.ensureLoaded(ctx); true }
 
     val totalUsers  = totalUsersCount
-    // Dashboard counter uses the raw isOnlineInApp flag (no staleness window)
-    // so online users show immediately when the admin opens the app, before
-    // their heartbeats arrive. The admin-side staleness sweep cleans up dead users.
-    val onlineCount = users.count { it.isOnlineInApp }
+    // Online is liveness-driven, identical to the directory's per-row check —
+    // fresh `lastActiveAt` (minus a newer clean-shutdown `offlineAt`) — NOT the
+    // unreliable `isOnlineInApp` flag, which pre-app-scoped-VM builds wrote false
+    // on every Activity destruction (the "online user shows offline" bug). Using
+    // the same predicate keeps the counter and the directory rows consistent.
+    val onlineCount = users.count { isUserOnline(it) }
     val bannedCount = bannedUsersCount
     val warnedCount = warnedUsersCount
 

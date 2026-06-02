@@ -163,6 +163,13 @@ object AppShutdown {
             val presence = VrchatPipelineState.presence
             val data = mutableMapOf<String, Any>(
                 "isOnlineInApp" to false,
+                // Clean-shutdown marker. The admin's isUserOnline forces a row
+                // offline the instant offlineAt is newer than lastActiveAt, so a
+                // swipe shows offline immediately when this write lands; if it
+                // races the 5s kill timeout and never lands, the ~65-min staleness
+                // window still flips the user offline. (This is why "swipe doesn't
+                // always go offline" is now self-correcting.)
+                "offlineAt" to FieldValue.serverTimestamp(),
                 "lastSeenAt" to FieldValue.serverTimestamp(),
                 "savedFriendIds" to FieldValue.delete(),
                 "savedFriendNames" to FieldValue.delete()
