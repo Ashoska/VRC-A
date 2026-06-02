@@ -54,6 +54,7 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -127,13 +128,22 @@ internal fun fmtRelativeTime(nowMs: Long, thenMs: Long): String {
  * Mapping doc is:
  * - usersById/{uid} -> { deviceHash, authUid, appId, adminBuild, updatedAt }
  */
-// Once-per-COLD-LAUNCH guard for the targeted directory liveness refresh. A
-// top-level val is process-lifetime: it resets to false on a fresh process (cold
-// launch) but stays true across Activity recreation / tab switches within the
-// same session, so the refresh fires exactly once per app open. Set true on ANY
-// server pull (full fetch OR the targeted cached-user refresh) so we never read
-// twice in one session.
-private val sessionDirectoryRefreshed = java.util.concurrent.atomic.AtomicBoolean(false)
+// Staleness guard for the targeted directory liveness refresh — a process-lifetime
+// timestamp of the last server pull (full fetch OR targeted cached-user refresh).
+// Init 0 so the first directory render after a cold launch always refreshes.
+//
+// "Once per cold launch" is NOT enough: an admin who keeps the app alive in the
+// background for hours/days never restarts the process, so a one-shot guard would
+// never re-fire and the cached dots would decay to offline and never recover. So
+// instead we refresh whenever the directory is shown (tab entry OR app returns to
+// the foreground) AND the data is older than [DIRECTORY_REFRESH_TTL_MS]. Within
+// the TTL, plain tab switches / brief resumes cost 0 reads.
+private val lastDirectoryRefreshMs = java.util.concurrent.atomic.AtomicLong(0L)
+// How stale the cached directory may get before a foreground-return / tab-entry
+// triggers a targeted cached-user refresh. 10 min keeps the online dots
+// reasonably fresh on return without being chatty; the admin can hit Refresh for
+// instant, and an open user's 10s detail poll keeps that one row live regardless.
+private const val DIRECTORY_REFRESH_TTL_MS = 10L * 60L * 1000L
 
 @Composable
 fun AdminScreen() {
@@ -302,7 +312,21 @@ fun AdminScreen() {
     var sharedLiveLimit by rememberSaveable { mutableIntStateOf(2000) }
     var sharedUsersLoading by remember { mutableStateOf(true) }
     var refreshTick by remember { mutableIntStateOf(0) }
+    // Bumped each time the app returns to the foreground (ON_RESUME). Folding it
+    // into the directory effect's keys makes a TTL-gated targeted refresh re-fire
+    // when the admin comes back after backgrounding — covering the long-lived
+    // process case where the cold-launch refresh never re-runs.
+    var resumeTick by remember { mutableIntStateOf(0) }
     val needsUsers = tabIndex == 0 || tabIndex == 1
+
+    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) resumeTick++
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+    }
 
     // Stats from count() aggregations — much cheaper than reading all docs.
     var totalUsersCount by remember { mutableIntStateOf(0) }
@@ -316,8 +340,11 @@ fun AdminScreen() {
     // ZERO Firestore reads.
     var lastFetchedKey by rememberSaveable { mutableStateOf("2000:0") }
 
-    LaunchedEffect(needsUsers, sharedLiveLimit, refreshTick) {
+    LaunchedEffect(needsUsers, sharedLiveLimit, refreshTick, resumeTick) {
         if (!needsUsers) return@LaunchedEffect
+        // NOTE: `key` deliberately excludes resumeTick — a foreground-return must
+        // NOT count as an explicit refresh (no full collection scan); it only
+        // re-runs this effect so the TTL-gated targeted cached-user refresh can fire.
         val key = "$sharedLiveLimit:$refreshTick"
 
         // 1) Instant render from the local cache (0 reads).
@@ -348,23 +375,28 @@ fun AdminScreen() {
                 sharedUsers = rows
                 UsersDirectoryCache.save(ctx, rows)
                 lastFetchedKey = key
-                // A full fetch already freshened everything — don't also run the
-                // targeted refresh this session.
-                sessionDirectoryRefreshed.set(true)
+                // A full fetch already freshened everything — reset the staleness
+                // clock so the targeted refresh doesn't also fire right after.
+                lastDirectoryRefreshMs.set(System.currentTimeMillis())
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Throwable) {
                 Log.e("AdminScreen", "Users fetch failed", e)
                 setErr(e.message ?: "Users load failed")
             }
-        } else if (sessionDirectoryRefreshed.compareAndSet(false, true)) {
-            // ONCE per cold launch, when rendering a populated cache without a full
-            // fetch: re-read ONLY the cached users' docs to freshen their liveness
-            // so the online/offline dots are correct at session start. This is
-            // bounded by the cache size and queried by document id in chunks of 10
+        } else if (System.currentTimeMillis() - lastDirectoryRefreshMs.get() > DIRECTORY_REFRESH_TTL_MS) {
+            // Directory shown (tab entry OR foreground-return via resumeTick) with a
+            // populated cache that's gone stale: re-read ONLY the cached users' docs
+            // to freshen their liveness so the online/offline dots are correct. This
+            // is bounded by the cache size and queried by document id in chunks of 10
             // (whereIn limit) — it NEVER scans the whole collection, so it can't
-            // "overload" reads or pull uncached/new users. Reads ≈ cached-user
-            // count, once per app open; plain tab re-entry stays at 0 reads.
+            // "overload" reads or pull uncached/new users. Reads ≈ cached-user count,
+            // at most once per TTL window; plain tab re-entry within the TTL = 0 reads.
+            // The clock is stamped only on SUCCESS (not up-front): the initial
+            // ON_RESUME replay bumps resumeTick right after launch, cancelling this
+            // run — claiming up-front would make the restarted run skip and the
+            // refresh would be lost. LaunchedEffect cancels the prior run on key
+            // change, so there's no real concurrency to guard against.
             try {
                 val ids = sharedUsers.map { it.docId }.filter { it.isNotBlank() }
                 val freshById = HashMap<String, UserRow>(ids.size)
@@ -384,10 +416,13 @@ fun AdminScreen() {
                     sharedUsers = merged
                     UsersDirectoryCache.save(ctx, merged)
                 }
+                // Claim the TTL window only after a clean read so a failure (or a
+                // cancel from the resume re-run) retries on the next entry/resume.
+                lastDirectoryRefreshMs.set(System.currentTimeMillis())
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Throwable) {
-                Log.e("AdminScreen", "Session liveness refresh failed", e)
+                Log.e("AdminScreen", "Directory liveness refresh failed", e)
             }
         }
         sharedUsersLoading = false
