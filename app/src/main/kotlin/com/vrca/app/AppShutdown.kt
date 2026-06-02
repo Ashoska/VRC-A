@@ -39,6 +39,11 @@ object AppShutdown {
 
     private val shuttingDown = AtomicBoolean(false)
 
+    /** True once a swipe-away shutdown has begun. The ViewModel reads this in
+     *  onCleared to skip its own offline write — AppShutdown owns the single swipe
+     *  write (offline marker + content snapshot), awaited before the process kill. */
+    fun isShuttingDown(): Boolean = shuttingDown.get()
+
     /** True if a swipe-kill was stamped within the guard window (used by services'
      *  onStartCommand to abort a START_STICKY restart instead of resurrecting). */
     fun isManualKillFresh(context: Context): Boolean {
@@ -180,6 +185,17 @@ object AppShutdown {
                 data["vrchatWorldName"] = presence.worldName
                 data["vrchatDisplayName"] = presence.displayName
             }
+            // Carry the user's LAST content state (presets / messages / intervals /
+            // toggles) so the admin sees what they had even if they swiped before the
+            // 30s edit-debounce flushed. NOT the volatile preview text. This is the
+            // backup for "edit then hard-kill before the debounce fired". Public build
+            // only — captureContentForOfflineWrite() returns empty for the admin build.
+            try {
+                if (com.vrca.ui.viewmodel.VrcaViewModel.isInstanceInitialized()) {
+                    data.putAll(com.vrca.ui.viewmodel.VrcaViewModel.getInstance()
+                        .captureContentForOfflineWrite())
+                }
+            } catch (_: Throwable) {}
             FirebaseFirestore.getInstance()
                 .collection("users").document(deviceHash)
                 .set(data, SetOptions.merge())

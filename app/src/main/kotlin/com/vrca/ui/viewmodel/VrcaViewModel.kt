@@ -98,7 +98,12 @@ class VrcaViewModel(
         private const val UI_TICK_MS = 500L
 
         // Firestore sync throttles
-        private const val SELF_SYNC_DEBOUNCE_MS = 500L
+        // 30s idle debounce: after the user STOPS editing presets/messages/intervals
+        // for this long, ONE delta write flushes all changed content to Firestore.
+        // Any new edit before it fires cancels and reschedules, so a burst of edits
+        // costs exactly one write. This is what stops "edit then close → reverts on
+        // reopen" (the app-open read no longer overwrites a not-yet-synced edit).
+        private const val SELF_SYNC_DEBOUNCE_MS = 30_000L
         // Live-mode write interval — only used when an admin is watching.
         private const val LIVE_SYNC_INTERVAL_MS = 10_000L
         // When an admin is browsing (dashboard/users list) but not actively
@@ -175,10 +180,15 @@ class VrcaViewModel(
         moderationUserReg?.remove()
         moderationDeviceReg?.remove()
         stopAll(clearFromChatbox = false)
-        // Best-effort close-write fallback: VrchatPipelineService.onTaskRemoved
-        // is the primary path, but if that service isn't running we still want
-        // the user to be marked offline. GlobalScope is intentional — we need
-        // the write to outlive ViewModel teardown.
+        // Swipe is the only path that clears the app-scoped ViewModelStore, so when
+        // AppShutdown is already shutting down it owns the offline write (offline
+        // marker + content snapshot, awaited before the process kill) — skip here so
+        // the swipe costs ONE write, not two. This GlobalScope write remains only as a
+        // defensive fallback for any future path that clears the VM without AppShutdown.
+        if (com.vrca.app.AppShutdown.isShuttingDown()) {
+            super.onCleared()
+            return
+        }
         @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
         kotlinx.coroutines.GlobalScope.launch {
             runCatching {
@@ -446,8 +456,22 @@ class VrcaViewModel(
      * watching this user, the 10s live-sync loop still streams volatile output.
      */
     private fun startSelfSyncLoopIfNeeded() {
-        // Intentionally empty — see KDoc above. (SELF_SYNC_DEBOUNCE_MS retained
-        // for reference; no debounced write is scheduled anymore.)
+        if (BuildConfig.IS_ADMIN_BUILD) return
+        // Don't schedule during cold-start content load — the DataStore collectors
+        // fire on first emission before the baseline is ready; performSelfSync also
+        // guards on initialDataLoaded, but skipping here avoids a pointless job.
+        if (!initialDataLoaded) return
+        // 30s idle debounce. Each edit cancels the pending write and reschedules, so
+        // a burst of edits flushes ONCE (one delta write — performSelfSync writes
+        // only changed content + liveness). Runs in viewModelScope, which is
+        // app-scoped, so the flush still fires if the user backgrounds the app after
+        // editing. A swipe is handled separately (AppShutdown writes content + offline
+        // synchronously before the process is killed).
+        syncTriggerJob?.cancel()
+        syncTriggerJob = viewModelScope.launch {
+            delay(SELF_SYNC_DEBOUNCE_MS)
+            performSelfSync()
+        }
     }
 
     /**
@@ -529,6 +553,22 @@ class VrcaViewModel(
         // admin panel resolves VRChat+ pictures on demand by vrchatUserId via the
         // admin's own VRChat session — see AdminAvatar / VrchatImageLoader.
     )
+
+    /**
+     * Content snapshot for the swipe-time offline write (called by [com.vrca.app.AppShutdown]
+     * before the process is killed). Carries presets / messages / intervals / toggles
+     * so the admin sees the user's LAST state even if they swiped before the 30s
+     * debounce flushed — but deliberately NOT the volatile preview text. This is the
+     * backup for the case where the process is hard-killed before the debounce fires.
+     * Public build only (admin content lives purely in local DataStore).
+     */
+    fun captureContentForOfflineWrite(): Map<String, Any> {
+        if (BuildConfig.IS_ADMIN_BUILD) return emptyMap()
+        val m = mutableMapOf<String, Any>()
+        captureStateForSync().forEach { (k, v) -> if (v != null) m[k] = v }
+        m["cycleLines"] = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(10)
+        return m
+    }
 
     private suspend fun applyRemoteContentBeforeSync() {
         // The admin build keeps its chatbox content purely in local DataStore.
