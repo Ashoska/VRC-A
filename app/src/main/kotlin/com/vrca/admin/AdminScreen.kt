@@ -522,6 +522,37 @@ fun AdminScreen() {
                             sharedLiveLimit = (sharedLiveLimit + 500).coerceAtMost(10000)
                         },
                         onRefresh = { refreshTick++ },
+                        // Patch the open user's row in the in-memory directory with
+                        // the liveness fields the 10s detail poll ALREADY fetched.
+                        // Zero extra Firestore cost — no new read/write, just a local
+                        // state merge — so backing out of the detail shows the fresh
+                        // online/offline status immediately instead of the stale
+                        // one-shot snapshot. Also refresh the local cache so it
+                        // survives tab re-entry (SharedPreferences, not Firestore).
+                        onUpdateUserRow = { docId, detail ->
+                            val idx = sharedUsers.indexOfFirst { it.docId == docId }
+                            if (idx >= 0) {
+                                val cur = sharedUsers[idx]
+                                val patched = cur.copy(
+                                    lastActiveAt = detail.lastActiveAt ?: cur.lastActiveAt,
+                                    lastSeenAt = detail.lastSeenAt ?: cur.lastSeenAt,
+                                    updatedAt = detail.updatedAt ?: cur.updatedAt,
+                                    offlineAt = detail.offlineAt ?: cur.offlineAt,
+                                    isOnlineInApp = detail.isOnlineInApp,
+                                    vrchatUserId = detail.vrchatUserId.ifBlank { cur.vrchatUserId },
+                                    vrchatDisplayName = detail.vrchatDisplayName.ifBlank { cur.vrchatDisplayName },
+                                    vrchatState = detail.vrchatState.ifBlank { cur.vrchatState },
+                                    vrchatStatus = detail.vrchatStatus.ifBlank { cur.vrchatStatus },
+                                    vrchatIsOnline = detail.vrchatIsOnline,
+                                    vrchatWorld = detail.vrchatWorld.ifBlank { cur.vrchatWorld },
+                                    vrchatLastSyncAt = detail.vrchatLastSyncAt ?: cur.vrchatLastSyncAt
+                                )
+                                if (patched != cur) {
+                                    sharedUsers = sharedUsers.toMutableList().also { it[idx] = patched }
+                                    UsersDirectoryCache.save(ctx, sharedUsers)
+                                }
+                            }
+                        },
                         setGlobalLoading = { globalLoading = it },
                         setError = ::setErr,
                         onSendToModeration = { target ->

@@ -255,6 +255,7 @@ internal fun UsersTab(
     liveLimit: Int,
     onIncreaseLiveLimit: () -> Unit,
     onRefresh: () -> Unit,
+    onUpdateUserRow: (String, UserDetail) -> Unit,
     setGlobalLoading: (Boolean) -> Unit,
     setError: (String?) -> Unit,
     onSendToModeration: (ModerationTarget) -> Unit
@@ -349,7 +350,9 @@ internal fun UsersTab(
                 val snap = db.collection("users").document(docId)
                     .get(Source.SERVER)
                     .await()
-                selectedDetail = if (snap.exists()) parseUserDetail(snap) else null
+                val detail = if (snap.exists()) parseUserDetail(snap) else null
+                selectedDetail = detail
+                if (detail != null) onUpdateUserRow(docId, detail)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Throwable) {
