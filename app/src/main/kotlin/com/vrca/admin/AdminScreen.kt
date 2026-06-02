@@ -72,6 +72,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FieldPath
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
@@ -126,6 +127,14 @@ internal fun fmtRelativeTime(nowMs: Long, thenMs: Long): String {
  * Mapping doc is:
  * - usersById/{uid} -> { deviceHash, authUid, appId, adminBuild, updatedAt }
  */
+// Once-per-COLD-LAUNCH guard for the targeted directory liveness refresh. A
+// top-level val is process-lifetime: it resets to false on a fresh process (cold
+// launch) but stays true across Activity recreation / tab switches within the
+// same session, so the refresh fires exactly once per app open. Set true on ANY
+// server pull (full fetch OR the targeted cached-user refresh) so we never read
+// twice in one session.
+private val sessionDirectoryRefreshed = java.util.concurrent.atomic.AtomicBoolean(false)
+
 @Composable
 fun AdminScreen() {
     val ctx = LocalContext.current
@@ -339,11 +348,46 @@ fun AdminScreen() {
                 sharedUsers = rows
                 UsersDirectoryCache.save(ctx, rows)
                 lastFetchedKey = key
+                // A full fetch already freshened everything — don't also run the
+                // targeted refresh this session.
+                sessionDirectoryRefreshed.set(true)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Throwable) {
                 Log.e("AdminScreen", "Users fetch failed", e)
                 setErr(e.message ?: "Users load failed")
+            }
+        } else if (sessionDirectoryRefreshed.compareAndSet(false, true)) {
+            // ONCE per cold launch, when rendering a populated cache without a full
+            // fetch: re-read ONLY the cached users' docs to freshen their liveness
+            // so the online/offline dots are correct at session start. This is
+            // bounded by the cache size and queried by document id in chunks of 10
+            // (whereIn limit) — it NEVER scans the whole collection, so it can't
+            // "overload" reads or pull uncached/new users. Reads ≈ cached-user
+            // count, once per app open; plain tab re-entry stays at 0 reads.
+            try {
+                val ids = sharedUsers.map { it.docId }.filter { it.isNotBlank() }
+                val freshById = HashMap<String, UserRow>(ids.size)
+                ids.chunked(10).forEach { chunk ->
+                    val snap = db.collection("users")
+                        .whereIn(FieldPath.documentId(), chunk)
+                        .get(Source.SERVER)
+                        .await()
+                    snap.documents.forEach { d -> freshById[d.id] = parseUserRow(d) }
+                }
+                if (freshById.isNotEmpty()) {
+                    val merged = sharedUsers
+                        .map { freshById[it.docId] ?: it }
+                        .sortedByDescending {
+                            (it.lastActiveAt ?: it.lastSeenAt)?.toDate()?.time ?: 0L
+                        }
+                    sharedUsers = merged
+                    UsersDirectoryCache.save(ctx, merged)
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                Log.e("AdminScreen", "Session liveness refresh failed", e)
             }
         }
         sharedUsersLoading = false
