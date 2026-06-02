@@ -55,6 +55,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -435,6 +436,14 @@ internal fun UsersTab(
     // detail view truly goes away within the same process.
     LaunchedEffect(selectedDocId) {
         AdminRuntime.setSelectedUser(selectedDocId)
+    }
+    // Clear the watch the moment the Users tab leaves composition (switching to
+    // another admin tab while a detail is open, or leaving the panel) so the 30s
+    // watcherActiveAt heartbeat stops — without this it kept writing for whatever
+    // user was last open. (Backing out of a detail already clears it via the effect
+    // above; this covers the tab-switch / panel-exit paths.)
+    DisposableEffect(Unit) {
+        onDispose { AdminRuntime.setSelectedUser(null) }
     }
 
     val selectedRow by remember {

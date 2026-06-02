@@ -499,6 +499,22 @@ fun AdminScreen() {
     // sweep. AdminRuntime is started once below.
     LaunchedEffect(Unit) { AdminRuntime.start(deviceHash) }
     LaunchedEffect(needsUsers) { AdminRuntime.setBrowsing(needsUsers) }
+    // Clear the watch/browse intent when the admin LEAVES the panel (page
+    // navigation disposes AdminScreen). Without this, AdminRuntime — which is
+    // process-lifetime so watching survives mere backgrounding — keeps a stale
+    // selectedUser and its watcherActiveAt heartbeat writes every 30s FOREVER even
+    // though the admin is no longer in the panel (the "constant ~2 writes/min while
+    // not in the admin panel" leak). UsersTab only clears selectedUser when you back
+    // OUT of a detail; navigating straight to another tab with a detail open never
+    // did. Backgrounding does NOT dispose the composable, so an actively-watching
+    // admin who backgrounds the app still keeps the watch — only leaving the panel
+    // (or the Activity being destroyed) stops it.
+    DisposableEffect(Unit) {
+        onDispose {
+            AdminRuntime.setSelectedUser(null)
+            AdminRuntime.setBrowsing(false)
+        }
+    }
     LaunchedEffect(sharedUsers) {
         AdminRuntime.updateSweepData(
             sharedUsers.map {
