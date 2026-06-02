@@ -54,6 +54,7 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -74,6 +75,7 @@ import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
 import com.google.firebase.firestore.Source
@@ -126,6 +128,28 @@ internal fun fmtRelativeTime(nowMs: Long, thenMs: Long): String {
  * Mapping doc is:
  * - usersById/{uid} -> { deviceHash, authUid, appId, adminBuild, updatedAt }
  */
+// Staleness guard for the targeted directory liveness refresh — a process-lifetime
+// timestamp of the last server pull (full fetch OR targeted cached-user refresh).
+// Init 0 so the first directory render after a cold launch always refreshes.
+//
+// "Once per cold launch" is NOT enough: an admin who keeps the app alive in the
+// background for hours/days never restarts the process, so a one-shot guard would
+// never re-fire and the cached dots would decay to offline and never recover. So
+// instead we refresh whenever the directory is shown (tab entry OR app returns to
+// the foreground) AND the data is older than [DIRECTORY_REFRESH_TTL_MS]. Within
+// the TTL, plain tab switches / brief resumes cost 0 reads.
+private val lastDirectoryRefreshMs = java.util.concurrent.atomic.AtomicLong(0L)
+// How stale the cached directory may get before a foreground-return / tab-entry
+// triggers a targeted liveness refresh. 10 min keeps the online dots reasonably
+// fresh on return without being chatty; the admin can hit Refresh for instant,
+// and an open user's 10s detail poll keeps that one row live regardless.
+private const val DIRECTORY_REFRESH_TTL_MS = 10L * 60L * 1000L
+// Safety margin subtracted from the refresh cursor to absorb client/server clock
+// skew so an update whose server timestamp lands just under our wall-clock cursor
+// is never missed (worst case: a few already-seen rows re-read; next refresh
+// settles it).
+private const val REFRESH_SKEW_MARGIN_MS = 5L * 60L * 1000L
+
 @Composable
 fun AdminScreen() {
     val ctx = LocalContext.current
@@ -293,7 +317,21 @@ fun AdminScreen() {
     var sharedLiveLimit by rememberSaveable { mutableIntStateOf(2000) }
     var sharedUsersLoading by remember { mutableStateOf(true) }
     var refreshTick by remember { mutableIntStateOf(0) }
+    // Bumped each time the app returns to the foreground (ON_RESUME). Folding it
+    // into the directory effect's keys makes a TTL-gated targeted refresh re-fire
+    // when the admin comes back after backgrounding — covering the long-lived
+    // process case where the cold-launch refresh never re-runs.
+    var resumeTick by remember { mutableIntStateOf(0) }
     val needsUsers = tabIndex == 0 || tabIndex == 1
+
+    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) resumeTick++
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+    }
 
     // Stats from count() aggregations — much cheaper than reading all docs.
     var totalUsersCount by remember { mutableIntStateOf(0) }
@@ -307,8 +345,11 @@ fun AdminScreen() {
     // ZERO Firestore reads.
     var lastFetchedKey by rememberSaveable { mutableStateOf("2000:0") }
 
-    LaunchedEffect(needsUsers, sharedLiveLimit, refreshTick) {
+    LaunchedEffect(needsUsers, sharedLiveLimit, refreshTick, resumeTick) {
         if (!needsUsers) return@LaunchedEffect
+        // NOTE: `key` deliberately excludes resumeTick — a foreground-return must
+        // NOT count as an explicit refresh (no full collection scan); it only
+        // re-runs this effect so the TTL-gated targeted cached-user refresh can fire.
         val key = "$sharedLiveLimit:$refreshTick"
 
         // 1) Instant render from the local cache (0 reads).
@@ -339,11 +380,66 @@ fun AdminScreen() {
                 sharedUsers = rows
                 UsersDirectoryCache.save(ctx, rows)
                 lastFetchedKey = key
+                // A full fetch already freshened everything — reset the staleness
+                // clock so the targeted refresh doesn't also fire right after.
+                lastDirectoryRefreshMs.set(System.currentTimeMillis())
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Throwable) {
                 Log.e("AdminScreen", "Users fetch failed", e)
                 setErr(e.message ?: "Users load failed")
+            }
+        } else if (System.currentTimeMillis() - lastDirectoryRefreshMs.get() > DIRECTORY_REFRESH_TTL_MS) {
+            // Directory shown (tab entry OR foreground-return via resumeTick) with a
+            // populated cache that's gone stale: INCREMENTAL liveness refresh.
+            //
+            // Read ONLY users whose `lastActiveAt` advanced since the last refresh
+            // (minus a skew margin) — i.e. users who came online or did their hourly
+            // write. Offline/idle users have a stale `lastActiveAt` that doesn't match
+            // the inequality, so they are NOT read; their cached rows decay to offline
+            // locally for free. As users settle offline the read count DROPS toward
+            // ~1 (an empty query's minimum) instead of staying at the full cached
+            // count. This NEVER scans the whole collection and is bounded by activity.
+            // (A swipe keeps `lastActiveAt` and only adds `offlineAt`, so a just-swiped
+            // user still matches the window and is re-read WITH the offlineAt → shows
+            // offline; older swipes are already offline locally.)
+            //
+            // On the first refresh of a session (cursor == 0) use the online window
+            // so we refresh exactly the users whose dots could currently be online.
+            // The clock is stamped only on SUCCESS: the initial ON_RESUME replay bumps
+            // resumeTick right after launch and cancels this run — stamping up-front
+            // would make the restarted run skip and lose the refresh.
+            try {
+                val last = lastDirectoryRefreshMs.get()
+                val cursorMs = if (last > 0L) last - REFRESH_SKEW_MARGIN_MS
+                               else System.currentTimeMillis() - ONLINE_STALENESS_WINDOW_MS
+                val snap = db.collection("users")
+                    .whereGreaterThan("lastActiveAt", Timestamp(java.util.Date(cursorMs)))
+                    // Newest-active first so the safety limit keeps the most relevant
+                    // rows if the active-since-cursor set is ever larger than the cap.
+                    .orderBy("lastActiveAt", Query.Direction.DESCENDING)
+                    .limit(sharedLiveLimit.toLong())
+                    .get(Source.SERVER)
+                    .await()
+                val fresh = snap.documents
+                    .filter { it.id != deviceHash }
+                    .map { parseUserRow(it) }
+                if (fresh.isNotEmpty()) {
+                    // Merge updates into existing rows and add any newly-active users.
+                    val byId = LinkedHashMap<String, UserRow>(sharedUsers.size + fresh.size)
+                    sharedUsers.forEach { byId[it.docId] = it }
+                    fresh.forEach { byId[it.docId] = it }
+                    val merged = byId.values.sortedByDescending {
+                        (it.lastActiveAt ?: it.lastSeenAt)?.toDate()?.time ?: 0L
+                    }
+                    sharedUsers = merged
+                    UsersDirectoryCache.save(ctx, merged)
+                }
+                lastDirectoryRefreshMs.set(System.currentTimeMillis())
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                Log.e("AdminScreen", "Directory liveness refresh failed", e)
             }
         }
         sharedUsersLoading = false
@@ -522,6 +618,37 @@ fun AdminScreen() {
                             sharedLiveLimit = (sharedLiveLimit + 500).coerceAtMost(10000)
                         },
                         onRefresh = { refreshTick++ },
+                        // Patch the open user's row in the in-memory directory with
+                        // the liveness fields the 10s detail poll ALREADY fetched.
+                        // Zero extra Firestore cost — no new read/write, just a local
+                        // state merge — so backing out of the detail shows the fresh
+                        // online/offline status immediately instead of the stale
+                        // one-shot snapshot. Also refresh the local cache so it
+                        // survives tab re-entry (SharedPreferences, not Firestore).
+                        onUpdateUserRow = { docId, detail ->
+                            val idx = sharedUsers.indexOfFirst { it.docId == docId }
+                            if (idx >= 0) {
+                                val cur = sharedUsers[idx]
+                                val patched = cur.copy(
+                                    lastActiveAt = detail.lastActiveAt ?: cur.lastActiveAt,
+                                    lastSeenAt = detail.lastSeenAt ?: cur.lastSeenAt,
+                                    updatedAt = detail.updatedAt ?: cur.updatedAt,
+                                    offlineAt = detail.offlineAt ?: cur.offlineAt,
+                                    isOnlineInApp = detail.isOnlineInApp,
+                                    vrchatUserId = detail.vrchatUserId.ifBlank { cur.vrchatUserId },
+                                    vrchatDisplayName = detail.vrchatDisplayName.ifBlank { cur.vrchatDisplayName },
+                                    vrchatState = detail.vrchatState.ifBlank { cur.vrchatState },
+                                    vrchatStatus = detail.vrchatStatus.ifBlank { cur.vrchatStatus },
+                                    vrchatIsOnline = detail.vrchatIsOnline,
+                                    vrchatWorld = detail.vrchatWorld.ifBlank { cur.vrchatWorld },
+                                    vrchatLastSyncAt = detail.vrchatLastSyncAt ?: cur.vrchatLastSyncAt
+                                )
+                                if (patched != cur) {
+                                    sharedUsers = sharedUsers.toMutableList().also { it[idx] = patched }
+                                    UsersDirectoryCache.save(ctx, sharedUsers)
+                                }
+                            }
+                        },
                         setGlobalLoading = { globalLoading = it },
                         setError = ::setErr,
                         onSendToModeration = { target ->

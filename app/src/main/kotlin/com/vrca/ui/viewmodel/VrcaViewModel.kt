@@ -187,6 +187,12 @@ class VrcaViewModel(
                     db.collection(COL_USERS).document(deviceHash)
                         .set(mapOf(
                             "isOnlineInApp" to false,
+                            // offlineAt is the authoritative clean-shutdown marker the
+                            // admin reads: when it's newer than lastActiveAt the user
+                            // shows offline INSTANTLY (the admin no longer trusts the
+                            // isOnlineInApp flag alone — see isUserOnline). onCleared
+                            // only runs on a real swipe now (app-scoped ViewModel).
+                            "offlineAt" to FieldValue.serverTimestamp(),
                             "lastSeenAt" to FieldValue.serverTimestamp()
                         ), SetOptions.merge())
                         .await()

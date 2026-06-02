@@ -46,7 +46,7 @@ service cloud.firestore {
         "displayName",
 
         // App online status
-        "isOnlineInApp",
+        "isOnlineInApp", "offlineAt",
 
         // Pinned message
         "afkEnabled", "afkMessage",
