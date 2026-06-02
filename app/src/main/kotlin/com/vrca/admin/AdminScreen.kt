@@ -73,9 +73,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.firestore.FieldPath
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
 import com.google.firebase.firestore.Source
@@ -140,10 +140,15 @@ internal fun fmtRelativeTime(nowMs: Long, thenMs: Long): String {
 // the TTL, plain tab switches / brief resumes cost 0 reads.
 private val lastDirectoryRefreshMs = java.util.concurrent.atomic.AtomicLong(0L)
 // How stale the cached directory may get before a foreground-return / tab-entry
-// triggers a targeted cached-user refresh. 10 min keeps the online dots
-// reasonably fresh on return without being chatty; the admin can hit Refresh for
-// instant, and an open user's 10s detail poll keeps that one row live regardless.
+// triggers a targeted liveness refresh. 10 min keeps the online dots reasonably
+// fresh on return without being chatty; the admin can hit Refresh for instant,
+// and an open user's 10s detail poll keeps that one row live regardless.
 private const val DIRECTORY_REFRESH_TTL_MS = 10L * 60L * 1000L
+// Safety margin subtracted from the refresh cursor to absorb client/server clock
+// skew so an update whose server timestamp lands just under our wall-clock cursor
+// is never missed (worst case: a few already-seen rows re-read; next refresh
+// settles it).
+private const val REFRESH_SKEW_MARGIN_MS = 5L * 60L * 1000L
 
 @Composable
 fun AdminScreen() {
@@ -386,38 +391,50 @@ fun AdminScreen() {
             }
         } else if (System.currentTimeMillis() - lastDirectoryRefreshMs.get() > DIRECTORY_REFRESH_TTL_MS) {
             // Directory shown (tab entry OR foreground-return via resumeTick) with a
-            // populated cache that's gone stale: re-read ONLY the cached users' docs
-            // to freshen their liveness so the online/offline dots are correct. This
-            // is bounded by the cache size and queried by document id in chunks of 10
-            // (whereIn limit) — it NEVER scans the whole collection, so it can't
-            // "overload" reads or pull uncached/new users. Reads ≈ cached-user count,
-            // at most once per TTL window; plain tab re-entry within the TTL = 0 reads.
-            // The clock is stamped only on SUCCESS (not up-front): the initial
-            // ON_RESUME replay bumps resumeTick right after launch, cancelling this
-            // run — claiming up-front would make the restarted run skip and the
-            // refresh would be lost. LaunchedEffect cancels the prior run on key
-            // change, so there's no real concurrency to guard against.
+            // populated cache that's gone stale: INCREMENTAL liveness refresh.
+            //
+            // Read ONLY users whose `lastActiveAt` advanced since the last refresh
+            // (minus a skew margin) — i.e. users who came online or did their hourly
+            // write. Offline/idle users have a stale `lastActiveAt` that doesn't match
+            // the inequality, so they are NOT read; their cached rows decay to offline
+            // locally for free. As users settle offline the read count DROPS toward
+            // ~1 (an empty query's minimum) instead of staying at the full cached
+            // count. This NEVER scans the whole collection and is bounded by activity.
+            // (A swipe keeps `lastActiveAt` and only adds `offlineAt`, so a just-swiped
+            // user still matches the window and is re-read WITH the offlineAt → shows
+            // offline; older swipes are already offline locally.)
+            //
+            // On the first refresh of a session (cursor == 0) use the online window
+            // so we refresh exactly the users whose dots could currently be online.
+            // The clock is stamped only on SUCCESS: the initial ON_RESUME replay bumps
+            // resumeTick right after launch and cancels this run — stamping up-front
+            // would make the restarted run skip and lose the refresh.
             try {
-                val ids = sharedUsers.map { it.docId }.filter { it.isNotBlank() }
-                val freshById = HashMap<String, UserRow>(ids.size)
-                ids.chunked(10).forEach { chunk ->
-                    val snap = db.collection("users")
-                        .whereIn(FieldPath.documentId(), chunk)
-                        .get(Source.SERVER)
-                        .await()
-                    snap.documents.forEach { d -> freshById[d.id] = parseUserRow(d) }
-                }
-                if (freshById.isNotEmpty()) {
-                    val merged = sharedUsers
-                        .map { freshById[it.docId] ?: it }
-                        .sortedByDescending {
-                            (it.lastActiveAt ?: it.lastSeenAt)?.toDate()?.time ?: 0L
-                        }
+                val last = lastDirectoryRefreshMs.get()
+                val cursorMs = if (last > 0L) last - REFRESH_SKEW_MARGIN_MS
+                               else System.currentTimeMillis() - ONLINE_STALENESS_WINDOW_MS
+                val snap = db.collection("users")
+                    .whereGreaterThan("lastActiveAt", Timestamp(java.util.Date(cursorMs)))
+                    // Newest-active first so the safety limit keeps the most relevant
+                    // rows if the active-since-cursor set is ever larger than the cap.
+                    .orderBy("lastActiveAt", Query.Direction.DESCENDING)
+                    .limit(sharedLiveLimit.toLong())
+                    .get(Source.SERVER)
+                    .await()
+                val fresh = snap.documents
+                    .filter { it.id != deviceHash }
+                    .map { parseUserRow(it) }
+                if (fresh.isNotEmpty()) {
+                    // Merge updates into existing rows and add any newly-active users.
+                    val byId = LinkedHashMap<String, UserRow>(sharedUsers.size + fresh.size)
+                    sharedUsers.forEach { byId[it.docId] = it }
+                    fresh.forEach { byId[it.docId] = it }
+                    val merged = byId.values.sortedByDescending {
+                        (it.lastActiveAt ?: it.lastSeenAt)?.toDate()?.time ?: 0L
+                    }
                     sharedUsers = merged
                     UsersDirectoryCache.save(ctx, merged)
                 }
-                // Claim the TTL window only after a clean read so a failure (or a
-                // cancel from the resume re-run) retries on the next entry/resume.
                 lastDirectoryRefreshMs.set(System.currentTimeMillis())
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
