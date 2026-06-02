@@ -400,9 +400,15 @@ fun AdminScreen() {
             // locally for free. As users settle offline the read count DROPS toward
             // ~1 (an empty query's minimum) instead of staying at the full cached
             // count. This NEVER scans the whole collection and is bounded by activity.
-            // (A swipe keeps `lastActiveAt` and only adds `offlineAt`, so a just-swiped
-            // user still matches the window and is re-read WITH the offlineAt → shows
-            // offline; older swipes are already offline locally.)
+            //
+            // A swipe-away writes `offlineAt` (+ `lastSeenAt`) but does NOT advance
+            // `lastActiveAt`, so the lastActiveAt query above MISSES swiped users once
+            // their `lastActiveAt` drifts older than the cursor — their `offlineAt`
+            // would never reach the cache and they'd linger "online" for ~65 min. So a
+            // SECOND query reads users whose `offlineAt` advanced since the cursor; the
+            // merge brings the swipe marker in and the row flips offline. This costs at
+            // most ~1 read per swipe (and Firestore's 1-read query minimum when none),
+            // so it stays bounded by activity like the lastActiveAt query.
             //
             // On the first refresh of a session (cursor == 0) use the online window
             // so we refresh exactly the users whose dots could currently be online.
@@ -413,16 +419,26 @@ fun AdminScreen() {
                 val last = lastDirectoryRefreshMs.get()
                 val cursorMs = if (last > 0L) last - REFRESH_SKEW_MARGIN_MS
                                else System.currentTimeMillis() - ONLINE_STALENESS_WINDOW_MS
-                val snap = db.collection("users")
-                    .whereGreaterThan("lastActiveAt", Timestamp(java.util.Date(cursorMs)))
+                val cursorTs = Timestamp(java.util.Date(cursorMs))
+                val activeSnap = db.collection("users")
+                    .whereGreaterThan("lastActiveAt", cursorTs)
                     // Newest-active first so the safety limit keeps the most relevant
                     // rows if the active-since-cursor set is ever larger than the cap.
                     .orderBy("lastActiveAt", Query.Direction.DESCENDING)
                     .limit(sharedLiveLimit.toLong())
                     .get(Source.SERVER)
                     .await()
-                val fresh = snap.documents
+                // Recently-swiped users (offlineAt advanced, lastActiveAt did not).
+                val offlineSnap = db.collection("users")
+                    .whereGreaterThan("offlineAt", cursorTs)
+                    .orderBy("offlineAt", Query.Direction.DESCENDING)
+                    .limit(sharedLiveLimit.toLong())
+                    .get(Source.SERVER)
+                    .await()
+                val fresh = (activeSnap.documents + offlineSnap.documents)
                     .filter { it.id != deviceHash }
+                    .associateBy { it.id }          // de-dupe docs hit by both queries
+                    .values
                     .map { parseUserRow(it) }
                 if (fresh.isNotEmpty()) {
                     // Merge updates into existing rows and add any newly-active users.
@@ -633,7 +649,11 @@ fun AdminScreen() {
                                     lastActiveAt = detail.lastActiveAt ?: cur.lastActiveAt,
                                     lastSeenAt = detail.lastSeenAt ?: cur.lastSeenAt,
                                     updatedAt = detail.updatedAt ?: cur.updatedAt,
-                                    offlineAt = detail.offlineAt ?: cur.offlineAt,
+                                    // Authoritative (the detail poll read the whole doc):
+                                    // a null clears a synthetic/stale swipe marker so a
+                                    // healed user returns online; the watched-stale path
+                                    // synthesizes offlineAt here to flip the row offline.
+                                    offlineAt = detail.offlineAt,
                                     isOnlineInApp = detail.isOnlineInApp,
                                     vrchatUserId = detail.vrchatUserId.ifBlank { cur.vrchatUserId },
                                     vrchatDisplayName = detail.vrchatDisplayName.ifBlank { cur.vrchatDisplayName },

@@ -206,8 +206,32 @@ internal data class ModerationTarget(
  *    the long-standing "swipe doesn't consistently go offline"), the staleness
  *    window still flips the user offline within ~65 min. Best of both: instant when
  *    the write succeeds, eventually-consistent when it doesn't.
+ *
+ * `isOnlineInApp` is deliberately NOT consulted: old builds write it `false` from
+ * `onCleared()` on routine Activity destruction (memory pressure) while still alive
+ * and without advancing `lastActiveAt`, so trusting it would re-introduce the
+ * "live user shows offline" bug.
  */
 internal const val ONLINE_STALENESS_WINDOW_MS = 65L * 60L * 1000L
+
+/**
+ * Tighter liveness window used ONLY while an admin is actively watching a user's
+ * detail page. A watched user's app is in 10s live-sync (it writes `lastActiveAt`
+ * every 10s), so a `lastActiveAt` that stops advancing for this long while watched
+ * is a reliable "the app died" signal — far faster than the 65-min unwatched window.
+ * This is what flips the detail dot (and, via the directory row patch, the directory
+ * dot) to offline when a watched user's app is killed without a clean swipe.
+ */
+internal const val WATCHED_STALE_WINDOW_MS = 45L * 1000L
+
+/**
+ * Grace period after the admin opens a user's detail before the tight
+ * [WATCHED_STALE_WINDOW_MS] applies. The user app's 10s live-sync loop only starts
+ * after the `watcherActiveAt` heartbeat propagates and its snapshot listener flips
+ * `isWatched` — up to ~30-60s. Applying the tight window before that would briefly
+ * false-flag a genuinely-online user as offline, so we wait out the ramp first.
+ */
+internal const val WATCH_RAMP_MS = 90L * 1000L
 
 internal fun isUserOnline(u: UserRow, nowMs: Long = System.currentTimeMillis()): Boolean {
     val activeMs = (u.lastActiveAt ?: u.lastSeenAt)?.toDate()?.time ?: return false
@@ -344,13 +368,35 @@ internal fun UsersTab(
             selectedDetail = null; selectedDetailLoading = false
             return@LaunchedEffect
         }
+        // Anchor the watch-ramp clock to when this user's detail opened, so the tight
+        // WATCHED_STALE_WINDOW_MS only kicks in after the user's 10s live-sync loop has
+        // had time to establish (avoids a false-offline flicker on a live user).
+        val watchStartMs = System.currentTimeMillis()
         selectedDetailLoading = true
         while (true) {
             try {
                 val snap = db.collection("users").document(docId)
                     .get(Source.SERVER)
                     .await()
-                val detail = if (snap.exists()) parseUserDetail(snap) else null
+                val detail = (if (snap.exists()) parseUserDetail(snap) else null)
+                    ?.let { d ->
+                        // A watched user app writes lastActiveAt every 10s. If it has
+                        // gone stale past the tight window (and we've watched long
+                        // enough for its loop to start), the app is dead — synthesize an
+                        // offlineAt so isUserOnline flips offline INSTANTLY here and, via
+                        // onUpdateUserRow, in the directory too. Zero Firestore write; it
+                        // self-heals when the real lastActiveAt advances (→ not stale →
+                        // detail carries the real offlineAt again).
+                        val activeMs = (d.lastActiveAt ?: d.lastSeenAt)?.toDate()?.time ?: 0L
+                        val offMs = d.offlineAt?.toDate()?.time ?: 0L
+                        val now = System.currentTimeMillis()
+                        val staleWhileWatched = now - watchStartMs > WATCH_RAMP_MS &&
+                            activeMs > 0L &&
+                            now - activeMs > WATCHED_STALE_WINDOW_MS
+                        if (staleWhileWatched && offMs <= activeMs)
+                            d.copy(offlineAt = Timestamp(java.util.Date(now)))
+                        else d
+                    }
                 selectedDetail = detail
                 if (detail != null) onUpdateUserRow(docId, detail)
             } catch (e: kotlinx.coroutines.CancellationException) {
@@ -389,7 +435,11 @@ internal fun UsersTab(
         val row = rawRow.copy(
             lastActiveAt = d?.lastActiveAt ?: rawRow.lastActiveAt,
             lastSeenAt   = d?.lastSeenAt ?: rawRow.lastSeenAt,
-            offlineAt    = d?.offlineAt ?: rawRow.offlineAt,
+            // When the detail poll has loaded, its offlineAt is AUTHORITATIVE (it read
+            // the whole doc) — including a null, so a healed user (synthetic offlineAt
+            // cleared) goes back online. Only fall back to the directory row's value
+            // while the detail hasn't loaded yet (d == null).
+            offlineAt    = if (d != null) d.offlineAt else rawRow.offlineAt,
             isOnlineInApp = d?.isOnlineInApp ?: rawRow.isOnlineInApp
         )
         Column(
