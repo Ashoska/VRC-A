@@ -737,6 +737,7 @@ internal fun PageContainer(content: @Composable ColumnScope.() -> Unit) {
 internal fun SectionCard(
     title: String,
     subtitle: String? = null,
+    titleStyle: androidx.compose.ui.text.TextStyle? = null,
     actions: (@Composable RowScope.() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
@@ -756,7 +757,7 @@ internal fun SectionCard(
                 ) {
                     Text(
                         text = title,
-                        style = MaterialTheme.typography.titleMedium,
+                        style = titleStyle ?: MaterialTheme.typography.titleMedium,
                         maxLines = 4,
                         overflow = TextOverflow.Clip
                     )
