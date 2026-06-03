@@ -1917,6 +1917,9 @@ class VrcaViewModel(
      *  Toggling features without pressing START only updates the preview. */
     fun startSending(local: Boolean = false) {
         if (isBanned) return
+        // Cancel any in-flight robust-clear from a just-pressed Stop so its trailing
+        // empty sends can't blank the content we're about to transmit.
+        clearJob?.cancel(); clearJob = null
         oscSending = true
         savedState["oscSending"] = true
         persistFeatureSession()
@@ -1938,7 +1941,7 @@ class VrcaViewModel(
         persistFeatureSession()
         stopAll(clearFromChatbox = false)
         keepaliveJob?.cancel(); keepaliveJob = null
-        if (!isBanned) clearChatbox(local)
+        if (!isBanned) clearChatboxRobust(local)
         // Keep the preview reflecting the still-enabled toggles (we did NOT untoggle).
         rebuildCombinedPreviewOnly()
         startSelfSyncLoopIfNeeded()
@@ -1957,7 +1960,7 @@ class VrcaViewModel(
         timeEnabled = false; savedState["timeEnabled"] = false
         persistFeatureSession()
         keepaliveJob?.cancel(); keepaliveJob = null
-        if (!isBanned) clearChatbox(local)
+        if (!isBanned) clearChatboxRobust(local)
         rebuildCombinedPreviewOnly(forceClearIfAllOff = true)
         startSelfSyncLoopIfNeeded()
     }
@@ -2481,6 +2484,32 @@ class VrcaViewModel(
     private fun clearChatbox(local: Boolean = false) {
         if (isBanned) return
         sendToVrchatRaw("", local, addToConversation = false)
+    }
+
+    private var clearJob: Job? = null
+
+    /**
+     * Reliably clear the VRChat chatbox on STOP. A SINGLE empty send is flaky:
+     *  (a) VRChat enforces a 0.5s chatbox rate limit, so a clear landing <0.5s
+     *      after the final content send is silently dropped;
+     *  (b) OSC is UDP — a lone packet can just be lost;
+     *  (c) a sender loop already mid-`rebuildAndMaybeSendCombined` when STOP was
+     *      pressed can land content AFTER the clear, repopulating the box.
+     * So we send the empty payload a few times, spaced just past the rate limit,
+     * which beats all three races. Reset the send-dedup state so nothing suppresses
+     * the empty sends and a later Start re-sends fresh content.
+     */
+    private fun clearChatboxRobust(local: Boolean = false) {
+        if (isBanned) return
+        clearJob?.cancel()
+        lastSentCombinedText = ""
+        lastCombinedSendMs = 0L
+        clearJob = viewModelScope.launch {
+            repeat(3) {
+                clearChatbox(local)
+                delay(SEND_FLOOR_MS + 100L)
+            }
+        }
     }
 
     private fun currentCycleLinePreview(): String {
