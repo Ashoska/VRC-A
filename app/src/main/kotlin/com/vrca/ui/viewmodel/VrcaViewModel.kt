@@ -132,6 +132,10 @@ class VrcaViewModel(
         private const val REMOTE_PREFS_FILE = "vrca_remote"
         private const val PREF_DEVICE_ID_HASH = "device_id_hash"
         private const val PREF_AUTH_UID = "auth_uid"
+        private const val PREF_LAST_CROSS_DEVICE_SYNC_MS = "last_cross_device_sync_ms"
+        // Cross-device sync runs on VM creation; throttle so OS-kill relaunches don't
+        // repeat the collection read every few minutes.
+        private const val CROSS_DEVICE_SYNC_THROTTLE_MS = 30L * 60L * 1000L
         private const val PREF_LAST_SYNCED_JSON = "last_synced_values_json"
 
         // Collections (MUST MATCH YOUR RULES)
@@ -455,17 +459,19 @@ class VrcaViewModel(
     }
 
     /**
-     * No-op under the hourly model. Edits and toggles used to trigger a
-     * debounced Firestore write here; that produced a write per keystroke/
-     * toggle. Now content is persisted ONLY to local DataStore on edit (which
-     * already happens at every call site) and pushed to Firestore on the next
-     * app-open write or the hourly heartbeat ([startHourlyHeartbeat]) — and
-     * only if it actually changed (delta comparison in [performSelfSync]).
+     * Schedules ONE debounced delta write [SELF_SYNC_DEBOUNCE_MS] (30s) after the
+     * last edit/toggle. Each call cancels and reschedules the pending write, so a
+     * burst of edits flushes exactly once. [performSelfSync] writes only changed
+     * content + the liveness fields (delta vs [lastSyncedValues]), so an idle user
+     * who isn't editing schedules nothing extra here — the call sites only fire on
+     * genuine content/toggle changes (NOT on NowPlaying ticks or preview rebuilds).
      *
-     * The 47 call sites are intentionally left in place so the edit→DataStore
-     * paths and preview rebuilds at those sites are untouched; this function
-     * simply no longer schedules a network write. While an admin is actively
-     * watching this user, the 10s live-sync loop still streams volatile output.
+     * This exists because removing the per-edit write made edits sync only on the
+     * hourly heartbeat, so "edit a preset then close the app" reverted on reopen
+     * (the app-open read overwrote the not-yet-synced edit). Runs in the app-scoped
+     * viewModelScope so the flush still fires if the app is backgrounded after
+     * editing; a swipe is handled separately (AppShutdown writes content + offline
+     * synchronously). While an admin watches, the 10s live loop also streams output.
      */
     private fun startSelfSyncLoopIfNeeded() {
         if (BuildConfig.IS_ADMIN_BUILD) return
@@ -658,8 +664,20 @@ class VrcaViewModel(
      * `vrchatUserId` but a different `deviceHash`. If a sibling has fresher content
      * (`updatedAt`), pulls its presets/messages/intervals into local DataStore —
      * so editing on phone A auto-appears on phone B's next open.
+     *
+     * THROTTLED to at most once per [CROSS_DEVICE_SYNC_THROTTLE_MS] (persisted
+     * timestamp): this runs on every VM creation, and the background-survival
+     * machinery recreates the VM after each OS kill, so without the throttle a
+     * device that's being killed+restarted repeatedly would re-run this collection
+     * read every few minutes. The throttle bounds it to one query per 30 min/device
+     * regardless of relaunch frequency. A genuine reopen after editing on the other
+     * phone is almost always >30 min from the last sync, so the feature is intact.
      */
     private suspend fun applyCrossDeviceSync() {
+        // Throttle: skip if we synced within the window. Cheap relaunch-storm guard.
+        val lastSync = prefs().getLong(PREF_LAST_CROSS_DEVICE_SYNC_MS, 0L)
+        if (System.currentTimeMillis() - lastSync < CROSS_DEVICE_SYNC_THROTTLE_MS) return
+
         val myPresence = kotlinx.coroutines.withTimeoutOrNull(120_000L) {
             VrchatPipelineState.presenceFlow.first { it != null }
         } ?: return
@@ -674,6 +692,9 @@ class VrcaViewModel(
                 .whereEqualTo("vrchatUserId", myVrchatId)
                 .get()
                 .await()
+            // Stamp the throttle on a successful query (whether or not we pull), so
+            // relaunches within the window don't re-read.
+            prefs().edit().putLong(PREF_LAST_CROSS_DEVICE_SYNC_MS, System.currentTimeMillis()).apply()
             if (siblings == null || siblings.isEmpty) return@runCatching
 
             // The query returns our OWN doc too (same vrchatUserId), so read our
