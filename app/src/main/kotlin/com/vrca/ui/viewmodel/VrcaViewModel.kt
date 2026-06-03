@@ -1276,6 +1276,20 @@ class VrcaViewModel(
     private var lastSentMs = 0L
 
     // =========================
+    // OSC send gate (master switch)
+    // =========================
+    // Toggles (afk/cycle/spotify/time) configure WHAT will be sent; this gate
+    // decides WHEN it actually goes out over OSC. When false, enabling a toggle
+    // only updates the local preview/config — nothing is transmitted and the
+    // VRChat chatbox is untouched. START (`startSending`) flips this true and
+    // launches the sender loops for whatever toggles are on; STOP (`stopSending`)
+    // flips it false, stops the loops, and clears the VRChat chatbox — WITHOUT
+    // untoggling any feature. Persisted (SavedStateHandle + FeatureSessionStore)
+    // so an OS-kill restore only resumes sending if the user was actually sending.
+    var oscSending by mutableStateOf(savedState["oscSending"] ?: false)
+        private set
+
+    // =========================
     // AFK
     // =========================
     var afkEnabled by mutableStateOf(savedState["afkEnabled"] ?: false)
@@ -1344,9 +1358,13 @@ class VrcaViewModel(
         timeEnabled = enabled
         savedState["timeEnabled"] = enabled
         persistFeatureSession()
-        rebuildAndMaybeSendCombined(forceSend = true)
+        if (oscSending) {
+            rebuildAndMaybeSendCombined(forceSend = true)
+            manageKeepaliveLoop()
+        } else {
+            rebuildCombinedPreviewOnly()
+        }
         startSelfSyncLoopIfNeeded()
-        manageKeepaliveLoop()
     }
 
     fun updateTimeMode(mode: String) {
@@ -1818,10 +1836,47 @@ class VrcaViewModel(
         }
 
     // =========================
-    // KILL switch
+    // START / STOP (OSC send gate)
+    // =========================
+    /** START: begin transmitting over OSC. Flips the [oscSending] gate on and
+     *  launches the sender loops for whatever toggles are currently enabled.
+     *  Toggling features without pressing START only updates the preview. */
+    fun startSending(local: Boolean = false) {
+        if (isBanned) return
+        oscSending = true
+        savedState["oscSending"] = true
+        persistFeatureSession()
+        // Launch whatever is configured. Each starter no-ops if its toggle is off.
+        startAfkSender(local)
+        startCycle(local)
+        startNowPlayingSender(local)
+        manageKeepaliveLoop(local)
+        rebuildAndMaybeSendCombined(forceSend = true, local = local)
+        startSelfSyncLoopIfNeeded()
+    }
+
+    /** STOP: stop transmitting over OSC and clear the VRChat chatbox. Does NOT
+     *  untoggle any feature — the toggle configuration is preserved so the user
+     *  can press START again to resume exactly what they had set up. */
+    fun stopSending(local: Boolean = false) {
+        oscSending = false
+        savedState["oscSending"] = false
+        persistFeatureSession()
+        stopAll(clearFromChatbox = false)
+        keepaliveJob?.cancel(); keepaliveJob = null
+        if (!isBanned) clearChatbox(local)
+        // Keep the preview reflecting the still-enabled toggles (we did NOT untoggle).
+        rebuildCombinedPreviewOnly()
+        startSelfSyncLoopIfNeeded()
+    }
+
+    // =========================
+    // KILL switch (ban path) — stops sending AND untoggles everything.
+    // Used only when the account is banned; the user-facing button is STOP.
     // =========================
     fun killStopAndClear(local: Boolean = false) {
         stopAll(clearFromChatbox = false)
+        oscSending = false; savedState["oscSending"] = false
         afkEnabled = false; savedState["afkEnabled"] = false
         cycleEnabled = false; savedState["cycleEnabled"] = false
         spotifyEnabled = false; savedState["spotifyEnabled"] = false
@@ -1841,20 +1896,34 @@ class VrcaViewModel(
             afk = afkEnabled,
             cycle = cycleEnabled,
             spotify = spotifyEnabled,
-            time = timeEnabled
+            time = timeEnabled,
+            sending = oscSending
         )
     }
 
-    /** Re-enable whatever toggles were active before an unexpected kill and start
-     *  their sender loops. No-op on a fresh/intentional launch (restore not armed). */
+    /** Restore the toggle CONFIG that was set up before an unexpected kill, and
+     *  resume OSC sending ONLY if the user was actively sending (pressed START).
+     *  No-op on a fresh/intentional launch (restore not armed). This is what makes
+     *  an OS kill invisible — if the user was sending, the chatbox resumes on its
+     *  own "like nothing happened"; if they had toggles configured but hadn't
+     *  pressed START, the config comes back but nothing transmits. */
     private fun restoreFeatureSession() {
         val pending = FeatureSessionStore.pendingRestore(app.applicationContext) ?: return
-        if (!pending.anyEnabled) return
         if (isBanned) return
-        if (pending.afk) setAfkEnabledFlag(true)
-        if (pending.cycle) setCycleEnabledFlag(true)
-        if (pending.spotify) setSpotifyEnabledFlag(true)
-        if (pending.time) updateTimeEnabled(true)
+        // Re-apply the toggle configuration directly (no sender start — the gate
+        // below decides whether anything actually transmits).
+        afkEnabled = pending.afk; savedState["afkEnabled"] = pending.afk
+        cycleEnabled = pending.cycle; savedState["cycleEnabled"] = pending.cycle
+        spotifyEnabled = pending.spotify; savedState["spotifyEnabled"] = pending.spotify
+        timeEnabled = pending.time; savedState["timeEnabled"] = pending.time
+        oscSending = false; savedState["oscSending"] = false
+        if (pending.sending && pending.anyEnabled) {
+            // Was actively sending → resume seamlessly.
+            startSending()
+        } else {
+            // Configured but idle → just reflect the toggles in the preview.
+            rebuildCombinedPreviewOnly()
+        }
     }
 
     // =========================
@@ -1864,36 +1933,54 @@ class VrcaViewModel(
         if (isBanned) return
         afkEnabled = enabled
         savedState["afkEnabled"] = enabled
-        if (!enabled) stopAfkSender(clearFromChatbox = true)
-        else startAfkSender()
         persistFeatureSession()
-        rebuildAndMaybeSendCombined(forceSend = true)
+        if (oscSending) {
+            // Live: start/stop this feature's loop immediately.
+            if (!enabled) stopAfkSender(clearFromChatbox = true)
+            else startAfkSender()
+            rebuildAndMaybeSendCombined(forceSend = true)
+            manageKeepaliveLoop()
+        } else {
+            // Idle (not sending): just update config + preview, no OSC.
+            afkJob?.cancel(); afkJob = null
+            rebuildCombinedPreviewOnly()
+        }
         startSelfSyncLoopIfNeeded()
-        manageKeepaliveLoop()
     }
 
     fun setCycleEnabledFlag(enabled: Boolean) {
         if (isBanned) return
         cycleEnabled = enabled
         savedState["cycleEnabled"] = enabled
-        if (!enabled) stopCycle(clearFromChatbox = true)
-        else { lastCyclePreviewAdvanceMs = 0L; startCycle() }
+        lastCyclePreviewAdvanceMs = 0L
         persistFeatureSession()
-        rebuildAndMaybeSendCombined(forceSend = true)
+        if (oscSending) {
+            if (!enabled) stopCycle(clearFromChatbox = true)
+            else startCycle()
+            rebuildAndMaybeSendCombined(forceSend = true)
+            manageKeepaliveLoop()
+        } else {
+            cycleJob?.cancel(); cycleJob = null
+            rebuildCombinedPreviewOnly()
+        }
         startSelfSyncLoopIfNeeded()
-        manageKeepaliveLoop()
     }
 
     fun setSpotifyEnabledFlag(enabled: Boolean) {
         if (isBanned) return
         spotifyEnabled = enabled
         savedState["spotifyEnabled"] = enabled
-        if (!enabled) stopNowPlayingSender(clearFromChatbox = true)
-        else startNowPlayingSender()
         persistFeatureSession()
-        rebuildAndMaybeSendCombined(forceSend = true)
+        if (oscSending) {
+            if (!enabled) stopNowPlayingSender(clearFromChatbox = true)
+            else startNowPlayingSender()
+            rebuildAndMaybeSendCombined(forceSend = true)
+            manageKeepaliveLoop()
+        } else {
+            nowPlayingJob?.cancel(); nowPlayingJob = null
+            rebuildCombinedPreviewOnly()
+        }
         startSelfSyncLoopIfNeeded()
-        manageKeepaliveLoop()
     }
 
     fun setSpotifyDemoFlag(enabled: Boolean) {
@@ -2081,13 +2168,13 @@ class VrcaViewModel(
     // =========================
     fun startAfkSender(local: Boolean = false) {
         if (isBanned) return
-        if (!afkEnabled) return
+        if (!afkEnabled || !oscSending) return
         // AFK sender has its own 12s loop — cancel keepalive to avoid duplication.
         keepaliveJob?.cancel()
         keepaliveJob = null
         afkJob?.cancel()
         afkJob = viewModelScope.launch {
-            while (afkEnabled && !isBanned) {
+            while (afkEnabled && oscSending && !isBanned) {
                 rebuildAndMaybeSendCombined(forceSend = true, local = local)
                 delay(afkForcedIntervalSeconds.toLong() * 1000L)
             }
@@ -2115,7 +2202,7 @@ class VrcaViewModel(
     fun startCycle(local: Boolean = false) {
         if (isBanned) return
         val msgs = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(10)
-        if (!cycleEnabled || msgs.isEmpty()) return
+        if (!cycleEnabled || !oscSending || msgs.isEmpty()) return
 
         persistCycleLinesPreserve()
         viewModelScope.launch { userPreferencesRepository.saveCycleInterval(cycleIntervalSeconds) }
@@ -2126,7 +2213,7 @@ class VrcaViewModel(
         cycleJob?.cancel()
         cycleJob = viewModelScope.launch {
             cycleIndex = 0
-            while (cycleEnabled && !isBanned) {
+            while (cycleEnabled && oscSending && !isBanned) {
                 rebuildAndMaybeSendCombined(
                     forceSend = true,
                     local = local,
@@ -2153,13 +2240,13 @@ class VrcaViewModel(
     // =========================
     fun startNowPlayingSender(local: Boolean = false) {
         if (isBanned) return
-        if (!spotifyEnabled) return
+        if (!spotifyEnabled || !oscSending) return
         // NowPlaying has its own 500ms send loop — cancel keepalive to avoid duplication.
         keepaliveJob?.cancel()
         keepaliveJob = null
         nowPlayingJob?.cancel()
         nowPlayingJob = viewModelScope.launch {
-            while (spotifyEnabled && !isBanned) {
+            while (spotifyEnabled && oscSending && !isBanned) {
                 // run on a 0.5s cadence so OSC updates match VRChat's chatbox rate limit
                 rebuildAndMaybeSendCombined(forceSend = true, local = local)
                 delay(SEND_FLOOR_MS)
@@ -2199,6 +2286,12 @@ class VrcaViewModel(
     // VRChat, and VRChat clears the chatbox after ~15s of silence.
     // =========================
     private fun manageKeepaliveLoop(local: Boolean = false) {
+        // Not sending → no keepalive (the master gate is off).
+        if (!oscSending) {
+            keepaliveJob?.cancel()
+            keepaliveJob = null
+            return
+        }
         // NowPlaying and Cycle have their own send loops — don't duplicate.
         if (spotifyEnabled || (cycleEnabled && cycleJob != null)) {
             keepaliveJob?.cancel()
