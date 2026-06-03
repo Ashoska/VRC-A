@@ -13,8 +13,6 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -175,57 +173,24 @@ internal fun HomePage(
             val previewTextRaw = vm.debugLastCombinedOsc.ifBlank { "(nothing active)" }
             val previewText = remember(previewTextRaw) { vrChatSafePreview(previewTextRaw) }
 
-            // The preview floats above a ghosted avatar bust — mirroring how the
-            // VRChat chatbox appears above your avatar's head in-world.
-            val accent = MaterialTheme.colorScheme.primary
             Box(
                 Modifier
                     .fillMaxWidth()
-                    .height(300.dp)
+                    .height(280.dp)
             ) {
-                Canvas(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .height(215.dp)
-                        .width(196.dp)
-                ) {
-                    val w = size.width
-                    val h = size.height
-                    val brush = Brush.verticalGradient(
-                        0f to accent.copy(alpha = 0.24f),
-                        1f to accent.copy(alpha = 0.03f)
-                    )
-                    // Head
-                    drawCircle(
-                        brush = brush,
-                        radius = w * 0.165f,
-                        center = Offset(w * 0.5f, h * 0.19f)
-                    )
-                    // Shoulders / bust
-                    val body = Path().apply {
-                        moveTo(w * 0.50f, h * 0.32f)
-                        cubicTo(w * 0.12f, h * 0.39f, w * 0.09f, h * 1.06f, w * 0.50f, h * 1.06f)
-                        cubicTo(w * 0.91f, h * 1.06f, w * 0.88f, h * 0.39f, w * 0.50f, h * 0.32f)
-                        close()
-                    }
-                    drawPath(body, brush = brush)
-                }
-
-                // Floating chatbox bubble.
                 Surface(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .widthIn(max = 420.dp)
-                        .fillMaxWidth(0.94f),
-                    tonalElevation = 6.dp,
-                    shadowElevation = 3.dp,
-                    shape = RoundedCornerShape(20.dp),
+                        .fillMaxWidth(0.92f),
+                    tonalElevation = 3.dp,
+                    shape = MaterialTheme.shapes.large,
                     color = MaterialTheme.colorScheme.surfaceVariant
                 ) {
                     Box(
                         Modifier
-                            .heightIn(min = 104.dp)
-                            .padding(18.dp)
+                            .heightIn(min = 96.dp)
+                            .padding(12.dp)
                             .fillMaxWidth(),
                         contentAlignment = Alignment.Center
                     ) {
@@ -242,6 +207,31 @@ internal fun HomePage(
                             )
                         }
                     }
+                }
+
+                Canvas(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 8.dp)
+                        .height(200.dp)
+                        .width(170.dp)
+                ) {
+                    val w = size.width
+                    val h = size.height
+
+                    drawCircle(
+                        color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.08f),
+                        radius = w * 0.18f,
+                        center = Offset(w * 0.5f, h * 0.20f)
+                    )
+
+                    val path = Path().apply {
+                        moveTo(w * 0.50f, h * 0.36f)
+                        cubicTo(w * 0.18f, h * 0.40f, w * 0.18f, h * 0.96f, w * 0.50f, h * 0.98f)
+                        cubicTo(w * 0.82f, h * 0.96f, w * 0.82f, h * 0.40f, w * 0.50f, h * 0.36f)
+                        close()
+                    }
+                    drawPath(path, color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.06f))
                 }
             }
 
@@ -297,15 +287,8 @@ internal fun HomePage(
                 }
             }
 
-            // Quick Toggles share the same surfaceVariant surface as the preview
-            // bubble so the whole section reads as one cohesive unit.
-            Surface(
-                shape = RoundedCornerShape(20.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                tonalElevation = 6.dp,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
 
                     // Quick Toggles title row with Edit/Done toggle and Reset button
                     var cardReorderMode by remember { mutableStateOf(false) }
@@ -342,18 +325,10 @@ internal fun HomePage(
                         }
                     }
 
-                    // Reorderable component rows - order = top-to-bottom in chatbox output.
-                    // Each sits in its own subtle tile for a clean, scannable list.
+                    // Reorderable component rows - order = top-to-bottom in chatbox output
                     vm.cardOrder.forEachIndexed { idx: Int, component: String ->
-                      Surface(
-                          shape = RoundedCornerShape(14.dp),
-                          color = MaterialTheme.colorScheme.surface.copy(alpha = 0.55f),
-                          modifier = Modifier.fillMaxWidth()
-                      ) {
                         Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 12.dp, vertical = 4.dp),
+                            Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
@@ -424,7 +399,6 @@ internal fun HomePage(
                                 }
                             }
                         }
-                      }
                     }
                 }
             }
