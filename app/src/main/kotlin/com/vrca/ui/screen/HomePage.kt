@@ -165,7 +165,8 @@ internal fun HomePage(
 
         SectionCard(
             title = "VRChat Preview",
-            subtitle = "Toggles below choose what to send. Press Start to begin transmitting.",
+            titleStyle = MaterialTheme.typography.headlineSmall,
+            subtitle = "What will appear in VRChat.",
             actions = {
                 SendStatusChip(sending = vm.oscSending)
             }
@@ -300,8 +301,8 @@ internal fun HomePage(
                         Column {
                             Text("Quick Toggles", style = MaterialTheme.typography.titleSmall)
                             Text(
-                                if (vm.oscSending) "Sending — changes apply live"
-                                else "Configure, then press Start",
+                                if (vm.oscSending) "Edits show live"
+                                else "Press Start when Ready",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
