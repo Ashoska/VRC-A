@@ -55,6 +55,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -111,7 +112,8 @@ internal data class UserRow(
     // Clean-shutdown marker (swipe-away). When present AND newer than
     // lastActiveAt it forces the row offline instantly; a live heartbeat
     // advances lastActiveAt past it, so it can never false-flag a running app.
-    val offlineAt: Timestamp? = null
+    val offlineAt: Timestamp? = null,
+    val versionName: String = ""
     // Profile pictures are NOT stored in Firestore — AdminAvatar resolves the
     // VRChat+ picture on demand by vrchatUserId via the admin's VRChat session.
 )
@@ -206,8 +208,40 @@ internal data class ModerationTarget(
  *    the long-standing "swipe doesn't consistently go offline"), the staleness
  *    window still flips the user offline within ~65 min. Best of both: instant when
  *    the write succeeds, eventually-consistent when it doesn't.
+ *
+ * `isOnlineInApp` is deliberately NOT consulted: old builds write it `false` from
+ * `onCleared()` on routine Activity destruction (memory pressure) while still alive
+ * and without advancing `lastActiveAt`, so trusting it would re-introduce the
+ * "live user shows offline" bug.
  */
 internal const val ONLINE_STALENESS_WINDOW_MS = 65L * 60L * 1000L
+
+/**
+ * Tighter liveness window used ONLY while an admin is actively watching a user's
+ * detail page. A watched user's app writes a liveness timestamp every 10s (the
+ * `lastSeenAt` live-loop write is dependency-free, so it's the reliable heartbeat),
+ * so a heartbeat that stops advancing for this long while watched is a reliable
+ * "the app died/was swiped" signal — far faster than the 65-min unwatched window.
+ * Set to ~2.5 missed 10s ticks: fast enough to feel immediate, with enough slack to
+ * ride out a single delayed write. This is the robust swipe→offline path because it
+ * does NOT depend on the swipe-time `offlineAt` write landing during shutdown.
+ */
+internal const val WATCHED_STALE_WINDOW_MS = 25L * 1000L
+
+/**
+ * Grace period before the tight [WATCHED_STALE_WINDOW_MS] applies WHEN the user's
+ * 10s heartbeat has not yet been observed advancing — the case where the admin opens
+ * a user who is ALREADY dead (force-killed / swiped with no offlineAt landing), so the
+ * poll never sees a heartbeat to confirm. `AdminRuntime.setSelectedUser` fires the
+ * `watcherActiveAt` write IMMEDIATELY on open, so a genuinely-LIVE user's app flips
+ * into 10s live-sync and its first heartbeat reaches this poll within ~15-25s; a 45s
+ * ramp clears that chain with margin while still flipping a dead user offline fast.
+ * (Even if the ramp ever false-flags a live user, it SELF-HEALS the instant the
+ * heartbeat advances — the synthesized offlineAt is dropped and the row goes online.)
+ * Once the poll HAS seen the heartbeat advance (`loopConfirmed`), this ramp is bypassed
+ * and a stopped heartbeat flips offline after just [WATCHED_STALE_WINDOW_MS].
+ */
+internal const val WATCH_RAMP_MS = 45L * 1000L
 
 internal fun isUserOnline(u: UserRow, nowMs: Long = System.currentTimeMillis()): Boolean {
     val activeMs = (u.lastActiveAt ?: u.lastSeenAt)?.toDate()?.time ?: return false
@@ -217,6 +251,22 @@ internal fun isUserOnline(u: UserRow, nowMs: Long = System.currentTimeMillis()):
     val offlineMs = u.offlineAt?.toDate()?.time ?: 0L
     if (offlineMs > activeMs) return false
     return true
+}
+
+/**
+ * When the same VRChat account is signed in on multiple phones, each install has
+ * its own deviceHash → a separate user doc, so the directory would show the person
+ * twice. Returns true if [a] is the better representative to KEEP over [b]: prefer
+ * an online row, then the most recently active. Rows with no vrchatUserId are never
+ * collapsed (the caller skips them).
+ */
+internal fun preferRow(a: UserRow, b: UserRow, nowMs: Long): Boolean {
+    val aOnline = isUserOnline(a, nowMs)
+    val bOnline = isUserOnline(b, nowMs)
+    if (aOnline != bOnline) return aOnline
+    val aMs = (a.lastActiveAt ?: a.lastSeenAt)?.toDate()?.time ?: 0L
+    val bMs = (b.lastActiveAt ?: b.lastSeenAt)?.toDate()?.time ?: 0L
+    return aMs > bMs
 }
 
 internal fun parseUserRow(d: com.google.firebase.firestore.DocumentSnapshot): UserRow {
@@ -242,7 +292,8 @@ internal fun parseUserRow(d: com.google.firebase.firestore.DocumentSnapshot): Us
         vrchatPlatform = (d.getString("vrchatPlatform") ?: "").trim(),
         vrchatLastSyncAt = d.getTimestamp("vrchatLastSyncAt"),
         isOnlineInApp = d.getBoolean("isOnlineInApp") ?: false,
-        offlineAt = d.getTimestamp("offlineAt")
+        offlineAt = d.getTimestamp("offlineAt"),
+        versionName = (d.getString("versionName") ?: "").trim()
     )
 }
 
@@ -286,7 +337,22 @@ internal fun UsersTab(
     val filteredUsers by remember {
         derivedStateOf {
             val q = search.trim()
+            val nowMs = System.currentTimeMillis()
+            // Collapse duplicate rows for the same VRChat account (same vrchatUserId
+            // on multiple phones = separate device docs). Keep ONE representative per
+            // vrchatUserId — preferring online, then freshest — so each person shows
+            // once. Rows that never logged into VRChat (blank vrchatUserId) are kept
+            // as distinct entries. Original sort order is preserved.
+            val best = HashMap<String, UserRow>()
+            for (u in users) {
+                val vid = u.vrchatUserId.trim()
+                if (vid.isBlank()) continue
+                val ex = best[vid]
+                if (ex == null || preferRow(u, ex, nowMs)) best[vid] = u
+            }
+            val keepDocIds = best.values.mapTo(HashSet()) { it.docId }
             users.asSequence()
+                .filter { it.vrchatUserId.trim().isBlank() || it.docId in keepDocIds }
                 .filter { if (filterWarned) it.warned else true }
                 .filter { if (filterBanned) it.banned else true }
                 .filter { rowMatches(it, q) }
@@ -344,13 +410,51 @@ internal fun UsersTab(
             selectedDetail = null; selectedDetailLoading = false
             return@LaunchedEffect
         }
+        // Watched fast-offline tracking. While watched, the user app writes a liveness
+        // timestamp every 10s — `lastSeenAt` via the ViewModel live loop (no external
+        // dependency, so it's the RELIABLE heartbeat) and `lastActiveAt` via the
+        // presence loop. We track the FRESHEST of the two and the wall-clock time it
+        // last advanced. Once we've SEEN it advance (the loop is confirmed running),
+        // a swipe/kill stops it and we flip offline after just WATCHED_STALE_WINDOW_MS
+        // — no need to wait the full ramp. Before the loop is confirmed (e.g. the
+        // user's 10s loop hasn't started yet, or they're already offline), we fall
+        // back to the WATCH_RAMP_MS grace so we don't false-flag a live user mid-ramp.
+        val watchStartMs = System.currentTimeMillis()
+        var freshestSeenMs = 0L
+        var lastAdvanceWallMs = watchStartMs
+        var loopConfirmed = false
         selectedDetailLoading = true
         while (true) {
             try {
                 val snap = db.collection("users").document(docId)
                     .get(Source.SERVER)
                     .await()
-                val detail = if (snap.exists()) parseUserDetail(snap) else null
+                val detail = (if (snap.exists()) parseUserDetail(snap) else null)
+                    ?.let { d ->
+                        val la = d.lastActiveAt?.toDate()?.time ?: 0L
+                        val ls = d.lastSeenAt?.toDate()?.time ?: 0L
+                        val freshest = maxOf(la, ls)
+                        val offMs = d.offlineAt?.toDate()?.time ?: 0L
+                        val now = System.currentTimeMillis()
+                        if (freshest > freshestSeenMs) {
+                            if (freshestSeenMs != 0L) loopConfirmed = true
+                            freshestSeenMs = freshest
+                            lastAdvanceWallMs = now
+                        }
+                        // If the heartbeat has stopped advancing, the app died.
+                        // Synthesize offlineAt so isUserOnline flips offline INSTANTLY
+                        // here and, via onUpdateUserRow, in the directory too (zero
+                        // Firestore write). Self-heals when the heartbeat advances again.
+                        val staleWhileWatched = if (loopConfirmed) {
+                            now - lastAdvanceWallMs > WATCHED_STALE_WINDOW_MS
+                        } else {
+                            now - watchStartMs > WATCH_RAMP_MS && freshest > 0L &&
+                                now - freshest > WATCHED_STALE_WINDOW_MS
+                        }
+                        if (staleWhileWatched && offMs <= freshest)
+                            d.copy(offlineAt = Timestamp(java.util.Date(now)))
+                        else d
+                    }
                 selectedDetail = detail
                 if (detail != null) onUpdateUserRow(docId, detail)
             } catch (e: kotlinx.coroutines.CancellationException) {
@@ -372,6 +476,14 @@ internal fun UsersTab(
     LaunchedEffect(selectedDocId) {
         AdminRuntime.setSelectedUser(selectedDocId)
     }
+    // Clear the watch the moment the Users tab leaves composition (switching to
+    // another admin tab while a detail is open, or leaving the panel) so the 30s
+    // watcherActiveAt heartbeat stops — without this it kept writing for whatever
+    // user was last open. (Backing out of a detail already clears it via the effect
+    // above; this covers the tab-switch / panel-exit paths.)
+    DisposableEffect(Unit) {
+        onDispose { AdminRuntime.setSelectedUser(null) }
+    }
 
     val selectedRow by remember {
         derivedStateOf {
@@ -389,7 +501,11 @@ internal fun UsersTab(
         val row = rawRow.copy(
             lastActiveAt = d?.lastActiveAt ?: rawRow.lastActiveAt,
             lastSeenAt   = d?.lastSeenAt ?: rawRow.lastSeenAt,
-            offlineAt    = d?.offlineAt ?: rawRow.offlineAt,
+            // When the detail poll has loaded, its offlineAt is AUTHORITATIVE (it read
+            // the whole doc) — including a null, so a healed user (synthetic offlineAt
+            // cleared) goes back online. Only fall back to the directory row's value
+            // while the detail hasn't loaded yet (d == null).
+            offlineAt    = if (d != null) d.offlineAt else rawRow.offlineAt,
             isOnlineInApp = d?.isOnlineInApp ?: rawRow.isOnlineInApp
         )
         Column(
@@ -693,13 +809,20 @@ internal fun UsersTab(
                                 color = MaterialTheme.colorScheme.primary,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                        // Status pills + relative time on one wrapping row.
+                        // Status pills + version + relative time on one wrapping row.
                         Row(horizontalArrangement = Arrangement.spacedBy(4.dp),
                             verticalAlignment = Alignment.CenterVertically) {
                             if (appOnline) StatusPill("ONLINE", AdminTone.Primary)
                             if (u.vrchatIsOnline) StatusPill("VRC", AdminTone.Info)
                             if (u.banned) StatusPill("BAN", AdminTone.Error)
                             if (u.warned) StatusPill("WARN", AdminTone.Warn)
+                            if (u.versionName.isNotBlank()) {
+                                Text(
+                                    u.versionName,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                             Text(
                                 relativeTime(u.lastActiveAt ?: u.lastSeenAt, nowMs),
                                 style = MaterialTheme.typography.labelSmall,

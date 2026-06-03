@@ -32,6 +32,7 @@ import com.vrca.app.VrcaApplication
 import com.vrca.nowplaying.NowPlayingState
 import com.vrca.data.UserPreferencesRepository
 import com.vrca.osc.VrcaOsc
+import com.vrca.vrchat.VrchatPipelineState
 import com.vrca.ui.conversation.ConversationUiState
 import com.vrca.ui.conversation.Message
 import kotlinx.coroutines.Job
@@ -98,7 +99,12 @@ class VrcaViewModel(
         private const val UI_TICK_MS = 500L
 
         // Firestore sync throttles
-        private const val SELF_SYNC_DEBOUNCE_MS = 500L
+        // 30s idle debounce: after the user STOPS editing presets/messages/intervals
+        // for this long, ONE delta write flushes all changed content to Firestore.
+        // Any new edit before it fires cancels and reschedules, so a burst of edits
+        // costs exactly one write. This is what stops "edit then close → reverts on
+        // reopen" (the app-open read no longer overwrites a not-yet-synced edit).
+        private const val SELF_SYNC_DEBOUNCE_MS = 30_000L
         // Live-mode write interval — only used when an admin is watching.
         private const val LIVE_SYNC_INTERVAL_MS = 10_000L
         // When an admin is browsing (dashboard/users list) but not actively
@@ -126,6 +132,10 @@ class VrcaViewModel(
         private const val REMOTE_PREFS_FILE = "vrca_remote"
         private const val PREF_DEVICE_ID_HASH = "device_id_hash"
         private const val PREF_AUTH_UID = "auth_uid"
+        private const val PREF_LAST_CROSS_DEVICE_SYNC_MS = "last_cross_device_sync_ms"
+        // Cross-device sync runs on VM creation; throttle so OS-kill relaunches don't
+        // repeat the collection read every few minutes.
+        private const val CROSS_DEVICE_SYNC_THROTTLE_MS = 30L * 60L * 1000L
         private const val PREF_LAST_SYNCED_JSON = "last_synced_values_json"
 
         // Collections (MUST MATCH YOUR RULES)
@@ -175,10 +185,15 @@ class VrcaViewModel(
         moderationUserReg?.remove()
         moderationDeviceReg?.remove()
         stopAll(clearFromChatbox = false)
-        // Best-effort close-write fallback: VrchatPipelineService.onTaskRemoved
-        // is the primary path, but if that service isn't running we still want
-        // the user to be marked offline. GlobalScope is intentional — we need
-        // the write to outlive ViewModel teardown.
+        // Swipe is the only path that clears the app-scoped ViewModelStore, so when
+        // AppShutdown is already shutting down it owns the offline write (offline
+        // marker + content snapshot, awaited before the process kill) — skip here so
+        // the swipe costs ONE write, not two. This GlobalScope write remains only as a
+        // defensive fallback for any future path that clears the VM without AppShutdown.
+        if (com.vrca.app.AppShutdown.isShuttingDown()) {
+            super.onCleared()
+            return
+        }
         @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
         kotlinx.coroutines.GlobalScope.launch {
             runCatching {
@@ -192,8 +207,11 @@ class VrcaViewModel(
                             // shows offline INSTANTLY (the admin no longer trusts the
                             // isOnlineInApp flag alone — see isUserOnline). onCleared
                             // only runs on a real swipe now (app-scoped ViewModel).
-                            "offlineAt" to FieldValue.serverTimestamp(),
-                            "lastSeenAt" to FieldValue.serverTimestamp()
+                            // NOTE: deliberately do NOT bump lastSeenAt here — a shutdown
+                            // must not refresh the liveness mirror, or isUserOnline's
+                            // `offlineAt > (lastActiveAt ?? lastSeenAt)` test could tie
+                            // (same serverTimestamp) and keep the user falsely online.
+                            "offlineAt" to FieldValue.serverTimestamp()
                         ), SetOptions.merge())
                         .await()
                 }
@@ -379,7 +397,7 @@ class VrcaViewModel(
 
         // Include VRChat presence if available — piggybacks on self-sync writes
         // so the admin can see location/status without active watching.
-        val presence = com.vrca.vrchat.VrchatPipelineState.presence
+        val presence = VrchatPipelineState.presence
         if (presence != null) {
             data["vrchatUserId"] = presence.userId
             data["vrchatDisplayName"] = presence.displayName
@@ -412,6 +430,14 @@ class VrcaViewModel(
         "activePackage" to activePackage,
         "combinedPreviewText" to combinedPreviewText.trim(),
         "cycleTrimWarning" to cycleTrimWarning.trim(),
+        // Feature toggles stream with the watched 10s loop so the admin's
+        // Pinned/Cycle/Music/Time button states reflect a user's toggle change in
+        // real time while watching. (They also persist via the hourly delta write —
+        // captureStateForSync carries them — so an unwatched toggle still surfaces.)
+        "afkEnabled" to afkEnabled,
+        "cycleEnabled" to cycleEnabled,
+        "spotifyEnabled" to spotifyEnabled,
+        "timeEnabled" to timeEnabled,
         "lastReportedTime" to if (timeEnabled) currentTimeString() else "",
         "lastTimeUpdateAt" to FieldValue.serverTimestamp(),
         "lastSeenAt" to FieldValue.serverTimestamp()
@@ -433,21 +459,37 @@ class VrcaViewModel(
     }
 
     /**
-     * No-op under the hourly model. Edits and toggles used to trigger a
-     * debounced Firestore write here; that produced a write per keystroke/
-     * toggle. Now content is persisted ONLY to local DataStore on edit (which
-     * already happens at every call site) and pushed to Firestore on the next
-     * app-open write or the hourly heartbeat ([startHourlyHeartbeat]) — and
-     * only if it actually changed (delta comparison in [performSelfSync]).
+     * Schedules ONE debounced delta write [SELF_SYNC_DEBOUNCE_MS] (30s) after the
+     * last edit/toggle. Each call cancels and reschedules the pending write, so a
+     * burst of edits flushes exactly once. [performSelfSync] writes only changed
+     * content + the liveness fields (delta vs [lastSyncedValues]), so an idle user
+     * who isn't editing schedules nothing extra here — the call sites only fire on
+     * genuine content/toggle changes (NOT on NowPlaying ticks or preview rebuilds).
      *
-     * The 47 call sites are intentionally left in place so the edit→DataStore
-     * paths and preview rebuilds at those sites are untouched; this function
-     * simply no longer schedules a network write. While an admin is actively
-     * watching this user, the 10s live-sync loop still streams volatile output.
+     * This exists because removing the per-edit write made edits sync only on the
+     * hourly heartbeat, so "edit a preset then close the app" reverted on reopen
+     * (the app-open read overwrote the not-yet-synced edit). Runs in the app-scoped
+     * viewModelScope so the flush still fires if the app is backgrounded after
+     * editing; a swipe is handled separately (AppShutdown writes content + offline
+     * synchronously). While an admin watches, the 10s live loop also streams output.
      */
     private fun startSelfSyncLoopIfNeeded() {
-        // Intentionally empty — see KDoc above. (SELF_SYNC_DEBOUNCE_MS retained
-        // for reference; no debounced write is scheduled anymore.)
+        if (BuildConfig.IS_ADMIN_BUILD) return
+        // Don't schedule during cold-start content load — the DataStore collectors
+        // fire on first emission before the baseline is ready; performSelfSync also
+        // guards on initialDataLoaded, but skipping here avoids a pointless job.
+        if (!initialDataLoaded) return
+        // 30s idle debounce. Each edit cancels the pending write and reschedules, so
+        // a burst of edits flushes ONCE (one delta write — performSelfSync writes
+        // only changed content + liveness). Runs in viewModelScope, which is
+        // app-scoped, so the flush still fires if the user backgrounds the app after
+        // editing. A swipe is handled separately (AppShutdown writes content + offline
+        // synchronously before the process is killed).
+        syncTriggerJob?.cancel()
+        syncTriggerJob = viewModelScope.launch {
+            delay(SELF_SYNC_DEBOUNCE_MS)
+            performSelfSync()
+        }
     }
 
     /**
@@ -530,73 +572,146 @@ class VrcaViewModel(
         // admin's own VRChat session — see AdminAvatar / VrchatImageLoader.
     )
 
+    /**
+     * Content snapshot for the swipe-time offline write (called by [com.vrca.app.AppShutdown]
+     * before the process is killed). Carries presets / messages / intervals / toggles
+     * so the admin sees the user's LAST state even if they swiped before the 30s
+     * debounce flushed — but deliberately NOT the volatile preview text. This is the
+     * backup for the case where the process is hard-killed before the debounce fires.
+     * Public build only (admin content lives purely in local DataStore).
+     */
+    fun captureContentForOfflineWrite(): Map<String, Any> {
+        if (BuildConfig.IS_ADMIN_BUILD) return emptyMap()
+        val m = mutableMapOf<String, Any>()
+        captureStateForSync().forEach { (k, v) -> if (v != null) m[k] = v }
+        m["cycleLines"] = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(10)
+        return m
+    }
+
     private suspend fun applyRemoteContentBeforeSync() {
-        // The admin build keeps its chatbox content purely in local DataStore.
-        // It must NOT read its own users/{adminHash} doc back into DataStore:
-        // a stale snapshot (from an earlier sync, including the pre-distinct-hash
-        // era when admin shared the public doc) would overwrite the admin's
-        // fresh local presets on every reopen.
         if (BuildConfig.IS_ADMIN_BUILD) return
         runCatching {
             val deviceHash = readDeviceHashFromPrefs()
             if (!isValidDeviceHash(deviceHash)) return@runCatching
             val snap = db.collection(COL_USERS).document(deviceHash).get().await()
             if (snap == null || !snap.exists()) return@runCatching
+            applyContentFromSnapshot(snap)
+        }
+    }
 
-            snap.getString("afkMessage")?.trim()?.let { remote ->
-                if (remote != afkMessage.trim()) {
-                    afkMessage = remote
-                    userPreferencesRepository.saveAfkMessage(remote)
+    private suspend fun applyContentFromSnapshot(
+        snap: com.google.firebase.firestore.DocumentSnapshot
+    ) {
+        snap.getString("afkMessage")?.trim()?.let { remote ->
+            if (remote != afkMessage.trim()) {
+                afkMessage = remote
+                userPreferencesRepository.saveAfkMessage(remote)
+            }
+        }
+        snap.getLong("cycleIntervalSeconds")?.toInt()?.coerceAtLeast(2)?.let { remote ->
+            if (remote != cycleIntervalSeconds) {
+                cycleIntervalSeconds = remote
+                userPreferencesRepository.saveCycleInterval(remote)
+            }
+        }
+        snap.getString("cycleLinesText")?.trim()?.let { remote ->
+            val local = cycleLines.joinToString("\n").trim()
+            if (remote != local) {
+                setCycleLinesFromTextPreserve(remote)
+                userPreferencesRepository.saveCycleMessages(remote)
+            }
+        }
+        val afkPresetSavers = listOf<suspend (String) -> Unit>(
+            { v -> userPreferencesRepository.saveAfkPreset1(v) },
+            { v -> userPreferencesRepository.saveAfkPreset2(v) },
+            { v -> userPreferencesRepository.saveAfkPreset3(v) }
+        )
+        for (i in 1..3) {
+            snap.getString("afkPreset$i")?.trim()?.let { remote ->
+                if (remote != afkPresetTexts[i - 1].trim()) {
+                    afkPresetTexts[i - 1] = remote
+                    afkPresetSavers[i - 1](remote)
                 }
             }
-            snap.getLong("cycleIntervalSeconds")?.toInt()?.coerceAtLeast(2)?.let { remote ->
-                if (remote != cycleIntervalSeconds) {
-                    cycleIntervalSeconds = remote
-                    userPreferencesRepository.saveCycleInterval(remote)
+        }
+        val presetSavers = listOf<suspend (String, Int, String?) -> Unit>(
+            userPreferencesRepository::saveCyclePreset1,
+            userPreferencesRepository::saveCyclePreset2,
+            userPreferencesRepository::saveCyclePreset3,
+            userPreferencesRepository::saveCyclePreset4,
+            userPreferencesRepository::saveCyclePreset5
+        )
+        for (i in 1..5) {
+            snap.getString("cyclePreset$i")?.trim()?.let { remote ->
+                if (remote != (cyclePresetMessages.getOrNull(i - 1)?.trim().orEmpty())) {
+                    cyclePresetMessages[i - 1] = remote
+                    val interval = cyclePresetIntervals.getOrElse(i - 1) { 10 }
+                    presetSavers[i - 1](remote, interval, null)
                 }
             }
-            snap.getString("cycleLinesText")?.trim()?.let { remote ->
-                val local = cycleLines.joinToString("\n").trim()
-                if (remote != local) {
-                    setCycleLinesFromTextPreserve(remote)
-                    userPreferencesRepository.saveCycleMessages(remote)
-                }
+        }
+        snap.getLong("spotifyPreset")?.toInt()?.coerceIn(1, 5)?.let { remote ->
+            if (remote != spotifyPreset) {
+                spotifyPreset = remote
+                userPreferencesRepository.saveSpotifyPreset(remote)
             }
-            val afkPresetSavers = listOf<suspend (String) -> Unit>(
-                { v -> userPreferencesRepository.saveAfkPreset1(v) },
-                { v -> userPreferencesRepository.saveAfkPreset2(v) },
-                { v -> userPreferencesRepository.saveAfkPreset3(v) }
-            )
-            for (i in 1..3) {
-                snap.getString("afkPreset$i")?.trim()?.let { remote ->
-                    if (remote != afkPresetTexts[i - 1].trim()) {
-                        afkPresetTexts[i - 1] = remote
-                        afkPresetSavers[i - 1](remote)
-                    }
-                }
+        }
+    }
+
+    /**
+     * Cross-device content sync. Waits for VRChat userId to become known (pipeline
+     * connect), then queries Firestore for sibling device docs with the SAME
+     * `vrchatUserId` but a different `deviceHash`. If a sibling has fresher content
+     * (`updatedAt`), pulls its presets/messages/intervals into local DataStore —
+     * so editing on phone A auto-appears on phone B's next open.
+     *
+     * THROTTLED to at most once per [CROSS_DEVICE_SYNC_THROTTLE_MS] (persisted
+     * timestamp): this runs on every VM creation, and the background-survival
+     * machinery recreates the VM after each OS kill, so without the throttle a
+     * device that's being killed+restarted repeatedly would re-run this collection
+     * read every few minutes. The throttle bounds it to one query per 30 min/device
+     * regardless of relaunch frequency. A genuine reopen after editing on the other
+     * phone is almost always >30 min from the last sync, so the feature is intact.
+     */
+    private suspend fun applyCrossDeviceSync() {
+        // Throttle: skip if we synced within the window. Cheap relaunch-storm guard.
+        val lastSync = prefs().getLong(PREF_LAST_CROSS_DEVICE_SYNC_MS, 0L)
+        if (System.currentTimeMillis() - lastSync < CROSS_DEVICE_SYNC_THROTTLE_MS) return
+
+        val myPresence = kotlinx.coroutines.withTimeoutOrNull(120_000L) {
+            VrchatPipelineState.presenceFlow.first { it != null }
+        } ?: return
+        val myVrchatId = myPresence.userId
+        if (myVrchatId.isBlank()) return
+
+        val deviceHash = readDeviceHashFromPrefs()
+        if (!isValidDeviceHash(deviceHash)) return
+
+        runCatching {
+            val siblings = db.collection(COL_USERS)
+                .whereEqualTo("vrchatUserId", myVrchatId)
+                .get()
+                .await()
+            // Stamp the throttle on a successful query (whether or not we pull), so
+            // relaunches within the window don't re-read.
+            prefs().edit().putLong(PREF_LAST_CROSS_DEVICE_SYNC_MS, System.currentTimeMillis()).apply()
+            if (siblings == null || siblings.isEmpty) return@runCatching
+
+            // The query returns our OWN doc too (same vrchatUserId), so read our
+            // updatedAt straight from the results — no extra get() needed.
+            var bestSnap: com.google.firebase.firestore.DocumentSnapshot? = null
+            var bestMs = 0L
+            var myUpdatedAt = 0L
+            for (doc in siblings.documents) {
+                val ts = doc.getTimestamp("updatedAt")?.toDate()?.time ?: 0L
+                if (doc.id == deviceHash) { myUpdatedAt = ts; continue }
+                if (ts > bestMs) { bestMs = ts; bestSnap = doc }
             }
-            val presetSavers = listOf<suspend (String, Int, String?) -> Unit>(
-                userPreferencesRepository::saveCyclePreset1,
-                userPreferencesRepository::saveCyclePreset2,
-                userPreferencesRepository::saveCyclePreset3,
-                userPreferencesRepository::saveCyclePreset4,
-                userPreferencesRepository::saveCyclePreset5
-            )
-            for (i in 1..5) {
-                snap.getString("cyclePreset$i")?.trim()?.let { remote ->
-                    if (remote != (cyclePresetMessages.getOrNull(i - 1)?.trim().orEmpty())) {
-                        cyclePresetMessages[i - 1] = remote
-                        val interval = cyclePresetIntervals.getOrElse(i - 1) { 10 }
-                        presetSavers[i - 1](remote, interval, null)
-                    }
-                }
-            }
-            snap.getLong("spotifyPreset")?.toInt()?.coerceIn(1, 5)?.let { remote ->
-                if (remote != spotifyPreset) {
-                    spotifyPreset = remote
-                    userPreferencesRepository.saveSpotifyPreset(remote)
-                }
-            }
+            if (bestSnap == null || bestMs <= myUpdatedAt) return@runCatching
+
+            applyContentFromSnapshot(bestSnap)
+            Log.d("VrcaViewModel", "Cross-device sync: pulled content from ${bestSnap.id}")
+            rebuildCombinedPreviewOnly()
         }
     }
 
@@ -1225,6 +1340,20 @@ class VrcaViewModel(
     private var lastSentMs = 0L
 
     // =========================
+    // OSC send gate (master switch)
+    // =========================
+    // Toggles (afk/cycle/spotify/time) configure WHAT will be sent; this gate
+    // decides WHEN it actually goes out over OSC. When false, enabling a toggle
+    // only updates the local preview/config — nothing is transmitted and the
+    // VRChat chatbox is untouched. START (`startSending`) flips this true and
+    // launches the sender loops for whatever toggles are on; STOP (`stopSending`)
+    // flips it false, stops the loops, and clears the VRChat chatbox — WITHOUT
+    // untoggling any feature. Persisted (SavedStateHandle + FeatureSessionStore)
+    // so an OS-kill restore only resumes sending if the user was actually sending.
+    var oscSending by mutableStateOf(savedState["oscSending"] ?: false)
+        private set
+
+    // =========================
     // AFK
     // =========================
     var afkEnabled by mutableStateOf(savedState["afkEnabled"] ?: false)
@@ -1293,9 +1422,13 @@ class VrcaViewModel(
         timeEnabled = enabled
         savedState["timeEnabled"] = enabled
         persistFeatureSession()
-        rebuildAndMaybeSendCombined(forceSend = true)
+        if (oscSending) {
+            rebuildAndMaybeSendCombined(forceSend = true)
+            manageKeepaliveLoop()
+        } else {
+            rebuildCombinedPreviewOnly()
+        }
         startSelfSyncLoopIfNeeded()
-        manageKeepaliveLoop()
     }
 
     fun updateTimeMode(mode: String) {
@@ -1498,6 +1631,16 @@ class VrcaViewModel(
             // app open. The hourly heartbeat then fires every hour after this.
             performSelfSync()
             startHourlyHeartbeat()
+        }
+
+        // Cross-device content sync: when the same VRChat account is used on
+        // multiple phones, the devices have different deviceHashes (separate docs).
+        // On app open, once we know our VRChat userId, check for a sibling device
+        // doc with fresher content and pull from it — so editing presets/messages
+        // on one phone auto-syncs to the other on its next open.
+        viewModelScope.launch {
+            if (BuildConfig.IS_ADMIN_BUILD) return@launch
+            applyCrossDeviceSync()
         }
 
         viewModelScope.launch {
@@ -1767,17 +1910,57 @@ class VrcaViewModel(
         }
 
     // =========================
-    // KILL switch
+    // START / STOP (OSC send gate)
+    // =========================
+    /** START: begin transmitting over OSC. Flips the [oscSending] gate on and
+     *  launches the sender loops for whatever toggles are currently enabled.
+     *  Toggling features without pressing START only updates the preview. */
+    fun startSending(local: Boolean = false) {
+        if (isBanned) return
+        // Cancel any in-flight robust-clear from a just-pressed Stop so its trailing
+        // empty sends can't blank the content we're about to transmit.
+        clearJob?.cancel(); clearJob = null
+        oscSending = true
+        savedState["oscSending"] = true
+        persistFeatureSession()
+        // Launch whatever is configured. Each starter no-ops if its toggle is off.
+        startAfkSender(local)
+        startCycle(local)
+        startNowPlayingSender(local)
+        manageKeepaliveLoop(local)
+        rebuildAndMaybeSendCombined(forceSend = true, local = local)
+        startSelfSyncLoopIfNeeded()
+    }
+
+    /** STOP: stop transmitting over OSC and clear the VRChat chatbox. Does NOT
+     *  untoggle any feature — the toggle configuration is preserved so the user
+     *  can press START again to resume exactly what they had set up. */
+    fun stopSending(local: Boolean = false) {
+        oscSending = false
+        savedState["oscSending"] = false
+        persistFeatureSession()
+        stopAll(clearFromChatbox = false)
+        keepaliveJob?.cancel(); keepaliveJob = null
+        if (!isBanned) clearChatboxRobust(local)
+        // Keep the preview reflecting the still-enabled toggles (we did NOT untoggle).
+        rebuildCombinedPreviewOnly()
+        startSelfSyncLoopIfNeeded()
+    }
+
+    // =========================
+    // KILL switch (ban path) — stops sending AND untoggles everything.
+    // Used only when the account is banned; the user-facing button is STOP.
     // =========================
     fun killStopAndClear(local: Boolean = false) {
         stopAll(clearFromChatbox = false)
+        oscSending = false; savedState["oscSending"] = false
         afkEnabled = false; savedState["afkEnabled"] = false
         cycleEnabled = false; savedState["cycleEnabled"] = false
         spotifyEnabled = false; savedState["spotifyEnabled"] = false
         timeEnabled = false; savedState["timeEnabled"] = false
         persistFeatureSession()
         keepaliveJob?.cancel(); keepaliveJob = null
-        if (!isBanned) clearChatbox(local)
+        if (!isBanned) clearChatboxRobust(local)
         rebuildCombinedPreviewOnly(forceClearIfAllOff = true)
         startSelfSyncLoopIfNeeded()
     }
@@ -1790,20 +1973,34 @@ class VrcaViewModel(
             afk = afkEnabled,
             cycle = cycleEnabled,
             spotify = spotifyEnabled,
-            time = timeEnabled
+            time = timeEnabled,
+            sending = oscSending
         )
     }
 
-    /** Re-enable whatever toggles were active before an unexpected kill and start
-     *  their sender loops. No-op on a fresh/intentional launch (restore not armed). */
+    /** Restore the toggle CONFIG that was set up before an unexpected kill, and
+     *  resume OSC sending ONLY if the user was actively sending (pressed START).
+     *  No-op on a fresh/intentional launch (restore not armed). This is what makes
+     *  an OS kill invisible — if the user was sending, the chatbox resumes on its
+     *  own "like nothing happened"; if they had toggles configured but hadn't
+     *  pressed START, the config comes back but nothing transmits. */
     private fun restoreFeatureSession() {
         val pending = FeatureSessionStore.pendingRestore(app.applicationContext) ?: return
-        if (!pending.anyEnabled) return
         if (isBanned) return
-        if (pending.afk) setAfkEnabledFlag(true)
-        if (pending.cycle) setCycleEnabledFlag(true)
-        if (pending.spotify) setSpotifyEnabledFlag(true)
-        if (pending.time) updateTimeEnabled(true)
+        // Re-apply the toggle configuration directly (no sender start — the gate
+        // below decides whether anything actually transmits).
+        afkEnabled = pending.afk; savedState["afkEnabled"] = pending.afk
+        cycleEnabled = pending.cycle; savedState["cycleEnabled"] = pending.cycle
+        spotifyEnabled = pending.spotify; savedState["spotifyEnabled"] = pending.spotify
+        timeEnabled = pending.time; savedState["timeEnabled"] = pending.time
+        oscSending = false; savedState["oscSending"] = false
+        if (pending.sending && pending.anyEnabled) {
+            // Was actively sending → resume seamlessly.
+            startSending()
+        } else {
+            // Configured but idle → just reflect the toggles in the preview.
+            rebuildCombinedPreviewOnly()
+        }
     }
 
     // =========================
@@ -1813,36 +2010,54 @@ class VrcaViewModel(
         if (isBanned) return
         afkEnabled = enabled
         savedState["afkEnabled"] = enabled
-        if (!enabled) stopAfkSender(clearFromChatbox = true)
-        else startAfkSender()
         persistFeatureSession()
-        rebuildAndMaybeSendCombined(forceSend = true)
+        if (oscSending) {
+            // Live: start/stop this feature's loop immediately.
+            if (!enabled) stopAfkSender(clearFromChatbox = true)
+            else startAfkSender()
+            rebuildAndMaybeSendCombined(forceSend = true)
+            manageKeepaliveLoop()
+        } else {
+            // Idle (not sending): just update config + preview, no OSC.
+            afkJob?.cancel(); afkJob = null
+            rebuildCombinedPreviewOnly()
+        }
         startSelfSyncLoopIfNeeded()
-        manageKeepaliveLoop()
     }
 
     fun setCycleEnabledFlag(enabled: Boolean) {
         if (isBanned) return
         cycleEnabled = enabled
         savedState["cycleEnabled"] = enabled
-        if (!enabled) stopCycle(clearFromChatbox = true)
-        else { lastCyclePreviewAdvanceMs = 0L; startCycle() }
+        lastCyclePreviewAdvanceMs = 0L
         persistFeatureSession()
-        rebuildAndMaybeSendCombined(forceSend = true)
+        if (oscSending) {
+            if (!enabled) stopCycle(clearFromChatbox = true)
+            else startCycle()
+            rebuildAndMaybeSendCombined(forceSend = true)
+            manageKeepaliveLoop()
+        } else {
+            cycleJob?.cancel(); cycleJob = null
+            rebuildCombinedPreviewOnly()
+        }
         startSelfSyncLoopIfNeeded()
-        manageKeepaliveLoop()
     }
 
     fun setSpotifyEnabledFlag(enabled: Boolean) {
         if (isBanned) return
         spotifyEnabled = enabled
         savedState["spotifyEnabled"] = enabled
-        if (!enabled) stopNowPlayingSender(clearFromChatbox = true)
-        else startNowPlayingSender()
         persistFeatureSession()
-        rebuildAndMaybeSendCombined(forceSend = true)
+        if (oscSending) {
+            if (!enabled) stopNowPlayingSender(clearFromChatbox = true)
+            else startNowPlayingSender()
+            rebuildAndMaybeSendCombined(forceSend = true)
+            manageKeepaliveLoop()
+        } else {
+            nowPlayingJob?.cancel(); nowPlayingJob = null
+            rebuildCombinedPreviewOnly()
+        }
         startSelfSyncLoopIfNeeded()
-        manageKeepaliveLoop()
     }
 
     fun setSpotifyDemoFlag(enabled: Boolean) {
@@ -2030,13 +2245,13 @@ class VrcaViewModel(
     // =========================
     fun startAfkSender(local: Boolean = false) {
         if (isBanned) return
-        if (!afkEnabled) return
+        if (!afkEnabled || !oscSending) return
         // AFK sender has its own 12s loop — cancel keepalive to avoid duplication.
         keepaliveJob?.cancel()
         keepaliveJob = null
         afkJob?.cancel()
         afkJob = viewModelScope.launch {
-            while (afkEnabled && !isBanned) {
+            while (afkEnabled && oscSending && !isBanned) {
                 rebuildAndMaybeSendCombined(forceSend = true, local = local)
                 delay(afkForcedIntervalSeconds.toLong() * 1000L)
             }
@@ -2064,7 +2279,7 @@ class VrcaViewModel(
     fun startCycle(local: Boolean = false) {
         if (isBanned) return
         val msgs = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(10)
-        if (!cycleEnabled || msgs.isEmpty()) return
+        if (!cycleEnabled || !oscSending || msgs.isEmpty()) return
 
         persistCycleLinesPreserve()
         viewModelScope.launch { userPreferencesRepository.saveCycleInterval(cycleIntervalSeconds) }
@@ -2075,7 +2290,7 @@ class VrcaViewModel(
         cycleJob?.cancel()
         cycleJob = viewModelScope.launch {
             cycleIndex = 0
-            while (cycleEnabled && !isBanned) {
+            while (cycleEnabled && oscSending && !isBanned) {
                 rebuildAndMaybeSendCombined(
                     forceSend = true,
                     local = local,
@@ -2102,13 +2317,13 @@ class VrcaViewModel(
     // =========================
     fun startNowPlayingSender(local: Boolean = false) {
         if (isBanned) return
-        if (!spotifyEnabled) return
+        if (!spotifyEnabled || !oscSending) return
         // NowPlaying has its own 500ms send loop — cancel keepalive to avoid duplication.
         keepaliveJob?.cancel()
         keepaliveJob = null
         nowPlayingJob?.cancel()
         nowPlayingJob = viewModelScope.launch {
-            while (spotifyEnabled && !isBanned) {
+            while (spotifyEnabled && oscSending && !isBanned) {
                 // run on a 0.5s cadence so OSC updates match VRChat's chatbox rate limit
                 rebuildAndMaybeSendCombined(forceSend = true, local = local)
                 delay(SEND_FLOOR_MS)
@@ -2148,6 +2363,12 @@ class VrcaViewModel(
     // VRChat, and VRChat clears the chatbox after ~15s of silence.
     // =========================
     private fun manageKeepaliveLoop(local: Boolean = false) {
+        // Not sending → no keepalive (the master gate is off).
+        if (!oscSending) {
+            keepaliveJob?.cancel()
+            keepaliveJob = null
+            return
+        }
         // NowPlaying and Cycle have their own send loops — don't duplicate.
         if (spotifyEnabled || (cycleEnabled && cycleJob != null)) {
             keepaliveJob?.cancel()
@@ -2263,6 +2484,32 @@ class VrcaViewModel(
     private fun clearChatbox(local: Boolean = false) {
         if (isBanned) return
         sendToVrchatRaw("", local, addToConversation = false)
+    }
+
+    private var clearJob: Job? = null
+
+    /**
+     * Reliably clear the VRChat chatbox on STOP. A SINGLE empty send is flaky:
+     *  (a) VRChat enforces a 0.5s chatbox rate limit, so a clear landing <0.5s
+     *      after the final content send is silently dropped;
+     *  (b) OSC is UDP — a lone packet can just be lost;
+     *  (c) a sender loop already mid-`rebuildAndMaybeSendCombined` when STOP was
+     *      pressed can land content AFTER the clear, repopulating the box.
+     * So we send the empty payload a few times, spaced just past the rate limit,
+     * which beats all three races. Reset the send-dedup state so nothing suppresses
+     * the empty sends and a later Start re-sends fresh content.
+     */
+    private fun clearChatboxRobust(local: Boolean = false) {
+        if (isBanned) return
+        clearJob?.cancel()
+        lastSentCombinedText = ""
+        lastCombinedSendMs = 0L
+        clearJob = viewModelScope.launch {
+            repeat(3) {
+                clearChatbox(local)
+                delay(SEND_FLOOR_MS + 100L)
+            }
+        }
     }
 
     private fun currentCycleLinePreview(): String {

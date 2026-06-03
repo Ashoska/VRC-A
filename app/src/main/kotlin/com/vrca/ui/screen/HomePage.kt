@@ -10,7 +10,9 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,7 +37,9 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Power
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -65,7 +69,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -159,24 +165,9 @@ internal fun HomePage(
 
         SectionCard(
             title = "VRChat Preview",
-            subtitle = "Exactly what will appear in your chatbox.",
+            subtitle = "Toggles below choose what to send. Press Start to begin transmitting.",
             actions = {
-                Button(
-                    onClick = {
-                        vm.startAfkSender()
-                        vm.startCycle()
-                        vm.startNowPlayingSender()
-                    },
-                    enabled = !isBanned
-                ) { Text("Start") }
-
-                Button(
-                    onClick = { vm.killStopAndClear() },
-                    enabled = !isBanned,
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                ) {
-                    Text("KILL", color = MaterialTheme.colorScheme.onError)
-                }
+                SendStatusChip(sending = vm.oscSending)
             }
         ) {
             val previewTextRaw = vm.debugLastCombinedOsc.ifBlank { "(nothing active)" }
@@ -244,6 +235,43 @@ internal fun HomePage(
                 }
             }
 
+            // Primary Start / Stop control — gates whether the configured toggles
+            // actually transmit over OSC. Start launches the senders for whatever is
+            // toggled on; Stop halts sending and clears the VRChat chatbox WITHOUT
+            // untoggling anything (so Start resumes exactly what was set up).
+            if (vm.oscSending) {
+                Button(
+                    onClick = { vm.stopSending() },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    )
+                ) {
+                    Icon(
+                        Icons.Filled.Stop,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onError
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("Stop sending", color = MaterialTheme.colorScheme.onError)
+                }
+            } else {
+                Button(
+                    onClick = { vm.startSending() },
+                    enabled = !isBanned,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        Icons.Filled.PlayArrow,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("Start sending")
+                }
+            }
+
             // Warning chips under the preview
             if (vm.cycleTrimWarning.isNotBlank()) {
                 Card(
@@ -269,7 +297,15 @@ internal fun HomePage(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("Quick Toggles", style = MaterialTheme.typography.titleSmall)
+                        Column {
+                            Text("Quick Toggles", style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                if (vm.oscSending) "Sending — changes apply live"
+                                else "Configure, then press Start",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                             if (cardReorderMode) {
                                 TextButton(
@@ -483,6 +519,42 @@ internal fun HomePage(
     }
 }
 
+
+/**
+ * Compact OSC send-state indicator. A filled amber circle + "Sending" while OSC
+ * is transmitting; a muted grey circle + "Idle" when nothing is being sent. This
+ * is the at-a-glance answer to "is the chatbox actually updating right now?".
+ */
+@Composable
+private fun SendStatusChip(sending: Boolean) {
+    val dotColor = if (sending) Color(0xFFFFC107) else MaterialTheme.colorScheme.outline
+    val label = if (sending) "Sending" else "Idle"
+    val container =
+        if (sending) Color(0xFFFFC107).copy(alpha = 0.16f)
+        else MaterialTheme.colorScheme.surfaceVariant
+    Surface(
+        shape = MaterialTheme.shapes.large,
+        color = container
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Box(
+                Modifier
+                    .size(10.dp)
+                    .clip(CircleShape)
+                    .background(dotColor)
+            )
+            Text(
+                label,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+        }
+    }
+}
 
 @Composable
 private fun TutorialStep(
