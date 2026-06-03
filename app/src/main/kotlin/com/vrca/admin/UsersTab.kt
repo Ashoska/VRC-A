@@ -112,7 +112,8 @@ internal data class UserRow(
     // Clean-shutdown marker (swipe-away). When present AND newer than
     // lastActiveAt it forces the row offline instantly; a live heartbeat
     // advances lastActiveAt past it, so it can never false-flag a running app.
-    val offlineAt: Timestamp? = null
+    val offlineAt: Timestamp? = null,
+    val versionName: String = ""
     // Profile pictures are NOT stored in Firestore — AdminAvatar resolves the
     // VRChat+ picture on demand by vrchatUserId via the admin's VRChat session.
 )
@@ -275,7 +276,8 @@ internal fun parseUserRow(d: com.google.firebase.firestore.DocumentSnapshot): Us
         vrchatPlatform = (d.getString("vrchatPlatform") ?: "").trim(),
         vrchatLastSyncAt = d.getTimestamp("vrchatLastSyncAt"),
         isOnlineInApp = d.getBoolean("isOnlineInApp") ?: false,
-        offlineAt = d.getTimestamp("offlineAt")
+        offlineAt = d.getTimestamp("offlineAt"),
+        versionName = (d.getString("versionName") ?: "").trim()
     )
 }
 
@@ -776,13 +778,20 @@ internal fun UsersTab(
                                 color = MaterialTheme.colorScheme.primary,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                        // Status pills + relative time on one wrapping row.
+                        // Status pills + version + relative time on one wrapping row.
                         Row(horizontalArrangement = Arrangement.spacedBy(4.dp),
                             verticalAlignment = Alignment.CenterVertically) {
                             if (appOnline) StatusPill("ONLINE", AdminTone.Primary)
                             if (u.vrchatIsOnline) StatusPill("VRC", AdminTone.Info)
                             if (u.banned) StatusPill("BAN", AdminTone.Error)
                             if (u.warned) StatusPill("WARN", AdminTone.Warn)
+                            if (u.versionName.isNotBlank()) {
+                                Text(
+                                    u.versionName,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                             Text(
                                 relativeTime(u.lastActiveAt ?: u.lastSeenAt, nowMs),
                                 style = MaterialTheme.typography.labelSmall,

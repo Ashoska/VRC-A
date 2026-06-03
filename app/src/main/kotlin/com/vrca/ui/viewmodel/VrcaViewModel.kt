@@ -32,6 +32,7 @@ import com.vrca.app.VrcaApplication
 import com.vrca.nowplaying.NowPlayingState
 import com.vrca.data.UserPreferencesRepository
 import com.vrca.osc.VrcaOsc
+import com.vrca.vrchat.VrchatPipelineState
 import com.vrca.ui.conversation.ConversationUiState
 import com.vrca.ui.conversation.Message
 import kotlinx.coroutines.Job
@@ -392,7 +393,7 @@ class VrcaViewModel(
 
         // Include VRChat presence if available — piggybacks on self-sync writes
         // so the admin can see location/status without active watching.
-        val presence = com.vrca.vrchat.VrchatPipelineState.presence
+        val presence = VrchatPipelineState.presence
         if (presence != null) {
             data["vrchatUserId"] = presence.userId
             data["vrchatDisplayName"] = presence.displayName
@@ -582,72 +583,115 @@ class VrcaViewModel(
     }
 
     private suspend fun applyRemoteContentBeforeSync() {
-        // The admin build keeps its chatbox content purely in local DataStore.
-        // It must NOT read its own users/{adminHash} doc back into DataStore:
-        // a stale snapshot (from an earlier sync, including the pre-distinct-hash
-        // era when admin shared the public doc) would overwrite the admin's
-        // fresh local presets on every reopen.
         if (BuildConfig.IS_ADMIN_BUILD) return
         runCatching {
             val deviceHash = readDeviceHashFromPrefs()
             if (!isValidDeviceHash(deviceHash)) return@runCatching
             val snap = db.collection(COL_USERS).document(deviceHash).get().await()
             if (snap == null || !snap.exists()) return@runCatching
+            applyContentFromSnapshot(snap)
+        }
+    }
 
-            snap.getString("afkMessage")?.trim()?.let { remote ->
-                if (remote != afkMessage.trim()) {
-                    afkMessage = remote
-                    userPreferencesRepository.saveAfkMessage(remote)
+    private suspend fun applyContentFromSnapshot(
+        snap: com.google.firebase.firestore.DocumentSnapshot
+    ) {
+        snap.getString("afkMessage")?.trim()?.let { remote ->
+            if (remote != afkMessage.trim()) {
+                afkMessage = remote
+                userPreferencesRepository.saveAfkMessage(remote)
+            }
+        }
+        snap.getLong("cycleIntervalSeconds")?.toInt()?.coerceAtLeast(2)?.let { remote ->
+            if (remote != cycleIntervalSeconds) {
+                cycleIntervalSeconds = remote
+                userPreferencesRepository.saveCycleInterval(remote)
+            }
+        }
+        snap.getString("cycleLinesText")?.trim()?.let { remote ->
+            val local = cycleLines.joinToString("\n").trim()
+            if (remote != local) {
+                setCycleLinesFromTextPreserve(remote)
+                userPreferencesRepository.saveCycleMessages(remote)
+            }
+        }
+        val afkPresetSavers = listOf<suspend (String) -> Unit>(
+            { v -> userPreferencesRepository.saveAfkPreset1(v) },
+            { v -> userPreferencesRepository.saveAfkPreset2(v) },
+            { v -> userPreferencesRepository.saveAfkPreset3(v) }
+        )
+        for (i in 1..3) {
+            snap.getString("afkPreset$i")?.trim()?.let { remote ->
+                if (remote != afkPresetTexts[i - 1].trim()) {
+                    afkPresetTexts[i - 1] = remote
+                    afkPresetSavers[i - 1](remote)
                 }
             }
-            snap.getLong("cycleIntervalSeconds")?.toInt()?.coerceAtLeast(2)?.let { remote ->
-                if (remote != cycleIntervalSeconds) {
-                    cycleIntervalSeconds = remote
-                    userPreferencesRepository.saveCycleInterval(remote)
+        }
+        val presetSavers = listOf<suspend (String, Int, String?) -> Unit>(
+            userPreferencesRepository::saveCyclePreset1,
+            userPreferencesRepository::saveCyclePreset2,
+            userPreferencesRepository::saveCyclePreset3,
+            userPreferencesRepository::saveCyclePreset4,
+            userPreferencesRepository::saveCyclePreset5
+        )
+        for (i in 1..5) {
+            snap.getString("cyclePreset$i")?.trim()?.let { remote ->
+                if (remote != (cyclePresetMessages.getOrNull(i - 1)?.trim().orEmpty())) {
+                    cyclePresetMessages[i - 1] = remote
+                    val interval = cyclePresetIntervals.getOrElse(i - 1) { 10 }
+                    presetSavers[i - 1](remote, interval, null)
                 }
             }
-            snap.getString("cycleLinesText")?.trim()?.let { remote ->
-                val local = cycleLines.joinToString("\n").trim()
-                if (remote != local) {
-                    setCycleLinesFromTextPreserve(remote)
-                    userPreferencesRepository.saveCycleMessages(remote)
-                }
+        }
+        snap.getLong("spotifyPreset")?.toInt()?.coerceIn(1, 5)?.let { remote ->
+            if (remote != spotifyPreset) {
+                spotifyPreset = remote
+                userPreferencesRepository.saveSpotifyPreset(remote)
             }
-            val afkPresetSavers = listOf<suspend (String) -> Unit>(
-                { v -> userPreferencesRepository.saveAfkPreset1(v) },
-                { v -> userPreferencesRepository.saveAfkPreset2(v) },
-                { v -> userPreferencesRepository.saveAfkPreset3(v) }
-            )
-            for (i in 1..3) {
-                snap.getString("afkPreset$i")?.trim()?.let { remote ->
-                    if (remote != afkPresetTexts[i - 1].trim()) {
-                        afkPresetTexts[i - 1] = remote
-                        afkPresetSavers[i - 1](remote)
-                    }
-                }
+        }
+    }
+
+    /**
+     * Cross-device content sync. Waits for VRChat userId to become known (pipeline
+     * connect), then queries Firestore for sibling device docs with the SAME
+     * `vrchatUserId` but a different `deviceHash`. If a sibling has fresher content
+     * (`updatedAt`), pulls its presets/messages/intervals into local DataStore —
+     * so editing on phone A auto-appears on phone B's next open.
+     */
+    private suspend fun applyCrossDeviceSync() {
+        val myPresence = kotlinx.coroutines.withTimeoutOrNull(120_000L) {
+            VrchatPipelineState.presenceFlow.first { it != null }
+        } ?: return
+        val myVrchatId = myPresence.userId
+        if (myVrchatId.isBlank()) return
+
+        val deviceHash = readDeviceHashFromPrefs()
+        if (!isValidDeviceHash(deviceHash)) return
+
+        runCatching {
+            val siblings = db.collection(COL_USERS)
+                .whereEqualTo("vrchatUserId", myVrchatId)
+                .get()
+                .await()
+            if (siblings == null || siblings.isEmpty) return@runCatching
+
+            var bestSnap: com.google.firebase.firestore.DocumentSnapshot? = null
+            var bestMs = 0L
+            for (doc in siblings.documents) {
+                if (doc.id == deviceHash) continue
+                val ts = doc.getTimestamp("updatedAt")?.toDate()?.time ?: 0L
+                if (ts > bestMs) { bestMs = ts; bestSnap = doc }
             }
-            val presetSavers = listOf<suspend (String, Int, String?) -> Unit>(
-                userPreferencesRepository::saveCyclePreset1,
-                userPreferencesRepository::saveCyclePreset2,
-                userPreferencesRepository::saveCyclePreset3,
-                userPreferencesRepository::saveCyclePreset4,
-                userPreferencesRepository::saveCyclePreset5
-            )
-            for (i in 1..5) {
-                snap.getString("cyclePreset$i")?.trim()?.let { remote ->
-                    if (remote != (cyclePresetMessages.getOrNull(i - 1)?.trim().orEmpty())) {
-                        cyclePresetMessages[i - 1] = remote
-                        val interval = cyclePresetIntervals.getOrElse(i - 1) { 10 }
-                        presetSavers[i - 1](remote, interval, null)
-                    }
-                }
-            }
-            snap.getLong("spotifyPreset")?.toInt()?.coerceIn(1, 5)?.let { remote ->
-                if (remote != spotifyPreset) {
-                    spotifyPreset = remote
-                    userPreferencesRepository.saveSpotifyPreset(remote)
-                }
-            }
+            if (bestSnap == null) return@runCatching
+
+            val myUpdatedAt = db.collection(COL_USERS).document(deviceHash)
+                .get().await()?.getTimestamp("updatedAt")?.toDate()?.time ?: 0L
+            if (bestMs <= myUpdatedAt) return@runCatching
+
+            applyContentFromSnapshot(bestSnap)
+            Log.d("VrcaViewModel", "Cross-device sync: pulled content from ${bestSnap.id}")
+            rebuildCombinedPreviewOnly()
         }
     }
 
@@ -1567,6 +1611,16 @@ class VrcaViewModel(
             // app open. The hourly heartbeat then fires every hour after this.
             performSelfSync()
             startHourlyHeartbeat()
+        }
+
+        // Cross-device content sync: when the same VRChat account is used on
+        // multiple phones, the devices have different deviceHashes (separate docs).
+        // On app open, once we know our VRChat userId, check for a sibling device
+        // doc with fresher content and pull from it — so editing presets/messages
+        // on one phone auto-syncs to the other on its next open.
+        viewModelScope.launch {
+            if (BuildConfig.IS_ADMIN_BUILD) return@launch
+            applyCrossDeviceSync()
         }
 
         viewModelScope.launch {

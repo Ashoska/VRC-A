@@ -8,7 +8,6 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -70,9 +69,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -163,82 +160,58 @@ internal fun HomePage(
             }
         }
 
+        // Chatbox preview — compact text box showing exactly what VRChat will render.
         SectionCard(
-            title = "VRChat Preview",
-            subtitle = "Toggles below choose what to send. Press Start to begin transmitting.",
-            actions = {
-                SendStatusChip(sending = vm.oscSending)
-            }
+            title = "Chatbox",
+            subtitle = null,
+            actions = { SendStatusChip(sending = vm.oscSending) }
         ) {
             val previewTextRaw = vm.debugLastCombinedOsc.ifBlank { "(nothing active)" }
             val previewText = remember(previewTextRaw) { vrChatSafePreview(previewTextRaw) }
 
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .height(280.dp)
+            Surface(
+                tonalElevation = 3.dp,
+                shape = MaterialTheme.shapes.medium,
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                modifier = Modifier.fillMaxWidth()
             ) {
-                Surface(
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .widthIn(max = 420.dp)
-                        .fillMaxWidth(0.92f),
-                    tonalElevation = 3.dp,
-                    shape = MaterialTheme.shapes.large,
-                    color = MaterialTheme.colorScheme.surfaceVariant
+                Box(
+                    Modifier
+                        .heightIn(min = 80.dp, max = 200.dp)
+                        .padding(14.dp)
+                        .fillMaxWidth(),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Box(
-                        Modifier
-                            .heightIn(min = 96.dp)
-                            .padding(12.dp)
-                            .fillMaxWidth(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        SelectionContainer {
-                            Text(
-                                text = previewText,
-                                modifier = Modifier.fillMaxWidth(),
-                                fontFamily = FontFamily.Monospace,
-                                style = MaterialTheme.typography.bodyMedium,
-                                textAlign = TextAlign.Center,
-                                softWrap = true,
-                                maxLines = 9,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
+                    SelectionContainer {
+                        Text(
+                            text = previewText,
+                            modifier = Modifier.fillMaxWidth(),
+                            fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodyMedium,
+                            textAlign = TextAlign.Center,
+                            softWrap = true,
+                            maxLines = 9,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
-                }
-
-                Canvas(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(bottom = 8.dp)
-                        .height(200.dp)
-                        .width(170.dp)
-                ) {
-                    val w = size.width
-                    val h = size.height
-
-                    drawCircle(
-                        color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.08f),
-                        radius = w * 0.18f,
-                        center = Offset(w * 0.5f, h * 0.20f)
-                    )
-
-                    val path = Path().apply {
-                        moveTo(w * 0.50f, h * 0.36f)
-                        cubicTo(w * 0.18f, h * 0.40f, w * 0.18f, h * 0.96f, w * 0.50f, h * 0.98f)
-                        cubicTo(w * 0.82f, h * 0.96f, w * 0.82f, h * 0.40f, w * 0.50f, h * 0.36f)
-                        close()
-                    }
-                    drawPath(path, color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.06f))
                 }
             }
 
-            // Primary Start / Stop control — gates whether the configured toggles
-            // actually transmit over OSC. Start launches the senders for whatever is
-            // toggled on; Stop halts sending and clears the VRChat chatbox WITHOUT
-            // untoggling anything (so Start resumes exactly what was set up).
+            if (vm.cycleTrimWarning.isNotBlank()) {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        vm.cycleTrimWarning,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                    )
+                }
+            }
+
+            // Start / Stop button.
             if (vm.oscSending) {
                 Button(
                     onClick = { vm.stopSending() },
@@ -247,66 +220,50 @@ internal fun HomePage(
                         containerColor = MaterialTheme.colorScheme.error
                     )
                 ) {
-                    Icon(
-                        Icons.Filled.Stop,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp),
-                        tint = MaterialTheme.colorScheme.onError
-                    )
-                    Spacer(Modifier.width(8.dp))
+                    Icon(Icons.Filled.Stop, null, Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onError)
+                    Spacer(Modifier.width(6.dp))
                     Text("Stop sending", color = MaterialTheme.colorScheme.onError)
                 }
             } else {
+                val anyToggled = vm.afkEnabled || vm.cycleEnabled || vm.spotifyEnabled || vm.timeEnabled
                 Button(
                     onClick = { vm.startSending() },
-                    enabled = !isBanned,
+                    enabled = !isBanned && anyToggled,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Icon(
-                        Icons.Filled.PlayArrow,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(Modifier.width(8.dp))
+                    Icon(Icons.Filled.PlayArrow, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
                     Text("Start sending")
                 }
             }
+        }
 
-            // Warning chips under the preview
-            if (vm.cycleTrimWarning.isNotBlank()) {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
-                    modifier = Modifier.fillMaxWidth()
+        // Quick Toggles — configure which features are included in the chatbox output.
+        ElevatedCard(
+            colors = CardDefaults.elevatedCardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+            ),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+
+                var cardReorderMode by remember { mutableStateOf(false) }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        "${vm.cycleTrimWarning}",
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onTertiaryContainer
-                    )
-                }
-            }
-
-            ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-
-                    // Quick Toggles title row with Edit/Done toggle and Reset button
-                    var cardReorderMode by remember { mutableStateOf(false) }
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column {
-                            Text("Quick Toggles", style = MaterialTheme.typography.titleSmall)
-                            Text(
-                                if (vm.oscSending) "Sending — changes apply live"
-                                else "Configure, then press Start",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Column {
+                        Text("Quick Toggles", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            if (vm.oscSending) "Sending — changes apply live"
+                            else "Configure, then press Start",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                             if (cardReorderMode) {
                                 TextButton(
                                     onClick = { vm.resetCardOrder() },
@@ -402,7 +359,6 @@ internal fun HomePage(
                     }
                 }
             }
-        }
 
         SectionCard(
             title = "Setup Tutorial",
