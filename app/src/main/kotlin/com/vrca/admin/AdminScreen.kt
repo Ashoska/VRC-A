@@ -333,10 +333,22 @@ fun AdminScreen() {
     var resumeTick by remember { mutableIntStateOf(0) }
     val needsUsers = tabIndex == 0 || tabIndex == 1
 
+    // True only while the admin app is in the FOREGROUND (between ON_RESUME and
+    // ON_PAUSE). The 30s live directory refresh is gated on this so a backgrounded
+    // admin app — even one left open ON the Users/Dashboard tab — stops polling
+    // Firestore. Compose keeps the composition (and its LaunchedEffects) alive when
+    // backgrounded, so without this gate the live loop reads every 30s all night
+    // with nobody looking. On return to foreground, resumeTick bumps and the
+    // TTL-gated refresh re-freshens the directory.
+    var isForeground by remember { mutableStateOf(true) }
     val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val obs = androidx.lifecycle.LifecycleEventObserver { _, event ->
-            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) resumeTick++
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_RESUME -> { isForeground = true; resumeTick++ }
+                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> isForeground = false
+                else -> {}
+            }
         }
         lifecycleOwner.lifecycle.addObserver(obs)
         onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
@@ -465,8 +477,8 @@ fun AdminScreen() {
     // re-entering the tab. Auto-cancels when switching to a non-directory tab
     // (needsUsers=false) or leaving the panel. Skips a cycle if a full fetch / TTL
     // refresh just freshened everything, so it never double-reads.
-    LaunchedEffect(needsUsers) {
-        if (!needsUsers) return@LaunchedEffect
+    LaunchedEffect(needsUsers, isForeground) {
+        if (!needsUsers || !isForeground) return@LaunchedEffect
         while (true) {
             delay(DIRECTORY_LIVE_REFRESH_MS)
             if (sharedUsers.isNotEmpty() &&
