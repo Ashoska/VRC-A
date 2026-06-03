@@ -253,6 +253,22 @@ internal fun isUserOnline(u: UserRow, nowMs: Long = System.currentTimeMillis()):
     return true
 }
 
+/**
+ * When the same VRChat account is signed in on multiple phones, each install has
+ * its own deviceHash → a separate user doc, so the directory would show the person
+ * twice. Returns true if [a] is the better representative to KEEP over [b]: prefer
+ * an online row, then the most recently active. Rows with no vrchatUserId are never
+ * collapsed (the caller skips them).
+ */
+internal fun preferRow(a: UserRow, b: UserRow, nowMs: Long): Boolean {
+    val aOnline = isUserOnline(a, nowMs)
+    val bOnline = isUserOnline(b, nowMs)
+    if (aOnline != bOnline) return aOnline
+    val aMs = (a.lastActiveAt ?: a.lastSeenAt)?.toDate()?.time ?: 0L
+    val bMs = (b.lastActiveAt ?: b.lastSeenAt)?.toDate()?.time ?: 0L
+    return aMs > bMs
+}
+
 internal fun parseUserRow(d: com.google.firebase.firestore.DocumentSnapshot): UserRow {
     val docId = d.id
     val authUid = (d.getString("authUid") ?: d.getString("uid") ?: "").trim()
@@ -321,7 +337,22 @@ internal fun UsersTab(
     val filteredUsers by remember {
         derivedStateOf {
             val q = search.trim()
+            val nowMs = System.currentTimeMillis()
+            // Collapse duplicate rows for the same VRChat account (same vrchatUserId
+            // on multiple phones = separate device docs). Keep ONE representative per
+            // vrchatUserId — preferring online, then freshest — so each person shows
+            // once. Rows that never logged into VRChat (blank vrchatUserId) are kept
+            // as distinct entries. Original sort order is preserved.
+            val best = HashMap<String, UserRow>()
+            for (u in users) {
+                val vid = u.vrchatUserId.trim()
+                if (vid.isBlank()) continue
+                val ex = best[vid]
+                if (ex == null || preferRow(u, ex, nowMs)) best[vid] = u
+            }
+            val keepDocIds = best.values.mapTo(HashSet()) { it.docId }
             users.asSequence()
+                .filter { it.vrchatUserId.trim().isBlank() || it.docId in keepDocIds }
                 .filter { if (filterWarned) it.warned else true }
                 .filter { if (filterBanned) it.banned else true }
                 .filter { rowMatches(it, q) }

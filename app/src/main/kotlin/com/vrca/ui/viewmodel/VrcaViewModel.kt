@@ -676,18 +676,17 @@ class VrcaViewModel(
                 .await()
             if (siblings == null || siblings.isEmpty) return@runCatching
 
+            // The query returns our OWN doc too (same vrchatUserId), so read our
+            // updatedAt straight from the results — no extra get() needed.
             var bestSnap: com.google.firebase.firestore.DocumentSnapshot? = null
             var bestMs = 0L
+            var myUpdatedAt = 0L
             for (doc in siblings.documents) {
-                if (doc.id == deviceHash) continue
                 val ts = doc.getTimestamp("updatedAt")?.toDate()?.time ?: 0L
+                if (doc.id == deviceHash) { myUpdatedAt = ts; continue }
                 if (ts > bestMs) { bestMs = ts; bestSnap = doc }
             }
-            if (bestSnap == null) return@runCatching
-
-            val myUpdatedAt = db.collection(COL_USERS).document(deviceHash)
-                .get().await()?.getTimestamp("updatedAt")?.toDate()?.time ?: 0L
-            if (bestMs <= myUpdatedAt) return@runCatching
+            if (bestSnap == null || bestMs <= myUpdatedAt) return@runCatching
 
             applyContentFromSnapshot(bestSnap)
             Log.d("VrcaViewModel", "Cross-device sync: pulled content from ${bestSnap.id}")
