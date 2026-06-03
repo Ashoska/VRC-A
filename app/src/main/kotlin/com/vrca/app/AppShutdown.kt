@@ -174,8 +174,14 @@ object AppShutdown {
                 // races the 5s kill timeout and never lands, the ~65-min staleness
                 // window still flips the user offline. (This is why "swipe doesn't
                 // always go offline" is now self-correcting.)
+                //
+                // Deliberately do NOT bump lastSeenAt on shutdown — refreshing the
+                // liveness mirror here would let isUserOnline's
+                // `offlineAt > (lastActiveAt ?? lastSeenAt)` test TIE (both the same
+                // serverTimestamp) for any user whose lastActiveAt is somehow absent,
+                // keeping a swiped app falsely "online" until the 65-min decay. offlineAt
+                // is the sole shutdown marker; the staleness window is the only fallback.
                 "offlineAt" to FieldValue.serverTimestamp(),
-                "lastSeenAt" to FieldValue.serverTimestamp(),
                 "savedFriendIds" to FieldValue.delete(),
                 "savedFriendNames" to FieldValue.delete()
             )

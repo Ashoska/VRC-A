@@ -229,12 +229,18 @@ internal const val WATCHED_STALE_WINDOW_MS = 25L * 1000L
 
 /**
  * Grace period before the tight [WATCHED_STALE_WINDOW_MS] applies WHEN the user's
- * 10s heartbeat has not yet been observed advancing (its live loop starts only after
- * the `watcherActiveAt` heartbeat propagates — up to ~30-60s). Once the detail poll
- * HAS seen the heartbeat advance (`loopConfirmed`), this ramp is bypassed and a
- * stopped heartbeat flips offline after just [WATCHED_STALE_WINDOW_MS].
+ * 10s heartbeat has not yet been observed advancing — the case where the admin opens
+ * a user who is ALREADY dead (force-killed / swiped with no offlineAt landing), so the
+ * poll never sees a heartbeat to confirm. `AdminRuntime.setSelectedUser` fires the
+ * `watcherActiveAt` write IMMEDIATELY on open, so a genuinely-LIVE user's app flips
+ * into 10s live-sync and its first heartbeat reaches this poll within ~15-25s; a 45s
+ * ramp clears that chain with margin while still flipping a dead user offline fast.
+ * (Even if the ramp ever false-flags a live user, it SELF-HEALS the instant the
+ * heartbeat advances — the synthesized offlineAt is dropped and the row goes online.)
+ * Once the poll HAS seen the heartbeat advance (`loopConfirmed`), this ramp is bypassed
+ * and a stopped heartbeat flips offline after just [WATCHED_STALE_WINDOW_MS].
  */
-internal const val WATCH_RAMP_MS = 90L * 1000L
+internal const val WATCH_RAMP_MS = 45L * 1000L
 
 internal fun isUserOnline(u: UserRow, nowMs: Long = System.currentTimeMillis()): Boolean {
     val activeMs = (u.lastActiveAt ?: u.lastSeenAt)?.toDate()?.time ?: return false

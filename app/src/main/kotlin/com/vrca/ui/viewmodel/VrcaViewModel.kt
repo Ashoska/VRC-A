@@ -202,8 +202,11 @@ class VrcaViewModel(
                             // shows offline INSTANTLY (the admin no longer trusts the
                             // isOnlineInApp flag alone — see isUserOnline). onCleared
                             // only runs on a real swipe now (app-scoped ViewModel).
-                            "offlineAt" to FieldValue.serverTimestamp(),
-                            "lastSeenAt" to FieldValue.serverTimestamp()
+                            // NOTE: deliberately do NOT bump lastSeenAt here — a shutdown
+                            // must not refresh the liveness mirror, or isUserOnline's
+                            // `offlineAt > (lastActiveAt ?? lastSeenAt)` test could tie
+                            // (same serverTimestamp) and keep the user falsely online.
+                            "offlineAt" to FieldValue.serverTimestamp()
                         ), SetOptions.merge())
                         .await()
                 }
