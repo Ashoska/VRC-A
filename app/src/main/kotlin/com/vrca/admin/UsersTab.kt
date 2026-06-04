@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Gavel
 import androidx.compose.material.icons.filled.Loop
+import androidx.compose.material.icons.filled.MeetingRoom
 import androidx.compose.material.icons.filled.Power
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Refresh
@@ -78,6 +79,7 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
 import com.google.firebase.firestore.Source
 import com.vrca.BuildConfig
+import com.vrca.vrchat.VrchatAuthManager
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
@@ -316,9 +318,31 @@ internal fun UsersTab(
     var filterBanned by rememberSaveable { mutableStateOf(false) }
     var selectedDocId by rememberSaveable { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
+    val ctx = androidx.compose.ui.platform.LocalContext.current
 
     var selectedDetail        by remember { mutableStateOf<UserDetail?>(null) }
     var selectedDetailLoading by remember { mutableStateOf(false) }
+
+    // Foreground gate for the 10s detail poll below. Compose keeps a composed
+    // LaunchedEffect alive when the admin app is merely backgrounded (not swiped),
+    // so without this the detail poll kept reading users/{docId} every 10s
+    // indefinitely while a detail page was left open in the background — the
+    // dominant "reads keep climbing even though no admin is looking" cost. The
+    // poll's key includes isForeground, so it cancels on ON_PAUSE and restarts
+    // (re-fetching immediately) on ON_RESUME.
+    val detailLifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    var isForeground by remember { mutableStateOf(true) }
+    DisposableEffect(detailLifecycleOwner) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            when (event) {
+                androidx.lifecycle.Lifecycle.Event.ON_RESUME -> isForeground = true
+                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> isForeground = false
+                else -> {}
+            }
+        }
+        detailLifecycleOwner.lifecycle.addObserver(obs)
+        onDispose { detailLifecycleOwner.lifecycle.removeObserver(obs) }
+    }
 
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) {
@@ -404,12 +428,16 @@ internal fun UsersTab(
     // this coroutine and the reads stop INSTANTLY. The watcher heartbeat
     // (AdminRuntime) puts the user app into 10s live-sync, so 10s polling here
     // matches the cadence at which the user's volatile fields refresh.
-    LaunchedEffect(selectedDocId) {
+    LaunchedEffect(selectedDocId, isForeground) {
         val docId = selectedDocId
         if (docId.isNullOrBlank()) {
             selectedDetail = null; selectedDetailLoading = false
             return@LaunchedEffect
         }
+        // Pause the 10s server poll while the admin app is backgrounded; the last
+        // loaded detail stays on screen and the poll resumes on ON_RESUME (this
+        // effect re-runs and re-fetches immediately).
+        if (!isForeground) return@LaunchedEffect
         // Watched fast-offline tracking. While watched, the user app writes a liveness
         // timestamp every 10s — `lastSeenAt` via the ViewModel live loop (no external
         // dependency, so it's the RELIABLE heartbeat) and `lastActiveAt` via the
@@ -647,6 +675,54 @@ internal fun UsersTab(
                             Text("Kill App")
                         }
                     }
+
+                    // Invite the ADMIN'S OWN logged-in VRChat account into this
+                    // user's current instance (website "Invite Me" behavior via
+                    // POST /invite/myself/to/{location}). Works for invite-only /
+                    // friends+ / group instances; the user is NOT notified — the
+                    // invite lands only on the admin's VRChat. Reads the freshest
+                    // location from the 10s detail poll (selectedDetail), since
+                    // UserRow doesn't carry vrchatLocation.
+                    val adminVrcLoggedIn = remember(selectedDocId) { VrchatAuthManager.isLoggedIn(ctx) }
+                    if (adminVrcLoggedIn) {
+                        val inviteLoc = d?.vrchatLocation.orEmpty()
+                        val canInvite = inviteLoc.startsWith("wrld_")
+                        var inviting by remember(selectedDocId) { mutableStateOf(false) }
+                        var inviteResult by remember(selectedDocId) { mutableStateOf<String?>(null) }
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedButton(
+                            onClick = {
+                                scope.launch {
+                                    inviting = true; inviteResult = null
+                                    val ok = VrchatAuthManager.inviteSelfToInstance(ctx, inviteLoc)
+                                    inviteResult = if (ok)
+                                        "Invite sent — check your VRChat notifications"
+                                    else
+                                        "Invite failed (instance not joinable or VRChat rejected it)"
+                                    inviting = false
+                                }
+                            },
+                            enabled = canInvite && !inviting,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            if (inviting) {
+                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                Spacer(Modifier.width(8.dp))
+                            } else {
+                                Icon(Icons.Filled.MeetingRoom, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp))
+                            }
+                            Text(if (canInvite) "Invite me to this instance" else "Not in a joinable instance")
+                        }
+                        inviteResult?.let {
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                it,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 }
             }
 
@@ -875,8 +951,27 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                     Text(d.vrchatStatusDescription, style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (d.vrchatWorld.isNotBlank()) {
-                    val cnt = if (d.vrchatCapacity > 0) "${d.vrchatPlayerCount}/${d.vrchatCapacity}"
-                              else "${d.vrchatPlayerCount}"
+                    // Live occupancy via the admin's OWN VRChat session (a single
+                    // GET /instances/{loc}) — instant and independent of the
+                    // user's sync chain, which can lag minutes. Polls every 10s
+                    // while the detail is open and falls back to the
+                    // Firestore-synced count (e.g. instance not visible to admin).
+                    val ctxLive = LocalContext.current
+                    var liveCount by remember(d.vrchatLocation) {
+                        mutableStateOf<VrchatAuthManager.InstanceCount?>(null)
+                    }
+                    LaunchedEffect(d.vrchatLocation) {
+                        val loc = d.vrchatLocation
+                        if (!loc.startsWith("wrld_") || !VrchatAuthManager.isLoggedIn(ctxLive))
+                            return@LaunchedEffect
+                        while (true) {
+                            VrchatAuthManager.fetchInstanceCount(ctxLive, loc)?.let { liveCount = it }
+                            delay(10_000L)
+                        }
+                    }
+                    val players = liveCount?.players ?: d.vrchatPlayerCount.toInt()
+                    val capacity = liveCount?.capacity ?: d.vrchatCapacity.toInt()
+                    val cnt = if (capacity > 0) "$players/$capacity" else "$players"
                     Text("📍 ${d.vrchatWorld} ($cnt)", style = MaterialTheme.typography.bodySmall)
                 }
                 val ctx = LocalContext.current

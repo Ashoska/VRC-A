@@ -83,7 +83,6 @@ import androidx.compose.ui.unit.dp
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
-import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.Query
 import com.vrca.BuildConfig
 import com.vrca.R
@@ -256,36 +255,41 @@ fun VrcaScreen(
 
     var announcements by remember { mutableStateOf<List<AnnouncementUi>>(emptyList()) }
 
-    // Announcements
-    DisposableEffect(Unit) {
-        var reg: ListenerRegistration? = null
-        reg = db.collection("announcements")
+    // Announcements (in-app display). This used to be a persistent snapshot
+    // listener, which duplicated the always-attached, background-surviving
+    // listener in VrchatPipelineService (attachAnnouncementsListener) — two
+    // listeners on the identical `active==true limit 60` query, each billing a
+    // read per matching doc on attach AND on every change. The service listener
+    // is the real-time source (it fires the notifications), so the in-app list
+    // only needs a one-shot read on screen entry: announcements change rarely
+    // and a brand-new one arrives as a notification anyway. This drops a
+    // persistent listener (and its re-fire reads) with no regression, and works
+    // even when the user isn't logged into VRChat (service not running).
+    LaunchedEffect(Unit) {
+        db.collection("announcements")
             .whereEqualTo("active", true)
             .orderBy("createdAt", Query.Direction.DESCENDING)
             .limit(60)
-            .addSnapshotListener { snap, err ->
-                if (err != null) {
-                    reportFirebase("announcements", "Failed to load announcements", err)
-                    return@addSnapshotListener
-                }
-                if (snap != null) {
-                    val list = snap.documents.map { d ->
-                        AnnouncementUi(
-                            id = d.id,
-                            title = d.getString("title") ?: "",
-                            body = d.getString("body") ?: "",
-                            active = d.getBoolean("active") ?: true,
-                            priority = (d.getLong("priority") ?: 0L).toInt(),
-                            createdAt = d.getTimestamp("createdAt")
-                        )
-                    }.sortedWith(
-                        compareByDescending<AnnouncementUi> { it.priority }
-                            .thenByDescending { it.createdAt }
+            .get()
+            .addOnSuccessListener { snap ->
+                val list = snap.documents.map { d ->
+                    AnnouncementUi(
+                        id = d.id,
+                        title = d.getString("title") ?: "",
+                        body = d.getString("body") ?: "",
+                        active = d.getBoolean("active") ?: true,
+                        priority = (d.getLong("priority") ?: 0L).toInt(),
+                        createdAt = d.getTimestamp("createdAt")
                     )
-                    announcements = list
-                }
+                }.sortedWith(
+                    compareByDescending<AnnouncementUi> { it.priority }
+                        .thenByDescending { it.createdAt }
+                )
+                announcements = list
             }
-        onDispose { reg?.remove() }
+            .addOnFailureListener { err ->
+                reportFirebase("announcements", "Failed to load announcements", err)
+            }
     }
 
     // --- Moderation state comes from ViewModel ---
