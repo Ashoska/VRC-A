@@ -125,6 +125,22 @@ class VrcaViewModel(
         // detection entirely.
         private const val HOURLY_HEARTBEAT_MS = 60L * 60L * 1000L
 
+        // Cold-open liveness throttle. The cold-open performSelfSync() is the "got
+        // online" write, but the background-survival stack (START_STICKY, the ~15-min
+        // watchdog, BootReceiver, OEM killers) resurrects the process repeatedly — and
+        // each resurrection re-ran the cold-open delta write (4 liveness fields) plus a
+        // self-listener echo read. That per-restart cost, multiplied by frequent kills,
+        // is the dominant "steady Firestore traffic even with no admin browsing" source.
+        // If the last ACTUAL liveness write was within this window, a liveness-ONLY
+        // cold-open write is skipped — lastActiveAt is still fresh, so online status is
+        // unaffected, and the hourly heartbeat is anchored to the last real write
+        // (below) so a write still lands within the 65-min staleness window. Content
+        // deltas and the first-ever sync are NEVER throttled.
+        private const val COLD_OPEN_LIVENESS_THROTTLE_MS = 20L * 60L * 1000L
+        // Persisted wall-clock of the last successful self-sync write, so the throttle
+        // and the hourly anchor survive process death (the in-memory field resets).
+        private const val PREF_LAST_SELF_SYNC_MS = "last_self_sync_ms"
+
         // Moderation attach retry
         private const val MOD_ATTACH_RETRY_MS = 1_250L
 
@@ -261,6 +277,19 @@ class VrcaViewModel(
     private fun isValidDeviceHash(h: String): Boolean {
         val s = h.trim()
         return s.length in 16..128
+    }
+
+    // The liveness fields written on every delta sync. A delta containing only these
+    // (no content change) is what the cold-open throttle skips on a rapid restart.
+    private val LIVENESS_KEYS = setOf("isOnlineInApp", "lastActiveAt", "lastSeenAt", "updatedAt")
+
+    private fun readLastSelfSyncMs(): Long = prefs().getLong(PREF_LAST_SELF_SYNC_MS, 0L)
+
+    /** Record a successful self-sync write time, in memory and persisted. */
+    private fun markSelfSyncWritten() {
+        val now = System.currentTimeMillis()
+        lastSelfSyncAtMs = now
+        runCatching { prefs().edit().putLong(PREF_LAST_SELF_SYNC_MS, now).apply() }
     }
 
     private fun persistLastSyncedValues() {
@@ -715,7 +744,7 @@ class VrcaViewModel(
         }
     }
 
-    private suspend fun performSelfSync() {
+    private suspend fun performSelfSync(coldOpen: Boolean = false) {
         if (BuildConfig.IS_ADMIN_BUILD) return
         if (!initialDataLoaded) return
         runCatching {
@@ -753,7 +782,7 @@ class VrcaViewModel(
                     lastSyncedValues.putAll(currentState)
                     lastSyncedValues["_authUid"] = authUid
                     persistLastSyncedValues()
-                    lastSelfSyncAtMs = System.currentTimeMillis()
+                    markSelfSyncWritten()
                     lastSelfSyncError = ""
                 } catch (e: Throwable) {
                     throw e
@@ -778,6 +807,19 @@ class VrcaViewModel(
                     .filter { it.isNotEmpty() }.take(10)
             }
 
+            // Cold-open liveness throttle: if this is the app-open write, the delta is
+            // liveness-ONLY (no content changed), and the last real write was recent,
+            // skip it. The fresh lastActiveAt already proves online; the hourly heartbeat
+            // (anchored to the last real write) backstops the 65-min window. This is what
+            // stops every process resurrection from re-paying the liveness write.
+            val livenessOnly = delta.keys.all { it in LIVENESS_KEYS }
+            if (coldOpen && livenessOnly &&
+                System.currentTimeMillis() - readLastSelfSyncMs() < COLD_OPEN_LIVENESS_THROTTLE_MS
+            ) {
+                lastSelfSyncError = ""
+                return@runCatching
+            }
+
             try {
                 db.collection(COL_USERS).document(deviceHash)
                     .set(delta, SetOptions.merge())
@@ -786,7 +828,7 @@ class VrcaViewModel(
                 lastSyncedValues.putAll(currentState)
                 lastSyncedValues["_authUid"] = authUid
                 persistLastSyncedValues()
-                lastSelfSyncAtMs = System.currentTimeMillis()
+                markSelfSyncWritten()
                 lastSelfSyncError = ""
             } catch (e: Throwable) {
                 throw e
@@ -808,6 +850,15 @@ class VrcaViewModel(
         if (BuildConfig.IS_ADMIN_BUILD) return
         if (hourlyHeartbeatJob != null) return
         hourlyHeartbeatJob = viewModelScope.launch {
+            // Anchor the first tick to the last REAL write (persisted), not to this
+            // process's start. If the cold-open write was throttled (a recent restart),
+            // this still fires a liveness write ~60 min after the last actual write —
+            // keeping lastActiveAt inside the 65-min staleness window without writing
+            // once per restart. Floored so a stale anchor doesn't fire a burst.
+            val sinceLast = System.currentTimeMillis() - readLastSelfSyncMs()
+            val firstDelay = (HOURLY_HEARTBEAT_MS - sinceLast).coerceIn(60_000L, HOURLY_HEARTBEAT_MS)
+            delay(firstDelay)
+            performSelfSync()
             while (true) {
                 delay(HOURLY_HEARTBEAT_MS)
                 performSelfSync()
@@ -1628,8 +1679,11 @@ class VrcaViewModel(
                 applyRemoteContentBeforeSync()
             }
             // Cold-open write: this is the "user got online" write, anchored to
-            // app open. The hourly heartbeat then fires every hour after this.
-            performSelfSync()
+            // app open. Throttled when it would be liveness-only and a real write
+            // landed recently (background-survival relaunches don't re-pay it). The
+            // hourly heartbeat is anchored to the last real write so a write still
+            // lands within the staleness window even when the cold-open is skipped.
+            performSelfSync(coldOpen = true)
             startHourlyHeartbeat()
         }
 

@@ -345,8 +345,19 @@ fun AdminScreen() {
     DisposableEffect(lifecycleOwner) {
         val obs = androidx.lifecycle.LifecycleEventObserver { _, event ->
             when (event) {
-                androidx.lifecycle.Lifecycle.Event.ON_RESUME -> { isForeground = true; resumeTick++ }
-                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> isForeground = false
+                androidx.lifecycle.Lifecycle.Event.ON_RESUME -> {
+                    isForeground = true; resumeTick++
+                    // Resume the watcher/sweep WRITES (the latched browsing/selectedUser
+                    // intent is preserved, so they pick up exactly where they left off).
+                    AdminRuntime.setForeground(true)
+                }
+                androidx.lifecycle.Lifecycle.Event.ON_PAUSE -> {
+                    isForeground = false
+                    // Backgrounding the admin app (no swipe/Activity destroy) leaves the
+                    // intent latched; gate the periodic writes off so a user isn't kept
+                    // in 10s live-sync while no admin is actually looking.
+                    AdminRuntime.setForeground(false)
+                }
                 else -> {}
             }
         }

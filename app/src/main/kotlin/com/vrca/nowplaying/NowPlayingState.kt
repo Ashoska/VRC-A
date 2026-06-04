@@ -132,6 +132,25 @@ object NowPlayingState {
     fun update(snapshot: NowPlayingSnapshot) {
         val prev = _state.value
 
+        // A blank-metadata push (the media app being closed / its MediaSession torn
+        // down often fires onMetadataChanged(null) or a poll reads empty metadata)
+        // must NOT wipe the chatbox. YouTube tears its session down on close and emits
+        // such a frame; Spotify keeps its session alive, which is the only reason the
+        // text "disappears on YouTube but not Spotify". Freeze the last known track as
+        // paused instead of clearing — matching pauseIfActivePackage's keep-last
+        // behavior. A genuine hard stop still goes through clearIfActivePackage().
+        if (!snapshot.detected && prev.detected && (prev.title.isNotBlank() || prev.artist.isNotBlank())) {
+            _state.value = prev.copy(
+                listenerConnected = snapshot.listenerConnected || prev.listenerConnected,
+                playbackSpeed = 0f,
+                isPlaying = false,
+                specialActive = false,
+                adInfo = ""
+            )
+            persist(_state.value)
+            return
+        }
+
         // Reset motion history if app changed (prevents false "paused" on app switch)
         val samePkg = prev.activePackage == snapshot.activePackage && snapshot.activePackage.isNotBlank()
 
