@@ -56,6 +56,15 @@ class VrcaOsc(
     // inetAddress when the user supplies an unresolvable host.
     private var inetAddress: InetAddress = InetAddress.getLoopbackAddress()
 
+    // Hard transmission gate. When true, EVERY outgoing OSC message is dropped
+    // at this single chokepoint (typing, input, realtime all route through
+    // sendOscMessage), regardless of which caller/loop triggered it. Used to
+    // enforce a forced app update: a pending required update sets this true so
+    // the user cannot keep driving the VRChat chatbox (even backgrounded) until
+    // they update. @Volatile so a background sender loop sees the flip instantly.
+    @Volatile
+    var blocked = false
+
     var typing = false
         set(value) {
             field = value
@@ -63,6 +72,7 @@ class VrcaOsc(
         }
 
     private fun sendOscMessage(address: String, arguments: List<Any?>, delay: Long = 0) {
+        if (blocked) return
         CoroutineScope(Dispatchers.IO).launch {
 
             val message = OSCMessage(address, arguments)

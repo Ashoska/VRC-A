@@ -1300,6 +1300,30 @@ class VrcaViewModel(
         port = 9000
     )
 
+    /**
+     * True while a REQUIRED app update is pending. Set from [VrcaApp] when the
+     * release check resolves to a forced update. It hard-blocks all OSC output
+     * at the [VrcaOsc] chokepoint so the user cannot keep driving the VRChat
+     * chatbox (including in the background — this lives on the app-scoped VM, so
+     * the gate persists after the Activity is destroyed) until they update.
+     */
+    var forceUpdatePending by mutableStateOf(false)
+        private set
+
+    fun applyForceUpdateGate(pending: Boolean) {
+        if (forceUpdatePending == pending) return
+        forceUpdatePending = pending
+        remoteVrcaOsc.blocked = pending
+        localVrcaOsc.blocked = pending
+        if (pending) {
+            // Stop any in-flight typing indicator immediately (state safety; the
+            // OSC send is already blocked). Sender loops keep their config but
+            // every transmission no-ops at the chokepoint above.
+            remoteVrcaOsc.typing = false
+            localVrcaOsc.typing = false
+        }
+    }
+
     fun onIpAddressChange(ip: String) {
         userInputIpState.value = ip
     }

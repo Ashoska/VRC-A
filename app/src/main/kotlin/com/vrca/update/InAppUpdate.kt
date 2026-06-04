@@ -11,7 +11,9 @@ import kotlinx.coroutines.tasks.await
  *   versionCode       (Long)   - integer build number
  *   versionName       (String) - display label e.g. "v1.4.2"
  *   downloadUrl       (String) - direct APK download URL
- *   requiredMinCode   (Long)   - users with versionCode < this are FORCE-updated
+ *   requiredMinCode   (Long)   - legacy / no longer consulted: ALL updates are
+ *                                forced now (any newer versionCode is required).
+ *                                Kept on the doc for backward compat with old clients.
  *   notes             (String) - optional release notes shown in the dialog
  *   publishedAt       (Timestamp)
  *
@@ -55,8 +57,11 @@ private fun parseReleaseSnap(
         requiredMinCode = requiredMin,
         notes           = notes
     )
-    val forced = currentVersionCode < requiredMin
-    return ReleaseCheckResult.UpdateAvailable(info, forced)
+    // ALL updates are forced — both global (releases/latest) and directed
+    // (releases/{deviceHash}). Any newer versionCode hard-walls the user until
+    // they update; `requiredMinCode` is no longer consulted for this decision
+    // (kept on the doc for backward compat with older clients).
+    return ReleaseCheckResult.UpdateAvailable(info, forced = true)
 }
 
 suspend fun checkFirestoreRelease(
