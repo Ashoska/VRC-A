@@ -780,7 +780,6 @@ private fun NowPlayingPage(vm: VrcaViewModel) {
             subtitle = "Uses Notification Access. Stop clears instantly."
         ) {
             ToggleRow("Enable Now Playing block", vm.spotifyEnabled) { vm.setSpotifyEnabledFlag(it) }
-            ToggleRow("Demo mode (testing)", vm.spotifyDemoEnabled) { vm.setSpotifyDemoFlag(it) }
 
             OutlinedButton(
                 onClick = { ctx.startActivity(vm.notificationAccessIntent()) },
@@ -987,7 +986,6 @@ fun SettingsPage(
                 ) {
                     ToggleRow("Pinned presets collapsed", vm.afkPresetsCollapsed) { vm.updateAfkPresetsCollapsed(it) }
                     ToggleRow("Cycle presets collapsed", vm.cyclePresetsCollapsed) { vm.updateCyclePresetsCollapsed(it) }
-                    ToggleRow("Music demo mode", vm.spotifyDemoEnabled) { vm.setSpotifyDemoFlag(it) }
                 }
             }
 

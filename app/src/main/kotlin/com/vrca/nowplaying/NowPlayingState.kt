@@ -1,8 +1,12 @@
 package com.vrca.nowplaying
 
+import android.content.Context
+import android.content.SharedPreferences
+import android.os.SystemClock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import org.json.JSONObject
 import kotlin.math.abs
 
 data class NowPlayingSnapshot(
@@ -38,6 +42,75 @@ object NowPlayingState {
     private val _state = MutableStateFlow(NowPlayingSnapshot())
     val state: StateFlow<NowPlayingSnapshot> = _state.asStateFlow()
 
+    // --- Persistence of the last-known track ---------------------------------
+    // The snapshot lives only in process memory, so after an OS-initiated process
+    // kill + headless ViewModel revival (KeepAliveService) there is no active
+    // MediaSession to re-push a PAUSED track — the chatbox NowPlaying line just
+    // blanked out. We persist the last detected, non-special track to disk and
+    // re-seed it (as paused) on process start so it survives revival / cold start
+    // instead of disappearing. Future-proof: keyed on whatever media app was
+    // active, not Spotify-specific.
+    private const val PREFS = "vrca_nowplaying"
+    private const val KEY_SNAPSHOT = "last_snapshot"
+    @Volatile private var prefs: SharedPreferences? = null
+
+    /**
+     * Seed the last-known track from disk (as paused) on process start so a
+     * headless revival or plain cold start shows the previous track immediately
+     * instead of blanking until a live MediaSession re-pushes. Idempotent; only
+     * restores while the in-memory state is still blank (never clobbers a live one).
+     * Call once, as early as possible (Application.onCreate).
+     */
+    fun attach(context: Context) {
+        if (prefs != null) return
+        val p = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        prefs = p
+        if (_state.value.detected) return
+        val raw = p.getString(KEY_SNAPSHOT, null) ?: return
+        try {
+            val o = JSONObject(raw)
+            val title = o.optString("title")
+            val artist = o.optString("artist")
+            if (title.isBlank() && artist.isBlank()) return
+            _state.value = _state.value.copy(
+                activePackage = o.optString("activePackage"),
+                detected = true,
+                title = title,
+                artist = artist,
+                durationMs = o.optLong("durationMs"),
+                positionMs = o.optLong("positionMs"),
+                // elapsedRealtime resets on reboot; re-anchor to "now" and mark
+                // paused so the downstream builder renders the frozen snapshot.
+                positionUpdateTimeMs = SystemClock.elapsedRealtime(),
+                playbackSpeed = 0f,
+                isPlaying = false,
+                specialActive = false,
+                adInfo = ""
+            )
+        } catch (_: Throwable) { }
+    }
+
+    private fun persist(s: NowPlayingSnapshot) {
+        val p = prefs ?: return
+        // Only persist real tracks — never ads / DJ / special windows (restoring
+        // "AD" on next launch would be nonsense).
+        if (!s.detected || s.specialActive || s.adInfo.isNotBlank()) return
+        if (s.title.isBlank() && s.artist.isBlank()) return
+        try {
+            val o = JSONObject()
+                .put("activePackage", s.activePackage)
+                .put("title", s.title)
+                .put("artist", s.artist)
+                .put("durationMs", s.durationMs)
+                .put("positionMs", s.positionMs)
+            p.edit().putString(KEY_SNAPSHOT, o.toString()).apply()
+        } catch (_: Throwable) { }
+    }
+
+    private fun clearPersisted() {
+        try { prefs?.edit()?.remove(KEY_SNAPSHOT)?.apply() } catch (_: Throwable) { }
+    }
+
     // Heuristic knobs (tuned for 0.5s refresh + common media-session jitter)
     private const val MOVING_POS_DELTA_MS = 250L     // position must advance by at least this to be "moving"
     private const val STALLED_POS_DELTA_MS = 60L     // treat <= this as "not moving"
@@ -58,6 +131,25 @@ object NowPlayingState {
 
     fun update(snapshot: NowPlayingSnapshot) {
         val prev = _state.value
+
+        // A blank-metadata push (the media app being closed / its MediaSession torn
+        // down often fires onMetadataChanged(null) or a poll reads empty metadata)
+        // must NOT wipe the chatbox. YouTube tears its session down on close and emits
+        // such a frame; Spotify keeps its session alive, which is the only reason the
+        // text "disappears on YouTube but not Spotify". Freeze the last known track as
+        // paused instead of clearing — matching pauseIfActivePackage's keep-last
+        // behavior. A genuine hard stop still goes through clearIfActivePackage().
+        if (!snapshot.detected && prev.detected && (prev.title.isNotBlank() || prev.artist.isNotBlank())) {
+            _state.value = prev.copy(
+                listenerConnected = snapshot.listenerConnected || prev.listenerConnected,
+                playbackSpeed = 0f,
+                isPlaying = false,
+                specialActive = false,
+                adInfo = ""
+            )
+            persist(_state.value)
+            return
+        }
 
         // Reset motion history if app changed (prevents false "paused" on app switch)
         val samePkg = prev.activePackage == snapshot.activePackage && snapshot.activePackage.isNotBlank()
@@ -100,6 +192,7 @@ object NowPlayingState {
         }
 
         _state.value = snapshot.copy(isPlaying = inferredIsPlaying)
+        persist(_state.value)
     }
 
     fun setConnected(connected: Boolean) {
@@ -120,6 +213,7 @@ object NowPlayingState {
                 playbackSpeed = 0f,
                 isPlaying = false
             )
+            persist(_state.value)
         } else if (cur.activePackage == pkg) {
             // If we have nothing meaningful, clear like before.
             clearIfActivePackage(pkg)
@@ -142,6 +236,8 @@ object NowPlayingState {
                 playbackSpeed = 1f,
                 isPlaying = false
             )
+            // A genuine clear means there's no track to restore on next launch.
+            clearPersisted()
         }
     }
 

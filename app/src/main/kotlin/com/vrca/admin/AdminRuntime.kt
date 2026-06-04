@@ -59,6 +59,13 @@ object AdminRuntime {
     // Intent set by the Compose layer.
     private val browsing = MutableStateFlow(false)
     private val selectedUser = MutableStateFlow<String?>(null)
+    // Whether the admin app is in the foreground. The watcher/sweep WRITES are gated on
+    // this so merely backgrounding the admin app (without a swipe / Activity destroy,
+    // which never clears the latched browsing/selectedUser intent) stops the periodic
+    // watcherActiveAt write — otherwise an admin who backgrounded the app on a user's
+    // detail kept that user in 10s live-sync indefinitely. The intent stays latched, so
+    // returning to the foreground (ON_RESUME) resumes exactly where it left off.
+    private val foreground = MutableStateFlow(true)
 
     // Latest user list (for the force-kill sweep). Minimal fields only.
     @Volatile private var sweepData: List<SweepUser> = emptyList()
@@ -78,6 +85,8 @@ object AdminRuntime {
 
     fun setBrowsing(active: Boolean) { browsing.value = active }
 
+    fun setForeground(fg: Boolean) { foreground.value = fg }
+
     fun setSelectedUser(docId: String?) {
         val clean = docId?.trim()?.ifBlank { null }
         val changed = selectedUser.value != clean
@@ -86,7 +95,7 @@ object AdminRuntime {
         // opened, instead of waiting up to WATCHER_HEARTBEAT_MS for the loop's
         // next tick. This flips the user app into 10s live-sync right away so the
         // admin sees fresh liveness/presence almost immediately.
-        if (changed && clean != null) {
+        if (changed && clean != null && foreground.value) {
             scope.launch {
                 try {
                     db.collection("users").document(clean)
@@ -105,7 +114,7 @@ object AdminRuntime {
     private suspend fun runBrowseHeartbeatLoop() {
         var browsingStartedAt = 0L
         while (true) {
-            if (browsing.value) {
+            if (browsing.value && foreground.value) {
                 if (browsingStartedAt == 0L) browsingStartedAt = System.currentTimeMillis()
                 // NOTE: the `config/adminPresence.browsingAt` heartbeat was REMOVED.
                 // Every online user held a snapshot listener on that doc, so writing
@@ -135,7 +144,7 @@ object AdminRuntime {
     private suspend fun runWatcherHeartbeatLoop() {
         while (true) {
             val docId = selectedUser.value
-            if (!docId.isNullOrBlank()) {
+            if (!docId.isNullOrBlank() && foreground.value) {
                 try {
                     db.collection("users").document(docId)
                         .set(mapOf("watcherActiveAt" to FieldValue.serverTimestamp()), SetOptions.merge())

@@ -2180,6 +2180,28 @@ class VrchatPipelineService : Service() {
         }
         VrchatPipelineState.presence = patched
         pushSelfPresenceToFirestoreIfWatched()
+
+        // Refresh the instance occupancy the instant we world-hop, via a single
+        // lightweight GET /instances/{loc} (what the website does on a tab
+        // refresh). The WS location event carries no player count, so without
+        // this the count showed 0/stale until the heavy 3-call fetchPresence
+        // chain next succeeded — minutes apart on mobile. One call, fired only
+        // on the hop, so it adds no steady traffic.
+        if (location.startsWith("wrld_")) {
+            serviceScope.launch {
+                val ic = VrchatAuthManager.fetchInstanceCount(this@VrchatPipelineService, location)
+                    ?: return@launch
+                val cur = VrchatPipelineState.presence ?: return@launch
+                if (cur.location == location &&
+                    (cur.instancePlayerCount != ic.players || cur.instanceCapacity != ic.capacity)
+                ) {
+                    VrchatPipelineState.presence = cur.copy(
+                        instancePlayerCount = ic.players,
+                        instanceCapacity = ic.capacity
+                    )
+                }
+            }
+        }
     }
 
     /** Reactively patch own status/state from a self `user-update` payload. */
@@ -2231,7 +2253,33 @@ class VrchatPipelineService : Service() {
         if (!forceLocalUpdate && deviceHash.isBlank()) return
         if (!forceLocalUpdate && !AdminWatchState.isWatched.value) return
 
-        val presence = VrchatAuthManager.fetchPresence(this) ?: return
+        val presence = VrchatAuthManager.fetchPresence(this)
+        if (presence == null) {
+            // The heavy 3-call chain (/auth/user -> /users/{id} -> /instances)
+            // failed (cookie IP-invalidation / rate limit). Keep the instance
+            // occupancy current anyway via a single lightweight GET
+            // /instances/{loc} on the last-known location — one request, what the
+            // website does on a tab refresh, far less likely to be throttled — so
+            // the player count tracks reality instead of freezing for minutes
+            // until the full chain next lands. Count-only patch; no Firestore
+            // write here (the heavy path owns the watched write).
+            val loc = VrchatPipelineState.presence?.location
+            if (!loc.isNullOrBlank() && loc.startsWith("wrld_")) {
+                VrchatAuthManager.fetchInstanceCount(this, loc)?.let { ic ->
+                    VrchatPipelineState.presence?.let { p ->
+                        if (p.location == loc &&
+                            (p.instancePlayerCount != ic.players || p.instanceCapacity != ic.capacity)
+                        ) {
+                            VrchatPipelineState.presence = p.copy(
+                                instancePlayerCount = ic.players,
+                                instanceCapacity = ic.capacity
+                            )
+                        }
+                    }
+                }
+            }
+            return
+        }
         VrchatPipelineState.presence = presence
 
         if (deviceHash.isBlank()) return

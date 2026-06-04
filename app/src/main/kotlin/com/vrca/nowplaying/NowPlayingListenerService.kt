@@ -26,6 +26,21 @@ class NowPlayingListenerService : NotificationListenerService() {
         "com.bandcamp.android"
     )
 
+    // YouTube keeps reporting STATE_PLAYING + speed=1f even while PAUSED, so the
+    // only reliable pause signal is that the raw position stops advancing across
+    // snapshots. That stall check (in NowPlayingState) needs fresh samples every
+    // ~500ms, but YouTube's MediaController fires almost no callbacks while paused
+    // — so we run a continuous 500ms poll for these packages to feed the detector.
+    private val youtubePackages = setOf(
+        "com.google.android.youtube",
+        "com.google.android.apps.youtube.music"
+    )
+
+    // Catches a newly-started media session the instant it goes active, instead of
+    // waiting for the app to post/update its media notification (the pickup delay).
+    private var activeSessionsListener:
+        android.media.session.MediaSessionManager.OnActiveSessionsChangedListener? = null
+
     private data class ControllerEntry(
         val controller: MediaController,
         val callback: MediaController.Callback,
@@ -70,6 +85,35 @@ class NowPlayingListenerService : NotificationListenerService() {
         } catch (_: Throwable) { }
 
         scanActiveMediaSessions()
+        registerActiveSessionsListener()
+    }
+
+    private fun registerActiveSessionsListener() {
+        if (activeSessionsListener != null) return
+        try {
+            val msm = getSystemService(android.media.session.MediaSessionManager::class.java)
+                ?: return
+            val comp = android.content.ComponentName(this, NowPlayingListenerService::class.java)
+            val l = android.media.session.MediaSessionManager.OnActiveSessionsChangedListener { controllers ->
+                controllers?.forEach { controller ->
+                    val pkg = controller.packageName ?: return@forEach
+                    if (allowedPackages.isNotEmpty() && pkg !in allowedPackages) return@forEach
+                    val token = controller.sessionToken ?: return@forEach
+                    ensureControllerForPackage(pkg, token)
+                }
+            }
+            msm.addOnActiveSessionsChangedListener(l, comp, mainHandler)
+            activeSessionsListener = l
+        } catch (_: Throwable) { }
+    }
+
+    private fun unregisterActiveSessionsListener() {
+        val l = activeSessionsListener ?: return
+        try {
+            getSystemService(android.media.session.MediaSessionManager::class.java)
+                ?.removeOnActiveSessionsChangedListener(l)
+        } catch (_: Throwable) { }
+        activeSessionsListener = null
     }
 
     private fun scanActiveMediaSessions() {
@@ -91,6 +135,7 @@ class NowPlayingListenerService : NotificationListenerService() {
     override fun onListenerDisconnected() {
         super.onListenerDisconnected()
         NowPlayingState.setConnected(false)
+        unregisterActiveSessionsListener()
         teardownAllControllers()
         stopAllPolls()
     }
@@ -158,6 +203,11 @@ class NowPlayingListenerService : NotificationListenerService() {
             lastPlayingStateByPackage[pkg] = initState?.state == PlaybackState.STATE_PLAYING
 
             pushSnapshot(pkg, controller.metadata, initState, controller)
+
+            // YouTube lies about play-state while paused; run a continuous 500ms
+            // poll so the stall detector gets the consecutive position samples it
+            // needs to flip to paused (and freeze the progress bar) within ~1s.
+            if (pkg in youtubePackages) startPollForRealTrack(pkg, controller)
         } catch (_: Throwable) {
         }
     }
@@ -286,8 +336,10 @@ class NowPlayingListenerService : NotificationListenerService() {
             } else if (pkg == "com.spotify.music" && controller != null) {
                 startPollForRealTrack(pkg, controller)
             }
-        } else {
-            // Normal track — stop polling if we were
+        } else if (pkg !in youtubePackages) {
+            // Normal track — stop polling if we were.
+            // EXCEPT YouTube: its continuous pause-detection poll must keep running
+            // (it pushes normal tracks every cycle and would otherwise stop itself here).
             stopPoll(pkg)
         }
 
@@ -350,12 +402,18 @@ class NowPlayingListenerService : NotificationListenerService() {
                 val statePrev = lastPlayingStateByPackage[pkg]
                 val stateChanged = statePrev != null && statePrev != nowPlaying
 
-                if (changed || stateChanged || sincePush >= 4000L) {
+                // YouTube: push EVERY cycle so the position-stall pause detector
+                // (NowPlayingState) gets consecutive samples. Other players only
+                // push on a real change / every 4s to stay quiet.
+                if (changed || stateChanged || sincePush >= 4000L || pkg in youtubePackages) {
                     pushSnapshot(pkg, md, pb, controller)
                 }
                 lastPlayingStateByPackage[pkg] = nowPlaying
 
-                if (SystemClock.elapsedRealtime() - startAt >= maxMs) {
+                // The Spotify ad/DJ poll is a short transient window; YouTube's pause
+                // poll must live as long as the session does (it self-stops when the
+                // controller changes above, or on teardown/destroy/notif-removed).
+                if (pkg !in youtubePackages && SystemClock.elapsedRealtime() - startAt >= maxMs) {
                     stopPoll(pkg)
                     return
                 }

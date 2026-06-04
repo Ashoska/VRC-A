@@ -176,6 +176,69 @@ object VrchatAuthManager {
             }
         }
 
+    /** Live instance occupancy from a single `GET /instances/{location}` call. */
+    data class InstanceCount(val players: Int, val capacity: Int)
+
+    /**
+     * Lightweight single-call instance occupancy fetch — hits ONLY
+     * `GET /instances/{location}` and reads `n_users` / `capacity`. This is what
+     * the VRChat website does on a tab refresh (one request, instant), unlike the
+     * full 3-call [fetchPresence] chain (`/auth/user` -> `/users/{id}` ->
+     * `/instances`) whose count only refreshes when the WHOLE chain lands —
+     * minutes apart on mobile under cookie IP-invalidation / rate-limit churn.
+     * Returns null when not in a joinable world instance or on any failure (the
+     * caller keeps the previously-known count). [location] is the raw
+     * `{worldId}:{instanceId}` string.
+     */
+    suspend fun fetchInstanceCount(context: Context, location: String): InstanceCount? =
+        withContext(Dispatchers.IO) {
+            val loc = location.trim()
+            if (loc.isBlank() || !loc.startsWith("wrld_") ||
+                loc == "offline" || loc == "private" || loc == "traveling"
+            ) return@withContext null
+            val cookieHeader = getCookieHeader(context) ?: return@withContext null
+            try {
+                val (code, body, rawCookies) = get("$BASE/instances/$loc", null, cookieHeader)
+                if (code != 200) return@withContext null
+                captureRolledCookies(context, rawCookies)
+                val inst = JSONObject(body)
+                InstanceCount(inst.optInt("n_users", 0), inst.optInt("capacity", 0))
+            } catch (e: Exception) {
+                Log.w(TAG, "fetchInstanceCount failed", e)
+                null
+            }
+        }
+
+    /**
+     * Sends an invite to the caller's OWN logged-in VRChat account for [location]
+     * (the raw `{worldId}:{instanceId}` string). Mirrors the website's "Invite Me"
+     * button (`POST /invite/myself/to/{location}`) — works for invite-only /
+     * friends+ / group instances. The instance's occupant is NOT notified; the
+     * invite lands only on the caller's account. Admin-only use. Returns true on
+     * HTTP 200.
+     */
+    suspend fun inviteSelfToInstance(context: Context, location: String): Boolean =
+        withContext(Dispatchers.IO) {
+            val loc = location.trim()
+            if (loc.isBlank() || !loc.startsWith("wrld_") ||
+                loc == "offline" || loc == "private" || loc == "traveling"
+            ) return@withContext false
+            val cookieHeader = getCookieHeader(context) ?: return@withContext false
+            try {
+                val (code, _, rawCookies) = post("$BASE/invite/myself/to/$loc", "", cookieHeader)
+                if (code == 200) {
+                    captureRolledCookies(context, rawCookies)
+                    true
+                } else {
+                    Log.w(TAG, "inviteSelfToInstance returned $code for $loc")
+                    false
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "inviteSelfToInstance failed", e)
+                false
+            }
+        }
+
     /**
      * Headers required to LOAD an auth-gated VRChat image (`api.vrchat.cloud`
      * file/image URLs require the session cookie + a User-Agent). Returned to the
