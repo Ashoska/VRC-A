@@ -195,18 +195,37 @@ object VrchatAuthManager {
      * back to the platforms sum / `userCount` when `n_users` is absent.
      */
     private fun extractInstanceUserCount(inst: JSONObject): Int {
+        // --- DIAGNOSTIC (temporary): log EVERY candidate count so we can see
+        // which field matches the in-game instance panel. Capture with:
+        //   adb logcat -s VrchatAuth | grep INSTANCE_COUNT_DEBUG
+        // then compare against the number VRChat shows in-game at that moment.
+        val platformsObj = inst.optJSONObject("platforms")
+        var platformsSum = 0
+        val platformParts = StringBuilder()
+        if (platformsObj != null) {
+            val k = platformsObj.keys()
+            while (k.hasNext()) {
+                val key = k.next()
+                val v = platformsObj.optInt(key, 0)
+                platformsSum += v
+                platformParts.append(key).append('=').append(v).append(' ')
+            }
+        }
+        Log.w(
+            TAG,
+            "INSTANCE_COUNT_DEBUG n_users=${inst.optInt("n_users", -1)} " +
+                "userCount=${inst.optInt("userCount", -1)} " +
+                "platformsSum=$platformsSum [${platformParts.toString().trim()}] " +
+                "queueSize=${inst.optInt("queueSize", -1)} " +
+                "capacity=${inst.optInt("capacity", -1)} " +
+                "recommendedCapacity=${inst.optInt("recommendedCapacity", -1)}"
+        )
+        // --- END DIAGNOSTIC
+
         val nUsers = inst.optInt("n_users", -1)
         if (nUsers >= 0) return nUsers
 
-        val platforms = inst.optJSONObject("platforms")
-        if (platforms != null) {
-            var sum = 0
-            val keys = platforms.keys()
-            while (keys.hasNext()) {
-                sum += platforms.optInt(keys.next(), 0)
-            }
-            return sum
-        }
+        if (platformsObj != null) return platformsSum
         return inst.optInt("userCount", 0)
     }
 
