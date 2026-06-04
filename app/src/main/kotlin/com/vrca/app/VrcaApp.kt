@@ -364,8 +364,9 @@ fun VrcaApp() {
                             requiredMinCode = snap.getLong("requiredMinCode") ?: 0L,
                             notes           = snap.getString("notes").orEmpty()
                         )
+                        // All directed releases are forced automatically.
                         releaseCheckResult = ReleaseCheckResult.UpdateAvailable(
-                            info, forced = BuildConfig.VERSION_CODE < info.requiredMinCode
+                            info, forced = true
                         )
                         updateDismissed = false
                     }
@@ -385,9 +386,19 @@ fun VrcaApp() {
                     requiredMinCode = 0L,
                     notes = liveTargetedNotes
                 )
-                releaseCheckResult = ReleaseCheckResult.UpdateAvailable(info, forced = false)
+                releaseCheckResult = ReleaseCheckResult.UpdateAvailable(info, forced = true)
                 updateDismissed = false
             }
+        }
+
+        // Hard-gate OSC output whenever a forced (required) update is pending, so
+        // the user can't keep driving the VRChat chatbox — even backgrounded —
+        // until they update. The flag lives on the app-scoped VM so it survives
+        // Activity destruction. Cleared if the pending update ever resolves.
+        val forcedUpdatePending =
+            (releaseCheckResult as? ReleaseCheckResult.UpdateAvailable)?.forced == true
+        LaunchedEffect(forcedUpdatePending) {
+            vm.applyForceUpdateGate(forcedUpdatePending)
         }
     }
 
