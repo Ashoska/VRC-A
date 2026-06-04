@@ -97,7 +97,7 @@ import java.security.MessageDigest
 private enum class AppPage(val title: String) {
     Home("Home"),
     Automations("Automations"),
-    Music("Music"),
+    Music("Media"),
     VrchatStatus("VRChat"),
     Settings("Settings"),
     Admin("Admin")
@@ -424,7 +424,7 @@ fun VrcaScreen(
                             selected = page == AppPage.Music,
                             onClick = { page = AppPage.Music },
                             icon = { Icon(Icons.Filled.MusicNote, contentDescription = null) },
-                            label = { Text("Music") }
+                            label = { Text("Media") }
                         )
                         NavigationBarItem(
                             selected = page == AppPage.VrchatStatus,
@@ -482,8 +482,6 @@ fun VrcaScreen(
                         AppPage.Music -> NowPlayingPage(
                             vm = chatboxViewModel,
                             isBanned = isBannedEffective,
-                            onPersistSpotifyEnabled = { UiPrefs.writeSpotifyEnabled(ctx, it) },
-                            onPersistSpotifyDemo = { UiPrefs.writeSpotifyDemo(ctx, it) },
                             onPersistSpotifyPreset = { UiPrefs.writeSpotifyPreset(ctx, it) }
                         )
 

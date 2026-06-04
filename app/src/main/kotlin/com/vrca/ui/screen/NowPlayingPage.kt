@@ -22,7 +22,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
-import com.vrca.ui.settings.ToggleRow
 import com.vrca.ui.viewmodel.VrcaViewModel
 import kotlinx.coroutines.delay
 
@@ -30,8 +29,6 @@ import kotlinx.coroutines.delay
 internal fun NowPlayingPage(
     vm: VrcaViewModel,
     isBanned: Boolean,
-    onPersistSpotifyEnabled: (Boolean) -> Unit,
-    onPersistSpotifyDemo: (Boolean) -> Unit,
     onPersistSpotifyPreset: (Int) -> Unit
 ) {
     val ctx = LocalContext.current
@@ -48,17 +45,8 @@ internal fun NowPlayingPage(
     PageContainer {
         SectionCard(
             title = "Now Playing",
-            subtitle = "Uses Notification Access. Stop clears instantly."
+            subtitle = "Uses Notification Access. Toggle it on Home. Stop clears instantly."
         ) {
-            ToggleRow("Enable Now Playing block", vm.spotifyEnabled, enabled = !isBanned) {
-                vm.setSpotifyEnabledFlag(it)
-                onPersistSpotifyEnabled(it)
-            }
-            ToggleRow("Demo mode (testing)", vm.spotifyDemoEnabled, enabled = !isBanned) {
-                vm.setSpotifyDemoFlag(it)
-                onPersistSpotifyDemo(it)
-            }
-
             OutlinedButton(
                 onClick = { ctx.startActivity(vm.notificationAccessIntent()) },
                 modifier = Modifier.fillMaxWidth()

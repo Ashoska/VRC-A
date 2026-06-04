@@ -55,6 +55,11 @@ class VrcaApplication : Application(), ViewModelStoreOwner {
 
         // Your repo expects Context
         userPreferencesRepository = UserPreferencesRepository(applicationContext)
+
+        // Seed the last-known NowPlaying track (as paused) BEFORE any ViewModel
+        // collects NowPlayingState, so a headless revival / cold start shows the
+        // previous (possibly paused) track immediately instead of blanking.
+        com.vrca.nowplaying.NowPlayingState.attach(applicationContext)
     }
 
     /**

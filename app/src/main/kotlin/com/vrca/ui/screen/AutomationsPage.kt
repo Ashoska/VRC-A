@@ -47,7 +47,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
-import com.vrca.ui.settings.ToggleRow
 import com.vrca.ui.viewmodel.VrcaViewModel
 import kotlinx.coroutines.launch
 
@@ -105,10 +104,8 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
             ChatboxAutomationsTab.Pinned -> {
                 SectionCard(
                     title = "Pinned Message",
-                    subtitle = "Always shown above Cycle and Now Playing."
+                    subtitle = "Always shown above Cycle and Now Playing. Toggle it on Home."
                 ) {
-                    ToggleRow("Pinned enabled", vm.afkEnabled, enabled = !isBanned) { vm.setAfkEnabledFlag(it) }
-
                     OutlinedTextField(
                         value = vm.afkMessage,
                         onValueChange = { s: String -> vm.updateAfkText(s) },
@@ -195,10 +192,8 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
             ChatboxAutomationsTab.Cycle -> {
                 SectionCard(
                     title = "Cycle",
-                    subtitle = "Up to 10 lines. Stop clears instantly."
+                    subtitle = "Up to 10 lines. Toggle it on Home. Stop clears instantly."
                 ) {
-                    ToggleRow("Cycle enabled", vm.cycleEnabled, enabled = !isBanned) { vm.setCycleEnabledFlag(it) }
-
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (vm.cycleLines.isEmpty()) {
                             Text("No lines yet. Tap Add Line.", style = MaterialTheme.typography.bodySmall)
