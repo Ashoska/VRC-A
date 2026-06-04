@@ -180,8 +180,33 @@ object VrchatAuthManager {
     data class InstanceCount(val players: Int, val capacity: Int)
 
     /**
+     * Derives the live in-instance headcount from a `/instances/{loc}` JSON body.
+     * VRChat's `n_users` is a CACHED aggregate that lags the real count, so the
+     * number drifts from what the website shows. The website (and tools like
+     * VRCX) instead sum the live per-platform breakdown (`platforms`:
+     * standalonewindows / android / ios), which tracks reality far more closely.
+     * We prefer that sum whenever the `platforms` object is present, and only
+     * fall back to `n_users` / `userCount` when it is absent.
+     */
+    private fun extractInstanceUserCount(inst: JSONObject): Int {
+        val platforms = inst.optJSONObject("platforms")
+        if (platforms != null) {
+            var sum = 0
+            val keys = platforms.keys()
+            while (keys.hasNext()) {
+                sum += platforms.optInt(keys.next(), 0)
+            }
+            return sum
+        }
+        val nUsers = inst.optInt("n_users", -1)
+        if (nUsers >= 0) return nUsers
+        return inst.optInt("userCount", 0)
+    }
+
+    /**
      * Lightweight single-call instance occupancy fetch — hits ONLY
-     * `GET /instances/{location}` and reads `n_users` / `capacity`. This is what
+     * `GET /instances/{location}` and reads the live player count (see
+     * [extractInstanceUserCount]) / `capacity`. This is what
      * the VRChat website does on a tab refresh (one request, instant), unlike the
      * full 3-call [fetchPresence] chain (`/auth/user` -> `/users/{id}` ->
      * `/instances`) whose count only refreshes when the WHOLE chain lands —
@@ -202,7 +227,7 @@ object VrchatAuthManager {
                 if (code != 200) return@withContext null
                 captureRolledCookies(context, rawCookies)
                 val inst = JSONObject(body)
-                InstanceCount(inst.optInt("n_users", 0), inst.optInt("capacity", 0))
+                InstanceCount(extractInstanceUserCount(inst), inst.optInt("capacity", 0))
             } catch (e: Exception) {
                 Log.w(TAG, "fetchInstanceCount failed", e)
                 null
@@ -694,7 +719,7 @@ object VrchatAuthManager {
                     if (wCode == 200) {
                         captureRolledCookies(context, wCookies)
                         val inst = JSONObject(wBody)
-                        playerCount = inst.optInt("n_users", 0)
+                        playerCount = extractInstanceUserCount(inst)
                         capacity = inst.optInt("capacity", 0)
                         val worldObj = inst.optJSONObject("world")
                         worldName = worldObj?.optString("name", "") ?: ""
