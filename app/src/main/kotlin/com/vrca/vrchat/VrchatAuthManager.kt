@@ -180,15 +180,24 @@ object VrchatAuthManager {
     data class InstanceCount(val players: Int, val capacity: Int)
 
     /**
-     * Derives the live in-instance headcount from a `/instances/{loc}` JSON body.
-     * VRChat's `n_users` is a CACHED aggregate that lags the real count, so the
-     * number drifts from what the website shows. The website (and tools like
-     * VRCX) instead sum the live per-platform breakdown (`platforms`:
-     * standalonewindows / android / ios), which tracks reality far more closely.
-     * We prefer that sum whenever the `platforms` object is present, and only
-     * fall back to `n_users` / `userCount` when it is absent.
+     * Derives the in-instance headcount from a `/instances/{loc}` JSON body.
+     *
+     * VRChat exposes TWO different counts on this object and they routinely
+     * disagree by a few users:
+     *  - `n_users` is what the **in-game client's** instance panel shows (the
+     *    number the player and everyone in the instance actually see in-headset).
+     *  - the per-platform breakdown (`platforms`: standalonewindows / android /
+     *    ios) sums to what the **website / VRCX** show — it counts users who are
+     *    mid-join / in-transit that `n_users` doesn't yet, so it skews a few HIGH.
+     *
+     * No single field matches both surfaces. We match the **in-game client**
+     * (the truest source for the user) by preferring `n_users`, and only fall
+     * back to the platforms sum / `userCount` when `n_users` is absent.
      */
     private fun extractInstanceUserCount(inst: JSONObject): Int {
+        val nUsers = inst.optInt("n_users", -1)
+        if (nUsers >= 0) return nUsers
+
         val platforms = inst.optJSONObject("platforms")
         if (platforms != null) {
             var sum = 0
@@ -198,8 +207,6 @@ object VrchatAuthManager {
             }
             return sum
         }
-        val nUsers = inst.optInt("n_users", -1)
-        if (nUsers >= 0) return nUsers
         return inst.optInt("userCount", 0)
     }
 
