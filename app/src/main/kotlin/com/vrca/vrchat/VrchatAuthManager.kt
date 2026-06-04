@@ -31,13 +31,6 @@ object VrchatAuthManager {
     private val _loggedOutSignal = kotlinx.coroutines.flow.MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val loggedOutSignal: kotlinx.coroutines.flow.SharedFlow<Unit> = _loggedOutSignal
 
-    // TEMPORARY DIAGNOSTIC: the latest raw instance-count breakdown, surfaced in
-    // the VRChat tab so the user can compare each candidate field against the
-    // in-game instance panel (no adb/PC needed). Remove once the correct field
-    // is confirmed.
-    private val _instanceCountDebug = kotlinx.coroutines.flow.MutableStateFlow("")
-    val instanceCountDebug: kotlinx.coroutines.flow.StateFlow<String> = _instanceCountDebug
-
     private const val TAG = "VrchatAuth"
     private const val BASE = "https://api.vrchat.cloud/api/1"
     private const val USER_AGENT = "VRC-A-Companion/1.0 (Android; companion app)"
@@ -189,48 +182,36 @@ object VrchatAuthManager {
     /**
      * Derives the in-instance headcount from a `/instances/{loc}` JSON body.
      *
-     * VRChat exposes TWO different counts on this object and they routinely
-     * disagree by a few users:
-     *  - `n_users` is what the **in-game client's** instance panel shows (the
+     * VRChat exposes THREE candidate counts and they disagree by a few users:
+     *  - `userCount` is what the **in-game client's** instance panel shows (the
      *    number the player and everyone in the instance actually see in-headset).
-     *  - the per-platform breakdown (`platforms`: standalonewindows / android /
-     *    ios) sums to what the **website / VRCX** show — it counts users who are
-     *    mid-join / in-transit that `n_users` doesn't yet, so it skews a few HIGH.
+     *  - `n_users` and the per-platform breakdown (`platforms`: standalonewindows
+     *    / android / ios, which sums to the **website / VRCX** number) AGREE with
+     *    each other but run a few HIGH — they count users mid-join / in-transit /
+     *    timing-out that the in-game client has already dropped.
      *
-     * No single field matches both surfaces. We match the **in-game client**
-     * (the truest source for the user) by preferring `n_users`, and only fall
-     * back to the platforms sum / `userCount` when `n_users` is absent.
+     * Confirmed empirically (debug overlay vs the in-game panel: userCount=36 ==
+     * in-game, while n_users=47 and platformsSum=47 both over-counted). We match
+     * the in-game client by preferring `userCount`, falling back to `n_users`
+     * then the platforms sum only when it is absent.
      */
     private fun extractInstanceUserCount(inst: JSONObject): Int {
-        // --- DIAGNOSTIC (temporary): log EVERY candidate count so we can see
-        // which field matches the in-game instance panel. Capture with:
-        //   adb logcat -s VrchatAuth | grep INSTANCE_COUNT_DEBUG
-        // then compare against the number VRChat shows in-game at that moment.
-        val platformsObj = inst.optJSONObject("platforms")
-        var platformsSum = 0
-        val platformParts = StringBuilder()
-        if (platformsObj != null) {
-            val k = platformsObj.keys()
-            while (k.hasNext()) {
-                val key = k.next()
-                val v = platformsObj.optInt(key, 0)
-                platformsSum += v
-                platformParts.append(key).append('=').append(v).append(' ')
-            }
-        }
-        val debugLine = "n_users=${inst.optInt("n_users", -1)} " +
-            "userCount=${inst.optInt("userCount", -1)} " +
-            "platformsSum=$platformsSum [${platformParts.toString().trim()}] " +
-            "queue=${inst.optInt("queueSize", -1)} cap=${inst.optInt("capacity", -1)}"
-        Log.w(TAG, "INSTANCE_COUNT_DEBUG $debugLine")
-        _instanceCountDebug.value = debugLine
-        // --- END DIAGNOSTIC
+        val userCount = inst.optInt("userCount", -1)
+        if (userCount >= 0) return userCount
 
         val nUsers = inst.optInt("n_users", -1)
         if (nUsers >= 0) return nUsers
 
-        if (platformsObj != null) return platformsSum
-        return inst.optInt("userCount", 0)
+        val platforms = inst.optJSONObject("platforms")
+        if (platforms != null) {
+            var sum = 0
+            val keys = platforms.keys()
+            while (keys.hasNext()) {
+                sum += platforms.optInt(keys.next(), 0)
+            }
+            return sum
+        }
+        return 0
     }
 
     /**
