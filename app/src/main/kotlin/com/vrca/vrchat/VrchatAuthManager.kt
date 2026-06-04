@@ -31,6 +31,13 @@ object VrchatAuthManager {
     private val _loggedOutSignal = kotlinx.coroutines.flow.MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val loggedOutSignal: kotlinx.coroutines.flow.SharedFlow<Unit> = _loggedOutSignal
 
+    // TEMPORARY DIAGNOSTIC: the latest raw instance-count breakdown, surfaced in
+    // the VRChat tab so the user can compare each candidate field against the
+    // in-game instance panel (no adb/PC needed). Remove once the correct field
+    // is confirmed.
+    private val _instanceCountDebug = kotlinx.coroutines.flow.MutableStateFlow("")
+    val instanceCountDebug: kotlinx.coroutines.flow.StateFlow<String> = _instanceCountDebug
+
     private const val TAG = "VrchatAuth"
     private const val BASE = "https://api.vrchat.cloud/api/1"
     private const val USER_AGENT = "VRC-A-Companion/1.0 (Android; companion app)"
@@ -211,15 +218,12 @@ object VrchatAuthManager {
                 platformParts.append(key).append('=').append(v).append(' ')
             }
         }
-        Log.w(
-            TAG,
-            "INSTANCE_COUNT_DEBUG n_users=${inst.optInt("n_users", -1)} " +
-                "userCount=${inst.optInt("userCount", -1)} " +
-                "platformsSum=$platformsSum [${platformParts.toString().trim()}] " +
-                "queueSize=${inst.optInt("queueSize", -1)} " +
-                "capacity=${inst.optInt("capacity", -1)} " +
-                "recommendedCapacity=${inst.optInt("recommendedCapacity", -1)}"
-        )
+        val debugLine = "n_users=${inst.optInt("n_users", -1)} " +
+            "userCount=${inst.optInt("userCount", -1)} " +
+            "platformsSum=$platformsSum [${platformParts.toString().trim()}] " +
+            "queue=${inst.optInt("queueSize", -1)} cap=${inst.optInt("capacity", -1)}"
+        Log.w(TAG, "INSTANCE_COUNT_DEBUG $debugLine")
+        _instanceCountDebug.value = debugLine
         // --- END DIAGNOSTIC
 
         val nUsers = inst.optInt("n_users", -1)

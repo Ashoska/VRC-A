@@ -226,6 +226,17 @@ internal fun VrchatStatusPage(
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
+                                // TEMPORARY DIAGNOSTIC: raw instance-count fields so
+                                // we can see which one matches the in-game panel.
+                                val countDebug by com.vrca.vrchat.VrchatAuthManager
+                                    .instanceCountDebug.collectAsState()
+                                if (countDebug.isNotBlank()) {
+                                    Text(
+                                        "DEBUG: $countDebug",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
                             }
                         } else {
                             Text(
