@@ -1,5 +1,8 @@
 package com.vrca.admin
 
+import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
 import android.util.Log
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
@@ -110,6 +113,73 @@ object AdminRuntime {
     fun updateSweepData(users: List<SweepUser>) { sweepData = users }
 
     val browsingState: StateFlow<Boolean> get() = browsing.asStateFlow()
+
+    // ---- Directed-release APK picker (survives Activity recreation) ----
+    // The admin detail view's "Pick APK" launches the system file picker
+    // (DocumentsUI). On the heavy admin app that routinely evicts/recreates the
+    // admin Activity on return, so the detail composable — and any plain
+    // `remember` picker state inside it — is disposed and rebuilt, and a copy
+    // coroutine on the composition scope is cancelled. Holding the picked APK
+    // here (process lifetime) + running the copy/parse on [scope] makes the
+    // selection survive that recreation: the rebuilt detail view reads it back.
+    data class PickedApk(
+        val docId: String,
+        val cachePath: String,
+        val fileName: String,
+        val versionCode: Long,
+        val versionName: String,
+        val error: String,
+        val parsing: Boolean
+    )
+
+    private val pickedApk = MutableStateFlow<PickedApk?>(null)
+    val pickedApkState: StateFlow<PickedApk?> get() = pickedApk.asStateFlow()
+
+    /**
+     * Copy the picked [uri] to cache and parse its version on the process-scoped
+     * [scope] (NOT the Compose composition), publishing the result to
+     * [pickedApkState] keyed by [docId]. Survives the Activity recreation that
+     * returning from the file picker triggers.
+     */
+    fun ingestPickedApk(appContext: Context, docId: String, uri: Uri) {
+        val clean = docId.trim()
+        if (clean.isBlank()) return
+        // Optimistic "reading…" state so the UI reflects the pick immediately.
+        pickedApk.value = PickedApk(clean, "", "", 0L, "", "", parsing = true)
+        scope.launch {
+            val name = runCatching {
+                appContext.contentResolver.query(uri, null, null, null, null)?.use { c ->
+                    c.moveToFirst()
+                    c.getString(c.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME))
+                }
+            }.getOrNull() ?: "targeted-update.apk"
+
+            val tmp = copyUriToCache(appContext, uri)
+            if (tmp == null) {
+                pickedApk.value = PickedApk(clean, "", name, 0L, "",
+                    "Could not read the selected file.", parsing = false)
+                return@launch
+            }
+            val info = parseApkInfo(appContext, tmp.absolutePath)
+            if (info == null) {
+                pickedApk.value = PickedApk(clean, tmp.absolutePath, name, 0L, "",
+                    "Could not read version info.\nMake sure this is a valid APK.", parsing = false)
+                return@launch
+            }
+            pickedApk.value = PickedApk(
+                clean, tmp.absolutePath, name, info.first, info.second, "", parsing = false
+            )
+        }
+    }
+
+    /** Clear the picked APK (after a successful push, or for a specific doc). */
+    fun clearPickedApk(docId: String? = null) {
+        val cur = pickedApk.value ?: return
+        if (docId == null || cur.docId == docId.trim()) {
+            runCatching { if (cur.cachePath.isNotBlank()) java.io.File(cur.cachePath).delete() }
+            pickedApk.value = null
+        }
+    }
 
     private suspend fun runBrowseHeartbeatLoop() {
         var browsingStartedAt = 0L

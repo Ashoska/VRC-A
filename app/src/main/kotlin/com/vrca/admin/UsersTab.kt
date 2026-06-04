@@ -59,6 +59,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -1201,12 +1202,23 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
             var hasTargeted by remember { mutableStateOf(false) }
             var loadedTarget by remember { mutableStateOf(false) }
 
-            // APK upload state
-            var tPickedFileName by remember { mutableStateOf("") }
-            var tParsedCode by remember { mutableLongStateOf(0L) }
-            var tParsedName by remember { mutableStateOf("") }
-            var tParseError by remember { mutableStateOf("") }
-            var tCachedApkPath by remember { mutableStateOf("") }
+            // APK picker state is held in AdminRuntime (process lifetime) so it
+            // survives the admin Activity being recreated when returning from the
+            // system file picker — otherwise the pick "doesn't apply" and the
+            // detail view resets. Read it back, scoped to THIS user's docId.
+            val pickedApk by AdminRuntime.pickedApkState.collectAsState()
+            val picked = pickedApk?.takeIf { it.docId == docId }
+            val tPickedFileName = when {
+                picked == null -> ""
+                picked.parsing -> "Reading APK…"
+                else -> picked.fileName
+            }
+            val tParsedCode = picked?.versionCode ?: 0L
+            val tParsedName = picked?.versionName.orEmpty()
+            val tParseError = picked?.error.orEmpty()
+            val tCachedApkPath = picked?.cachePath.orEmpty()
+
+            // APK upload-action state (local — only relevant while actively pushing)
             var tUploading by remember { mutableStateOf(false) }
             var tUploadPhase by remember { mutableStateOf("") }
             var tUploadProgress by remember { mutableStateOf(0f) }
@@ -1238,29 +1250,12 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                 ActivityResultContracts.GetContent()
             ) { uri: Uri? ->
                 if (uri == null) return@rememberLauncherForActivityResult
-                tParseError = ""; tParsedCode = 0L; tParsedName = ""
-                tPickedFileName = ""; tCachedApkPath = ""; tUploadDone = false
-
-                scope.launch {
-                    val tmp = copyUriToCache(ctx, uri)
-                    if (tmp == null) { tParseError = "Could not read the selected file."; return@launch }
-                    tCachedApkPath = tmp.absolutePath
-
-                    tPickedFileName = runCatching {
-                        ctx.contentResolver.query(uri, null, null, null, null)?.use { c ->
-                            c.moveToFirst()
-                            c.getString(c.getColumnIndexOrThrow(android.provider.OpenableColumns.DISPLAY_NAME))
-                        }
-                    }.getOrNull() ?: "targeted-update.apk"
-
-                    val info = parseApkInfo(ctx, tmp.absolutePath)
-                    if (info == null) {
-                        tParseError = "Could not read version info.\nMake sure this is a valid APK."
-                        return@launch
-                    }
-                    tParsedCode = info.first
-                    tParsedName = info.second
-                }
+                tUploadDone = false
+                // Copy + parse run on AdminRuntime's process scope, so they
+                // complete (and the result persists) even if this Activity is
+                // recreated on return from the picker. Use the application
+                // context — the Activity may not survive.
+                AdminRuntime.ingestPickedApk(ctx.applicationContext, docId, uri)
             }
 
             fun startTargetedUpload() {
@@ -1318,8 +1313,8 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                         tUploadPhase = ""
                         targetedUploadError = null
 
-                        runCatching { apkFile.delete() }
-                        tCachedApkPath = ""; tPickedFileName = ""; tParsedCode = 0L; tParsedName = ""
+                        // Clears the picked-APK holder and deletes the cached file.
+                        AdminRuntime.clearPickedApk(docId)
 
                     }.onFailure { e ->
                         val msg = e.message ?: "Upload failed"
