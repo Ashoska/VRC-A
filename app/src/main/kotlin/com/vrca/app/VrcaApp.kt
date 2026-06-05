@@ -714,10 +714,20 @@ private suspend fun bootstrapFirebaseAndCache(ctx: Context) {
 
     // Admin build must not appear in the public user directory.
     if (!BuildConfig.IS_ADMIN_BUILD) {
-        runCatching {
-            db.collection("users").document(deviceHash)
-                .set(safeUser, SetOptions.merge())
-                .await()
+        // Throttle the bootstrap liveness write: the VM cold-open write also
+        // writes lastSeenAt/updatedAt seconds later, so this is redundant when
+        // a recent write already landed. Skip when the last real self-sync
+        // was within 20 min (matches the VM's COLD_OPEN_LIVENESS_THROTTLE_MS).
+        val lastSyncMs = ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
+            .getLong("last_self_sync_ms", 0L)
+        val recentWrite = System.currentTimeMillis() - lastSyncMs < 20L * 60L * 1000L
+
+        if (!recentWrite) {
+            runCatching {
+                db.collection("users").document(deviceHash)
+                    .set(safeUser, SetOptions.merge())
+                    .await()
+            }
         }
 
         runCatching {

@@ -343,8 +343,10 @@ fun VrcaScreen(
     // user left running when they backgrounded the app. Toggles already start OFF on
     // a fresh process (VM defaults) and must survive Activity recreation.
     LaunchedEffect(Unit) {
-        chatboxViewModel.setSpotifyDemoFlag(UiPrefs.readSpotifyDemo(ctx))
-        chatboxViewModel.updateSpotifyPreset(UiPrefs.readSpotifyPreset(ctx))
+        val demo = UiPrefs.readSpotifyDemo(ctx)
+        val preset = UiPrefs.readSpotifyPreset(ctx)
+        if (chatboxViewModel.spotifyDemoEnabled != demo) chatboxViewModel.setSpotifyDemoFlag(demo)
+        if (chatboxViewModel.spotifyPreset != preset) chatboxViewModel.updateSpotifyPreset(preset)
     }
 
     // If banned, always keep them on Home (so they see ban screen)

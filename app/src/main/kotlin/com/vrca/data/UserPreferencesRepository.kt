@@ -15,6 +15,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import java.time.Instant
@@ -131,101 +132,101 @@ class UserPreferencesRepository(private val context: Context) {
         slotAddr?.takeIf { it.isNotBlank() }
             ?: prefs[Keys.IP]?.takeIf { it.isNotBlank() }
             ?: "127.0.0.1"
-    }
-    val port: Flow<Int> = context.dataStore.data.map { it[Keys.PORT] ?: 9000 }
-    val ip1Name:      Flow<String> = context.dataStore.data.map { it[Keys.IP_1_NAME]    ?: "Home" }
-    val ip1Address:   Flow<String> = context.dataStore.data.map { it[Keys.IP_1_ADDRESS] ?: "" }
-    val ip2Name:      Flow<String> = context.dataStore.data.map { it[Keys.IP_2_NAME]    ?: "Hotspot" }
-    val ip2Address:   Flow<String> = context.dataStore.data.map { it[Keys.IP_2_ADDRESS] ?: "" }
-    val ip3Name:      Flow<String> = context.dataStore.data.map { it[Keys.IP_3_NAME]    ?: "Other" }
-    val ip3Address:   Flow<String> = context.dataStore.data.map { it[Keys.IP_3_ADDRESS] ?: "" }
-    val activeIpSlot: Flow<Int>    = context.dataStore.data.map { it[Keys.ACTIVE_IP_SLOT] ?: 1 }
+    }.distinctUntilChanged()
+    val port: Flow<Int> = context.dataStore.data.map { it[Keys.PORT] ?: 9000 }.distinctUntilChanged()
+    val ip1Name:      Flow<String> = context.dataStore.data.map { it[Keys.IP_1_NAME]    ?: "Home" }.distinctUntilChanged()
+    val ip1Address:   Flow<String> = context.dataStore.data.map { it[Keys.IP_1_ADDRESS] ?: "" }.distinctUntilChanged()
+    val ip2Name:      Flow<String> = context.dataStore.data.map { it[Keys.IP_2_NAME]    ?: "Hotspot" }.distinctUntilChanged()
+    val ip2Address:   Flow<String> = context.dataStore.data.map { it[Keys.IP_2_ADDRESS] ?: "" }.distinctUntilChanged()
+    val ip3Name:      Flow<String> = context.dataStore.data.map { it[Keys.IP_3_NAME]    ?: "Other" }.distinctUntilChanged()
+    val ip3Address:   Flow<String> = context.dataStore.data.map { it[Keys.IP_3_ADDRESS] ?: "" }.distinctUntilChanged()
+    val activeIpSlot: Flow<Int>    = context.dataStore.data.map { it[Keys.ACTIVE_IP_SLOT] ?: 1 }.distinctUntilChanged()
 
-    val isRealtimeMsg:    Flow<Boolean> = context.dataStore.data.map { it[Keys.REALTIME]         ?: false }
-    val isTriggerSfx:     Flow<Boolean> = context.dataStore.data.map { it[Keys.TRIGGER_SFX]      ?: true }
-    val isTypingIndicator: Flow<Boolean> = context.dataStore.data.map { it[Keys.TYPING]           ?: true }
-    val isSendImmediately: Flow<Boolean> = context.dataStore.data.map { it[Keys.SEND_IMMEDIATELY] ?: true }
+    val isRealtimeMsg:    Flow<Boolean> = context.dataStore.data.map { it[Keys.REALTIME]         ?: false }.distinctUntilChanged()
+    val isTriggerSfx:     Flow<Boolean> = context.dataStore.data.map { it[Keys.TRIGGER_SFX]      ?: true }.distinctUntilChanged()
+    val isTypingIndicator: Flow<Boolean> = context.dataStore.data.map { it[Keys.TYPING]           ?: true }.distinctUntilChanged()
+    val isSendImmediately: Flow<Boolean> = context.dataStore.data.map { it[Keys.SEND_IMMEDIATELY] ?: true }.distinctUntilChanged()
 
-    val pinnedMessage:        Flow<String>  = context.dataStore.data.map { it[Keys.PINNED_MESSAGE]         ?: "" }
-    val pinnedMessageEnabled: Flow<Boolean> = context.dataStore.data.map { it[Keys.PINNED_MESSAGE_ENABLED] ?: false }
-    val pinnedPreset1:        Flow<String>  = context.dataStore.data.map { it[Keys.PINNED_PRESET_1]        ?: "" }
-    val pinnedPreset2:        Flow<String>  = context.dataStore.data.map { it[Keys.PINNED_PRESET_2]        ?: "" }
-    val pinnedPreset3:        Flow<String>  = context.dataStore.data.map { it[Keys.PINNED_PRESET_3]        ?: "" }
+    val pinnedMessage:        Flow<String>  = context.dataStore.data.map { it[Keys.PINNED_MESSAGE]         ?: "" }.distinctUntilChanged()
+    val pinnedMessageEnabled: Flow<Boolean> = context.dataStore.data.map { it[Keys.PINNED_MESSAGE_ENABLED] ?: false }.distinctUntilChanged()
+    val pinnedPreset1:        Flow<String>  = context.dataStore.data.map { it[Keys.PINNED_PRESET_1]        ?: "" }.distinctUntilChanged()
+    val pinnedPreset2:        Flow<String>  = context.dataStore.data.map { it[Keys.PINNED_PRESET_2]        ?: "" }.distinctUntilChanged()
+    val pinnedPreset3:        Flow<String>  = context.dataStore.data.map { it[Keys.PINNED_PRESET_3]        ?: "" }.distinctUntilChanged()
 
-    val cycleEnabled:  Flow<Boolean> = context.dataStore.data.map { it[Keys.CYCLE_ENABLED]  ?: false }
-    val cycleMessages: Flow<String>  = context.dataStore.data.map { it[Keys.CYCLE_MESSAGES] ?: "" }
-    val cycleInterval: Flow<Int>     = context.dataStore.data.map { it[Keys.CYCLE_INTERVAL] ?: 10 }
+    val cycleEnabled:  Flow<Boolean> = context.dataStore.data.map { it[Keys.CYCLE_ENABLED]  ?: false }.distinctUntilChanged()
+    val cycleMessages: Flow<String>  = context.dataStore.data.map { it[Keys.CYCLE_MESSAGES] ?: "" }.distinctUntilChanged()
+    val cycleInterval: Flow<Int>     = context.dataStore.data.map { it[Keys.CYCLE_INTERVAL] ?: 10 }.distinctUntilChanged()
 
-    val cyclePreset1Messages: Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_P1_MSG]  ?: "" }
-    val cyclePreset1Interval: Flow<Int>    = context.dataStore.data.map { it[Keys.CYCLE_P1_INT]  ?: 10 }
-    val cyclePreset2Messages: Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_P2_MSG]  ?: "" }
-    val cyclePreset2Interval: Flow<Int>    = context.dataStore.data.map { it[Keys.CYCLE_P2_INT]  ?: 10 }
-    val cyclePreset3Messages: Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_P3_MSG]  ?: "" }
-    val cyclePreset3Interval: Flow<Int>    = context.dataStore.data.map { it[Keys.CYCLE_P3_INT]  ?: 10 }
-    val cyclePreset4Messages: Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_P4_MSG]  ?: "" }
-    val cyclePreset4Interval: Flow<Int>    = context.dataStore.data.map { it[Keys.CYCLE_P4_INT]  ?: 10 }
-    val cyclePreset5Messages: Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_P5_MSG]  ?: "" }
-    val cyclePreset5Interval: Flow<Int>    = context.dataStore.data.map { it[Keys.CYCLE_P5_INT]  ?: 10 }
+    val cyclePreset1Messages: Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_P1_MSG]  ?: "" }.distinctUntilChanged()
+    val cyclePreset1Interval: Flow<Int>    = context.dataStore.data.map { it[Keys.CYCLE_P1_INT]  ?: 10 }.distinctUntilChanged()
+    val cyclePreset2Messages: Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_P2_MSG]  ?: "" }.distinctUntilChanged()
+    val cyclePreset2Interval: Flow<Int>    = context.dataStore.data.map { it[Keys.CYCLE_P2_INT]  ?: 10 }.distinctUntilChanged()
+    val cyclePreset3Messages: Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_P3_MSG]  ?: "" }.distinctUntilChanged()
+    val cyclePreset3Interval: Flow<Int>    = context.dataStore.data.map { it[Keys.CYCLE_P3_INT]  ?: 10 }.distinctUntilChanged()
+    val cyclePreset4Messages: Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_P4_MSG]  ?: "" }.distinctUntilChanged()
+    val cyclePreset4Interval: Flow<Int>    = context.dataStore.data.map { it[Keys.CYCLE_P4_INT]  ?: 10 }.distinctUntilChanged()
+    val cyclePreset5Messages: Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_P5_MSG]  ?: "" }.distinctUntilChanged()
+    val cyclePreset5Interval: Flow<Int>    = context.dataStore.data.map { it[Keys.CYCLE_P5_INT]  ?: 10 }.distinctUntilChanged()
 
-    val spotifyEnabled:        Flow<Boolean> = context.dataStore.data.map { it[Keys.SPOTIFY_ENABLED] ?: false }
-    val spotifyPreset:         Flow<Int>     = context.dataStore.data.map { (it[Keys.SPOTIFY_PRESET] ?: 1).coerceIn(1, 5) }
-    val pinnedPresetsCollapsed: Flow<Boolean> = context.dataStore.data.map { it[Keys.PINNED_PRESETS_COLLAPSED] ?: true }
-    val cyclePresetsCollapsed:  Flow<Boolean> = context.dataStore.data.map { it[Keys.CYCLE_PRESETS_COLLAPSED]  ?: true }
-    val timeEnabled:            Flow<Boolean> = context.dataStore.data.map { it[Keys.TIME_ENABLED] ?: false }
-    val timeMode:               Flow<String>  = context.dataStore.data.map { it[Keys.TIME_MODE]    ?: "Device" }
+    val spotifyEnabled:        Flow<Boolean> = context.dataStore.data.map { it[Keys.SPOTIFY_ENABLED] ?: false }.distinctUntilChanged()
+    val spotifyPreset:         Flow<Int>     = context.dataStore.data.map { (it[Keys.SPOTIFY_PRESET] ?: 1).coerceIn(1, 5) }.distinctUntilChanged()
+    val pinnedPresetsCollapsed: Flow<Boolean> = context.dataStore.data.map { it[Keys.PINNED_PRESETS_COLLAPSED] ?: true }.distinctUntilChanged()
+    val cyclePresetsCollapsed:  Flow<Boolean> = context.dataStore.data.map { it[Keys.CYCLE_PRESETS_COLLAPSED]  ?: true }.distinctUntilChanged()
+    val timeEnabled:            Flow<Boolean> = context.dataStore.data.map { it[Keys.TIME_ENABLED] ?: false }.distinctUntilChanged()
+    val timeMode:               Flow<String>  = context.dataStore.data.map { it[Keys.TIME_MODE]    ?: "Device" }.distinctUntilChanged()
     val cardOrder: Flow<List<String>> = context.dataStore.data.map { prefs ->
         val raw = prefs[Keys.CARD_ORDER] ?: "Time,Pinned,Cycle,NowPlaying"
         raw.split(",").map { it.trim().let { k -> if (k == "AFK") "Pinned" else k } }.filter { it.isNotBlank() }
-    }
+    }.distinctUntilChanged()
 
-    val notifFriendRequest:        Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_REQUEST]        ?: false }
-    val notifNewFriend:            Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_NEW_FRIEND]            ?: false }
-    val notifUnfriend:             Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_UNFRIEND]              ?: false }
-    val notifFriendOnline:         Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_ONLINE]         ?: false }
-    val notifFriendOffline:        Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_OFFLINE]        ?: false }
-    val notifFriendActive:         Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_ACTIVE]         ?: false }
-    val notifFriendLocation:       Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_LOCATION]       ?: false }
-    val notifFriendStatus:         Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_STATUS]         ?: false }
-    val notifFriendAvatar:         Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_AVATAR]         ?: false }
-    val notifFriendBio:            Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_BIO]            ?: false }
-    val notifFriendDisplayName:    Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_DISPLAY_NAME]   ?: false }
-    val notifInvite:               Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_INVITE]                ?: false }
+    val notifFriendRequest:        Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_REQUEST]        ?: false }.distinctUntilChanged()
+    val notifNewFriend:            Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_NEW_FRIEND]            ?: false }.distinctUntilChanged()
+    val notifUnfriend:             Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_UNFRIEND]              ?: false }.distinctUntilChanged()
+    val notifFriendOnline:         Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_ONLINE]         ?: false }.distinctUntilChanged()
+    val notifFriendOffline:        Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_OFFLINE]        ?: false }.distinctUntilChanged()
+    val notifFriendActive:         Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_ACTIVE]         ?: false }.distinctUntilChanged()
+    val notifFriendLocation:       Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_LOCATION]       ?: false }.distinctUntilChanged()
+    val notifFriendStatus:         Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_STATUS]         ?: false }.distinctUntilChanged()
+    val notifFriendAvatar:         Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_AVATAR]         ?: false }.distinctUntilChanged()
+    val notifFriendBio:            Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_BIO]            ?: false }.distinctUntilChanged()
+    val notifFriendDisplayName:    Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_DISPLAY_NAME]   ?: false }.distinctUntilChanged()
+    val notifInvite:               Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_INVITE]                ?: false }.distinctUntilChanged()
     // Auto-mirror legacy combined-invite preference: if user previously enabled
     // KEY_NOTIF_INVITE (which used to gate both world invites AND invite requests),
     // treat invite-requests as enabled too until they explicitly toggle the new
     // KEY_NOTIF_INVITE_REQUEST. After that, the explicit setting takes over.
     val notifInviteRequest:        Flow<Boolean> = context.dataStore.data.map { prefs ->
         prefs[Keys.NOTIF_INVITE_REQUEST] ?: (prefs[Keys.NOTIF_INVITE] ?: false)
-    }
-    val notifGroupInvite:          Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_INVITE]          ?: false }
-    val notifGroupAnnouncement:    Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_ANNOUNCEMENT]    ?: false }
-    val notifGroupEvent:           Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_EVENT]           ?: false }
-    val notifGroupQueue:           Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_QUEUE]           ?: false }
-    val notifGroupJoinRequest:     Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_JOIN_REQUEST]    ?: false }
-    val notifGroupRole:            Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_ROLE]            ?: false }
-    val notifGroupInstance:        Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_INSTANCE]        ?: false }
-    val notifAppUpdate:            Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_APP_UPDATE]            ?: true  }
-    val notifAnnouncements:        Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_ANNOUNCEMENTS]         ?: true  }
-    val notifConnection:           Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_CONNECTION]            ?: false }
-    val notifAuth:                 Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_AUTH]                  ?: true  }
-    val notifVoteToKick:           Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_VOTE_TO_KICK]          ?: false }
-    val notifFriendRank:           Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_RANK]           ?: false }
-    val notifVrchatMessage:        Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_VRCHAT_MESSAGE]        ?: false }
-    val notifVrchatAlert:          Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_VRCHAT_ALERT]          ?: false }
-    val notifGiftReceived:         Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GIFT_RECEIVED]         ?: false }
+    }.distinctUntilChanged()
+    val notifGroupInvite:          Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_INVITE]          ?: false }.distinctUntilChanged()
+    val notifGroupAnnouncement:    Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_ANNOUNCEMENT]    ?: false }.distinctUntilChanged()
+    val notifGroupEvent:           Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_EVENT]           ?: false }.distinctUntilChanged()
+    val notifGroupQueue:           Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_QUEUE]           ?: false }.distinctUntilChanged()
+    val notifGroupJoinRequest:     Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_JOIN_REQUEST]    ?: false }.distinctUntilChanged()
+    val notifGroupRole:            Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_ROLE]            ?: false }.distinctUntilChanged()
+    val notifGroupInstance:        Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_INSTANCE]        ?: false }.distinctUntilChanged()
+    val notifAppUpdate:            Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_APP_UPDATE]            ?: true  }.distinctUntilChanged()
+    val notifAnnouncements:        Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_ANNOUNCEMENTS]         ?: true  }.distinctUntilChanged()
+    val notifConnection:           Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_CONNECTION]            ?: false }.distinctUntilChanged()
+    val notifAuth:                 Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_AUTH]                  ?: true  }.distinctUntilChanged()
+    val notifVoteToKick:           Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_VOTE_TO_KICK]          ?: false }.distinctUntilChanged()
+    val notifFriendRank:           Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_RANK]           ?: false }.distinctUntilChanged()
+    val notifVrchatMessage:        Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_VRCHAT_MESSAGE]        ?: false }.distinctUntilChanged()
+    val notifVrchatAlert:          Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_VRCHAT_ALERT]          ?: false }.distinctUntilChanged()
+    val notifGiftReceived:         Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_GIFT_RECEIVED]         ?: false }.distinctUntilChanged()
 
-    val notifSeenIds:              Flow<String>  = context.dataStore.data.map { it[Keys.NOTIF_SEEN_IDS]              ?: "[]" }
-    val notifGroupAnnouncementSeen: Flow<String> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_ANNOUNCEMENT_SEEN] ?: "{}" }
-    val notifGiftSeenAt:           Flow<Long>    = context.dataStore.data.map { it[Keys.NOTIF_GIFT_SEEN_AT]          ?: 0L }
-    val notifBackfillInitialized:  Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_BACKFILL_INITIALIZED]  ?: false }
+    val notifSeenIds:              Flow<String>  = context.dataStore.data.map { it[Keys.NOTIF_SEEN_IDS]              ?: "[]" }.distinctUntilChanged()
+    val notifGroupAnnouncementSeen: Flow<String> = context.dataStore.data.map { it[Keys.NOTIF_GROUP_ANNOUNCEMENT_SEEN] ?: "{}" }.distinctUntilChanged()
+    val notifGiftSeenAt:           Flow<Long>    = context.dataStore.data.map { it[Keys.NOTIF_GIFT_SEEN_AT]          ?: 0L }.distinctUntilChanged()
+    val notifBackfillInitialized:  Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_BACKFILL_INITIALIZED]  ?: false }.distinctUntilChanged()
 
-    val setupVrchatDone: Flow<Boolean> = context.dataStore.data.map { it[Keys.SETUP_VRCHAT_DONE] ?: false }
-    val setupIpDone:     Flow<Boolean> = context.dataStore.data.map { it[Keys.SETUP_IP_DONE]     ?: false }
-    val ipSlot1Migrated: Flow<Boolean> = context.dataStore.data.map { it[Keys.IP_SLOT1_MIGRATED] ?: false }
+    val setupVrchatDone: Flow<Boolean> = context.dataStore.data.map { it[Keys.SETUP_VRCHAT_DONE] ?: false }.distinctUntilChanged()
+    val setupIpDone:     Flow<Boolean> = context.dataStore.data.map { it[Keys.SETUP_IP_DONE]     ?: false }.distinctUntilChanged()
+    val ipSlot1Migrated: Flow<Boolean> = context.dataStore.data.map { it[Keys.IP_SLOT1_MIGRATED] ?: false }.distinctUntilChanged()
 
-    val discordRpcEnabled:     Flow<Boolean> = context.dataStore.data.map { it[Keys.DISCORD_RPC_ENABLED]    ?: false }
-    val discordSessionSeeded:  Flow<Boolean> = context.dataStore.data.map { it[Keys.DISCORD_SESSION_SEEDED] ?: false }
-    val discordRiskAccepted:   Flow<Boolean> = context.dataStore.data.map { it[Keys.DISCORD_RISK_ACCEPTED]  ?: false }
+    val discordRpcEnabled:     Flow<Boolean> = context.dataStore.data.map { it[Keys.DISCORD_RPC_ENABLED]    ?: false }.distinctUntilChanged()
+    val discordSessionSeeded:  Flow<Boolean> = context.dataStore.data.map { it[Keys.DISCORD_SESSION_SEEDED] ?: false }.distinctUntilChanged()
+    val discordRiskAccepted:   Flow<Boolean> = context.dataStore.data.map { it[Keys.DISCORD_RISK_ACCEPTED]  ?: false }.distinctUntilChanged()
 
     suspend fun saveDiscordRpcEnabled(value: Boolean) = context.dataStore.edit { it[Keys.DISCORD_RPC_ENABLED] = value }
     suspend fun saveDiscordSessionSeeded(value: Boolean) = context.dataStore.edit { it[Keys.DISCORD_SESSION_SEEDED] = value }

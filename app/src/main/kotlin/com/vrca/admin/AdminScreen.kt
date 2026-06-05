@@ -442,8 +442,13 @@ fun AdminScreen() {
 
         // 2) Hit the server ONLY when there's nothing to show or the admin
         //    explicitly refreshed / paged (+500). Plain tab re-entry = no read.
+        //    When the cache already has data, a manual Refresh uses the cheap
+        //    incremental path instead of re-reading the whole collection.
         val explicitRefresh = key != lastFetchedKey
-        if (sharedUsers.isEmpty() || explicitRefresh) {
+        if (explicitRefresh && sharedUsers.isNotEmpty()) {
+            lastFetchedKey = key
+            incrementalDirectoryRefresh()
+        } else if (sharedUsers.isEmpty() || explicitRefresh) {
             sharedUsersLoading = sharedUsers.isEmpty()
             try {
                 val snap = db.collection("users")

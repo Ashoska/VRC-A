@@ -188,7 +188,7 @@ object AppShutdown {
             if (presence != null) {
                 data["vrchatState"] = presence.status
                 data["vrchatLocation"] = presence.location
-                data["vrchatWorldName"] = presence.worldName
+                data["vrchatWorld"] = presence.worldName
                 data["vrchatDisplayName"] = presence.displayName
             }
             // Carry the user's LAST content state (presets / messages / intervals /
