@@ -143,8 +143,6 @@ class VrcaViewModel(
 
         // Moderation attach retry
         private const val MOD_ATTACH_RETRY_MS = 1_250L
-        private const val MOD_POLL_MS = 60_000L
-        private const val MOD_POLL_WATCHED_MS = 10_000L
 
         // SharedPrefs (must match AdminScreen + VrcaApp/MainActivity)
         private const val REMOTE_PREFS_FILE = "vrca_remote"
@@ -200,7 +198,7 @@ class VrcaViewModel(
         liveSyncJob?.cancel()
         keepaliveJob?.cancel()
         moderationAttachJob?.cancel()
-        moderationUserReg?.cancel()
+        moderationUserReg?.remove()
         moderationDeviceReg?.remove()
         stopAll(clearFromChatbox = false)
         // Swipe is the only path that clears the app-scoped ViewModelStore, so when
@@ -874,7 +872,7 @@ class VrcaViewModel(
     // =========================
     // Moderation / punishments
     // =========================
-    private var moderationUserReg: kotlinx.coroutines.Job? = null
+    private var moderationUserReg: ListenerRegistration? = null
     private var moderationDeviceReg: ListenerRegistration? = null
     private var moderationAttachJob: Job? = null
 
@@ -918,49 +916,6 @@ class VrcaViewModel(
         } catch (_: Throwable) { /* nothing to do */ }
     }
 
-    private fun startModerationPollLoop(deviceHash: String): kotlinx.coroutines.Job =
-        viewModelScope.launch {
-            while (true) {
-                try {
-                    val snap = db.collection(COL_USERS).document(deviceHash)
-                        .get(com.google.firebase.firestore.Source.SERVER)
-                        .await()
-
-                    if (snap == null || !snap.exists()) {
-                        warned = false; warnReason = ""
-                        uidBanned = false; banReason = ""
-                        moderationConnected = true; moderationLastError = ""
-                        enforceIfBannedChanged()
-                    } else {
-                        warned = snap.getBoolean("warned") ?: false
-                        warnReason = (snap.getString("warnReason") ?: "").trim()
-                        uidBanned = snap.getBoolean("banned") ?: false
-                        banReason = (snap.getString("banReason") ?: "").trim()
-                        moderationConnected = true; moderationLastError = ""
-                        enforceIfBannedChanged()
-
-                        val killSignal = snap.getTimestamp("killSignal")
-                        if (killSignal != null) {
-                            val killMs = killSignal.seconds * 1000L + (killSignal.nanoseconds / 1_000_000L)
-                            val ageMs = System.currentTimeMillis() - killMs
-                            if (ageMs in 0L..60_000L) handleAdminKill()
-                        }
-
-                        targetedUpdateUrl = (snap.getString("targetedUpdateUrl") ?: "").trim()
-                        targetedUpdateNotes = (snap.getString("targetedUpdateNotes") ?: "").trim()
-                        applyRemoteConfig(snap)
-                    }
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e
-                } catch (e: Throwable) {
-                    moderationLastError = (e.message ?: "Moderation poll failed").take(4000)
-                    moderationConnected = false
-                }
-                val interval = if (com.vrca.sync.AdminWatchState.isWatched.value) MOD_POLL_WATCHED_MS else MOD_POLL_MS
-                delay(interval)
-            }
-        }
-
     private fun enforceIfBannedChanged() {
         val nowBanned = isBanned
         if (nowBanned == lastBanEffective) return
@@ -998,16 +953,42 @@ class VrcaViewModel(
                     continue
                 }
 
-                // Poll the user doc instead of a live snapshot listener.
-                // A listener re-bills a read on every self-write (hourly heartbeat,
-                // debounced sync, live-sync) — the dominant idle Firestore cost.
-                // Polling every 60s (10s while watched) caps reads at a fixed cadence
-                // instead of scaling with writes.
                 if (moderationUserReg == null) {
-                    moderationLastError = ""
-                    moderationConnected = true
+                    moderationUserReg = db.collection(COL_USERS).document(deviceHash)
+                        .addSnapshotListener { snap, e ->
+                            if (e != null) {
+                                moderationLastError = (e.message ?: "User-doc listen failed").take(4000)
+                                moderationConnected = false
+                                enforceIfBannedChanged()
+                                return@addSnapshotListener
+                            }
 
-                    moderationUserReg = startModerationPollLoop(deviceHash)
+                            if (snap == null || !snap.exists()) {
+                                warned = false; warnReason = ""
+                                uidBanned = false; banReason = ""
+                                moderationConnected = true; moderationLastError = ""
+                                enforceIfBannedChanged()
+                                return@addSnapshotListener
+                            }
+
+                            warned = snap.getBoolean("warned") ?: false
+                            warnReason = (snap.getString("warnReason") ?: "").trim()
+                            uidBanned = snap.getBoolean("banned") ?: false
+                            banReason = (snap.getString("banReason") ?: "").trim()
+                            moderationConnected = true; moderationLastError = ""
+                            enforceIfBannedChanged()
+
+                            val killSignal = snap.getTimestamp("killSignal")
+                            if (killSignal != null) {
+                                val killMs = killSignal.seconds * 1000L + (killSignal.nanoseconds / 1_000_000L)
+                                val ageMs = System.currentTimeMillis() - killMs
+                                if (ageMs in 0L..60_000L) handleAdminKill()
+                            }
+
+                            targetedUpdateUrl = (snap.getString("targetedUpdateUrl") ?: "").trim()
+                            targetedUpdateNotes = (snap.getString("targetedUpdateNotes") ?: "").trim()
+                            applyRemoteConfig(snap)
+                        }
                 }
 
                 if (moderationDeviceReg == null) {
