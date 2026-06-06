@@ -256,6 +256,15 @@ class VrcaViewModel(
     // race conditions between heartbeat and self-sync writes.
     private val lastSyncedValues = mutableMapOf<String, Any?>()
 
+    // Set by applyRemoteContentBeforeSync when the SERVER read confirms the user's
+    // doc already exists. The cold-open performSelfSync uses this to write LIVENESS
+    // ONLY (never content/toggles) for an existing doc — so a cold-open write can
+    // physically never overwrite an admin's offline edit (the edit lives on the
+    // server; the apply path + moderation listener pull it into local; the later
+    // debounced/hourly write pushes any genuine user edit up). A true first install
+    // (doc absent) still does the full creating write.
+    @Volatile private var remoteDocConfirmedExists = false
+
     // Gate self-sync until DataStore has provided its initial values. Without this
     // gate, an immediate sync on cold start writes the empty default ViewModel
     // state to Firestore, which then echoes back via the snapshot listener and
@@ -640,9 +649,19 @@ class VrcaViewModel(
                 Log.d("VrcaViewModel", "applyRemoteContentBeforeSync: no remote doc yet")
                 return@runCatching
             }
+            // The doc exists → the cold-open write must NOT write content/toggles
+            // (it would risk clobbering admin offline edits). Liveness-only from here.
+            remoteDocConfirmedExists = true
+            // Apply admin content/toggle edits. Each apply updates lastSyncedValues for
+            // the field it changed (so the moderation listener suppresses the duplicate);
+            // un-applied keys keep their prefs baseline so the listener can still apply a
+            // real admin edit and the delta can still push a genuine user offline edit.
+            // We deliberately do NOT blanket-seed the baseline from the snapshot — that
+            // poisoned the listener (it saw remote==baseline and suppressed un-applied
+            // admin edits) AND, combined with a stale local value, made the cold-open
+            // delta write the local value back, OVERWRITING the admin's edit.
             applyContentFromSnapshot(snap)
             applyOfflineToggleEdits(snap)
-            seedLastSyncedFromSnapshot(snap)
             Log.d("VrcaViewModel", "applyRemoteContentBeforeSync: applied remote content/toggles")
         }.onFailure { e ->
             Log.w("VrcaViewModel", "applyRemoteContentBeforeSync failed (listener will backstop): ${e.message}")
@@ -650,36 +669,33 @@ class VrcaViewModel(
     }
 
     /**
-     * Apply admin toggle edits made while this user was offline. Applies a toggle
-     * ONLY when the admin actually changed it — remote != persisted baseline
-     * ([lastSyncedValues]) — same semantics as [applyContentFromSnapshot]. Comparing
-     * against current local state would fight [restoreFeatureSession] (a user who was
-     * sending has the toggle true locally; if the admin never touched it the baseline
-     * also says true, so we correctly leave it alone). After this runs,
-     * [seedLastSyncedFromSnapshot] sets the baseline to the doc's values and the
-     * cold-open [performSelfSync] SKIPS toggle keys, so the admin's edit is never
-     * overwritten.
+     * Apply admin toggle edits made while this user was offline. **Toggles are special
+     * because of the OS-kill revival path**: [restoreFeatureSession] runs first and may
+     * have just resumed OSC sending with the toggles ON. So we apply a toggle change
+     * ONLY when there is a REAL persisted baseline ([lastSyncedValues]) that the admin
+     * genuinely changed (`remote != baseline`). We deliberately SKIP on a null baseline
+     * (return) instead of falling back to local — falling back to local could flip a
+     * just-restored toggle on a stale/missing baseline and STOP a revived user's OSC.
+     * With a real baseline, `remote == baseline` means the admin didn't touch it → we
+     * leave the restored toggle (and its OSC) alone; `remote != baseline` means the
+     * admin edited it (e.g. DISABLED afk while the app was OEM-killed) → we apply via
+     * the same setter the UI uses (which starts/stops the sender, gated on oscSending).
+     * The cold-open [performSelfSync] also SKIPS toggle keys (and writes liveness-only
+     * for an existing doc), so it never writes a toggle value back either way.
      *
-     * Delegates to the same setters the UI uses (setAfk/Cycle/SpotifyEnabledFlag,
-     * updateTimeEnabled) so the full lifecycle is handled: a feature the admin
-     * DISABLED that the user just resumed via restoreFeatureSession stops
-     * transmitting, and a feature the admin ENABLED on an actively-sending user
-     * starts transmitting — both gated on oscSending inside the setters.
+     * We update [lastSyncedValues] for any toggle we apply so the moderation listener
+     * (which also processes the same snapshot) sees `remote == baseline` and suppresses
+     * the duplicate — without poisoning un-applied keys.
      */
     private fun applyOfflineToggleEdits(
         snap: com.google.firebase.firestore.DocumentSnapshot
     ) {
-        // Apply a toggle ONLY when the admin actually changed it — i.e. the remote
-        // value differs from the persisted baseline ([lastSyncedValues], what we last
-        // knew was on the doc). Comparing against the CURRENT local value would fight
-        // restoreFeatureSession: a user who was sending afk has afkEnabled=true locally;
-        // if the admin never touched it, remote(true) == baseline(true) so we leave it
-        // alone. If the admin DID change it (remote != baseline) we apply. When there's
-        // no baseline yet (first sync), we can't tell, so we leave local untouched.
         fun applyToggle(key: String, current: Boolean, setter: (Boolean) -> Unit) {
             val remote = snap.getBoolean(key) ?: return
-            val baseline = lastSyncedValues[key] as? Boolean ?: return
-            if (remote != baseline && remote != current) setter(remote)
+            val baseline = lastSyncedValues[key] as? Boolean ?: return // no baseline → don't fight restore
+            if (remote == baseline) return
+            if (remote != current) setter(remote)
+            lastSyncedValues[key] = remote
         }
         applyToggle("afkEnabled", afkEnabled) { setAfkEnabledFlag(it) }
         applyToggle("cycleEnabled", cycleEnabled) { setCycleEnabledFlag(it) }
@@ -690,36 +706,41 @@ class VrcaViewModel(
     private suspend fun applyContentFromSnapshot(
         snap: com.google.firebase.firestore.DocumentSnapshot
     ) {
-        // Apply admin-edited content ONLY when the remote value differs from the
-        // persisted baseline ([lastSyncedValues]) — i.e. the admin actually changed it
-        // since our last sync. Comparing against CURRENT LOCAL state would clobber the
-        // user's OWN offline edits: if the user edited a preset offline (local=new) but
-        // the admin didn't touch it (remote=old=baseline), a compare-vs-local would
-        // wrongly overwrite the user's edit with the stale server value. With the
-        // baseline check, remote==baseline means "admin didn't change it" so we keep the
-        // user's local edit (the cold-open delta write then pushes it up). When both
-        // edited the same field offline, remote!=baseline so the admin wins (documented
-        // intent). No baseline yet (first sync) → leave local untouched.
+        // Apply admin-edited content when the remote value differs from the persisted
+        // baseline ([lastSyncedValues]) — i.e. the admin changed it since our last sync.
+        // With a real baseline, remote==baseline means "admin didn't change it" so we
+        // keep the user's local edit (a later debounced/hourly write pushes it up); both
+        // edited → admin wins. When there's NO baseline for a key (null), we fall back to
+        // the current LOCAL value so the server/admin value still wins on first sync.
+        //
+        // For every field we APPLY, we set lastSyncedValues[key] = remote so the
+        // moderation listener (processing the same snapshot) suppresses the duplicate.
+        // We do NOT seed un-applied keys — leaving their baseline as the prefs value lets
+        // the listener correctly distinguish a real admin edit from an echo, and lets the
+        // cold-open/debounced delta push a genuine user offline edit.
         snap.getString("afkMessage")?.trim()?.let { remote ->
-            val baseline = lastSyncedValues["afkMessage"] as? String ?: return@let
+            val baseline = (lastSyncedValues["afkMessage"] as? String) ?: afkMessage.trim()
             if (remote != baseline && remote != afkMessage.trim()) {
                 afkMessage = remote
                 userPreferencesRepository.saveAfkMessage(remote)
+                lastSyncedValues["afkMessage"] = remote
             }
         }
         snap.getLong("cycleIntervalSeconds")?.toInt()?.coerceAtLeast(2)?.let { remote ->
-            val baseline = lastSyncedValues["cycleIntervalSeconds"] as? Int ?: return@let
+            val baseline = (lastSyncedValues["cycleIntervalSeconds"] as? Int) ?: cycleIntervalSeconds
             if (remote != baseline && remote != cycleIntervalSeconds) {
                 cycleIntervalSeconds = remote
                 userPreferencesRepository.saveCycleInterval(remote)
+                lastSyncedValues["cycleIntervalSeconds"] = remote
             }
         }
         snap.getString("cycleLinesText")?.trim()?.let { remote ->
-            val baseline = lastSyncedValues["cycleLinesText"] as? String ?: return@let
             val local = cycleLines.joinToString("\n").trim()
+            val baseline = (lastSyncedValues["cycleLinesText"] as? String) ?: local
             if (remote != baseline && remote != local) {
                 setCycleLinesFromTextPreserve(remote)
                 userPreferencesRepository.saveCycleMessages(remote)
+                lastSyncedValues["cycleLinesText"] = remote
             }
         }
         val afkPresetSavers = listOf<suspend (String) -> Unit>(
@@ -729,10 +750,12 @@ class VrcaViewModel(
         )
         for (i in 1..3) {
             snap.getString("afkPreset$i")?.trim()?.let { remote ->
-                val baseline = lastSyncedValues["afkPreset$i"] as? String ?: return@let
-                if (remote != baseline && remote != afkPresetTexts[i - 1].trim()) {
+                val local = afkPresetTexts[i - 1].trim()
+                val baseline = (lastSyncedValues["afkPreset$i"] as? String) ?: local
+                if (remote != baseline && remote != local) {
                     afkPresetTexts[i - 1] = remote
                     afkPresetSavers[i - 1](remote)
+                    lastSyncedValues["afkPreset$i"] = remote
                 }
             }
         }
@@ -745,19 +768,22 @@ class VrcaViewModel(
         )
         for (i in 1..5) {
             snap.getString("cyclePreset$i")?.trim()?.let { remote ->
-                val baseline = lastSyncedValues["cyclePreset$i"] as? String ?: return@let
-                if (remote != baseline && remote != (cyclePresetMessages.getOrNull(i - 1)?.trim().orEmpty())) {
+                val local = cyclePresetMessages.getOrNull(i - 1)?.trim().orEmpty()
+                val baseline = (lastSyncedValues["cyclePreset$i"] as? String) ?: local
+                if (remote != baseline && remote != local) {
                     cyclePresetMessages[i - 1] = remote
                     val interval = cyclePresetIntervals.getOrElse(i - 1) { 10 }
                     presetSavers[i - 1](remote, interval, null)
+                    lastSyncedValues["cyclePreset$i"] = remote
                 }
             }
         }
         snap.getLong("spotifyPreset")?.toInt()?.coerceIn(1, 5)?.let { remote ->
-            val baseline = lastSyncedValues["spotifyPreset"] as? Int ?: return@let
+            val baseline = (lastSyncedValues["spotifyPreset"] as? Int) ?: spotifyPreset
             if (remote != baseline && remote != spotifyPreset) {
                 spotifyPreset = remote
                 userPreferencesRepository.saveSpotifyPreset(remote)
+                lastSyncedValues["spotifyPreset"] = remote
             }
         }
     }
@@ -835,10 +861,19 @@ class VrcaViewModel(
             val currentState = captureStateForSync()
             val uidChanged = lastSyncedValues["_authUid"]?.let { it != authUid } ?: false
             val isFirstSync = lastSyncedValues.isEmpty()
+            // Cold-open against an EXISTING server doc: write liveness ONLY, never
+            // content/toggles. The admin's offline edits live on that doc; the apply
+            // path + moderation listener pull them into local, and a later debounced/
+            // hourly write pushes any genuine user offline edit up. This makes it
+            // structurally impossible for the cold-open write to clobber an admin edit,
+            // even if the read-before-write timed out or the persisted baseline was
+            // empty (which would otherwise take the full-write branch below).
+            val livenessOnlyExistingDoc = coldOpen && remoteDocConfirmedExists
 
-            if (isFirstSync || uidChanged) {
-                // Full write: first ever install, first cold-open with no
-                // persisted baseline, or auth UID changed. Handles doc
+            if ((isFirstSync && !remoteDocConfirmedExists) || uidChanged) {
+                // Full write: first ever install (doc absent), or auth UID changed
+                // (rules require uid/authUid to match the new auth, so a delta that
+                // omits them would be denied — must rewrite the whole doc). Handles doc
                 // creation and writes all fields for backward compat.
                 try {
                     db.collection(COL_USERS).document(deviceHash)
@@ -874,6 +909,10 @@ class VrcaViewModel(
                 "updatedAt" to FieldValue.serverTimestamp()
             )
             for ((key, value) in currentState) {
+                // Existing-doc cold open → liveness only (never write content/toggles).
+                if (livenessOnlyExistingDoc) continue
+                // First-install cold open still skips toggles (they start OFF; writing
+                // OFF back would race an admin's enabled toggle before it's applied).
                 if (coldOpen && key in TOGGLE_KEYS) continue
                 if (value != lastSyncedValues[key] && value != null) {
                     delta[key] = value
@@ -903,6 +942,20 @@ class VrcaViewModel(
                 db.collection(COL_USERS).document(deviceHash)
                     .set(delta, SetOptions.merge())
                     .await()
+                if (livenessOnlyExistingDoc) {
+                    // We wrote ONLY liveness — we did NOT write content/toggles, so we
+                    // must NOT rebaseline them to local. Overwriting the baseline with
+                    // local here would (a) drop the prefs baseline that lets the listener
+                    // apply admin offline edits, and (b) make a later write/listener
+                    // clobber a user's own offline edit. Keep the existing baseline
+                    // (prefs + any per-field updates the apply path made) and just
+                    // record _authUid + the write timestamp.
+                    lastSyncedValues["_authUid"] = authUid
+                    persistLastSyncedValues()
+                    markSelfSyncWritten()
+                    lastSelfSyncError = ""
+                    return@runCatching
+                }
                 lastSyncedValues.clear()
                 lastSyncedValues.putAll(currentState)
                 lastSyncedValues["_authUid"] = authUid
@@ -1107,27 +1160,6 @@ class VrcaViewModel(
      * existing flow collectors to update ViewModel state). Fields without DataStore
      * backing are set directly on the ViewModel.
      */
-
-    /**
-     * Seed [lastSyncedValues] from a Firestore snapshot. Called from
-     * [applyRemoteContentBeforeSync] (after applying content + toggle edits)
-     * so [performSelfSync] has a baseline that matches what's on Firestore —
-     * without this, the delta write would include admin-edited fields and
-     * overwrite them with stale local defaults.
-     */
-    private fun seedLastSyncedFromSnapshot(snap: com.google.firebase.firestore.DocumentSnapshot) {
-        snap.getBoolean("afkEnabled")?.let { lastSyncedValues["afkEnabled"] = it }
-        snap.getBoolean("cycleEnabled")?.let { lastSyncedValues["cycleEnabled"] = it }
-        snap.getBoolean("spotifyEnabled")?.let { lastSyncedValues["spotifyEnabled"] = it }
-        snap.getBoolean("timeEnabled")?.let { lastSyncedValues["timeEnabled"] = it }
-        snap.getString("afkMessage")?.let { lastSyncedValues["afkMessage"] = it.trim() }
-        snap.getLong("cycleIntervalSeconds")?.let { lastSyncedValues["cycleIntervalSeconds"] = it.toInt().coerceAtLeast(2) }
-        snap.getString("cycleLinesText")?.let { lastSyncedValues["cycleLinesText"] = it.trim() }
-        for (i in 1..3) snap.getString("afkPreset$i")?.let { lastSyncedValues["afkPreset$i"] = it.trim() }
-        for (i in 1..5) snap.getString("cyclePreset$i")?.let { lastSyncedValues["cyclePreset$i"] = it.trim() }
-        snap.getLong("spotifyPreset")?.let { lastSyncedValues["spotifyPreset"] = it.toInt().coerceIn(1, 5) }
-        snap.getString("timeMode")?.let { lastSyncedValues["timeMode"] = it }
-    }
 
     private fun applyRemoteConfig(snap: com.google.firebase.firestore.DocumentSnapshot) {
         // Admin build does not apply remote config to itself. It is never the
