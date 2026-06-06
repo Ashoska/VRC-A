@@ -625,7 +625,26 @@ class VrcaViewModel(
             val snap = db.collection(COL_USERS).document(deviceHash).get().await()
             if (snap == null || !snap.exists()) return@runCatching
             applyContentFromSnapshot(snap)
+            applyOfflineToggleEdits(snap)
+            seedLastSyncedFromSnapshot(snap)
         }
+    }
+
+    private fun applyOfflineToggleEdits(
+        snap: com.google.firebase.firestore.DocumentSnapshot
+    ) {
+        fun applyToggle(key: String, setter: (Boolean) -> Unit) {
+            snap.getBoolean(key)?.let { remote ->
+                val baseline = lastSyncedValues[key] as? Boolean
+                if (baseline != null && remote != baseline) {
+                    setter(remote)
+                }
+            }
+        }
+        applyToggle("afkEnabled") { afkEnabled = it; savedState["afkEnabled"] = it }
+        applyToggle("cycleEnabled") { cycleEnabled = it; savedState["cycleEnabled"] = it }
+        applyToggle("spotifyEnabled") { spotifyEnabled = it; savedState["spotifyEnabled"] = it }
+        applyToggle("timeEnabled") { timeEnabled = it; savedState["timeEnabled"] = it }
     }
 
     private suspend fun applyContentFromSnapshot(
@@ -1034,11 +1053,11 @@ class VrcaViewModel(
     private var initialSnapshotProcessed = false
 
     /**
-     * Seed [lastSyncedValues] from a Firestore snapshot. Called on the very
-     * first snapshot AND after [applyRemoteContentBeforeSync] so the snapshot
-     * listener has a baseline to compare admin edits against — without this,
-     * admin toggle/preset writes would be silently dropped during the window
-     * between listener-attach and the first successful [performSelfSync].
+     * Seed [lastSyncedValues] from a Firestore snapshot. Called from
+     * [applyRemoteContentBeforeSync] (after applying content + toggle edits)
+     * so [performSelfSync] has a baseline that matches what's on Firestore —
+     * without this, the delta write would include admin-edited fields and
+     * overwrite them with stale local defaults.
      */
     private fun seedLastSyncedFromSnapshot(snap: com.google.firebase.firestore.DocumentSnapshot) {
         snap.getBoolean("afkEnabled")?.let { lastSyncedValues["afkEnabled"] = it }
@@ -1073,11 +1092,12 @@ class VrcaViewModel(
         viewModelScope.launch {
             if (!initialSnapshotProcessed) {
                 initialSnapshotProcessed = true
-                // Seed baseline from the first snapshot so admin edits arriving
-                // before the first performSelfSync write can still be detected.
-                // We drop the first snapshot's content (DataStore wins cold start)
-                // but record what's on the doc so subsequent changes are caught.
-                seedLastSyncedFromSnapshot(snap)
+                // Drop the first snapshot's content (DataStore wins cold start).
+                // The baseline for echo-suppression is seeded by
+                // applyRemoteContentBeforeSync (which runs before performSelfSync),
+                // so we do NOT seed here — seeding here would set lastSyncedValues
+                // to include admin's offline edits, causing performSelfSync to see
+                // a difference against the local defaults and overwrite them.
                 return@launch
             }
 
