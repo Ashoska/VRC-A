@@ -630,21 +630,29 @@ class VrcaViewModel(
         }
     }
 
+    /**
+     * Apply admin toggle edits made while this user was offline. Compares the
+     * remote value against the CURRENT LOCAL state (same semantics as
+     * [applyContentFromSnapshot]) — NOT against [lastSyncedValues] — so that
+     * after this runs local state == the doc for every edited toggle. This is
+     * essential: [seedLastSyncedFromSnapshot] runs right after and sets the
+     * baseline to the doc's values, and [performSelfSync]'s delta write captures
+     * local state; if local didn't already match the doc, the delta would write
+     * the stale local value back and overwrite the admin's edit.
+     *
+     * Delegates to the same setters the UI uses (setAfk/Cycle/SpotifyEnabledFlag,
+     * updateTimeEnabled) so the full lifecycle is handled: a feature the admin
+     * DISABLED that the user just resumed via restoreFeatureSession stops
+     * transmitting, and a feature the admin ENABLED on an actively-sending user
+     * starts transmitting — both gated on oscSending inside the setters.
+     */
     private fun applyOfflineToggleEdits(
         snap: com.google.firebase.firestore.DocumentSnapshot
     ) {
-        fun applyToggle(key: String, setter: (Boolean) -> Unit) {
-            snap.getBoolean(key)?.let { remote ->
-                val baseline = lastSyncedValues[key] as? Boolean
-                if (baseline != null && remote != baseline) {
-                    setter(remote)
-                }
-            }
-        }
-        applyToggle("afkEnabled") { afkEnabled = it; savedState["afkEnabled"] = it }
-        applyToggle("cycleEnabled") { cycleEnabled = it; savedState["cycleEnabled"] = it }
-        applyToggle("spotifyEnabled") { spotifyEnabled = it; savedState["spotifyEnabled"] = it }
-        applyToggle("timeEnabled") { timeEnabled = it; savedState["timeEnabled"] = it }
+        snap.getBoolean("afkEnabled")?.let { if (it != afkEnabled) setAfkEnabledFlag(it) }
+        snap.getBoolean("cycleEnabled")?.let { if (it != cycleEnabled) setCycleEnabledFlag(it) }
+        snap.getBoolean("spotifyEnabled")?.let { if (it != spotifyEnabled) setSpotifyEnabledFlag(it) }
+        snap.getBoolean("timeEnabled")?.let { if (it != timeEnabled) updateTimeEnabled(it) }
     }
 
     private suspend fun applyContentFromSnapshot(
