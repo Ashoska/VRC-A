@@ -620,9 +620,11 @@ class VrcaViewModel(
     private suspend fun applyRemoteContentBeforeSync() {
         if (BuildConfig.IS_ADMIN_BUILD) return
         runCatching {
+            ensureAnonAuth()
             val deviceHash = readDeviceHashFromPrefs()
             if (!isValidDeviceHash(deviceHash)) return@runCatching
-            val snap = db.collection(COL_USERS).document(deviceHash).get().await()
+            val snap = db.collection(COL_USERS).document(deviceHash)
+                .get(com.google.firebase.firestore.Source.SERVER).await()
             if (snap == null || !snap.exists()) return@runCatching
             applyContentFromSnapshot(snap)
             applyOfflineToggleEdits(snap)
