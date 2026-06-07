@@ -265,6 +265,12 @@ class VrcaViewModel(
     // (doc absent) still does the full creating write.
     @Volatile private var remoteDocConfirmedExists = false
 
+    // True when restoreFeatureSession() resumed an ACTIVE OSC session after an OS
+    // kill. Used by applyOfflineToggleEdits to avoid letting a stale server `false`
+    // (no baseline) stop a just-revived user's OSC. A deliberate admin disable
+    // (remote != baseline) still applies.
+    @Volatile private var restoredActiveSending = false
+
     // Gate self-sync until DataStore has provided its initial values. Without this
     // gate, an immediate sync on cold start writes the empty default ViewModel
     // state to Firestore, which then echoes back via the snapshot listener and
@@ -646,9 +652,12 @@ class VrcaViewModel(
             val snap = db.collection(COL_USERS).document(deviceHash)
                 .get(com.google.firebase.firestore.Source.SERVER).await()
             if (snap == null || !snap.exists()) {
-                Log.d("VrcaViewModel", "applyRemoteContentBeforeSync: no remote doc yet")
+                Log.w("VrcaSync", "applyRemoteContentBeforeSync: no remote doc yet (server read)")
                 return@runCatching
             }
+            Log.i("VrcaSync", "applyRemoteContentBeforeSync: server read OK — " +
+                "afkMsg='${snap.getString("afkMessage")}' afkEnabled=${snap.getBoolean("afkEnabled")} " +
+                "baselineKeys=${lastSyncedValues.keys}")
             // The doc exists → the cold-open write must NOT write content/toggles
             // (it would risk clobbering admin offline edits). Liveness-only from here.
             remoteDocConfirmedExists = true
@@ -664,7 +673,7 @@ class VrcaViewModel(
             applyOfflineToggleEdits(snap)
             Log.d("VrcaViewModel", "applyRemoteContentBeforeSync: applied remote content/toggles")
         }.onFailure { e ->
-            Log.w("VrcaViewModel", "applyRemoteContentBeforeSync failed (listener will backstop): ${e.message}")
+            Log.w("VrcaSync", "applyRemoteContentBeforeSync FAILED (listener will backstop): ${e.message}")
         }
     }
 
@@ -692,9 +701,27 @@ class VrcaViewModel(
     ) {
         fun applyToggle(key: String, current: Boolean, setter: (Boolean) -> Unit) {
             val remote = snap.getBoolean(key) ?: return
-            val baseline = lastSyncedValues[key] as? Boolean ?: return // no baseline → don't fight restore
-            if (remote == baseline) return
-            if (remote != current) setter(remote)
+            val baseline = lastSyncedValues[key] as? Boolean
+            // If we have a baseline and the server matches it, the admin didn't
+            // change this toggle since our last sync — leave it (and don't fight a
+            // restored OSC session).
+            if (baseline != null && remote == baseline) {
+                Log.d("VrcaSync", "toggle $key: remote=$remote == baseline → skip")
+                return
+            }
+            // Revival protection: if we just restored an ACTIVE OSC session and have
+            // no baseline proof the admin turned this OFF, a stale server `false`
+            // must not stop the revived user's OSC. Skip only that exact case.
+            if (restoredActiveSending && baseline == null && !remote) {
+                Log.d("VrcaSync", "toggle $key: stale false during active restore → skip")
+                return
+            }
+            // Either a real admin edit (remote != baseline) OR no baseline at all
+            // (empty/partial prefs) — cold open is server-authoritative, so apply.
+            if (remote != current) {
+                Log.i("VrcaSync", "toggle $key: APPLY remote=$remote (was $current, baseline=$baseline)")
+                setter(remote)
+            }
             lastSyncedValues[key] = remote
         }
         applyToggle("afkEnabled", afkEnabled) { setAfkEnabledFlag(it) }
@@ -873,6 +900,10 @@ class VrcaViewModel(
                 } catch (_: Throwable) { false }
             }
             val livenessOnlyExistingDoc = coldOpen && remoteDocConfirmedExists
+
+            Log.i("VrcaSync", "performSelfSync coldOpen=$coldOpen isFirstSync=$isFirstSync " +
+                "docExists=$remoteDocConfirmedExists uidChanged=$uidChanged " +
+                "→ ${if ((isFirstSync && !remoteDocConfirmedExists) || uidChanged) "FULL-WRITE" else if (livenessOnlyExistingDoc) "LIVENESS-ONLY" else "DELTA"}")
 
             if ((isFirstSync && !remoteDocConfirmedExists) || uidChanged) {
                 // Full write: first ever install (doc absent), or auth UID changed
@@ -2183,6 +2214,7 @@ class VrcaViewModel(
         oscSending = false; savedState["oscSending"] = false
         if (pending.sending && pending.anyEnabled) {
             // Was actively sending → resume seamlessly.
+            restoredActiveSending = true
             startSending()
         } else {
             // Configured but idle → just reflect the toggles in the preview.

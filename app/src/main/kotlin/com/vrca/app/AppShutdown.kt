@@ -191,17 +191,21 @@ object AppShutdown {
                 data["vrchatWorld"] = presence.worldName
                 data["vrchatDisplayName"] = presence.displayName
             }
-            // Carry the user's LAST content state (presets / messages / intervals /
-            // toggles) so the admin sees what they had even if they swiped before the
-            // 30s edit-debounce flushed. NOT the volatile preview text. This is the
-            // backup for "edit then hard-kill before the debounce fired". Public build
-            // only — captureContentForOfflineWrite() returns empty for the admin build.
-            try {
-                if (com.vrca.ui.viewmodel.VrcaViewModel.isInstanceInitialized()) {
-                    data.putAll(com.vrca.ui.viewmodel.VrcaViewModel.getInstance()
-                        .captureContentForOfflineWrite())
-                }
-            } catch (_: Throwable) {}
+            // IMPORTANT: we deliberately do NOT write the user's content snapshot
+            // (presets / messages / intervals / toggles) here.
+            //
+            // This swipe write has only ~5s before killProcess, so on mobile it
+            // frequently does NOT reach the server in time — Firestore then PERSISTS
+            // it in its on-disk mutation queue (offline persistence is on by default)
+            // and REPLAYS it on the next app launch. If an admin edited this user's
+            // doc while the app was closed, that stale replayed content write would
+            // OVERWRITE the admin's edits — making "admin edits to an offline user
+            // don't apply on reopen" (the bug). The user's own content edits are
+            // already synced by the 30s debounce / hourly / live-sync while the app
+            // was alive, so re-writing them on swipe adds nothing but the clobber
+            // risk. Only the offline marker (isOnlineInApp=false, offlineAt) +
+            // current VRChat presence are written — neither conflicts with admin
+            // content edits, so a queued replay of them is harmless.
             FirebaseFirestore.getInstance()
                 .collection("users").document(deviceHash)
                 .set(data, SetOptions.merge())
