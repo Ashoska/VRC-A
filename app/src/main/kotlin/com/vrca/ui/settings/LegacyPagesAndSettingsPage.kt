@@ -896,39 +896,6 @@ private fun DebugPage(vm: VrcaViewModel) {
         SectionCard(title = "VRChat send status") {
             Text("Last sent to VRChat (ms): ${vm.lastSentToVrchatAtMs}")
         }
-
-        // TEMPORARY: YouTube ad-detection signal capture. Play a video that triggers
-        // a pre-roll ad, then a genuine Short, then read this log to see which signal
-        // (seek=, cust=[], over=, mid=) separates the ad from the real video.
-        val adSignals by com.vrca.nowplaying.NowPlayingDebug.lines.collectAsState()
-        SectionCard(
-            title = "YouTube ad signals (debug)",
-            subtitle = "seek=ACTION_SEEK_TO, ff=fast-fwd, over=pos>dur, cust=customActions, mid=mediaId"
-        ) {
-            OutlinedButton(onClick = { com.vrca.nowplaying.NowPlayingDebug.clear() }) {
-                Text("Clear log")
-            }
-            Spacer(Modifier.height(8.dp))
-            if (adSignals.isEmpty()) {
-                Text(
-                    "No samples yet. Play YouTube / YouTube Music to populate.",
-                    style = MaterialTheme.typography.bodySmall
-                )
-            } else {
-                SelectionContainer {
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                        // Newest first so the most recent ad/video state is on top.
-                        for (line in adSignals.asReversed()) {
-                            Text(
-                                line,
-                                fontFamily = FontFamily.Monospace,
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 
