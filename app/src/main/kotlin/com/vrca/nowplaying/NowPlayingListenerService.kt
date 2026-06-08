@@ -46,12 +46,16 @@ class NowPlayingListenerService : NotificationListenerService() {
     // not flash "Ad". 2 samples ≈ 1s.
     private val YT_AD_ENTRY_STREAK = 2
 
-    // YouTube MUSIC ad ceiling: an ad collapses the reported duration to a short value
-    // (≈5–30s) while the song title is still shown. Tracks above this are real songs
-    // and also re-arm the title baseline. 45s clears typical 15/30s ads with margin
-    // while sparing all but the rarest sub-45s real songs (which are spared anyway by
-    // the title-baseline match — they carry their OWN title, not the prior song's).
-    private val YT_MUSIC_AD_MAX_MS = 45 * 1000L
+    // YouTube MUSIC ad detection is RELATIVE, not a fixed ceiling (ads have been seen at
+    // 55s+, and the real cap is unknowable). An ad reuses the previous song's title but
+    // reports a much shorter duration; we flag it when the SAME title is suddenly playing
+    // a duration far below that title's established (longest-seen) length:
+    //  - it must collapse by at least this much (guards against metadata jitter),
+    private val YT_MUSIC_AD_COLLAPSE_MS = 20 * 1000L
+    //  - and the short duration must be under this absolute cap (YT Music ads are never
+    //    longer than a few minutes; stops a freak "collapse" under a 30-min track from
+    //    being read as an ad).
+    private val YT_MUSIC_AD_ABS_MAX_MS = 3 * 60 * 1000L
 
     // Catches a newly-started media session the instant it goes active, instead of
     // waiting for the app to post/update its media notification (the pickup delay).
@@ -87,9 +91,11 @@ class NowPlayingListenerService : NotificationListenerService() {
     private val specialWindowIsAdByPackage = HashMap<String, Boolean>()
     private val lastAdInfoByPackage = HashMap<String, String>()
 
-    // YT Music: the last REAL song title (a track whose duration exceeded the ad
-    // ceiling). An ad is detected when a short-duration sample still shows THIS title.
+    // YT Music: the current title and its ESTABLISHED (longest-seen) duration. A title
+    // change means a genuine new track (ads never change the title); an ad is detected
+    // when the SAME title's duration collapses far below its established length.
     private val lastSongTitleByPackage = HashMap<String, String>()
+    private val songEstablishedDurByPackage = HashMap<String, Long>()
 
     // Debounce: when metadata changes rapidly (skip/seek), wait before pushing to avoid flicker.
     private val lastMetaChangeElapsedByPackage = HashMap<String, Long>()
@@ -346,28 +352,39 @@ class NowPlayingListenerService : NotificationListenerService() {
             val actions = pb?.actions ?: 0L
             val seekable = (actions and PlaybackState.ACTION_SEEK_TO) != 0L
             val pbState = pb?.state ?: PlaybackState.STATE_NONE
-            val playing = pbState == PlaybackState.STATE_PLAYING
             val buffering = pbState == PlaybackState.STATE_BUFFERING ||
                 pbState == PlaybackState.STATE_CONNECTING
             ytDbgSeekable = seekable
             ytDbgState = pbState
 
             if (pkg == "com.google.android.apps.youtube.music") {
-                // Record the last REAL song (long-duration track) as the title baseline.
+                // RELATIVE duration-collapse detection (no fixed ceiling — ads have been
+                // seen at 55s+ and the cap is unknowable). An ad reuses the PREVIOUS
+                // song's title but reports a duration far SHORTER than that song; a real
+                // new track changes the title. So track each title's ESTABLISHED
+                // (longest-seen) length and flag an ad when the SAME title is suddenly
+                // playing a much shorter duration than its established length. This works
+                // for a 44s, 55s, or 90s ad alike, and spares genuinely short real songs
+                // (they carry their OWN title → their own established length).
                 val curTitle = title.trim()
-                if (duration > YT_MUSIC_AD_MAX_MS && curTitle.isNotBlank()) {
+                if (curTitle.isNotBlank() && curTitle != lastSongTitleByPackage[pkg]) {
+                    // New title = genuine new track (ads never change the title). Adopt it
+                    // and seed its established length with the current duration.
                     lastSongTitleByPackage[pkg] = curTitle
+                    songEstablishedDurByPackage[pkg] = duration
                 }
-                val baseline = lastSongTitleByPackage[pkg]
-                val haveBaseline = !baseline.isNullOrBlank()
-                val titleStillSong = haveBaseline && baseline == curTitle
-                // Ad candidate: short finite duration while PLAYING, and either the
-                // carried-over song title is still showing (the confirmed ad behavior)
-                // or we have no baseline yet (cold-start fallback).
-                val adCandidate = playing &&
-                    duration in 1..YT_MUSIC_AD_MAX_MS &&
-                    (titleStillSong || !haveBaseline)
-                if (adCandidate) {
+                val seeded = songEstablishedDurByPackage[pkg] ?: duration
+                if (duration > seeded) songEstablishedDurByPackage[pkg] = duration
+                val establishedDur = songEstablishedDurByPackage[pkg] ?: duration
+
+                // NOTE: NOT gated on `playing`. A PAUSED ad keeps title=song + the ad's
+                // short duration, so the collapse still holds — this is what keeps "AD"
+                // showing when the user pauses mid-ad (pausing used to revert to the song
+                // title because `playing` went false and the 2s window lapsed).
+                val collapsed = duration in 1 until establishedDur &&
+                    (establishedDur - duration) >= YT_MUSIC_AD_COLLAPSE_MS &&
+                    duration <= YT_MUSIC_AD_ABS_MAX_MS
+                if (collapsed) {
                     val streak = (ytSeekNStreakByPackage[pkg] ?: 0) + 1
                     ytSeekNStreakByPackage[pkg] = streak
                     if (streak >= YT_AD_ENTRY_STREAK) ytAdDetected = true
