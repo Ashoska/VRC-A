@@ -247,10 +247,10 @@ The runtime is decoupled from the Activity so everything keeps running while bac
 - Keep admin APK and public APK builds fully separated
 
 ## Git & PR Conventions
-- **CRITICAL — Default branch for ALL work is `VRC-A-Official`.** Every commit and push must land on `VRC-A-Official`. Do NOT push to `main`, `claude/*`, or any other auto-generated branch. If you find yourself on a different branch (including the `claude/...` branch the harness defaults to), checkout `VRC-A-Official` first, cherry-pick or rebase your work onto it, and push there. Only deviate if the user explicitly names a different target branch in this turn.
+- **CRITICAL — Push ALL work to `claude/vrc-a-android-app-NUpaN`.** Commit on the local `VRC-A-Official` working branch, then push to the remote `claude/vrc-a-android-app-NUpaN` branch (e.g. `git push -u origin VRC-A-Official:claude/vrc-a-android-app-NUpaN`). **Do NOT push to `VRC-A-Official` directly — the remote consistently returns HTTP 503 on that branch.** Do NOT push to `main` or any other branch. Only deviate if the user explicitly names a different target branch in this turn.
 - Commit messages: short, imperative ("Fix NowPlaying pause detection", "Add Releases tab filter")
 - Include a brief description in the PR body of what changed and why
-- Do NOT open pull requests automatically — the user merges `VRC-A-Official` themselves on their own schedule
+- Do NOT open pull requests automatically — the user merges the work themselves on their own schedule
 
 ## Autonomous Permissions
 Claude is fully authorised to do all of the following without asking for confirmation:
@@ -290,7 +290,7 @@ Claude should update CLAUDE.md in the same commit as the feature it describes, n
 - Update this CLAUDE.md file whenever the architecture, conventions, or features change
 
 ## What Claude Should Never Do
-- Push to `main`, `claude/*`, or any branch other than `VRC-A-Official` (always use `VRC-A-Official` unless the user explicitly names a different target this turn)
+- Push to `main`, `VRC-A-Official` (it 503s), or any branch other than `claude/vrc-a-android-app-NUpaN` (always push to `claude/vrc-a-android-app-NUpaN` unless the user explicitly names a different target this turn)
 - Remove or weaken `bannedDevices` Firestore security rules
 - Mix admin-only UI into the public build
 - Break the existing GitHub Actions CI pipeline without replacing it with something better
