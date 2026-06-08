@@ -56,6 +56,15 @@ class NowPlayingListenerService : NotificationListenerService() {
     //    longer than a few minutes; stops a freak "collapse" under a 30-min track from
     //    being read as an ad).
     private val YT_MUSIC_AD_ABS_MAX_MS = 3 * 60 * 1000L
+    //  - A title that has NEVER been seen longer than this is "unconfirmed" — a short
+    //    duration on it is treated as an ad even with no long baseline to collapse from.
+    //    This catches the PRE-ROLL ad, which shows the UPCOMING song's title at the ad's
+    //    short length (so the collapse rule alone can't see it — there's no established
+    //    long length yet). Conversely, once a title is seen LONGER than this it's a
+    //    confirmed real song and only the collapse rule applies to it. Tradeoff: a real
+    //    song shorter than this (rare) would be read as an ad. Covers the 55s ads seen
+    //    plus margin.
+    private val YT_MUSIC_AD_MAX_MS = 75 * 1000L
 
     // Catches a newly-started media session the instant it goes active, instead of
     // waiting for the app to post/update its media notification (the pickup delay).
@@ -377,14 +386,24 @@ class NowPlayingListenerService : NotificationListenerService() {
                 if (duration > seeded) songEstablishedDurByPackage[pkg] = duration
                 val establishedDur = songEstablishedDurByPackage[pkg] ?: duration
 
-                // NOTE: NOT gated on `playing`. A PAUSED ad keeps title=song + the ad's
-                // short duration, so the collapse still holds — this is what keeps "AD"
-                // showing when the user pauses mid-ad (pausing used to revert to the song
-                // title because `playing` went false and the 2s window lapsed).
+                // Two ad shapes, both NOT gated on `playing` (a PAUSED ad keeps title=song
+                // + the ad's short duration, so detection must survive a pause — gating on
+                // `playing` was the cause of "pausing mid-ad reverts to the song title"):
+                //  (1) COLLAPSE — the title was already established LONG (a real song
+                //      played), and now the SAME title is suddenly playing far shorter:
+                //      the classic mid-roll ad reusing the current song's title.
                 val collapsed = duration in 1 until establishedDur &&
                     (establishedDur - duration) >= YT_MUSIC_AD_COLLAPSE_MS &&
                     duration <= YT_MUSIC_AD_ABS_MAX_MS
-                if (collapsed) {
+                //  (2) SHORT-UNCONFIRMED — a short duration on a title we have NEVER seen
+                //      longer than an ad. This is the PRE-ROLL ad, which shows the UPCOMING
+                //      song's title at the ad's short length, so there is no established
+                //      long length to collapse from (the "first ad of a pod is missed,
+                //      second works" cause). Once the real song plays and establishes a
+                //      long length, this stops firing and only (1) applies.
+                val titleConfirmedLong = establishedDur > YT_MUSIC_AD_MAX_MS
+                val shortUnconfirmed = duration in 1..YT_MUSIC_AD_MAX_MS && !titleConfirmedLong
+                if (collapsed || shortUnconfirmed) {
                     val streak = (ytSeekNStreakByPackage[pkg] ?: 0) + 1
                     ytSeekNStreakByPackage[pkg] = streak
                     if (streak >= YT_AD_ENTRY_STREAK) ytAdDetected = true
