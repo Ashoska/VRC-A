@@ -485,6 +485,7 @@ class VrcaViewModel(
         "timeEnabled" to timeEnabled,
         "lastReportedTime" to if (timeEnabled) currentTimeString() else "",
         "lastTimeUpdateAt" to FieldValue.serverTimestamp(),
+        "lastActiveAt" to FieldValue.serverTimestamp(),
         "lastSeenAt" to FieldValue.serverTimestamp()
     )
 

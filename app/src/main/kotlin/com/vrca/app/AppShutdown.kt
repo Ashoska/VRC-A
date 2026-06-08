@@ -72,13 +72,18 @@ object AppShutdown {
             .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getBoolean(KEY_SWIPED_AWAY, false)
 
-    /** Clear the persistent swipe flag — called on a legitimate app open / reboot. */
+    /** Clear the persistent swipe flag — called on a legitimate app open / reboot.
+     *  Also clears the liveness-throttle timestamp so the cold-open write always
+     *  lands: after a swipe, `offlineAt` sits on the Firestore doc and must be
+     *  overridden by a fresh `lastActiveAt` — the 20-min throttle must not suppress
+     *  that write or the user stays offline in the admin directory. */
     fun clearSwipedAway(context: Context) {
         try {
             context.applicationContext
                 .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit()
                 .putBoolean(KEY_SWIPED_AWAY, false)
+                .putLong("last_self_sync_ms", 0L)
                 .apply()
         } catch (_: Throwable) {}
     }
