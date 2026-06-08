@@ -293,6 +293,41 @@ class NowPlayingListenerService : NotificationListenerService() {
 
         val isPlaying = pb?.state == PlaybackState.STATE_PLAYING
 
+        // TEMPORARY: capture raw ad-detection signals for YouTube/YT Music research.
+        // Records seekability (ACTION_SEEK_TO), custom actions ("skip ad"), mediaId,
+        // and position>duration so we can confirm on-device which signal separates a
+        // pre-roll ad from a genuine short video. Computed from the RAW pb/metadata
+        // here, before classifySpecial() blanks the title. Remove with NowPlayingDebug.
+        if (pkg in youtubePackages || pkg == "com.spotify.music") {
+            try {
+                val actions = pb?.actions ?: 0L
+                val seek = (actions and PlaybackState.ACTION_SEEK_TO) != 0L
+                val ff = (actions and PlaybackState.ACTION_FAST_FORWARD) != 0L
+                val custom = pb?.customActions
+                    ?.joinToString(",") { it.action.toString() }
+                    .orEmpty()
+                val mediaId = metadata?.getString(MediaMetadata.METADATA_KEY_MEDIA_ID).orEmpty()
+                val durS = if (duration > 0L) "%.1f".format(duration / 1000.0) else "?"
+                val posS = "%.1f".format(rawPos / 1000.0)
+                val over = if (duration > 0L && rawPos > duration) "Y" else "N"
+                val shortPkg = when {
+                    pkg.endsWith("youtube") -> "yt"
+                    pkg.contains("youtube.music") -> "ytm"
+                    pkg == "com.spotify.music" -> "spot"
+                    else -> pkg.takeLast(8)
+                }
+                val ti = title.take(24)
+                val stamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
+                    .format(java.util.Date())
+                NowPlayingDebug.record(
+                    stamp,
+                    "$shortPkg seek=${if (seek) "Y" else "N"} ff=${if (ff) "Y" else "N"} " +
+                        "dur=$durS pos=$posS over=$over play=${if (isPlaying) "Y" else "N"} " +
+                        "cust=[$custom] mid=${mediaId.take(20)} | $ti"
+                )
+            } catch (_: Throwable) {}
+        }
+
         val snapshotUpdateTime =
             if (lastUpdate > 0L) lastUpdate else SystemClock.elapsedRealtime()
 
