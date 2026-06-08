@@ -993,17 +993,16 @@ internal fun VrchatStatusBanner() {
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .padding(vertical = 8.dp),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
+                                        Canvas(Modifier.size(6.dp)) {
+                                            drawCircle(color = bannerColor)
+                                        }
                                         Text(
-                                            c.name
-                                                .replace("Realtime Player State Changes",
-                                                    "Realtime Player State"),
+                                            c.name,
                                             style = MaterialTheme.typography.bodyMedium,
                                             color = onContainerColor,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
                                             modifier = Modifier.weight(1f)
                                         )
                                         Surface(
