@@ -165,29 +165,41 @@ object NowPlayingState {
             samePkg = samePkg
         )
 
-        // YouTube-specific override: detect pause by checking 2 consecutive stall cycles.
-        // This must not affect other apps.
+        // The YouTube VIDEO app keeps reporting STATE_PLAYING + speed=1f even when
+        // paused, so the only reliable pause signal THERE is the raw position stalling
+        // for 2 consecutive cycles. YouTube MUSIC is the opposite case: its raw position
+        // is unreliable — it can ADVANCE while paused and FREEZE while playing, which
+        // INVERTED the motion/stall detector (playing showed paused, paused showed
+        // playing). YT Music's reported PlaybackState.state IS honest, so trust it
+        // directly and skip every position heuristic for it.
         if (snapshot.activePackage in YOUTUBE_PACKAGES && snapshot.detected) {
-            val metaKey = "${snapshot.title.trim()}|${snapshot.artist.trim()}|${snapshot.durationMs}"
-            val metaChanged = metaKey != ytLastMetaKey
-            val posDelta = abs(snapshot.positionMs - ytLastPosMs)
-
-            if (metaChanged || !samePkg) {
-                // New track or new app: reset stall counter, treat as playing
-                ytLastMetaKey = metaKey
-                ytLastPosMs = snapshot.positionMs
+            if (snapshot.activePackage == "com.google.android.apps.youtube.music") {
+                inferredIsPlaying = snapshot.isPlaying
+                ytLastMetaKey = ""
+                ytLastPosMs = -1L
                 ytStallCycles = 0
-            } else if (ytLastPosMs >= 0L && posDelta < YOUTUBE_STALL_DELTA_MS) {
-                ytStallCycles++
-                ytLastPosMs = snapshot.positionMs
             } else {
-                // Position moved: clear stall, definitely playing
-                ytStallCycles = 0
-                ytLastPosMs = snapshot.positionMs
-            }
+                val metaKey = "${snapshot.title.trim()}|${snapshot.artist.trim()}|${snapshot.durationMs}"
+                val metaChanged = metaKey != ytLastMetaKey
+                val posDelta = abs(snapshot.positionMs - ytLastPosMs)
 
-            if (ytStallCycles >= YOUTUBE_STALL_CYCLES_NEEDED) {
-                inferredIsPlaying = false
+                if (metaChanged || !samePkg) {
+                    // New track or new app: reset stall counter, treat as playing
+                    ytLastMetaKey = metaKey
+                    ytLastPosMs = snapshot.positionMs
+                    ytStallCycles = 0
+                } else if (ytLastPosMs >= 0L && posDelta < YOUTUBE_STALL_DELTA_MS) {
+                    ytStallCycles++
+                    ytLastPosMs = snapshot.positionMs
+                } else {
+                    // Position moved: clear stall, definitely playing
+                    ytStallCycles = 0
+                    ytLastPosMs = snapshot.positionMs
+                }
+
+                if (ytStallCycles >= YOUTUBE_STALL_CYCLES_NEEDED) {
+                    inferredIsPlaying = false
+                }
             }
         } else if (snapshot.activePackage !in YOUTUBE_PACKAGES) {
             // Reset YouTube state when not on a YouTube app

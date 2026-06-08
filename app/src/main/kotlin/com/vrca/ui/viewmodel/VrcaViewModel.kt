@@ -2090,7 +2090,14 @@ class VrcaViewModel(
             return false
         }
 
-        // YouTube-specific: NowPlayingState already ran stall detection and forced
+        // YouTube MUSIC: its raw position is unreliable (advances while paused / freezes
+        // while playing) so any motion heuristic INVERTS it. Its reported state is honest
+        // — trust it directly in BOTH directions and skip all motion logic below.
+        if (activePackage == "com.google.android.apps.youtube.music") {
+            return nowPlayingReportedIsPlaying
+        }
+
+        // YouTube VIDEO app: NowPlayingState already ran stall detection and forced
         // isPlaying=false. Trust it directly -- skip motion heuristics for YouTube
         // because YouTube keeps reporting speed=1f and position advances via extrapolation
         // even when truly paused, which fools the motion ticker.
