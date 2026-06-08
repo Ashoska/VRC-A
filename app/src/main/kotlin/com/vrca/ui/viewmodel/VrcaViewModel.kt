@@ -1979,7 +1979,15 @@ class VrcaViewModel(
                 val isAdNow = s.specialActive && s.title.trim().lowercase().let { t ->
                     t.contains("advert") || t == "ad" || t.contains("advertisement") || t.contains("sponsored")
                 } || (s.specialActive && s.activePackage == "com.spotify.music" && s.title.trim() == "AD")
-                if (isAdNow && !lastSpecialWasAd) adSegmentCount++
+                if (isAdNow && !lastSpecialWasAd) {
+                    adSegmentCount++
+                } else if (!isAdNow && lastSpecialWasAd) {
+                    // Ad break ended — reset so the NEXT break starts at "Ad 1" instead of
+                    // climbing 1→2→3 across the whole session. (Combined with the
+                    // service-side window lock that keeps isAdNow continuously true through
+                    // a single ad, this stops the count incrementing randomly mid-ad.)
+                    adSegmentCount = 0
+                }
                 lastSpecialWasAd = isAdNow
                 nowPlayingIsAd = isAdNow
 

@@ -40,6 +40,11 @@ class NowPlayingListenerService : NotificationListenerService() {
     // beyond this threshold is a live stream, not an ad.
     private val YOUTUBE_AD_MAX_DURATION_MS = 5 * 60 * 1000L
 
+    // Require this many CONSECUTIVE non-seekable PLAYING samples before declaring an
+    // ad. The raw ACTION_SEEK_TO bit is noisy — a single stray non-seekable frame
+    // (e.g. right as a track switches) must not flash "Ad". 2 samples ≈ 1s.
+    private val YT_AD_ENTRY_STREAK = 2
+
     // Catches a newly-started media session the instant it goes active, instead of
     // waiting for the app to post/update its media notification (the pickup delay).
     private var activeSessionsListener:
@@ -63,6 +68,16 @@ class NowPlayingListenerService : NotificationListenerService() {
     // Spotify ad/DJ: only activate special window when metadata explicitly says "ad" or "dj".
     // Stall-based detection is removed entirely — it caused false positives on normal skips.
     private val specialUntilElapsedByPackage = HashMap<String, Long>()
+
+    // YouTube ad-detection state machine (per package):
+    //  - ytSeekNStreakByPackage: consecutive non-seekable PLAYING samples (entry hysteresis)
+    //  - specialWindowIsAdByPackage: whether the currently-open special window is an AD
+    //    window — lets us LOCK the redacted "AD" title for the whole window so a seek=Y
+    //    flap mid-ad can't leak the real song title.
+    //  - lastAdInfoByPackage: the last parsed "X of Y" ad index for the open window.
+    private val ytSeekNStreakByPackage = HashMap<String, Int>()
+    private val specialWindowIsAdByPackage = HashMap<String, Boolean>()
+    private val lastAdInfoByPackage = HashMap<String, String>()
 
     // Debounce: when metadata changes rapidly (skip/seek), wait before pushing to avoid flicker.
     private val lastMetaChangeElapsedByPackage = HashMap<String, Long>()
@@ -297,25 +312,50 @@ class NowPlayingListenerService : NotificationListenerService() {
 
         val isPlaying = pb?.state == PlaybackState.STATE_PLAYING
 
-        // YouTube ad / live-stream detection via seekability.
-        // YouTube strips ACTION_SEEK_TO from the PlaybackState during pre-roll/mid-roll
-        // ads (you can't scrub an ad). A genuine video/song is always seekable.
+        // YouTube ad / live-stream detection via seekability, with a small state machine
+        // to reject the noisy raw signal. YouTube strips ACTION_SEEK_TO from the
+        // PlaybackState during pre-roll/mid-roll ads (you can't scrub an ad) — BUT it is
+        // ALSO stripped while a real track is BUFFERING/loading, which produced a false
+        // "Ad" flash on every song switch. Two guards:
+        //   (a) ignore non-seekable samples while the player is BUFFERING/CONNECTING (a
+        //       loading song, not an ad);
+        //   (b) require YT_AD_ENTRY_STREAK consecutive non-seekable PLAYING/paused samples
+        //       before declaring an ad, so a single noisy frame can't trigger it.
+        // A seekable sample clears the streak. The streak is HELD (not reset) during
+        // buffering so an ad that briefly buffers mid-roll still confirms.
         var ytAdDetected = false
         var isLive = false
+        var ytDbgSeekable = true
+        var ytDbgState = -99
         if (pkg in youtubePackages) {
             val actions = pb?.actions ?: 0L
             val seekable = (actions and PlaybackState.ACTION_SEEK_TO) != 0L
-            if (!seekable) {
-                val isMusicApp = pkg == "com.google.android.apps.youtube.music"
-                when {
-                    // YouTube Music: a non-seekable session is an AD. Live streams are
-                    // negligible on a music app, and YT Music AUDIO ads frequently
-                    // report zero/absent duration — so don't gate the ad on a finite
-                    // duration (that mis-routed YT Music ads to the live-stream branch).
-                    isMusicApp -> ytAdDetected = true
-                    // YouTube video app: finite duration = ad; zero/absent = live stream.
-                    duration in 1..YOUTUBE_AD_MAX_DURATION_MS -> ytAdDetected = true
-                    duration <= 0L -> isLive = true
+            val pbState = pb?.state ?: PlaybackState.STATE_NONE
+            val buffering = pbState == PlaybackState.STATE_BUFFERING ||
+                pbState == PlaybackState.STATE_CONNECTING
+            ytDbgSeekable = seekable
+            ytDbgState = pbState
+            when {
+                // A seekable sample is a genuine scrubable track — clear the ad streak.
+                seekable -> ytSeekNStreakByPackage[pkg] = 0
+                // Loading a real track — hold the streak, never confirm an ad here.
+                buffering -> { /* no-op */ }
+                else -> {
+                    val streak = (ytSeekNStreakByPackage[pkg] ?: 0) + 1
+                    ytSeekNStreakByPackage[pkg] = streak
+                    if (streak >= YT_AD_ENTRY_STREAK) {
+                        val isMusicApp = pkg == "com.google.android.apps.youtube.music"
+                        when {
+                            // YouTube Music: a non-seekable session is an AD. Live streams
+                            // are negligible on a music app, and YT Music AUDIO ads
+                            // frequently report zero/absent duration — so don't gate the ad
+                            // on a finite duration (that mis-routed YT Music ads to live).
+                            isMusicApp -> ytAdDetected = true
+                            // YouTube video app: finite duration = ad; zero/absent = live.
+                            duration in 1..YOUTUBE_AD_MAX_DURATION_MS -> ytAdDetected = true
+                            duration <= 0L -> isLive = true
+                        }
+                    }
                 }
             }
         }
@@ -352,6 +392,8 @@ class NowPlayingListenerService : NotificationListenerService() {
             // the window expires in ≤2s — fast enough to not linger over the next
             // song. Spotify/other ads keep the 10s window (no continuous poll).
             markSpecialWindow(pkg, if (ytAdDetected) 2_000L else 10_000L)
+            specialWindowIsAdByPackage[pkg] = (special == SpecialKind.AD)
+            if (special == SpecialKind.AD) lastAdInfoByPackage[pkg] = adInfo
             if (controller != null) startPollForRealTrack(pkg, controller)
         } else if (isSpecialWindowActive(pkg)) {
             // The ad/DJ segment just ended. As soon as a real track with genuine
@@ -367,13 +409,20 @@ class NowPlayingListenerService : NotificationListenerService() {
             // (seek=Y) before the PlaybackState update propagates, causing a false
             // "ad ended" that clears the window AND kills the continuous poll.
             // Instead, let the short 2s window expire naturally — the poll keeps
-            // running and refreshes it every cycle while the ad is ongoing.
+            // running and refreshes it every cycle while the ad is ongoing. AND, while
+            // it's an AD window, LOCK the redacted "AD" title for the WHOLE window so a
+            // single seek=Y flap mid-ad can't leak the real song title (the cause of
+            // "the ad shows the actual music title"). The window only lapses (≤2s) once
+            // the ad genuinely ends and seek=N stops refreshing it.
             if (pkg in youtubePackages) {
-                // no-op: let the window + poll run; window expires after ≤2s of no
-                // seek=N refreshes once the ad genuinely ends.
+                if (specialWindowIsAdByPackage[pkg] == true) {
+                    adInfo = lastAdInfoByPackage[pkg].orEmpty()
+                    title = "AD"; artist = ""
+                }
             } else if (title.isNotBlank() || artist.isNotBlank()) {
                 clearSpecialWindow(pkg)
                 stopPoll(pkg)
+                specialWindowIsAdByPackage[pkg] = false
             } else if (pkg == "com.spotify.music" && controller != null) {
                 startPollForRealTrack(pkg, controller)
             }
@@ -382,6 +431,20 @@ class NowPlayingListenerService : NotificationListenerService() {
             // EXCEPT YouTube: its continuous pause-detection poll must keep running
             // (it pushes normal tracks every cycle and would otherwise stop itself here).
             stopPoll(pkg)
+        }
+
+        // Temporary on-device debug trace of the YouTube ad signals.
+        if (pkg in youtubePackages) {
+            NowPlayingDebug.record(
+                pkg = pkg,
+                state = ytDbgState,
+                seekable = ytDbgSeekable,
+                durationMs = duration,
+                streak = ytSeekNStreakByPackage[pkg] ?: 0,
+                adDetected = ytAdDetected,
+                windowActive = isSpecialWindowActive(pkg),
+                isAdWindow = specialWindowIsAdByPackage[pkg] == true
+            )
         }
 
         val detected = title.isNotBlank() || artist.isNotBlank()
