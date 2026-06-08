@@ -40,10 +40,18 @@ class NowPlayingListenerService : NotificationListenerService() {
     // beyond this threshold is a live stream, not an ad.
     private val YOUTUBE_AD_MAX_DURATION_MS = 5 * 60 * 1000L
 
-    // Require this many CONSECUTIVE non-seekable PLAYING samples before declaring an
-    // ad. The raw ACTION_SEEK_TO bit is noisy — a single stray non-seekable frame
-    // (e.g. right as a track switches) must not flash "Ad". 2 samples ≈ 1s.
+    // Require this many CONSECUTIVE ad-candidate PLAYING samples before declaring an
+    // ad. The raw signal is noisy — a single stray frame (a non-seekable frame on the
+    // video app, or a transient short-duration frame at song start on YT Music) must
+    // not flash "Ad". 2 samples ≈ 1s.
     private val YT_AD_ENTRY_STREAK = 2
+
+    // YouTube MUSIC ad ceiling: an ad collapses the reported duration to a short value
+    // (≈5–30s) while the song title is still shown. Tracks above this are real songs
+    // and also re-arm the title baseline. 45s clears typical 15/30s ads with margin
+    // while sparing all but the rarest sub-45s real songs (which are spared anyway by
+    // the title-baseline match — they carry their OWN title, not the prior song's).
+    private val YT_MUSIC_AD_MAX_MS = 45 * 1000L
 
     // Catches a newly-started media session the instant it goes active, instead of
     // waiting for the app to post/update its media notification (the pickup delay).
@@ -78,6 +86,10 @@ class NowPlayingListenerService : NotificationListenerService() {
     private val ytSeekNStreakByPackage = HashMap<String, Int>()
     private val specialWindowIsAdByPackage = HashMap<String, Boolean>()
     private val lastAdInfoByPackage = HashMap<String, String>()
+
+    // YT Music: the last REAL song title (a track whose duration exceeded the ad
+    // ceiling). An ad is detected when a short-duration sample still shows THIS title.
+    private val lastSongTitleByPackage = HashMap<String, String>()
 
     // Debounce: when metadata changes rapidly (skip/seek), wait before pushing to avoid flicker.
     private val lastMetaChangeElapsedByPackage = HashMap<String, Long>()
@@ -312,17 +324,20 @@ class NowPlayingListenerService : NotificationListenerService() {
 
         val isPlaying = pb?.state == PlaybackState.STATE_PLAYING
 
-        // YouTube ad / live-stream detection via seekability, with a small state machine
-        // to reject the noisy raw signal. YouTube strips ACTION_SEEK_TO from the
-        // PlaybackState during pre-roll/mid-roll ads (you can't scrub an ad) — BUT it is
-        // ALSO stripped while a real track is BUFFERING/loading, which produced a false
-        // "Ad" flash on every song switch. Two guards:
-        //   (a) ignore non-seekable samples while the player is BUFFERING/CONNECTING (a
-        //       loading song, not an ad);
-        //   (b) require YT_AD_ENTRY_STREAK consecutive non-seekable PLAYING/paused samples
-        //       before declaring an ad, so a single noisy frame can't trigger it.
-        // A seekable sample clears the streak. The streak is HELD (not reset) during
-        // buffering so an ad that briefly buffers mid-roll still confirms.
+        // YouTube ad / live-stream detection. The two apps need DIFFERENT signals:
+        //
+        // • YouTube MUSIC: on-device traces proved ACTION_SEEK_TO is IDENTICAL for songs
+        //   and ads (both seek=Y, both STATE_PLAYING) — so seekability is useless here.
+        //   The reliable tell is DURATION: an ad collapses the reported duration to a
+        //   short value (≈5–30s) while YT Music KEEPS displaying the PREVIOUS song's
+        //   title. So an ad = a short finite duration while the shown title is still the
+        //   last real song's title. Matching on the carried-over title means a genuinely
+        //   SHORT real track (it has its OWN title) is NOT mistaken for an ad. At cold
+        //   start (no song baseline yet) we fall back to "short finite duration = ad".
+        //
+        // • YouTube VIDEO app: ACTION_SEEK_TO IS stripped during ads, so the seekability
+        //   state machine works (seek=N + finite dur = ad, zero/absent = live stream),
+        //   with a buffering gate + entry hysteresis to reject the noisy raw signal.
         var ytAdDetected = false
         var isLive = false
         var ytDbgSeekable = true
@@ -331,29 +346,49 @@ class NowPlayingListenerService : NotificationListenerService() {
             val actions = pb?.actions ?: 0L
             val seekable = (actions and PlaybackState.ACTION_SEEK_TO) != 0L
             val pbState = pb?.state ?: PlaybackState.STATE_NONE
+            val playing = pbState == PlaybackState.STATE_PLAYING
             val buffering = pbState == PlaybackState.STATE_BUFFERING ||
                 pbState == PlaybackState.STATE_CONNECTING
             ytDbgSeekable = seekable
             ytDbgState = pbState
-            when {
-                // A seekable sample is a genuine scrubable track — clear the ad streak.
-                seekable -> ytSeekNStreakByPackage[pkg] = 0
-                // Loading a real track — hold the streak, never confirm an ad here.
-                buffering -> { /* no-op */ }
-                else -> {
+
+            if (pkg == "com.google.android.apps.youtube.music") {
+                // Record the last REAL song (long-duration track) as the title baseline.
+                val curTitle = title.trim()
+                if (duration > YT_MUSIC_AD_MAX_MS && curTitle.isNotBlank()) {
+                    lastSongTitleByPackage[pkg] = curTitle
+                }
+                val baseline = lastSongTitleByPackage[pkg]
+                val haveBaseline = !baseline.isNullOrBlank()
+                val titleStillSong = haveBaseline && baseline == curTitle
+                // Ad candidate: short finite duration while PLAYING, and either the
+                // carried-over song title is still showing (the confirmed ad behavior)
+                // or we have no baseline yet (cold-start fallback).
+                val adCandidate = playing &&
+                    duration in 1..YT_MUSIC_AD_MAX_MS &&
+                    (titleStillSong || !haveBaseline)
+                if (adCandidate) {
                     val streak = (ytSeekNStreakByPackage[pkg] ?: 0) + 1
                     ytSeekNStreakByPackage[pkg] = streak
-                    if (streak >= YT_AD_ENTRY_STREAK) {
-                        val isMusicApp = pkg == "com.google.android.apps.youtube.music"
-                        when {
-                            // YouTube Music: a non-seekable session is an AD. Live streams
-                            // are negligible on a music app, and YT Music AUDIO ads
-                            // frequently report zero/absent duration — so don't gate the ad
-                            // on a finite duration (that mis-routed YT Music ads to live).
-                            isMusicApp -> ytAdDetected = true
-                            // YouTube video app: finite duration = ad; zero/absent = live.
-                            duration in 1..YOUTUBE_AD_MAX_DURATION_MS -> ytAdDetected = true
-                            duration <= 0L -> isLive = true
+                    if (streak >= YT_AD_ENTRY_STREAK) ytAdDetected = true
+                } else {
+                    ytSeekNStreakByPackage[pkg] = 0
+                }
+            } else {
+                // YouTube video app — seekability works.
+                when {
+                    // A seekable sample is a genuine scrubable track — clear the streak.
+                    seekable -> ytSeekNStreakByPackage[pkg] = 0
+                    // Loading a real track — hold the streak, never confirm an ad here.
+                    buffering -> { /* no-op */ }
+                    else -> {
+                        val streak = (ytSeekNStreakByPackage[pkg] ?: 0) + 1
+                        ytSeekNStreakByPackage[pkg] = streak
+                        if (streak >= YT_AD_ENTRY_STREAK) {
+                            when {
+                                duration in 1..YOUTUBE_AD_MAX_DURATION_MS -> ytAdDetected = true
+                                duration <= 0L -> isLive = true
+                            }
                         }
                     }
                 }
