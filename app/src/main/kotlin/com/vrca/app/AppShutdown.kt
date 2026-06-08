@@ -115,6 +115,13 @@ object AppShutdown {
         // chatbox auto-resumes on the next process start.
         FeatureSessionStore.disarm(app)
 
+        // Clear toggle keys from the persisted lastSyncedValues baseline so the
+        // next cold open sees null baselines and applies admin toggle edits
+        // server-authoritatively. Without this, the baseline matches the server
+        // (both have the admin's value) but the local toggle was reset to OFF by
+        // disarm() above — the echo-suppression would block re-application.
+        clearToggleBaselines(app)
+
         // Clear the process-lifetime ViewModelStore so VrcaViewModel.onCleared()
         // runs exactly once on a genuine shutdown — cancels the chatbox senders and
         // sync loops and fires the going-offline write. (onTaskRemoved is delivered
@@ -212,5 +219,45 @@ object AppShutdown {
         } catch (_: Throwable) {
             null
         }
+    }
+
+    /**
+     * Toggle keys mirrored from VrcaViewModel.TOGGLE_KEYS. Kept here so the swipe
+     * path can strip them from the persisted baseline without a ViewModel instance.
+     */
+    private val TOGGLE_KEYS = setOf(
+        "afkEnabled", "cycleEnabled", "spotifyEnabled", "spotifyDemoEnabled", "timeEnabled"
+    )
+    private const val KEY_LAST_SYNCED_JSON = "last_synced_values_json"
+
+    /**
+     * Remove the feature-toggle keys from the persisted `lastSyncedValues` baseline.
+     *
+     * On a deliberate swipe [FeatureSessionStore.disarm] makes the next launch start
+     * with toggles OFF. But the persisted baseline still holds whatever the admin
+     * last set (e.g. afkEnabled=true), and the server doc also still holds that value.
+     * On the next cold open the moderation listener / applyOfflineToggleEdits would
+     * see `remote == baseline` and ECHO-SUPPRESS the admin's edit — so the toggle
+     * stays OFF instead of reflecting the admin's setting ("toggles don't stay off and
+     * save what the admin did prior"). Dropping these keys leaves a null baseline, so
+     * the next cold open applies the server value authoritatively. Content keys are
+     * left intact (they restore from DataStore + the same listener path).
+     */
+    private fun clearToggleBaselines(app: Context) {
+        try {
+            val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val json = prefs.getString(KEY_LAST_SYNCED_JSON, null) ?: return
+            val obj = org.json.JSONObject(json)
+            var changed = false
+            for (key in TOGGLE_KEYS) {
+                if (obj.has(key)) {
+                    obj.remove(key)
+                    changed = true
+                }
+            }
+            if (changed) {
+                prefs.edit().putString(KEY_LAST_SYNCED_JSON, obj.toString()).commit()
+            }
+        } catch (_: Throwable) {}
     }
 }
