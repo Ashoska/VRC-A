@@ -35,7 +35,12 @@ data class NowPlayingSnapshot(
     // For ads: the player's own ad index parsed from the original metadata
     // (e.g. "1 of 1", "2 of 3") BEFORE the title was redacted to "AD". Blank
     // when the player didn't expose one. Used to render "Ad 1 of 1".
-    val adInfo: String = ""
+    val adInfo: String = "",
+
+    // True for a YouTube live stream (non-seekable session with unknown/zero
+    // duration). Distinguished from an ad (non-seekable but FINITE duration) so
+    // the chatbox shows a LIVE marker instead of a broken progress bar.
+    val isLive: Boolean = false
 )
 
 object NowPlayingState {
@@ -94,7 +99,7 @@ object NowPlayingState {
         val p = prefs ?: return
         // Only persist real tracks — never ads / DJ / special windows (restoring
         // "AD" on next launch would be nonsense).
-        if (!s.detected || s.specialActive || s.adInfo.isNotBlank()) return
+        if (!s.detected || s.specialActive || s.adInfo.isNotBlank() || s.isLive) return
         if (s.title.isBlank() && s.artist.isBlank()) return
         try {
             val o = JSONObject()

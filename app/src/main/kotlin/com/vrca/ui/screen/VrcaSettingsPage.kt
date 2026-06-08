@@ -26,7 +26,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -154,39 +153,6 @@ internal fun SettingsPage(
 
                         Text("Last sent to VRChat (ms): ${vm.lastSentToVrchatAtMs}",
                             style = MaterialTheme.typography.bodySmall)
-
-                        // TEMPORARY: YouTube ad-detection signal capture. Play a video
-                        // that triggers a pre-roll ad, then a genuine short video, and
-                        // read this log to see which signal (seek=, cust=[], over=, mid=)
-                        // separates the ad from the real video.
-                        val adSignals by com.vrca.nowplaying.NowPlayingDebug.lines.collectAsState()
-                        Text("YouTube ad signals (debug)", style = MaterialTheme.typography.labelMedium)
-                        Text(
-                            "seek=ACTION_SEEK_TO  ff=fast-fwd  over=pos>dur  cust=customActions  mid=mediaId",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                        TextButton(onClick = { com.vrca.nowplaying.NowPlayingDebug.clear() }) {
-                            Text("Clear log")
-                        }
-                        if (adSignals.isEmpty()) {
-                            Text(
-                                "No samples yet. Play YouTube / YouTube Music to populate.",
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        } else {
-                            SelectionContainer {
-                                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                    // Newest first.
-                                    for (line in adSignals.asReversed()) {
-                                        Text(
-                                            line,
-                                            fontFamily = FontFamily.Monospace,
-                                            style = MaterialTheme.typography.bodySmall
-                                        )
-                                    }
-                                }
-                            }
-                        }
                     }
                 }
             }

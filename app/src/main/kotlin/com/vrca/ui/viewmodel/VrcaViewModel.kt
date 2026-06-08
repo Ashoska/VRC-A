@@ -1620,6 +1620,10 @@ class VrcaViewModel(
     // artist, which would otherwise make isSpotifyDj true and swallow the label.
     private var nowPlayingIsAd by mutableStateOf(false)
 
+    // True when the active YouTube session is a live stream (non-seekable, no
+    // finite duration). The builder shows a LIVE marker instead of a progress bar.
+    private var nowPlayingIsLive by mutableStateOf(false)
+
     // =========================
     // Time feature
     // =========================
@@ -1968,6 +1972,7 @@ class VrcaViewModel(
 
                 nowPlayingSpecialActive = s.specialActive
                 nowPlayingAdInfo = s.adInfo
+                nowPlayingIsLive = s.isLive
 
                 // Track ad segment count: increment only when transitioning INTO an ad,
                 // not on every tick. Reset when ad ends so next ad gets a fresh count.
@@ -2758,14 +2763,23 @@ class VrcaViewModel(
         // title with a progress bar instead of "Ad 1 of 1". Check the explicit ad
         // flag FIRST and return early so ads always show their index.
         if (nowPlayingIsAd) {
-            // Prefer the player's real ad index ("Ad 1 of 1"); else fall back to the
-            // session counter, coerced to at least 1 so it never shows "Ad 0".
             val label = if (nowPlayingAdInfo.isNotBlank()) {
                 "Ad $nowPlayingAdInfo"
             } else {
                 "Ad ${adSegmentCount.coerceAtLeast(1)}"
             }
             return listOf(label)
+        }
+
+        if (nowPlayingIsLive) {
+            val combinedName = if (safeArtist.isNotBlank()) "$safeArtist — $safeTitle" else safeTitle
+            val maxLine = 42
+            val line1 = when {
+                combinedName.length <= maxLine -> combinedName
+                safeTitle.length <= maxLine -> safeTitle
+                else -> safeTitle.take(maxLine - 1) + "…"
+            }.trim()
+            return listOfNotNull(line1.takeIf { it.isNotBlank() }, "● LIVE")
         }
 
         val isSpotifyDj = activePackage == "com.spotify.music" &&
