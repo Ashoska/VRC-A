@@ -299,19 +299,23 @@ class NowPlayingListenerService : NotificationListenerService() {
 
         // YouTube ad / live-stream detection via seekability.
         // YouTube strips ACTION_SEEK_TO from the PlaybackState during pre-roll/mid-roll
-        // ads (you can't scrub an ad). Live streams are also non-seekable but report
-        // zero or absent duration. Finite non-seekable = ad; non-seekable + no duration
-        // = live stream.
+        // ads (you can't scrub an ad). A genuine video/song is always seekable.
         var ytAdDetected = false
         var isLive = false
         if (pkg in youtubePackages) {
             val actions = pb?.actions ?: 0L
             val seekable = (actions and PlaybackState.ACTION_SEEK_TO) != 0L
             if (!seekable) {
-                if (duration in 1..YOUTUBE_AD_MAX_DURATION_MS) {
-                    ytAdDetected = true
-                } else if (duration <= 0L) {
-                    isLive = true
+                val isMusicApp = pkg == "com.google.android.apps.youtube.music"
+                when {
+                    // YouTube Music: a non-seekable session is an AD. Live streams are
+                    // negligible on a music app, and YT Music AUDIO ads frequently
+                    // report zero/absent duration — so don't gate the ad on a finite
+                    // duration (that mis-routed YT Music ads to the live-stream branch).
+                    isMusicApp -> ytAdDetected = true
+                    // YouTube video app: finite duration = ad; zero/absent = live stream.
+                    duration in 1..YOUTUBE_AD_MAX_DURATION_MS -> ytAdDetected = true
+                    duration <= 0L -> isLive = true
                 }
             }
         }
