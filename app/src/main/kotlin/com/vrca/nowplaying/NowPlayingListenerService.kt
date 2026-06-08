@@ -347,7 +347,11 @@ class NowPlayingListenerService : NotificationListenerService() {
                     title = "AD"; artist = ""
                 }
             }
-            markSpecialWindow(pkg, 10_000L)
+            // YouTube ads use a short window (2s) because the 500ms continuous
+            // poll refreshes it every cycle while seek=N holds. After the ad ends
+            // the window expires in ≤2s — fast enough to not linger over the next
+            // song. Spotify/other ads keep the 10s window (no continuous poll).
+            markSpecialWindow(pkg, if (ytAdDetected) 2_000L else 10_000L)
             if (controller != null) startPollForRealTrack(pkg, controller)
         } else if (isSpecialWindowActive(pkg)) {
             // The ad/DJ segment just ended. As soon as a real track with genuine
@@ -356,7 +360,18 @@ class NowPlayingListenerService : NotificationListenerService() {
             // for the remainder of the 10s window even though a normal song is now
             // playing. While the metadata is still blank (mid-transition), keep the
             // window + polling so the chatbox doesn't flicker to empty/"Paused".
-            if (title.isNotBlank() || artist.isNotBlank()) {
+            //
+            // YouTube packages are EXEMPT from the eager clear. Their continuous
+            // 500ms poll can race with onMetadataChanged callbacks: the callback
+            // reads controller.playbackState which may still carry the OLD actions
+            // (seek=Y) before the PlaybackState update propagates, causing a false
+            // "ad ended" that clears the window AND kills the continuous poll.
+            // Instead, let the short 2s window expire naturally — the poll keeps
+            // running and refreshes it every cycle while the ad is ongoing.
+            if (pkg in youtubePackages) {
+                // no-op: let the window + poll run; window expires after ≤2s of no
+                // seek=N refreshes once the ad genuinely ends.
+            } else if (title.isNotBlank() || artist.isNotBlank()) {
                 clearSpecialWindow(pkg)
                 stopPoll(pkg)
             } else if (pkg == "com.spotify.music" && controller != null) {
