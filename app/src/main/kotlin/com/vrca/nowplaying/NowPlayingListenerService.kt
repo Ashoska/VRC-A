@@ -64,7 +64,7 @@ class NowPlayingListenerService : NotificationListenerService() {
     //    confirmed real song and only the collapse rule applies to it. Tradeoff: a real
     //    song shorter than this (rare) would be read as an ad. Covers the 55s ads seen
     //    plus margin.
-    private val YT_MUSIC_AD_MAX_MS = 75 * 1000L
+    private val YT_MUSIC_AD_MAX_MS = 60 * 1000L
 
     // Catches a newly-started media session the instant it goes active, instead of
     // waiting for the app to post/update its media notification (the pickup delay).
