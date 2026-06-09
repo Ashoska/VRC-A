@@ -182,6 +182,11 @@ object TitleCleaner {
     }
 
     private fun charWidth(c: Char): Float = when {
+        // The ellipsis is three dots on ONE char — ~2 average chars wide. Counting
+        // it as 1.0 made truncate() emit a "shortened to fit" title that STILL
+        // wrapped: the appended … itself pushed the line over ("Theodore Roosevelt
+        // Would LOVE…" wrapped the whole LOVE… token in-game).
+        c == '…' -> 2.0f
         c == 'm' || c == 'w' || c == 'M' || c == 'W' -> 1.4f
         c.isUpperCase() || c.isDigit() -> 1.2f
         c in NARROW_CHARS -> 0.6f
@@ -222,6 +227,8 @@ object TitleCleaner {
     private const val WORD_SLACK = 12
 
     // One VRChat chatbox line ≈ 30-31.5 average-character units (empirical: a 27.8-unit
-    // prefix fit while 31.6 wrapped; 30.0 fit while 34.8 wrapped). 30 keeps margin.
-    private const val VISUAL_LINE_UNITS = 30f
+    // prefix fit while 31.6 wrapped; 30.0 fit while 34.8 wrapped). 28.5 buys safety
+    // margin for estimator noise — a third in-game sample wrapped right at the old
+    // 30-unit edge once the ellipsis was counted honestly.
+    private const val VISUAL_LINE_UNITS = 28.5f
 }
