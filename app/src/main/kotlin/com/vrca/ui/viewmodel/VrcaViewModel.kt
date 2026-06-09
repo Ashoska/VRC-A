@@ -2778,15 +2778,12 @@ class VrcaViewModel(
         // title with a progress bar instead of "Ad 1 of 1". Check the explicit ad
         // flag FIRST and return early so ads always show their index.
         if (nowPlayingIsAd) {
-            val label = if (nowPlayingAdInfo.isNotBlank()) {
-                "Ad $nowPlayingAdInfo"
-            } else {
-                "Ad ${adSegmentCount.coerceAtLeast(1)}"
-            }
+            // The ad index ("Ad 1 of 1") was unreliable, so just show a bare "Ad".
+            val label = "Ad"
             // Keep the progress bar during ads (the bar used to vanish, leaving a
-            // bare "Ad N"). Ads always play, so force playing and render the ad's
+            // bare "Ad"). Ads always play, so force playing and render the ad's
             // OWN position/duration countdown. No brand/title is shown — only the
-            // neutral "Ad N" label + a timer — so nothing leaks.
+            // neutral "Ad" label + a timer — so nothing leaks.
             val adDur = nowPlayingDurationMs
             if (adDur > 0L) {
                 val spd = if (nowPlayingSpeed > 0f) nowPlayingSpeed else 1f
