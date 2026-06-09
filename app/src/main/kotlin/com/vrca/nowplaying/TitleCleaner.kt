@@ -135,8 +135,14 @@ object TitleCleaner {
     }
 
     /**
-     * Fit "artist — title" onto one line of [maxLine] chars, escalating only as far as
-     * needed. Returns the single-line string (already trimmed).
+     * Fit "artist — title" onto one line, escalating only as far as needed. Returns the
+     * single-line string (already trimmed). "Fits" is a DUAL constraint: ≤ [maxLine]
+     * chars (the chatbox char budget) AND ≤ [VISUAL_LINE_UNITS] estimated visual width.
+     * VRChat's chatbox wraps centered PROPORTIONAL text at ~30 average-character widths
+     * — a 41-char title within the 42-char budget still wrapped to a second rendered
+     * line when caps-heavy ("Theodore Roosevelt Would LOVE…" wrapped at ~29 chars,
+     * "…the DUMBEST mfs on earth" at ~31). The char cap stays at 42 so a skinny
+     * all-lowercase title can still use every char that genuinely fits on one line.
      */
     fun fitOneLine(rawTitle: String, rawArtist: String, maxLine: Int): String {
         val artist = clean(rawArtist).trim()
@@ -146,29 +152,67 @@ object TitleCleaner {
             if (artist.isNotBlank() && t.isNotBlank()) "$artist — $t" else t
 
         // 1. cleaned artist + title
-        combined(title1).let { if (it.length <= maxLine) return it }
+        combined(title1).let { if (fitsOneLine(it, maxLine)) return it }
 
         // 2. drop Tier-2 tags from the title, keep artist
         val titleAgg = dedupArtist(cleanAggressive(rawTitle), artist)
-        combined(titleAgg).let { if (it.length <= maxLine) return it }
+        combined(titleAgg).let { if (fitsOneLine(it, maxLine)) return it }
 
         // 3. drop the artist, cleaned title
-        if (title1.length <= maxLine) return title1
+        if (fitsOneLine(title1, maxLine)) return title1
         // 4. drop the artist, aggressive title
-        if (titleAgg.length <= maxLine) return titleAgg
+        if (fitsOneLine(titleAgg, maxLine)) return titleAgg
 
         // 5. last resort — word-boundary truncate the most-cleaned title.
         return truncate(titleAgg.ifBlank { title1 }, maxLine)
     }
 
+    private fun fitsOneLine(s: String, maxLine: Int): Boolean =
+        s.length <= maxLine && visualWidth(s) <= VISUAL_LINE_UNITS
+
     /**
-     * Truncate to [maxLine] with an ellipsis, preferring a whole-word boundary — but only
-     * if cutting at that boundary doesn't waste too much of the line (≤ WORD_SLACK chars);
+     * Crude proportional-width estimate in "average character" units, tuned against
+     * observed VRChat chatbox wraps. Not real font metrics — just enough to catch
+     * caps-heavy strings that blow past the box while letting narrow text run longer.
+     */
+    private fun visualWidth(s: String): Float {
+        var w = 0f
+        for (c in s) w += charWidth(c)
+        return w
+    }
+
+    private fun charWidth(c: Char): Float = when {
+        c == 'm' || c == 'w' || c == 'M' || c == 'W' -> 1.4f
+        c.isUpperCase() || c.isDigit() -> 1.2f
+        c in NARROW_CHARS -> 0.6f
+        // CJK / fullwidth glyphs render roughly double an average Latin char.
+        c.code in 0x2E80..0x9FFF || c.code in 0xAC00..0xD7AF ||
+            c.code in 0xF900..0xFAFF || c.code in 0xFF00..0xFF60 ||
+            c.code in 0x3000..0x303F -> 2.0f
+        else -> 1.0f
+    }
+
+    private const val NARROW_CHARS = " ijltfr.,':;!|()[]-"
+
+    /**
+     * Truncate with an ellipsis to the dual budget (≤ maxLine-1 chars AND inside
+     * [VISUAL_LINE_UNITS] visually), preferring a whole-word boundary — but only if
+     * cutting at that boundary doesn't waste too much of the line (≤ WORD_SLACK chars);
      * otherwise hard-cut so we keep as much identifying text as possible.
      */
     private fun truncate(text: String, maxLine: Int): String {
-        if (text.length <= maxLine) return text
-        val budget = (maxLine - 1).coerceAtLeast(1) // room for the ellipsis
+        if (fitsOneLine(text, maxLine)) return text
+        // Largest prefix whose width + ellipsis stays inside the visual budget.
+        var w = charWidth('…')
+        var n = 0
+        val cap = (maxLine - 1).coerceAtLeast(1).coerceAtMost(text.length)
+        while (n < cap) {
+            val cw = charWidth(text[n])
+            if (w + cw > VISUAL_LINE_UNITS) break
+            w += cw
+            n++
+        }
+        val budget = n.coerceAtLeast(1)
         val space = text.lastIndexOf(' ', budget)
         val base = if (space >= budget - WORD_SLACK && space > 0) text.substring(0, space)
         else text.take(budget)
@@ -176,4 +220,8 @@ object TitleCleaner {
     }
 
     private const val WORD_SLACK = 12
+
+    // One VRChat chatbox line ≈ 30-31.5 average-character units (empirical: a 27.8-unit
+    // prefix fit while 31.6 wrapped; 30.0 fit while 34.8 wrapped). 30 keeps margin.
+    private const val VISUAL_LINE_UNITS = 30f
 }

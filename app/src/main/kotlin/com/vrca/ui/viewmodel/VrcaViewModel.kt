@@ -2837,7 +2837,7 @@ class VrcaViewModel(
                 val adj = (elapsed * spd).toLong()
                 val pos = (nowPlayingPositionMs + max(0L, adj)).coerceAtMost(adDur)
                 val bar = renderProgressBar(spotifyPreset, pos, max(1L, adDur), true, true)
-                val time = "${fmtTime(pos)}ǀ${fmtTime(adDur)}"
+                val time = "${fmtTime(pos)}/${fmtTime(adDur)}"
                 return listOfNotNull(label, (bar + time).takeIf { it.isNotBlank() })
             }
             return listOf(label)
@@ -2871,7 +2871,7 @@ class VrcaViewModel(
         // DJ/special window forces it true so dot never flickers during ads/transitions.
         val dotIsPlaying = if (nowPlayingSpecialActive || isSpotifyDj) true else nowPlayingReportedIsPlaying
         val bar = renderProgressBar(spotifyPreset, pos, max(1L, dur), effectiveIsPlaying, dotIsPlaying)
-        val time = "${fmtTime(pos)}ǀ${fmtTime(max(1L, dur))}"
+        val time = "${fmtTime(pos)}/${fmtTime(max(1L, dur))}"
 
         // No space between bar and time - saves 1 char.
         // Time is a separate independent card; it is NOT embedded here.
@@ -2984,24 +2984,31 @@ class VrcaViewModel(
         val duration = max(1L, durMs)
         val p = min(1f, max(0f, posMs.toFloat() / duration.toFloat()))
         val dot = posDot(dotIsPlaying)
+        // The paused marker (\u23F8) renders as a wide emoji in VRChat's chatbox font
+        // (the playing \u25C9 is a normal text glyph), pushing the bar+time line past
+        // the box width \u2014 "the time wraps when paused but not when playing".
+        // Compensate by dropping ONE filler slot while paused: every slot is the
+        // same glyph, so the bar just reads one char shorter; the marker index
+        // rescales automatically and the slot returns on resume.
+        val pausedTrim = if (dotIsPlaying) 0 else 1
 
         return when (preset.coerceIn(1, 5)) {
             1 -> {
-                val innerSlots = 8
+                val innerSlots = 8 - pausedTrim
                 val idx = (p * (innerSlots - 1)).toInt()
                 val inner = CharArray(innerSlots) { '\u2501' }
                 inner[idx] = dot
                 "\u2661" + inner.concatToString() + "\u2661"
             }
             2 -> {
-                val slots = 10
+                val slots = 10 - pausedTrim
                 val idx = (p * (slots - 1)).toInt()
                 val bg = CharArray(slots) { '\u2500' }
                 bg[idx] = dot
                 bg.concatToString()
             }
             3 -> {
-                val slots = 10
+                val slots = 10 - pausedTrim
                 val idx = (p * (slots - 1)).toInt()
                 val out = CharArray(slots) { i ->
                     when {
@@ -3014,7 +3021,7 @@ class VrcaViewModel(
             }
             4 -> renderSoundwaveBar(p, posMs, isPlaying, dotIsPlaying)
             else -> {
-                val slots = 10
+                val slots = 10 - pausedTrim
                 val idx = (p * (slots - 1)).toInt()
                 val out = CharArray(slots) { i ->
                     when {
@@ -3044,7 +3051,8 @@ class VrcaViewModel(
     private val soundwavePaused: IntArray = intArrayOf(4, 5, 4, 6, 4, 5, 4, 6, 4, 5, 4, 6)
 
     private fun renderSoundwaveBar(progress01: Float, posMs: Long, isPlaying: Boolean, dotIsPlaying: Boolean = isPlaying): String {
-        val slots = 8
+        // Same paused-trim as renderProgressBar: the [⏸] marker is emoji-wide.
+        val slots = if (dotIsPlaying) 8 else 7
         val idx = (progress01 * (slots - 1)).toInt().coerceIn(0, slots - 1)
 
         val patternIndex = if (isPlaying) ((posMs / 1400L) % soundwavePatterns.size).toInt() else -1
