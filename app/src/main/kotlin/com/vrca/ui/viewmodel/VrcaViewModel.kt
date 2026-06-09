@@ -299,6 +299,19 @@ class VrcaViewModel(
     // (no content change) is what the cold-open throttle skips on a rapid restart.
     private val LIVENESS_KEYS = setOf("isOnlineInApp", "lastActiveAt", "lastSeenAt", "updatedAt")
     private val TOGGLE_KEYS = setOf("afkEnabled", "cycleEnabled", "spotifyEnabled", "spotifyDemoEnabled", "timeEnabled")
+    // Volatile preview/nowPlaying/presence keys carried by captureStateForSync so the
+    // hourly delta refreshes an unwatched user's directory row. Excluded from the
+    // swipe-time offline write (captureContentForOfflineWrite) — that write is
+    // documented to omit volatile preview, and the pipeline service's own offline
+    // write already carries final presence.
+    private val VOLATILE_SYNC_KEYS = setOf(
+        "combinedPreviewText", "nowPlayingDetected", "nowPlayingIsPlaying",
+        "nowPlayingTitle", "nowPlayingArtist", "activePackage",
+        "vrchatUserId", "vrchatDisplayName", "vrchatState", "vrchatStatus",
+        "vrchatStatusDescription", "vrchatWorld", "vrchatLocation",
+        "vrchatInstancePlayerCount", "vrchatInstanceCapacity",
+        "vrchatPlatform", "vrchatIsOnline"
+    )
 
     private fun readLastSelfSyncMs(): Long = prefs().getLong(PREF_LAST_SELF_SYNC_MS, 0L)
 
@@ -595,29 +608,59 @@ class VrcaViewModel(
         // Intentionally empty — directory browsing no longer triggers writes.
     }
 
-    private fun captureStateForSync(): Map<String, Any?> = mapOf(
-        "afkEnabled" to afkEnabled,
-        "afkMessage" to afkMessage.trim(),
-        "cycleEnabled" to cycleEnabled,
-        "cycleIntervalSeconds" to cycleIntervalSeconds,
-        "cycleLinesText" to cycleLines.joinToString("\n").trim(),
-        "spotifyEnabled" to spotifyEnabled,
-        "spotifyDemoEnabled" to spotifyDemoEnabled,
-        "spotifyPreset" to spotifyPreset,
-        "timeEnabled" to timeEnabled,
-        "timeMode" to timeMode,
-        "afkPreset1" to getAfkPresetPreview(1),
-        "afkPreset2" to getAfkPresetPreview(2),
-        "afkPreset3" to getAfkPresetPreview(3),
-        "cyclePreset1" to (cyclePresetMessages.getOrNull(0)?.trim().orEmpty()),
-        "cyclePreset2" to (cyclePresetMessages.getOrNull(1)?.trim().orEmpty()),
-        "cyclePreset3" to (cyclePresetMessages.getOrNull(2)?.trim().orEmpty()),
-        "cyclePreset4" to (cyclePresetMessages.getOrNull(3)?.trim().orEmpty()),
-        "cyclePreset5" to (cyclePresetMessages.getOrNull(4)?.trim().orEmpty()),
+    private fun captureStateForSync(): Map<String, Any?> = buildMap {
+        put("afkEnabled", afkEnabled)
+        put("afkMessage", afkMessage.trim())
+        put("cycleEnabled", cycleEnabled)
+        put("cycleIntervalSeconds", cycleIntervalSeconds)
+        put("cycleLinesText", cycleLines.joinToString("\n").trim())
+        put("spotifyEnabled", spotifyEnabled)
+        put("spotifyDemoEnabled", spotifyDemoEnabled)
+        put("spotifyPreset", spotifyPreset)
+        put("timeEnabled", timeEnabled)
+        put("timeMode", timeMode)
+        put("afkPreset1", getAfkPresetPreview(1))
+        put("afkPreset2", getAfkPresetPreview(2))
+        put("afkPreset3", getAfkPresetPreview(3))
+        put("cyclePreset1", cyclePresetMessages.getOrNull(0)?.trim().orEmpty())
+        put("cyclePreset2", cyclePresetMessages.getOrNull(1)?.trim().orEmpty())
+        put("cyclePreset3", cyclePresetMessages.getOrNull(2)?.trim().orEmpty())
+        put("cyclePreset4", cyclePresetMessages.getOrNull(3)?.trim().orEmpty())
+        put("cyclePreset5", cyclePresetMessages.getOrNull(4)?.trim().orEmpty())
         // Profile pictures are deliberately NOT synced to Firestore (cost). The
         // admin panel resolves VRChat+ pictures on demand by vrchatUserId via the
         // admin's own VRChat session — see AdminAvatar / VrchatImageLoader.
-    )
+
+        // Volatile preview/nowPlaying + VRChat presence ride the hourly delta so
+        // an UNWATCHED user's directory row stays roughly current (Firestore bills
+        // per document write, not per field — these piggyback on the write that
+        // happens anyway). The 30s edit debounce is still only scheduled by
+        // genuine content edits, so these fields never CAUSE a write on their own;
+        // they're swept up whenever one fires. While watched, the 10s live loop
+        // remains the real-time source. (These were silently dropped from the
+        // delta path when captureStateForSync was introduced — buildUserSnapshot
+        // carries them but only fires on first install / uid change — leaving
+        // unwatched previews frozen at the last watch session.)
+        put("combinedPreviewText", combinedPreviewText.trim())
+        put("nowPlayingDetected", nowPlayingDetected)
+        put("nowPlayingIsPlaying", nowPlayingIsPlaying)
+        put("nowPlayingTitle", lastNowPlayingTitle.takeIf { it != "(blank)" }?.trim().orEmpty())
+        put("nowPlayingArtist", lastNowPlayingArtist.takeIf { it != "(blank)" }?.trim().orEmpty())
+        put("activePackage", activePackage)
+        VrchatPipelineState.presence?.let { p ->
+            put("vrchatUserId", p.userId)
+            put("vrchatDisplayName", p.displayName)
+            put("vrchatState", p.state)
+            put("vrchatStatus", p.status)
+            put("vrchatStatusDescription", p.statusDescription)
+            put("vrchatWorld", p.worldName)
+            put("vrchatLocation", p.location)
+            put("vrchatInstancePlayerCount", p.instancePlayerCount)
+            put("vrchatInstanceCapacity", p.instanceCapacity)
+            put("vrchatPlatform", p.platform)
+            put("vrchatIsOnline", p.isOnlineInVRChat)
+        }
+    }
 
     /**
      * Content snapshot for the swipe-time offline write (called by [com.vrca.app.AppShutdown]
@@ -630,7 +673,9 @@ class VrcaViewModel(
     fun captureContentForOfflineWrite(): Map<String, Any> {
         if (BuildConfig.IS_ADMIN_BUILD) return emptyMap()
         val m = mutableMapOf<String, Any>()
-        captureStateForSync().forEach { (k, v) -> if (v != null) m[k] = v }
+        captureStateForSync().forEach { (k, v) ->
+            if (v != null && k !in VOLATILE_SYNC_KEYS) m[k] = v
+        }
         m["cycleLines"] = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(10)
         return m
     }
