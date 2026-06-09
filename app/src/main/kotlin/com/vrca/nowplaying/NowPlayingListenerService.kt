@@ -355,16 +355,12 @@ class NowPlayingListenerService : NotificationListenerService() {
         //   with a buffering gate + entry hysteresis to reject the noisy raw signal.
         var ytAdDetected = false
         var isLive = false
-        var ytDbgSeekable = true
-        var ytDbgState = -99
         if (pkg in youtubePackages) {
             val actions = pb?.actions ?: 0L
             val seekable = (actions and PlaybackState.ACTION_SEEK_TO) != 0L
             val pbState = pb?.state ?: PlaybackState.STATE_NONE
             val buffering = pbState == PlaybackState.STATE_BUFFERING ||
                 pbState == PlaybackState.STATE_CONNECTING
-            ytDbgSeekable = seekable
-            ytDbgState = pbState
 
             if (pkg == "com.google.android.apps.youtube.music") {
                 // RELATIVE duration-collapse detection (no fixed ceiling — ads have been
@@ -384,7 +380,22 @@ class NowPlayingListenerService : NotificationListenerService() {
                 }
                 val seeded = songEstablishedDurByPackage[pkg] ?: duration
                 if (duration > seeded) songEstablishedDurByPackage[pkg] = duration
-                val establishedDur = songEstablishedDurByPackage[pkg] ?: duration
+                var establishedDur = songEstablishedDurByPackage[pkg] ?: duration
+
+                // Ground-truth from the iTunes Search API (best-effort, additive). Warm the
+                // cache for this title/artist; if we already have the song's REAL length use
+                // it to RAISE establishedDur. This catches the PRE-ROLL ad even on its first
+                // appearance: the ad shows the UPCOMING song's title at the ad's short length
+                // (no long device baseline yet), but iTunes tells us the song is much longer,
+                // so the collapse rule fires immediately instead of waiting for the real song.
+                if (curTitle.isNotBlank()) {
+                    ITunesDurationLookup.prefetch(curTitle, artist)
+                    val itunesDur = ITunesDurationLookup.cached(curTitle, artist) ?: 0L
+                    if (itunesDur > establishedDur) {
+                        establishedDur = itunesDur
+                        songEstablishedDurByPackage[pkg] = itunesDur
+                    }
+                }
 
                 // Two ad shapes, both NOT gated on `playing` (a PAUSED ad keeps title=song
                 // + the ad's short duration, so detection must survive a pause — gating on
@@ -502,20 +513,6 @@ class NowPlayingListenerService : NotificationListenerService() {
             // EXCEPT YouTube: its continuous pause-detection poll must keep running
             // (it pushes normal tracks every cycle and would otherwise stop itself here).
             stopPoll(pkg)
-        }
-
-        // Temporary on-device debug trace of the YouTube ad signals.
-        if (pkg in youtubePackages) {
-            NowPlayingDebug.record(
-                pkg = pkg,
-                state = ytDbgState,
-                seekable = ytDbgSeekable,
-                durationMs = duration,
-                streak = ytSeekNStreakByPackage[pkg] ?: 0,
-                adDetected = ytAdDetected,
-                windowActive = isSpecialWindowActive(pkg),
-                isAdWindow = specialWindowIsAdByPackage[pkg] == true
-            )
         }
 
         val detected = title.isNotBlank() || artist.isNotBlank()

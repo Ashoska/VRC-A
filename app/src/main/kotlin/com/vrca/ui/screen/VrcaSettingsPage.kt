@@ -26,7 +26,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -38,7 +37,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.vrca.nowplaying.NowPlayingDebug
 import com.vrca.ui.viewmodel.VrcaViewModel
 
 @Composable
@@ -142,14 +140,6 @@ internal fun SettingsPage(
                         Text("Active package: ${vm.activePackage}", style = MaterialTheme.typography.bodySmall)
                         Text("Detected: ${vm.nowPlayingDetected}", style = MaterialTheme.typography.bodySmall)
                         Text("Playing: ${vm.nowPlayingIsPlaying}", style = MaterialTheme.typography.bodySmall)
-
-                        Text("YouTube ad signals", style = MaterialTheme.typography.labelMedium)
-                        val ytTrace by NowPlayingDebug.trace.collectAsState()
-                        Text(
-                            text = ytTrace,
-                            fontFamily = FontFamily.Monospace,
-                            style = MaterialTheme.typography.bodySmall
-                        )
 
                         Text("OSC Output Preview", style = MaterialTheme.typography.labelMedium)
                         SelectionContainer {

@@ -495,18 +495,43 @@ fun VrcaApp() {
             onDismiss = { updateDismissed = true },
             onDownload = { url ->
                 downloadError = null
-                val dm = ctx.getSystemService(android.content.Context.DOWNLOAD_SERVICE) as DownloadManager
+                // DownloadManager can be disabled/unavailable on some OEM builds (reported
+                // on Samsung Galaxy) — getSystemService returns null or enqueue() throws
+                // (IllegalArgumentException "Unknown URL"/SecurityException). Catch every
+                // failure and fall back to opening the APK URL in the browser so the user
+                // can always get the update instead of the popup silently doing nothing.
                 val fileName = "vrc-a-update.apk"
-                val dest = File(ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), fileName)
-                if (dest.exists()) dest.delete()
-                val request = DownloadManager.Request(Uri.parse(url)).apply {
-                    setTitle("VRC-A Update")
-                    setDescription("Downloading update...")
-                    setDestinationInExternalFilesDir(ctx, Environment.DIRECTORY_DOWNLOADS, fileName)
-                    setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
+                var enqueued = false
+                try {
+                    val dm = ctx.getSystemService(android.content.Context.DOWNLOAD_SERVICE) as? DownloadManager
+                    if (dm != null) {
+                        val dest = File(ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), fileName)
+                        if (dest.exists()) dest.delete()
+                        val request = DownloadManager.Request(Uri.parse(url)).apply {
+                            setTitle("VRC-A Update")
+                            setDescription("Downloading update...")
+                            setDestinationInExternalFilesDir(ctx, Environment.DIRECTORY_DOWNLOADS, fileName)
+                            setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
+                        }
+                        downloadId = dm.enqueue(request)
+                        downloadDone = false
+                        enqueued = true
+                    }
+                } catch (_: Throwable) {
+                    // fall through to the browser fallback below
                 }
-                downloadId = dm.enqueue(request)
-                downloadDone = false
+                if (!enqueued) {
+                    try {
+                        ctx.startActivity(
+                            Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                        downloadError = "In-app download unavailable on this device — " +
+                            "opened the update in your browser instead."
+                    } catch (_: Throwable) {
+                        downloadError = "Couldn't start the download. Update manually from: $url"
+                    }
+                }
             }
         )
     }
