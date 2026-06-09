@@ -2792,7 +2792,7 @@ class VrcaViewModel(
                 val adj = (elapsed * spd).toLong()
                 val pos = (nowPlayingPositionMs + max(0L, adj)).coerceAtMost(adDur)
                 val bar = renderProgressBar(spotifyPreset, pos, max(1L, adDur), true, true)
-                val time = "${fmtTime(pos)}/${fmtTime(adDur)}"
+                val time = "${fmtTime(pos)}|${fmtTime(adDur)}"
                 return listOfNotNull(label, (bar + time).takeIf { it.isNotBlank() })
             }
             return listOf(label)
@@ -2800,8 +2800,13 @@ class VrcaViewModel(
 
         if (nowPlayingIsLive) {
             val maxLine = 42
-            val line1 = TitleCleaner.fitOneLine(safeTitle, safeArtist, maxLine)
-            return listOfNotNull(line1.takeIf { it.isNotBlank() }, "● LIVE")
+            val isYtVideo = activePackage == "com.google.android.youtube"
+            val titleLines = if (isYtVideo) {
+                splitIntoLines(TitleCleaner.fitOneLine(safeTitle, safeArtist, maxLine * 2), maxLine)
+            } else {
+                listOf(TitleCleaner.fitOneLine(safeTitle, safeArtist, maxLine))
+            }
+            return titleLines.filter { it.isNotBlank() } + listOf("● LIVE")
         }
 
         val isSpotifyDj = activePackage == "com.spotify.music" &&
@@ -2811,11 +2816,13 @@ class VrcaViewModel(
         val effectiveIsPlaying = if (nowPlayingSpecialActive || isSpotifyDj) true else nowPlayingIsPlaying
 
         val maxLine = 42
+        val isYtVideo = activePackage == "com.google.android.youtube"
 
-        // Fit "artist \u2014 title" onto one line: strip non-identifying cruft (Official Video,
-        // - Topic, | Label, Remastered \u2026), de-dup an artist embedded in the title, drop
-        // the artist only if still over, then word-boundary truncate as a last resort.
-        val line1 = TitleCleaner.fitOneLine(safeTitle, safeArtist, maxLine)
+        val titleLines: List<String> = if (isYtVideo) {
+            splitIntoLines(TitleCleaner.fitOneLine(safeTitle, safeArtist, maxLine * 2), maxLine)
+        } else {
+            listOf(TitleCleaner.fitOneLine(safeTitle, safeArtist, maxLine))
+        }
 
         val dur = if (spotifyDemoEnabled && !nowPlayingDetected) 205_000L else nowPlayingDurationMs
         val posSnapshot = if (spotifyDemoEnabled && !nowPlayingDetected) 78_000L else nowPlayingPositionMs
@@ -2830,13 +2837,13 @@ class VrcaViewModel(
         // DJ/special window forces it true so dot never flickers during ads/transitions.
         val dotIsPlaying = if (nowPlayingSpecialActive || isSpotifyDj) true else nowPlayingReportedIsPlaying
         val bar = renderProgressBar(spotifyPreset, pos, max(1L, dur), effectiveIsPlaying, dotIsPlaying)
-        val time = "${fmtTime(pos)}/${fmtTime(max(1L, dur))}"
+        val time = "${fmtTime(pos)}|${fmtTime(max(1L, dur))}"
 
         // No space between bar and time - saves 1 char.
         // Time is a separate independent card; it is NOT embedded here.
         val line2 = bar + time
 
-        return listOfNotNull(line1.takeIf { it.isNotBlank() }, line2.takeIf { it.isNotBlank() })
+        return titleLines.filter { it.isNotBlank() } + listOfNotNull(line2.takeIf { it.isNotBlank() })
     }
 
     private enum class Priority { AFK, MUSIC, CYCLE }
@@ -2932,6 +2939,26 @@ class VrcaViewModel(
     // =========================
 
     // \u25C9 = playing (circled dot). \u23F8 = paused (classic double-bar pause symbol).
+    private fun splitIntoLines(text: String, lineWidth: Int): List<String> {
+        if (text.length <= lineWidth) return listOf(text)
+        val split = text.lastIndexOf(' ', lineWidth)
+        val line1: String
+        val remainder: String
+        if (split > 0) {
+            line1 = text.substring(0, split).trimEnd()
+            remainder = text.substring(split + 1).trimStart()
+        } else {
+            line1 = text.take(lineWidth)
+            remainder = text.substring(lineWidth)
+        }
+        val line2 = if (remainder.length > lineWidth) {
+            remainder.take(lineWidth - 1) + "\u2026"
+        } else {
+            remainder
+        }
+        return listOfNotNull(line1.takeIf { it.isNotBlank() }, line2.takeIf { it.isNotBlank() })
+    }
+
     private fun posDot(isPlaying: Boolean): Char = if (isPlaying) '\u25C9' else '\u23F8'
 
     // isPlaying   = animation state (smoothed - suppress stall/DJ flicker on position advance)
