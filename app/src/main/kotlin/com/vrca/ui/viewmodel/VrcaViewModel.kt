@@ -2792,7 +2792,7 @@ class VrcaViewModel(
                 val adj = (elapsed * spd).toLong()
                 val pos = (nowPlayingPositionMs + max(0L, adj)).coerceAtMost(adDur)
                 val bar = renderProgressBar(spotifyPreset, pos, max(1L, adDur), true, true)
-                val time = "${fmtTime(pos)}⁄${fmtTime(adDur)}"
+                val time = "${fmtTime(pos)}ǀ${fmtTime(adDur)}"
                 return listOfNotNull(label, (bar + time).takeIf { it.isNotBlank() })
             }
             return listOf(label)
@@ -2826,7 +2826,7 @@ class VrcaViewModel(
         // DJ/special window forces it true so dot never flickers during ads/transitions.
         val dotIsPlaying = if (nowPlayingSpecialActive || isSpotifyDj) true else nowPlayingReportedIsPlaying
         val bar = renderProgressBar(spotifyPreset, pos, max(1L, dur), effectiveIsPlaying, dotIsPlaying)
-        val time = "${fmtTime(pos)}⁄${fmtTime(max(1L, dur))}"
+        val time = "${fmtTime(pos)}ǀ${fmtTime(max(1L, dur))}"
 
         // No space between bar and time - saves 1 char.
         // Time is a separate independent card; it is NOT embedded here.
