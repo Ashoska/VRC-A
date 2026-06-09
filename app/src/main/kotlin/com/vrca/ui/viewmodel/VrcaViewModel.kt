@@ -30,6 +30,7 @@ import com.vrca.BuildConfig
 import com.vrca.app.FeatureSessionStore
 import com.vrca.app.VrcaApplication
 import com.vrca.nowplaying.NowPlayingState
+import com.vrca.nowplaying.TitleCleaner
 import com.vrca.data.UserPreferencesRepository
 import com.vrca.osc.VrcaOsc
 import com.vrca.vrchat.VrchatPipelineState
@@ -2798,13 +2799,8 @@ class VrcaViewModel(
         }
 
         if (nowPlayingIsLive) {
-            val combinedName = if (safeArtist.isNotBlank()) "$safeArtist — $safeTitle" else safeTitle
             val maxLine = 42
-            val line1 = when {
-                combinedName.length <= maxLine -> combinedName
-                safeTitle.length <= maxLine -> safeTitle
-                else -> safeTitle.take(maxLine - 1) + "…"
-            }.trim()
+            val line1 = TitleCleaner.fitOneLine(safeTitle, safeArtist, maxLine)
             return listOfNotNull(line1.takeIf { it.isNotBlank() }, "● LIVE")
         }
 
@@ -2815,17 +2811,11 @@ class VrcaViewModel(
         val effectiveIsPlaying = if (nowPlayingSpecialActive || isSpotifyDj) true else nowPlayingIsPlaying
 
         val maxLine = 42
-        val twoLineBudget = maxLine * 2
 
-        val combinedName = if (safeArtist.isNotBlank()) "$safeArtist \u2014 $safeTitle" else safeTitle
-        val preferNoArtist = safeArtist.isNotBlank() && combinedName.length > twoLineBudget
-
-        val primary = if (preferNoArtist) safeTitle else combinedName
-        val line1 = when {
-            primary.length <= maxLine -> primary
-            safeTitle.length <= maxLine -> safeTitle
-            else -> safeTitle.take(maxLine - 1) + "…"
-        }.trim()
+        // Fit "artist \u2014 title" onto one line: strip non-identifying cruft (Official Video,
+        // - Topic, | Label, Remastered \u2026), de-dup an artist embedded in the title, drop
+        // the artist only if still over, then word-boundary truncate as a last resort.
+        val line1 = TitleCleaner.fitOneLine(safeTitle, safeArtist, maxLine)
 
         val dur = if (spotifyDemoEnabled && !nowPlayingDetected) 205_000L else nowPlayingDurationMs
         val posSnapshot = if (spotifyDemoEnabled && !nowPlayingDetected) 78_000L else nowPlayingPositionMs
