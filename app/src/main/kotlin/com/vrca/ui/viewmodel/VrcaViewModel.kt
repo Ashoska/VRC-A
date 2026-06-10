@@ -2612,13 +2612,32 @@ class VrcaViewModel(
         cycleJob = viewModelScope.launch {
             cycleIndex = 0
             while (cycleEnabled && oscSending && !isBanned) {
+                // Re-read the LIVE lines every tick. The loop used to iterate a
+                // list captured ONCE at start, so a mid-send edit kept flashing
+                // the pre-edit text at each rotation boundary (every other path
+                // reads live cycleLines, so only this loop was stale) until a
+                // Stop/Start re-captured it.
+                val live = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(10)
+                if (live.isEmpty()) {
+                    // All lines deleted mid-send: render without a cycle line
+                    // (clears the chatbox if nothing else is enabled) and keep
+                    // looping so re-adding a line resumes automatically.
+                    rebuildAndMaybeSendCombined(forceSend = true, local = local, forceClearIfAllOff = true)
+                    delay(cycleIntervalSeconds.toLong() * 1000L)
+                    continue
+                }
+                if (cycleIndex >= live.size) cycleIndex = 0
                 rebuildAndMaybeSendCombined(
                     forceSend = true,
                     local = local,
-                    cycleLineOverride = msgs[cycleIndex % msgs.size]
+                    cycleLineOverride = live[cycleIndex]
                 )
-                cycleIndex = (cycleIndex + 1) % msgs.size
+                // Advance AFTER the interval, not right after the send — during
+                // the wait cycleIndex must still point at the line on screen so
+                // currentCycleLinePreview() (preview + the other sender loops'
+                // null-override rebuilds) agrees with what this tick sent.
                 delay(cycleIntervalSeconds.toLong() * 1000L)
+                cycleIndex = (cycleIndex + 1) % live.size
             }
         }
         startSelfSyncLoopIfNeeded()
