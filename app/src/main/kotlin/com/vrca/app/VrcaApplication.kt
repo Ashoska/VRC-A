@@ -3,15 +3,19 @@ package com.vrca.app
 import android.app.Application
 import android.content.Context
 import android.os.Build
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.os.Process
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.FirebaseFirestoreSettings
 import com.vrca.BuildConfig
 import com.vrca.data.UserPreferencesRepository
 import com.vrca.ui.viewmodel.VrcaViewModel
+import java.io.File
 import java.io.PrintWriter
 import java.io.StringWriter
 import java.text.SimpleDateFormat
@@ -60,6 +64,14 @@ class VrcaApplication : Application(), ViewModelStoreOwner {
         // collects NowPlayingState, so a headless revival / cold start shows the
         // previous (possibly paused) track immediately instead of blanking.
         com.vrca.nowplaying.NowPlayingState.attach(applicationContext)
+
+        // Cap Firestore offline cache (default is 100 MB — far more than needed).
+        FirebaseFirestore.getInstance().firestoreSettings =
+            FirebaseFirestoreSettings.Builder()
+                .setCacheSizeBytes(25L * 1024 * 1024)
+                .build()
+
+        cleanStaleUpdateApks()
     }
 
     /**
@@ -84,6 +96,15 @@ class VrcaApplication : Application(), ViewModelStoreOwner {
         }
         if (Looper.myLooper() == Looper.getMainLooper()) create.run()
         else Handler(Looper.getMainLooper()).post(create)
+    }
+
+    private fun cleanStaleUpdateApks() {
+        try {
+            val dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: return
+            dir.listFiles()?.forEach { f ->
+                if (f.name.endsWith(".apk")) f.delete()
+            }
+        } catch (_: Throwable) {}
     }
 
     private fun installCrashHandler() {

@@ -105,7 +105,7 @@ class DiscordRpcService : Service() {
         // fails it lands on /login and the existing onSessionExpired() recovery
         // kicks in.
         private const val CACHE_CHECK_INTERVAL_MS = 60L * 60 * 1000   // hourly
-        private const val WEBVIEW_CACHE_CAP_BYTES = 80L * 1024 * 1024  // 80 MB
+        private const val WEBVIEW_CACHE_CAP_BYTES = 20L * 1024 * 1024  // 20 MB
 
         var isRunning = false
             private set
