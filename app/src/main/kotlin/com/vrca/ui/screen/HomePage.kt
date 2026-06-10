@@ -40,6 +40,8 @@ import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Power
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -169,6 +171,20 @@ internal fun HomePage(
             titleStyle = MaterialTheme.typography.headlineSmall,
             subtitle = "What will appear in VRChat.",
             actions = {
+                // Invisible Chatbox Border quick-toggle — tiny, unlabeled by design;
+                // the preview's reaction IS the explanation.
+                IconButton(
+                    onClick = { vm.setMinimalChatboxBgFlag(!vm.minimalChatboxBg) },
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        if (vm.minimalChatboxBg) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp),
+                        tint = if (vm.minimalChatboxBg) MaterialTheme.colorScheme.primary
+                               else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 SendStatusChip(sending = vm.oscSending)
             }
         ) {
@@ -180,22 +196,27 @@ internal fun HomePage(
                     .fillMaxWidth()
                     .height(280.dp)
             ) {
-                Surface(
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .widthIn(max = 420.dp)
-                        .fillMaxWidth(0.92f),
-                    tonalElevation = 3.dp,
-                    shape = MaterialTheme.shapes.large,
-                    color = MaterialTheme.colorScheme.surfaceVariant
-                ) {
+                if (vm.minimalChatboxBg) {
+                    // Invisible Chatbox Border simulation: text floats with only a
+                    // tiny pill behind it — mirrors what VRChat renders in-game.
                     Box(
                         Modifier
+                            .align(Alignment.TopCenter)
+                            .widthIn(max = 420.dp)
+                            .fillMaxWidth(0.92f)
                             .heightIn(min = 96.dp)
-                            .padding(12.dp)
-                            .fillMaxWidth(),
+                            .padding(12.dp),
                         contentAlignment = Alignment.Center
                     ) {
+                        Surface(
+                            modifier = Modifier
+                                .align(Alignment.Center)
+                                .width(44.dp)
+                                .height(16.dp),
+                            tonalElevation = 3.dp,
+                            shape = MaterialTheme.shapes.large,
+                            color = MaterialTheme.colorScheme.surfaceVariant
+                        ) {}
                         SelectionContainer {
                             Text(
                                 text = previewText,
@@ -207,6 +228,37 @@ internal fun HomePage(
                                 maxLines = 9,
                                 overflow = TextOverflow.Ellipsis
                             )
+                        }
+                    }
+                } else {
+                    Surface(
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .widthIn(max = 420.dp)
+                            .fillMaxWidth(0.92f),
+                        tonalElevation = 3.dp,
+                        shape = MaterialTheme.shapes.large,
+                        color = MaterialTheme.colorScheme.surfaceVariant
+                    ) {
+                        Box(
+                            Modifier
+                                .heightIn(min = 96.dp)
+                                .padding(12.dp)
+                                .fillMaxWidth(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            SelectionContainer {
+                                Text(
+                                    text = previewText,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    fontFamily = FontFamily.Monospace,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    textAlign = TextAlign.Center,
+                                    softWrap = true,
+                                    maxLines = 9,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                         }
                     }
                 }
@@ -403,15 +455,6 @@ internal fun HomePage(
                         }
                     }
 
-                    // Display option, not a chatbox component: shrinks the in-game
-                    // bubble background (testing). Persists across close/swipe.
-                    Divider(color = MaterialTheme.colorScheme.outlineVariant)
-                    ToggleRow(
-                        "Minimal chatbox bubble",
-                        vm.minimalChatboxBg,
-                        enabled = !isBanned,
-                        description = "Shrinks the bubble behind your text in VRChat. Uses 2 of the 144 characters."
-                    ) { vm.setMinimalChatboxBgFlag(it) }
                 }
             }
         }

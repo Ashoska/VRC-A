@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -37,6 +38,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.vrca.BuildConfig
+import com.vrca.ui.settings.ToggleRow
 import com.vrca.ui.viewmodel.VrcaViewModel
 
 @Composable
@@ -49,6 +52,31 @@ internal fun SettingsPage(
     var debugExpanded by rememberSaveable { mutableStateOf(false) }
 
     PageContainer {
+        // -- Chatbox display --
+        SectionCard(title = "Chatbox display") {
+            ToggleRow(
+                label = "Invisible Chatbox Border",
+                checked = vm.minimalChatboxBg,
+                description = "Shrinks the chatbox background in VRChat to a minimal pill so only your text shows."
+            ) { vm.setMinimalChatboxBgFlag(it) }
+        }
+
+        // -- App --
+        SectionCard(title = "App") {
+            Text(
+                "Version ${BuildConfig.VERSION_NAME}",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(6.dp))
+            SettingsRow(
+                icon = Icons.Filled.Power,
+                title = "Battery Optimization",
+                subtitle = "Stops Android pausing VRC-A when the screen is off. Strongly recommended.",
+                primary = "Request"
+            ) { ctx.startActivity(vm.batteryOptimizationIntent()) }
+        }
+
         // -- Permissions --
         SectionCard(title = "Permissions") {
             SettingsRow(
@@ -64,13 +92,6 @@ internal fun SettingsPage(
                 subtitle = "Only needed if you use overlay.",
                 primary = "Open"
             ) { ctx.startActivity(vm.overlayPermissionIntent()) }
-
-            SettingsRow(
-                icon = Icons.Filled.Power,
-                title = "Battery Optimization",
-                subtitle = "Stops Android pausing when screen is off.",
-                primary = "Request"
-            ) { ctx.startActivity(vm.batteryOptimizationIntent()) }
         }
 
         // -- About --
@@ -79,26 +100,31 @@ internal fun SettingsPage(
                 "VRC-A (made by Ashoska Mitsu Sisko)\n\n" +
                 "- Sends OSC chatbox text to your Quest/PC target\n" +
                 "- Includes: Pinned, Cycle, Now Playing, Manual Send\n" +
-                "- Use KILL to stop all senders and clear the VRChat chatbox",
+                "- Use Stop to halt all senders and clear the VRChat chatbox",
                 style = MaterialTheme.typography.bodyMedium
             )
         }
 
-        // -- Help --
+        // -- Help (collapsible FAQ) --
         SectionCard(title = "Help") {
-            Text(
-                "Nothing appears in VRChat:\n" +
-                "- VRChat -> Settings -> OSC -> Enable OSC\n" +
-                "- Phone + headset on the same Wi-Fi\n" +
-                "- Set the correct headset IP (Home -> Connection)\n" +
-                "- Try Manual Send\n\n" +
-                "Now Playing blank:\n" +
-                "- Enable Notification Access\n" +
-                "- Reopen the app\n" +
-                "- Start music so a notification exists\n\n" +
-                "Stops sending with screen off:\n" +
-                "- Disable Battery Optimization for VRC-A",
-                style = MaterialTheme.typography.bodyMedium
+            HelpFaqRow(
+                question = "Nothing appears in VRChat",
+                answer = "- VRChat -> Settings -> OSC -> Enable OSC\n" +
+                    "- Phone + headset on the same Wi-Fi\n" +
+                    "- Set the correct headset IP (Home -> Connection)\n" +
+                    "- Press Start on Home\n" +
+                    "- Try Manual Send"
+            )
+            HelpFaqRow(
+                question = "Now Playing is blank",
+                answer = "- Enable Notification Access\n" +
+                    "- Reopen the app\n" +
+                    "- Start music so a notification exists"
+            )
+            HelpFaqRow(
+                question = "Stops sending with screen off",
+                answer = "- Disable Battery Optimization for VRC-A (App section above)\n" +
+                    "- On Samsung: add VRC-A to \"Never sleeping apps\""
             )
         }
 
@@ -156,6 +182,37 @@ internal fun SettingsPage(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun HelpFaqRow(question: String, answer: String) {
+    var expanded by rememberSaveable(question) { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                question,
+                style = MaterialTheme.typography.titleSmall,
+                modifier = Modifier.weight(1f)
+            )
+            Icon(
+                if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                contentDescription = if (expanded) "Collapse" else "Expand",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        AnimatedVisibility(visible = expanded) {
+            Text(
+                answer,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(bottom = 10.dp)
+            )
         }
     }
 }

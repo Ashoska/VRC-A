@@ -1528,7 +1528,10 @@ class VrcaViewModel(
         remoteVrcaOsc.minimalBackground = enabled
         localVrcaOsc.minimalBackground = enabled
         viewModelScope.launch { userPreferencesRepository.saveMinimalChatboxBg(enabled) }
-        rebuildCombinedPreviewOnly()
+        // Re-send immediately while sending so the bubble reacts in-game the
+        // moment the user flips the eye toggle (instead of on the next tick).
+        if (oscSending) rebuildAndMaybeSendCombined(forceSend = true)
+        else rebuildCombinedPreviewOnly()
     }
 
     fun onIpAddressChange(ip: String) {
