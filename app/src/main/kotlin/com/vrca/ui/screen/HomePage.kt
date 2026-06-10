@@ -56,6 +56,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Divider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -401,6 +402,16 @@ internal fun HomePage(
                             }
                         }
                     }
+
+                    // Display option, not a chatbox component: shrinks the in-game
+                    // bubble background (testing). Persists across close/swipe.
+                    Divider(color = MaterialTheme.colorScheme.outlineVariant)
+                    ToggleRow(
+                        "Minimal chatbox bubble",
+                        vm.minimalChatboxBg,
+                        enabled = !isBanned,
+                        description = "Shrinks the bubble behind your text in VRChat. Uses 2 of the 144 characters."
+                    ) { vm.setMinimalChatboxBgFlag(it) }
                 }
             }
         }

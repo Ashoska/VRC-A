@@ -88,6 +88,9 @@ class VrcaViewModel(
 
         private const val VRC_MAX_CHARS = 144
         private const val VRC_MAX_LINES = 9
+        // Chars reserved from the 144 budget for the minimal-background control
+        // suffix (U+0003+U+001F, appended in VrcaOsc) while that toggle is ON.
+        private const val MINIMAL_BG_RESERVED_CHARS = 2
 
         private const val SEND_FLOOR_MS = 500L
 
@@ -1508,6 +1511,26 @@ class VrcaViewModel(
         }
     }
 
+    /**
+     * Minimal chatbox background (the VRCOSC/MagicChatbox "skinny bubble" trick).
+     * When ON, [VrcaOsc] appends U+0003+U+001F to every outgoing chatbox message
+     * (collapsing the in-game bubble background) and the combined-text builder
+     * reserves 2 chars of the 144 budget so the suffix can never be trimmed off.
+     * Persisted to DataStore like the notification toggles — survives close/swipe
+     * (it is a display preference, NOT a sender toggle: it never starts OSC and
+     * is not part of the feature-session restore or Firestore sync).
+     */
+    var minimalChatboxBg by mutableStateOf(false)
+        private set
+
+    fun setMinimalChatboxBgFlag(enabled: Boolean) {
+        minimalChatboxBg = enabled
+        remoteVrcaOsc.minimalBackground = enabled
+        localVrcaOsc.minimalBackground = enabled
+        viewModelScope.launch { userPreferencesRepository.saveMinimalChatboxBg(enabled) }
+        rebuildCombinedPreviewOnly()
+    }
+
     fun onIpAddressChange(ip: String) {
         userInputIpState.value = ip
     }
@@ -1910,6 +1933,18 @@ class VrcaViewModel(
         viewModelScope.launch {
             if (BuildConfig.IS_ADMIN_BUILD) return@launch
             applyCrossDeviceSync()
+        }
+
+        // Minimal chatbox background: seed from DataStore on every VM creation
+        // (incl. headless revival) and keep the OSC chokepoint flags in sync.
+        // Deliberately no startSelfSyncLoopIfNeeded — local-only preference.
+        viewModelScope.launch {
+            userPreferencesRepository.minimalChatboxBg.collect {
+                minimalChatboxBg = it
+                remoteVrcaOsc.minimalBackground = it
+                localVrcaOsc.minimalBackground = it
+                rebuildCombinedPreviewOnly()
+            }
         }
 
         viewModelScope.launch {
@@ -2756,7 +2791,11 @@ class VrcaViewModel(
             }
         }
 
-        val limited = limitWithPriority(rawLines, VRC_MAX_CHARS, VRC_MAX_LINES)
+        // With minimal background ON, give the control suffix its 2 chars back
+        // out of the content budget so it can never be cut by the 144 limit;
+        // OFF returns the full budget to content.
+        val charBudget = if (minimalChatboxBg) VRC_MAX_CHARS - MINIMAL_BG_RESERVED_CHARS else VRC_MAX_CHARS
+        val limited = limitWithPriority(rawLines, charBudget, VRC_MAX_LINES)
 
         if (limited.cycleWasModifiedToPreserveMusic) {
             cycleTrimWarning = "Cycle was trimmed to preserve Now Playing (VRChat limits)."

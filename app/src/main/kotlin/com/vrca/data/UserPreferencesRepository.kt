@@ -69,6 +69,7 @@ class UserPreferencesRepository(private val context: Context) {
         val TIME_ENABLED             = booleanPreferencesKey("time_enabled")
         val TIME_MODE                = stringPreferencesKey("time_mode")
         val CARD_ORDER               = stringPreferencesKey("card_order")
+        val MINIMAL_CHATBOX_BG       = booleanPreferencesKey("minimal_chatbox_bg")
 
         val NOTIF_FRIEND_REQUEST       = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_FRIEND_REQUEST)
         val NOTIF_NEW_FRIEND           = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_NEW_FRIEND)
@@ -178,6 +179,7 @@ class UserPreferencesRepository(private val context: Context) {
         val raw = prefs[Keys.CARD_ORDER] ?: "Time,Pinned,Cycle,NowPlaying"
         raw.split(",").map { it.trim().let { k -> if (k == "AFK") "Pinned" else k } }.filter { it.isNotBlank() }
     }.distinctUntilChanged()
+    val minimalChatboxBg:       Flow<Boolean> = context.dataStore.data.map { it[Keys.MINIMAL_CHATBOX_BG] ?: false }.distinctUntilChanged()
 
     val notifFriendRequest:        Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_REQUEST]        ?: false }.distinctUntilChanged()
     val notifNewFriend:            Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_NEW_FRIEND]            ?: false }.distinctUntilChanged()
@@ -306,6 +308,7 @@ class UserPreferencesRepository(private val context: Context) {
     suspend fun saveTimeEnabled(v: Boolean)             = context.dataStore.edit { it[Keys.TIME_ENABLED] = v }
     suspend fun saveTimeMode(v: String)                 = context.dataStore.edit { it[Keys.TIME_MODE]    = v }
     suspend fun saveCardOrder(order: List<String>)      = context.dataStore.edit { it[Keys.CARD_ORDER]   = order.joinToString(",") }
+    suspend fun saveMinimalChatboxBg(v: Boolean)        = context.dataStore.edit { it[Keys.MINIMAL_CHATBOX_BG] = v }
 
     suspend fun saveNotifFriendRequest(v: Boolean)        = context.dataStore.edit { it[Keys.NOTIF_FRIEND_REQUEST]        = v }
     suspend fun saveNotifNewFriend(v: Boolean)            = context.dataStore.edit { it[Keys.NOTIF_NEW_FRIEND]            = v }
