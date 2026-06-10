@@ -654,6 +654,26 @@ private fun UpdateDialog(
                         }
                     }
                 }
+
+                // Manual fallback: always-visible link that opens the release URL in the
+                // browser, for devices where the in-app DownloadManager flow fails.
+                val dialogCtx = LocalContext.current
+                TextButton(
+                    onClick = {
+                        runCatching {
+                            dialogCtx.startActivity(
+                                Intent(Intent.ACTION_VIEW, Uri.parse(info.downloadUrl))
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            )
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        "Download failed? Tap here to download in your browser",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
             }
         }
     }
