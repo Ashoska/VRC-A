@@ -173,6 +173,34 @@ markdown mess, agree control is a Switch.
 - Nice-to-have: "Resend code" with cooldown; segmented digit boxes.
 - Keep the differentiated error surfacing (bad credentials vs transient) —
   the auth manager already distinguishes them.
+- **VRChat platform status on the login surfaces**: when VRChat itself is
+  having issues (status.vrchat.com indicator != none), show a compact warning
+  on the login screen — "VRChat is having platform issues right now — login
+  may fail and it's not you." Applies to BOTH the onboarding login step and
+  the standalone/mini login (Settings re-login). NOTE: the existing status
+  banner is fed by `startStatusPagePolling()` in `VrchatPipelineService`,
+  which only runs POST-login — so the login surfaces need their own one-shot
+  fetch of `status.vrchat.com/api/v2/summary.json` on entry (the admin
+  dashboard feed already does this directly via OkHttp; reuse that parsing).
+  Re-fetch on a failed login attempt so the warning can appear reactively.
+
+### Update dialog (redesign — same pass)
+Findings (v1.6.31 screenshot): long patch notes CLIP — the notes box is a
+fixed-height block with no scrolling; overall presentation is plain.
+
+- **Scrollable notes area** with a max height (~50% of screen) so arbitrarily
+  long patch logs never clip; the dialog itself never grows past the viewport.
+- Header: title + version as a pill (consistent with ToS version pill);
+  optionally "current → new" version line.
+- Notes rendered with styled bullets (same fix as ToS/About literal-dash
+  problem).
+- **Download state inline**: progress indicator + state text (downloading /
+  verifying / failed with reason) instead of the bare disabled button; keep
+  the existing browser-fallback link (added June 2026) visible on failure.
+- Forced-update variant (the current default — ALL releases are forced) keeps
+  no-dismiss/no-Later; the layout must look intentional without a cancel
+  action (single full-width Download button).
+- Built from the same kit components so it matches the gate screens.
 
 ---
 
@@ -183,7 +211,9 @@ Pager flow — order is FINAL:
 1. **Welcome + ToS** — hard gate (redesigned ToS component).
 2. **VRChat login** — hard gate; hosts the Phase-2 ban check (catches evaders
    before any setup effort); pipeline first-run notification baseline seeds
-   during onboarding.
+   during onboarding. Shows the **VRChat platform status warning** (one-shot
+   status fetch — see "VRChat login" section) so a user whose login fails
+   during an outage knows it isn't their credentials.
 3. **Permissions** — notification runtime permission (Android 13+),
    Notification Access, battery exemption. NO screenshots here (the app fires
    the exact intents; OEM screens vary). Samsung detected →
@@ -248,7 +278,8 @@ Mechanics:
 ## Implementation order (each step its own commit, page-per-commit)
 
 1. **PublicUiKit** (components only, no behavior changes)
-2. **Onboarding** (defines the tone for new users; absorbs ToS + login redesign)
+2. **Onboarding** (defines the tone for new users; absorbs ToS + login
+   redesign + the update dialog redesign + login status warnings)
 3. **Settings** (Accounts + OSC logout gate, notification toggles arrive,
    storage row, replay-tutorial row)
 4. **Home** (health checklist, compact preview, uptime pill, toggle grid,
