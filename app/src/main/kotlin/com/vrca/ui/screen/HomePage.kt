@@ -445,83 +445,86 @@ private fun PreviewAndTogglesCard(
             // Full in-game simulation — the original visual identity (bubble
             // over the avatar silhouette). Do not restyle (two redesigns were
             // reverted per user preference).
-            Box(
+            Column(
                 Modifier
                     .fillMaxWidth()
-                    .height(280.dp)
+                    .heightIn(max = 420.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
             ) {
-                if (vm.minimalChatboxBg) {
-                    // Invisible Chatbox Border simulation: in-game the bubble
-                    // collapses to a NARROW VERTICAL capsule the full height of
-                    // the text, centered behind it — mirror that exactly. The
-                    // inner Box wraps the text's intrinsic height so the pill
-                    // tracks however many lines are showing.
-                    Box(
-                        Modifier
-                            .align(Alignment.TopCenter)
-                            .widthIn(max = 420.dp)
-                            .fillMaxWidth(0.92f)
-                            .heightIn(min = 96.dp)
-                            .padding(12.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
+                Box(
+                    Modifier
+                        .widthIn(max = 420.dp)
+                        .fillMaxWidth(0.92f)
+                        .heightIn(min = 96.dp)
+                ) {
+                    if (vm.minimalChatboxBg) {
+                        // Invisible Chatbox Border simulation: in-game the bubble
+                        // collapses to a NARROW VERTICAL capsule the full height of
+                        // the text, centered behind it — mirror that exactly. The
+                        // inner Box wraps the text's intrinsic height so the pill
+                        // tracks however many lines are showing.
                         Box(
                             Modifier
-                                .fillMaxWidth()
-                                .height(IntrinsicSize.Min),
+                                .align(Alignment.Center)
+                                .padding(12.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Surface(
-                                modifier = Modifier
-                                    .align(Alignment.Center)
-                                    .width(26.dp)
-                                    .fillMaxHeight(),
-                                tonalElevation = 3.dp,
-                                shape = CircleShape,
-                                color = MaterialTheme.colorScheme.surfaceVariant
-                            ) {}
-                            SelectionContainer {
-                                Text(
-                                    text = previewText,
-                                    modifier = Modifier.fillMaxWidth(),
-                                    fontFamily = FontFamily.Monospace,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    textAlign = TextAlign.Center,
-                                    softWrap = true,
-                                    maxLines = 9,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                            Box(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .height(IntrinsicSize.Min),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Surface(
+                                    modifier = Modifier
+                                        .align(Alignment.Center)
+                                        .width(26.dp)
+                                        .fillMaxHeight(),
+                                    tonalElevation = 3.dp,
+                                    shape = CircleShape,
+                                    color = MaterialTheme.colorScheme.surfaceVariant
+                                ) {}
+                                SelectionContainer {
+                                    Text(
+                                        text = previewText,
+                                        modifier = Modifier.fillMaxWidth(),
+                                        fontFamily = FontFamily.Monospace,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        textAlign = TextAlign.Center,
+                                        softWrap = true,
+                                        maxLines = 9,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                             }
                         }
-                    }
-                } else {
-                    Surface(
-                        modifier = Modifier
-                            .align(Alignment.TopCenter)
-                            .widthIn(max = 420.dp)
-                            .fillMaxWidth(0.92f),
-                        tonalElevation = 3.dp,
-                        shape = MaterialTheme.shapes.large,
-                        color = MaterialTheme.colorScheme.surfaceVariant
-                    ) {
-                        Box(
-                            Modifier
-                                .heightIn(min = 96.dp)
-                                .padding(12.dp)
-                                .fillMaxWidth(),
-                            contentAlignment = Alignment.Center
+                    } else {
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            tonalElevation = 3.dp,
+                            shape = MaterialTheme.shapes.large,
+                            color = MaterialTheme.colorScheme.surfaceVariant
                         ) {
-                            SelectionContainer {
-                                Text(
-                                    text = previewText,
-                                    modifier = Modifier.fillMaxWidth(),
-                                    fontFamily = FontFamily.Monospace,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    textAlign = TextAlign.Center,
-                                    softWrap = true,
-                                    maxLines = 9,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                            Box(
+                                Modifier
+                                    .heightIn(min = 96.dp)
+                                    .padding(12.dp)
+                                    .fillMaxWidth(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                SelectionContainer {
+                                    Text(
+                                        text = previewText,
+                                        modifier = Modifier.fillMaxWidth(),
+                                        fontFamily = FontFamily.Monospace,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        textAlign = TextAlign.Center,
+                                        softWrap = true,
+                                        maxLines = 9,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
                             }
                         }
                     }
@@ -529,10 +532,9 @@ private fun PreviewAndTogglesCard(
 
                 Canvas(
                     modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(bottom = 8.dp)
-                        .height(200.dp)
-                        .width(170.dp)
+                        .padding(top = 8.dp)
+                        .height(120.dp)
+                        .width(120.dp)
                 ) {
                     val w = size.width
                     val h = size.height
@@ -699,7 +701,7 @@ private fun PreviewAndTogglesCard(
     }
 }
 
-/** 2×2 grid of TogglePills in [VrcaViewModel.cardOrder] order. Long-press
+/** Vertical list of TogglePills in [VrcaViewModel.cardOrder] order. Long-press
  *  jumps to the feature's edit page (Time long-press opens its UTC menu). */
 @Composable
 private fun QuickTogglesGrid(
@@ -717,58 +719,53 @@ private fun QuickTogglesGrid(
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        vm.cardOrder.chunked(2).forEach { rowItems ->
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                rowItems.forEach { component ->
-                    when (component) {
-                        "Pinned" -> TogglePill(
-                            label = "Pinned",
-                            icon = Icons.Filled.PushPin,
-                            checked = vm.afkEnabled,
-                            enabled = !isBanned,
-                            onLongPress = { onNavigate(AppPage.Automations) },
-                            modifier = Modifier.weight(1f)
-                        ) { vm.setAfkEnabledFlag(it) }
+        vm.cardOrder.forEach { component ->
+            when (component) {
+                "Pinned" -> TogglePill(
+                    label = "Pinned",
+                    icon = Icons.Filled.PushPin,
+                    checked = vm.afkEnabled,
+                    enabled = !isBanned,
+                    onLongPress = { onNavigate(AppPage.Automations) },
+                    modifier = Modifier.fillMaxWidth()
+                ) { vm.setAfkEnabledFlag(it) }
 
-                        "Cycle" -> TogglePill(
-                            label = "Cycle",
-                            icon = Icons.Filled.Loop,
-                            checked = vm.cycleEnabled,
-                            enabled = !isBanned,
-                            onLongPress = { onNavigate(AppPage.Automations) },
-                            modifier = Modifier.weight(1f)
-                        ) { vm.setCycleEnabledFlag(it) }
+                "Cycle" -> TogglePill(
+                    label = "Cycle",
+                    icon = Icons.Filled.Loop,
+                    checked = vm.cycleEnabled,
+                    enabled = !isBanned,
+                    onLongPress = { onNavigate(AppPage.Automations) },
+                    modifier = Modifier.fillMaxWidth()
+                ) { vm.setCycleEnabledFlag(it) }
 
-                        "NowPlaying" -> TogglePill(
-                            label = "Now Playing",
-                            icon = Icons.Filled.MusicNote,
-                            checked = vm.spotifyEnabled,
-                            enabled = !isBanned,
-                            onLongPress = { onNavigate(AppPage.Music) },
-                            modifier = Modifier.weight(1f)
-                        ) { vm.setSpotifyEnabledFlag(it) }
+                "NowPlaying" -> TogglePill(
+                    label = "Now Playing",
+                    icon = Icons.Filled.MusicNote,
+                    checked = vm.spotifyEnabled,
+                    enabled = !isBanned,
+                    onLongPress = { onNavigate(AppPage.Music) },
+                    modifier = Modifier.fillMaxWidth()
+                ) { vm.setSpotifyEnabledFlag(it) }
 
-                        "Time" -> Box(Modifier.weight(1f)) {
-                            TogglePill(
-                                label = "Time · ${vm.timeMode}",
-                                icon = Icons.Filled.Schedule,
-                                checked = vm.timeEnabled,
-                                enabled = !isBanned,
-                                onLongPress = { timeMenuOpen = true },
-                                modifier = Modifier.fillMaxWidth()
-                            ) { vm.updateTimeEnabled(it) }
-                            DropdownMenu(expanded = timeMenuOpen, onDismissRequest = { timeMenuOpen = false }) {
-                                timeModeOptions.forEach { mode: String ->
-                                    DropdownMenuItem(
-                                        text = { Text(mode) },
-                                        onClick = { vm.updateTimeMode(mode); timeMenuOpen = false }
-                                    )
-                                }
-                            }
+                "Time" -> Box {
+                    TogglePill(
+                        label = "Time · ${vm.timeMode}",
+                        icon = Icons.Filled.Schedule,
+                        checked = vm.timeEnabled,
+                        enabled = !isBanned,
+                        onLongPress = { timeMenuOpen = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { vm.updateTimeEnabled(it) }
+                    DropdownMenu(expanded = timeMenuOpen, onDismissRequest = { timeMenuOpen = false }) {
+                        timeModeOptions.forEach { mode: String ->
+                            DropdownMenuItem(
+                                text = { Text(mode) },
+                                onClick = { vm.updateTimeMode(mode); timeMenuOpen = false }
+                            )
                         }
                     }
                 }
-                if (rowItems.size == 1) Spacer(Modifier.weight(1f))
             }
         }
     }
