@@ -1632,6 +1632,18 @@ class VrcaViewModel(
         else -> true
     }
 
+    /** Now Playing progress bar+time line. OFF = title only (Media tab toggle).
+     *  DataStore-persisted, local-only. */
+    var musicShowProgress by mutableStateOf(true)
+        private set
+
+    fun setMusicShowProgressFlag(enabled: Boolean) {
+        musicShowProgress = enabled
+        viewModelScope.launch { userPreferencesRepository.saveMusicShowProgress(enabled) }
+        if (oscSending) rebuildAndMaybeSendCombined(forceSend = true)
+        else rebuildCombinedPreviewOnly()
+    }
+
     fun onIpAddressChange(ip: String) {
         userInputIpState.value = ip
     }
@@ -1845,6 +1857,18 @@ class VrcaViewModel(
         startSelfSyncLoopIfNeeded()
     }
 
+    // 12-hour (default, with AM/PM) vs 24-hour clock for the Time line.
+    // Settings → Chatbox display. (`Flag` suffix avoids the JVM setter clash.)
+    var time24h by mutableStateOf(false)
+        private set
+
+    fun setTime24hFlag(enabled: Boolean) {
+        time24h = enabled
+        viewModelScope.launch { userPreferencesRepository.saveTimeFormat24h(enabled) }
+        if (oscSending) rebuildAndMaybeSendCombined(forceSend = true)
+        else rebuildCombinedPreviewOnly()
+    }
+
     private fun currentTimeString(): String {
         val zone: java.time.ZoneId = when {
             timeMode == "Device" || timeMode == "LOCAL" ->
@@ -1862,7 +1886,10 @@ class VrcaViewModel(
             else -> java.time.ZoneId.systemDefault()
         }
         val now = java.time.LocalDateTime.now(zone)
-        return DateTimeFormatter.ofPattern("HH:mm").format(now)
+        // 12-hour with AM/PM by default; 24-hour when the Settings toggle is on.
+        // Locale.US keeps the marker a stable uppercase "AM"/"PM".
+        return if (time24h) DateTimeFormatter.ofPattern("HH:mm").format(now)
+        else DateTimeFormatter.ofPattern("h:mm a", java.util.Locale.US).format(now)
     }
 
     var musicRefreshSeconds by mutableStateOf(MUSIC_REFRESH_SECONDS_LOCKED)
@@ -2084,6 +2111,18 @@ class VrcaViewModel(
         viewModelScope.launch {
             userPreferencesRepository.mediaSourceYtMusic.collect {
                 mediaSourceYtMusic = it; rebuildCombinedPreviewOnly()
+            }
+        }
+
+        // 12/24-hour clock + Now Playing progress-bar visibility (local-only).
+        viewModelScope.launch {
+            userPreferencesRepository.timeFormat24h.collect {
+                time24h = it; rebuildCombinedPreviewOnly()
+            }
+        }
+        viewModelScope.launch {
+            userPreferencesRepository.musicShowProgress.collect {
+                musicShowProgress = it; rebuildCombinedPreviewOnly()
             }
         }
 
@@ -3079,10 +3118,13 @@ class VrcaViewModel(
         if (nowPlayingIsAd) {
             // The ad index ("Ad 1 of 1") was unreliable, so just show a bare "Ad".
             val label = "Ad"
-            // Keep the progress bar during ads (the bar used to vanish, leaving a
-            // bare "Ad"). Ads always play, so force playing and render the ad's
-            // OWN position/duration countdown. No brand/title is shown — only the
-            // neutral "Ad" label + a timer — so nothing leaks.
+            if (!musicShowProgress) return listOf(label)
+            // Keep the progress bar during ads — it must NEVER vanish. Ads always
+            // play, so force playing and render the ad's OWN position/duration
+            // countdown. When the player reports NO duration (some audio ads),
+            // render a static zero-position bar with no time instead of dropping
+            // the bar entirely (the old fallback). No brand/title is shown — only
+            // the neutral "Ad" label + the bar — so nothing leaks.
             val adDur = nowPlayingDurationMs
             if (adDur > 0L) {
                 val spd = if (nowPlayingSpeed > 0f) nowPlayingSpeed else 1f
@@ -3093,7 +3135,8 @@ class VrcaViewModel(
                 val time = "${fmtTime(pos)}/${fmtTime(adDur)}"
                 return listOfNotNull(label, (bar + time).takeIf { it.isNotBlank() })
             }
-            return listOf(label)
+            val bar = renderProgressBar(spotifyPreset, 0L, 1L, true, true)
+            return listOfNotNull(label, bar.takeIf { it.isNotBlank() })
         }
 
         if (nowPlayingIsLive) {
@@ -3110,6 +3153,9 @@ class VrcaViewModel(
 
         val maxLine = 42
         val line1 = TitleCleaner.fitOneLine(safeTitle, safeArtist, maxLine)
+
+        // Media tab "Show progress bar" off → title only, no bar/time line.
+        if (!musicShowProgress) return listOfNotNull(line1.takeIf { it.isNotBlank() })
 
         val dur = if (spotifyDemoEnabled && !nowPlayingDetected) 205_000L else nowPlayingDurationMs
         val posSnapshot = if (spotifyDemoEnabled && !nowPlayingDetected) 78_000L else nowPlayingPositionMs

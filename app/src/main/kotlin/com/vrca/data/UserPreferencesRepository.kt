@@ -75,6 +75,10 @@ class UserPreferencesRepository(private val context: Context) {
         val MEDIA_SOURCE_SPOTIFY     = booleanPreferencesKey("media_source_spotify")
         val MEDIA_SOURCE_YOUTUBE     = booleanPreferencesKey("media_source_youtube")
         val MEDIA_SOURCE_YTMUSIC     = booleanPreferencesKey("media_source_ytmusic")
+        // 24-hour clock for the Time chatbox line (default OFF = 12-hour AM/PM)
+        val TIME_FORMAT_24H          = booleanPreferencesKey("time_format_24h")
+        // Now Playing progress bar+time line (default ON; OFF = title only)
+        val MUSIC_SHOW_PROGRESS      = booleanPreferencesKey("music_show_progress")
 
         val NOTIF_FRIEND_REQUEST       = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_FRIEND_REQUEST)
         val NOTIF_NEW_FRIEND           = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_NEW_FRIEND)
@@ -188,6 +192,8 @@ class UserPreferencesRepository(private val context: Context) {
     val mediaSourceSpotify:     Flow<Boolean> = context.dataStore.data.map { it[Keys.MEDIA_SOURCE_SPOTIFY] ?: true }.distinctUntilChanged()
     val mediaSourceYoutube:     Flow<Boolean> = context.dataStore.data.map { it[Keys.MEDIA_SOURCE_YOUTUBE] ?: true }.distinctUntilChanged()
     val mediaSourceYtMusic:     Flow<Boolean> = context.dataStore.data.map { it[Keys.MEDIA_SOURCE_YTMUSIC] ?: true }.distinctUntilChanged()
+    val timeFormat24h:          Flow<Boolean> = context.dataStore.data.map { it[Keys.TIME_FORMAT_24H] ?: false }.distinctUntilChanged()
+    val musicShowProgress:      Flow<Boolean> = context.dataStore.data.map { it[Keys.MUSIC_SHOW_PROGRESS] ?: true }.distinctUntilChanged()
 
     val notifFriendRequest:        Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_REQUEST]        ?: false }.distinctUntilChanged()
     val notifNewFriend:            Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_NEW_FRIEND]            ?: false }.distinctUntilChanged()
@@ -320,6 +326,8 @@ class UserPreferencesRepository(private val context: Context) {
     suspend fun saveMediaSourceSpotify(v: Boolean)      = context.dataStore.edit { it[Keys.MEDIA_SOURCE_SPOTIFY] = v }
     suspend fun saveMediaSourceYoutube(v: Boolean)      = context.dataStore.edit { it[Keys.MEDIA_SOURCE_YOUTUBE] = v }
     suspend fun saveMediaSourceYtMusic(v: Boolean)      = context.dataStore.edit { it[Keys.MEDIA_SOURCE_YTMUSIC] = v }
+    suspend fun saveTimeFormat24h(v: Boolean)           = context.dataStore.edit { it[Keys.TIME_FORMAT_24H] = v }
+    suspend fun saveMusicShowProgress(v: Boolean)       = context.dataStore.edit { it[Keys.MUSIC_SHOW_PROGRESS] = v }
 
     suspend fun saveNotifFriendRequest(v: Boolean)        = context.dataStore.edit { it[Keys.NOTIF_FRIEND_REQUEST]        = v }
     suspend fun saveNotifNewFriend(v: Boolean)            = context.dataStore.edit { it[Keys.NOTIF_NEW_FRIEND]            = v }

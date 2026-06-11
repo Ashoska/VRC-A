@@ -9,7 +9,10 @@ import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -51,7 +54,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
@@ -177,9 +182,22 @@ fun OnboardingFlow(
     // Hard gates completed state (replay shows them as checkmarks)
     val tosDone = tosAlreadyAccepted
     val loginDone = remember { mutableStateOf(VrchatAuthManager.isLoggedIn(ctx)) }
+    // Final hard gate: a test message must be confirmed against the saved IP
+    // before Finish unlocks (replay is exempt — it has Exit tutorial anyway).
+    val testDone = remember { mutableStateOf(false) }
+
+    // Tapping empty space anywhere in the tutorial clears text-field focus —
+    // a focused field otherwise stays selected while reading/navigating.
+    val focusManager = LocalFocusManager.current
 
     Surface(Modifier.fillMaxSize()) {
-        Column(Modifier.fillMaxSize()) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .pointerInput(Unit) {
+                    detectTapGestures(onTap = { focusManager.clearFocus() })
+                }
+        ) {
             // Step content
             Box(Modifier.weight(1f)) {
                 when (step) {
@@ -194,36 +212,52 @@ fun OnboardingFlow(
                     4 -> StepEnableOsc()
                     5 -> StepNotificationTypes()
                     6 -> StepDiscord()
-                    7 -> StepTestMessage()
+                    7 -> StepTestMessage(
+                        passed = testDone.value,
+                        onPassed = { testDone.value = true },
+                        onGoToIpStep = { step = 3 }
+                    )
                 }
             }
 
-            // Footer: progress dots + nav. Hard gates hide "Next" until done.
-            val hardGateBlocked = (step == 0 && !tosDone) || (step == 1 && !loginDone.value)
+            // Footer: step label + progress pills + nav. Hard gates hide
+            // "Next"/"Finish" until done.
+            val hardGateBlocked = (step == 0 && !tosDone) ||
+                (step == 1 && !loginDone.value) ||
+                (step == STEP_COUNT - 1 && !testDone.value && !replay)
             Surface(tonalElevation = 3.dp) {
                 Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
+                    Text(
+                        "Step ${step + 1} of $STEP_COUNT",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(6.dp))
                     Row(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         repeat(STEP_COUNT) { i ->
+                            // Current step is an elongated pill; visited steps are
+                            // filled and tappable to jump back; future steps muted.
+                            val w by animateDpAsState(
+                                targetValue = if (i == step) 24.dp else 8.dp,
+                                label = "onboardingDot"
+                            )
                             Box(
                                 Modifier
-                                    .padding(3.dp)
-                                    .size(if (i == step) 9.dp else 7.dp)
+                                    .padding(horizontal = 3.dp)
+                                    .size(width = w, height = 8.dp)
                                     .clip(CircleShape)
-                                    .then(
-                                        Modifier.clickable(enabled = i < step) { step = i }
+                                    .background(
+                                        if (i <= step) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.surfaceVariant
                                     )
-                            ) {
-                                Surface(
-                                    shape = CircleShape,
-                                    color = if (i <= step) MaterialTheme.colorScheme.primary
-                                            else MaterialTheme.colorScheme.surfaceVariant,
-                                    modifier = Modifier.fillMaxSize()
-                                ) {}
-                            }
+                                    .clickable(enabled = i < step) { step = i }
+                            )
                         }
                     }
                     Spacer(Modifier.height(8.dp))
@@ -547,12 +581,25 @@ private fun StepIpEntry() {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("On Quest:", style = MaterialTheme.typography.titleSmall,
                     color = MaterialTheme.colorScheme.primary)
-                NumberedInstruction(1, "Open Settings in the headset")
-                NumberedInstruction(2, "Wi-Fi → tap your connected network")
-                NumberedInstruction(3, "Scroll down — copy the IP address (e.g. 192.168.1.23)")
-                TrustNote(
-                    "On PC or phone it works the same way: your phone's Wi-Fi details, " +
-                    "or on PC run ipconfig and read the IPv4 address."
+                NumberedInstruction(1, "Put the headset on and open Settings (the gear icon at the end of the dock)")
+                NumberedInstruction(2, "Select Wi-Fi, then tap the network with \"Connected\" under it")
+                NumberedInstruction(3, "Scroll down in the network details panel that opens")
+                NumberedInstruction(4, "Find \"IP address\" — four numbers with dots, like 192.168.1.23 — and type it below")
+            }
+        }
+
+        ElevatedCard {
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Good to know", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "• Ignore the long address with letters and colons (that's IPv6) — " +
+                    "you want the short dotted one.\n" +
+                    "• Phone and headset must be on the SAME Wi-Fi network.\n" +
+                    "• The IP can change when the router restarts or you switch networks — " +
+                    "you can update it any time in Home → Connection.\n" +
+                    "• On PC: press Win+R, type cmd, run ipconfig and read \"IPv4 Address\".",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
@@ -765,11 +812,20 @@ private fun StepDiscord() {
    ------------------------------------------------------------------------- */
 
 @Composable
-private fun StepTestMessage() {
+private fun StepTestMessage(
+    passed: Boolean,
+    onPassed: () -> Unit,
+    onGoToIpStep: () -> Unit
+) {
     val ctx = LocalContext.current
     val repo = (ctx.applicationContext as VrcaApplication).userPreferencesRepository
+    val scope = rememberCoroutineScope()
 
     var running by rememberSaveable { mutableStateOf(false) }
+    var checking by remember { mutableStateOf(false) }
+    // null = not checked, true = ping answered (auto-pass), false = no reply
+    // (headsets often ignore pings → fall back to a manual "it showed up" confirm)
+    var reachable by remember { mutableStateOf<Boolean?>(null) }
     var targetIp by remember { mutableStateOf("") }
     var targetPort by remember { mutableStateOf(9000) }
 
@@ -801,7 +857,7 @@ private fun StepTestMessage() {
 
     StepContainer(
         title = "Test it!",
-        subtitle = "If everything is set up, this pins a message in your VRChat chatbox. Skip if you're not in VRChat right now."
+        subtitle = "This step is required: send the test message and confirm it reaches your VRChat chatbox before finishing."
     ) {
         // Preview bubble — teaches preview == chatbox
         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -818,8 +874,15 @@ private fun StepTestMessage() {
             }
         }
 
+        if (passed) {
+            CompletedGateCard("Test message confirmed — you're all set. Press Finish!")
+        }
+
         if (targetIp.isBlank()) {
-            TrustNote("No IP saved — go back to the address step first.")
+            TrustNote("No IP saved yet — the test needs the address from the earlier step.")
+            OutlinedButton(onClick = onGoToIpStep, modifier = Modifier.fillMaxWidth()) {
+                Text("Go to the address step")
+            }
         } else {
             Text(
                 "Sending to $targetIp:$targetPort",
@@ -830,14 +893,64 @@ private fun StepTestMessage() {
         }
 
         Button(
-            onClick = { running = !running },
+            onClick = {
+                if (running) {
+                    running = false
+                } else {
+                    running = true
+                    // Reachability check alongside the send loop: a ping reply
+                    // proves the IP is a live device → pass the gate. No reply
+                    // is NOT proof of failure (headsets often ignore pings), so
+                    // that path falls back to the manual confirm below.
+                    scope.launch {
+                        checking = true
+                        val ok = withContext(Dispatchers.IO) {
+                            try { java.net.InetAddress.getByName(targetIp).isReachable(1500) }
+                            catch (_: Throwable) { false }
+                        }
+                        reachable = ok
+                        checking = false
+                        if (ok) onPassed()
+                    }
+                }
+            },
             enabled = targetIp.isNotBlank(),
             modifier = Modifier.fillMaxWidth()
         ) {
             Text(if (running) "Stop test" else "Send test message")
         }
 
-        if (running) {
+        if (checking) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                Text(
+                    "Checking the device is reachable...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        // No ping reply → ask the user to confirm by eye. The headset may
+        // simply ignore pings while still receiving OSC fine.
+        if (running && !passed && !checking && reachable == false) {
+            ElevatedCard {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Couldn't confirm automatically", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "The device didn't answer a ping — many headsets ignore them. " +
+                        "Put the headset on: is \"VRC-A connected ✓\" showing above your head?",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Button(onClick = { onPassed() }, modifier = Modifier.fillMaxWidth()) {
+                        Text("Yes — it showed up in VRChat")
+                    }
+                }
+            }
+        }
+
+        if (running && !passed) {
             ElevatedCard {
                 Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("Not showing in VRChat?", style = MaterialTheme.typography.titleSmall)

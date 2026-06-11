@@ -457,12 +457,15 @@ private fun PreviewAndTogglesCard(
             // Full in-game simulation — the original visual identity (bubble
             // over the avatar silhouette). Do not restyle (two redesigns were
             // reverted per user preference).
+            //
+            // No height cap and no Center arrangement: a max-height Column with
+            // Arrangement.Center lets oversized content escape BOTH edges of
+            // the card ("the preview overflows while sending"). The bubble text
+            // is already capped at 9 lines, so letting the card grow naturally
+            // is bounded and can never spill.
             Column(
-                Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 420.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
+                Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Box(
                     Modifier
@@ -593,6 +596,25 @@ private fun PreviewAndTogglesCard(
                     overflow = TextOverflow.Ellipsis
                 )
             }
+        }
+
+        // Character budget — how much of VRChat's 144-char chatbox limit the
+        // current combined output uses (142 with the invisible border, which
+        // reserves 2 chars for its control suffix). Amber near the cap, red over.
+        run {
+            val used = vm.debugLastCombinedOsc.length
+            val budget = if (vm.minimalChatboxBg) 142 else 144
+            Text(
+                "$used / $budget characters",
+                style = MaterialTheme.typography.labelSmall,
+                color = when {
+                    used > budget -> MaterialTheme.colorScheme.error
+                    used > budget - 30 -> androidx.compose.ui.graphics.Color(0xFFFFB300)
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                textAlign = TextAlign.End,
+                modifier = Modifier.fillMaxWidth()
+            )
         }
 
         // Cycle countdown — only meaningful while the cycle loop is running.
@@ -871,7 +893,9 @@ private fun ConnectionCard(
     CompactSectionCard(
         title = "Connection",
         icon = Icons.Filled.Wifi,
-        summary = if (ipOk) "$ipAddress · $slotName" else "No headset IP set",
+        // Two lines while collapsed: the IP with the slot's device name under
+        // it (the summary Text allows 2 lines).
+        summary = if (ipOk) "$ipAddress\n$slotName" else "No headset IP set",
         trailing = {
             when {
                 !ipOk -> KitStatusChip("Not set", KitTone.Error)

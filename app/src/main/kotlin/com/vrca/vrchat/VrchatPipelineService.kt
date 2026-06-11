@@ -1185,11 +1185,15 @@ class VrchatPipelineService : Service() {
         return ""
     }
 
+    // VRChat's tag names are OFFSET from the displayed rank names (the same
+    // mapping VRCX uses): system_trust_known displays as "User",
+    // system_trust_trusted as "Known User", system_trust_veteran as
+    // "Trusted User", system_trust_legend as "Veteran" (hidden rank).
     private fun prettyTrustRank(rank: String): String = when (rank) {
-        "system_trust_legend"  -> "Legendary"
-        "system_trust_veteran" -> "Veteran"
-        "system_trust_trusted" -> "Trusted"
-        "system_trust_known"   -> "Known"
+        "system_trust_legend"  -> "Veteran"
+        "system_trust_veteran" -> "Trusted User"
+        "system_trust_trusted" -> "Known User"
+        "system_trust_known"   -> "User"
         "system_trust_basic"   -> "New User"
         else -> rank.removePrefix("system_trust_").replaceFirstChar { it.uppercase() }
     }
@@ -1383,12 +1387,21 @@ class VrchatPipelineService : Service() {
 
     /** Publish the (online, total) friend count for the VRChat tab — computed
      *  from the cache on every mutation, no API call. "Online" = any non-offline
-     *  status (in-game or website-active), matching VRChat's own sidebar. */
+     *  status (in-game or website-active), matching VRChat's own sidebar.
+     *
+     *  Counts by status OR location: the WebSocket friend-online /
+     *  friend-location payloads don't always carry a `user.status` field (the
+     *  user object is optional), so a status-only predicate never changed the
+     *  count on live events — it only refreshed when the REST friends reload
+     *  ran on reconnect, i.e. "the count only updates when I reopen the app".
+     *  A live location (wrld_/private/traveling) proves online even when the
+     *  event omitted status; friend-offline explicitly stamps both fields. */
     private fun publishFriendsOnline() {
         val total = friendsCache.size
         if (total == 0) return
         val online = friendsCache.values.count {
-            it.status.isNotBlank() && !it.status.equals("offline", true)
+            (it.status.isNotBlank() && !it.status.equals("offline", true)) ||
+                (it.location.isNotBlank() && !it.location.equals("offline", true))
         }
         VrchatPipelineState.friendsOnline = online to total
     }

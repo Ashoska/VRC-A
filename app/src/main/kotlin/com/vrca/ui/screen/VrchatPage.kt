@@ -59,6 +59,7 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.draw.clip
@@ -122,7 +123,34 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
         val discordSeededHdr by repoHdr.discordSessionSeeded.collectAsState(initial = false)
         val discordStatusHdr by DiscordRpcState.statusFlow.collectAsState()
 
+        // VRChat+ banner (profilePicOverride) as the card BACKGROUND — the round
+        // userIcon stays the avatar. No banner (no VRChat+) → plain card.
+        val bannerUrl = if (isLinked) p?.bannerUrl.orEmpty() else ""
+        val hasBanner = bannerUrl.isNotBlank()
         ElevatedCard {
+            Box {
+                if (hasBanner) {
+                    coil.compose.AsyncImage(
+                        model = bannerUrl,
+                        imageLoader = com.vrca.admin.VrchatImageLoader.get(ctx),
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.matchParentSize()
+                    )
+                    // Scrim so name/status/chips/buttons stay readable over any banner.
+                    Box(
+                        Modifier
+                            .matchParentSize()
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(
+                                        Color.Black.copy(alpha = 0.45f),
+                                        Color.Black.copy(alpha = 0.72f)
+                                    )
+                                )
+                            )
+                    )
+                }
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 if (!isLinked) {
                     Row(
@@ -176,14 +204,18 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
                                 )
                             }
                         }
-                        // Small trailing actions
+                        // Small trailing actions — over a banner they get a dark
+                        // circle backing so they never blend into the image.
+                        val actionBg = Modifier.size(36.dp).let {
+                            if (hasBanner) it.background(Color.Black.copy(alpha = 0.40f), CircleShape) else it
+                        }
                         if (p?.userId?.isNotBlank() == true) {
                             IconButton(onClick = {
                                 ctx.startActivity(
                                     Intent(Intent.ACTION_VIEW,
                                         Uri.parse("https://vrchat.com/home/user/${p.userId}"))
                                 )
-                            }, modifier = Modifier.size(36.dp)) {
+                            }, modifier = actionBg) {
                                 Icon(
                                     Icons.Filled.OpenInNew,
                                     contentDescription = "View VRChat profile",
@@ -192,7 +224,7 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
                                 )
                             }
                         }
-                        IconButton(onClick = { showLogoutDialog = true }, modifier = Modifier.size(36.dp)) {
+                        IconButton(onClick = { showLogoutDialog = true }, modifier = actionBg) {
                             Icon(
                                 Icons.AutoMirrored.Filled.Logout,
                                 contentDescription = "Sign out of VRChat",
@@ -213,10 +245,13 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
                                 Text(platform, style = MaterialTheme.typography.labelSmall)
                             }
                         }
-                        val trust = prettyTrust(p?.trustRank.orEmpty())
-                        if (trust.isNotBlank()) {
-                            Badge(containerColor = MaterialTheme.colorScheme.surfaceVariant) {
-                                Text(trust, style = MaterialTheme.typography.labelSmall)
+                        trustBadge(p?.trustRank.orEmpty())?.let { tb ->
+                            Badge(containerColor = tb.color.copy(alpha = 0.22f)) {
+                                Text(
+                                    tb.label,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = tb.color
+                                )
                             }
                         }
                         if (discordSeededHdr) {
@@ -301,6 +336,7 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
                     }
                 }
             }
+            }
         }
 
         VrchatStatusBanner()
@@ -344,6 +380,19 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
 
 private const val VISIBLE_ALERT_LIMIT = 3
 
+/**
+ * Process-level expand state for the "Notifications (N)" alert section.
+ * Default EXPANDED; the user's choice persists across tab switches for the
+ * life of the process and resets to expanded only on a real reopen (a fresh
+ * process with the user looking at it). A headless OEM revival restarts the
+ * process with no UI on screen, so by the time the user actually opens the
+ * app again, resetting to the expanded default is exactly the intended
+ * "reopen" behavior — no extra persistence needed.
+ */
+internal object AlertSectionState {
+    val expanded = mutableStateOf(true)
+}
+
 /* =========================
    Identity header helpers
    ========================= */
@@ -378,14 +427,25 @@ private fun prettyPlatform(platform: String): String = when (platform) {
     else                -> ""
 }
 
-private fun prettyTrust(rank: String): String = when (rank) {
-    "system_trust_legend"  -> "Legendary"
-    "system_trust_veteran" -> "Veteran"
-    "system_trust_trusted" -> "Trusted"
-    "system_trust_known"   -> "Known"
-    "system_trust_basic"   -> "New User"
-    "" -> ""
-    else -> rank.removePrefix("system_trust_").replaceFirstChar { it.uppercase() }
+/**
+ * Trust rank chip: VRChat's tag names are OFFSET from the displayed rank names
+ * (same mapping VRCX uses) — system_trust_known displays as "User",
+ * system_trust_trusted as "Known User", system_trust_veteran as "Trusted User",
+ * system_trust_legend as the hidden "Veteran". Colors follow VRChat's rank
+ * colors (New User blue, User green, Known User orange, Trusted User purple,
+ * Veteran yellow; Visitor grey). "Legendary" is deliberately excluded — it
+ * does not exist.
+ */
+private data class TrustBadge(val label: String, val color: Color)
+
+private fun trustBadge(rank: String): TrustBadge? = when (rank) {
+    "system_trust_legend"  -> TrustBadge("Veteran", Color(0xFFFFD000))
+    "system_trust_veteran" -> TrustBadge("Trusted User", Color(0xFFB18FE4))
+    "system_trust_trusted" -> TrustBadge("Known User", Color(0xFFFF7B42))
+    "system_trust_known"   -> TrustBadge("User", Color(0xFF2BCF5C))
+    "system_trust_basic"   -> TrustBadge("New User", Color(0xFF1778FF))
+    "" -> null
+    else -> TrustBadge("Visitor", Color(0xFFCCCCCC))
 }
 
 /** The user's OWN avatar: VRChat+ profile picture loaded through the
@@ -459,7 +519,9 @@ private fun InAppAlertCards() {
     val groups by InAppAlertState.groups.collectAsState()
     if (groups.isEmpty()) return
 
-    var sectionExpanded by remember { mutableStateOf(false) }
+    // Shared, process-scoped: expanded by default, survives tab switches,
+    // resets only on a genuine app reopen (see AlertSectionState).
+    var sectionExpanded by AlertSectionState.expanded
     var showAll by remember { mutableStateOf(false) }
     var filter by rememberSaveable { mutableStateOf("All") }
 

@@ -33,6 +33,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -129,6 +130,11 @@ fun KitStatusChip(label: String, tone: KitTone) {
  * [rememberSaveable] keyed on the title — a new card prepended to a list must
  * not shift another card's remembered state (same lesson as the in-app alert
  * cards' key(group.groupId) fix).
+ *
+ * [persistExpansion] = false opts out of that: plain [remember], so leaving
+ * the tab (which disposes the composable) snaps the card back to
+ * [initiallyExpanded] on return — used by the Media tab's Now Playing /
+ * Progress-bar-style cards, which must always re-open collapsed.
  */
 @Composable
 fun CompactSectionCard(
@@ -137,10 +143,14 @@ fun CompactSectionCard(
     summary: String? = null,
     collapsible: Boolean = true,
     initiallyExpanded: Boolean = false,
+    persistExpansion: Boolean = true,
     trailing: (@Composable RowScope.() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    var expanded by rememberSaveable(title) { mutableStateOf(!collapsible || initiallyExpanded) }
+    var expanded by if (persistExpansion)
+        rememberSaveable(title) { mutableStateOf(!collapsible || initiallyExpanded) }
+    else
+        remember(title) { mutableStateOf(!collapsible || initiallyExpanded) }
 
     ElevatedCard(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {

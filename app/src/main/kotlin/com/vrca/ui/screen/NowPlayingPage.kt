@@ -108,12 +108,21 @@ internal fun NowPlayingPage(
         NowPlayingCard(vm = vm, isBanned = isBanned, previewT = previewT)
 
         // -- Progress bar style --
+        // Defaults CLOSED and deliberately does NOT persist expansion: leaving
+        // the tab snaps it shut again (per user request).
         CompactSectionCard(
             title = "Progress bar style",
             icon = Icons.Filled.GraphicEq,
-            summary = vm.getMusicPresetName(vm.spotifyPreset),
-            initiallyExpanded = true
+            summary = if (vm.musicShowProgress) vm.getMusicPresetName(vm.spotifyPreset)
+                      else "Hidden — title only",
+            persistExpansion = false
         ) {
+            ToggleRow(
+                label = "Show progress bar",
+                checked = vm.musicShowProgress,
+                enabled = !isBanned,
+                description = "Off = only the track title shows in the chatbox — no bar or time."
+            ) { vm.setMusicShowProgressFlag(it) }
             (1..5).forEach { p ->
                 val selected = (vm.spotifyPreset == p)
                 PresetRow(
@@ -150,11 +159,13 @@ private fun NowPlayingCard(vm: VrcaViewModel, isBanned: Boolean, previewT: Float
             .joinToString(" — ") + " · " + sourceLabel(pkg)
     }
 
+    // Defaults CLOSED and resets to closed when the user navigates away and
+    // back (persistExpansion = false) — per user request.
     CompactSectionCard(
         title = "Now Playing",
         icon = Icons.Filled.MusicNote,
         summary = summary,
-        initiallyExpanded = true,
+        persistExpansion = false,
         trailing = {
             when {
                 !detected -> KitStatusChip("Idle", KitTone.Neutral)

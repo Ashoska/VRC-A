@@ -86,6 +86,11 @@ internal fun SettingsPage(
                 checked = vm.minimalChatboxBg,
                 description = "Shrinks the chatbox background in VRChat to a minimal pill so only your text shows."
             ) { vm.setMinimalChatboxBgFlag(it) }
+            ToggleRow(
+                label = "24-hour time",
+                checked = vm.time24h,
+                description = "Time line shows 17:20 instead of 5:20 PM. Off = 12-hour with AM/PM."
+            ) { vm.setTime24hFlag(it) }
         }
 
         // -- App --

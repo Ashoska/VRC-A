@@ -26,8 +26,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Gavel
@@ -749,10 +751,17 @@ private fun DrawerItem(
 
 @Composable
 internal fun PageContainer(content: @Composable ColumnScope.() -> Unit) {
+    // Tapping empty space anywhere on a page clears text-field focus (and the
+    // keyboard). detectTapGestures on a parent only sees taps the children
+    // didn't claim, so buttons/fields keep working normally.
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
+            .pointerInput(Unit) {
+                detectTapGestures(onTap = { focusManager.clearFocus() })
+            }
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
         content = content
