@@ -92,6 +92,11 @@ class VrcaViewModel(
         // suffix (U+0003+U+001F, appended in VrcaOsc) while that toggle is ON.
         private const val MINIMAL_BG_RESERVED_CHARS = 2
 
+        // Known media-source packages (per-source Now Playing enables).
+        const val PKG_SPOTIFY = "com.spotify.music"
+        const val PKG_YOUTUBE = "com.google.android.youtube"
+        const val PKG_YTMUSIC = "com.google.android.apps.youtube.music"
+
         private const val SEND_FLOOR_MS = 500L
 
         private const val META_STABLE_MS = 1_100L
@@ -1583,6 +1588,50 @@ class VrcaViewModel(
         else rebuildCombinedPreviewOnly()
     }
 
+    /**
+     * Per-source Now Playing enables (Media tab). When the currently-detected
+     * media app's source is OFF, [buildNowPlayingLines] renders nothing — the
+     * chatbox/preview drop the music block while detection itself keeps
+     * running (so re-enabling the source picks the track straight back up).
+     * An unlisted media app is always allowed. DataStore-persisted, local-only
+     * (not synced to Firestore, not part of the feature-session restore).
+     */
+    var mediaSourceSpotify by mutableStateOf(true)
+        private set
+    var mediaSourceYoutube by mutableStateOf(true)
+        private set
+    var mediaSourceYtMusic by mutableStateOf(true)
+        private set
+
+    fun setMediaSourceFlag(pkg: String, enabled: Boolean) {
+        when (pkg) {
+            PKG_SPOTIFY -> {
+                mediaSourceSpotify = enabled
+                viewModelScope.launch { userPreferencesRepository.saveMediaSourceSpotify(enabled) }
+            }
+            PKG_YOUTUBE -> {
+                mediaSourceYoutube = enabled
+                viewModelScope.launch { userPreferencesRepository.saveMediaSourceYoutube(enabled) }
+            }
+            PKG_YTMUSIC -> {
+                mediaSourceYtMusic = enabled
+                viewModelScope.launch { userPreferencesRepository.saveMediaSourceYtMusic(enabled) }
+            }
+            else -> return
+        }
+        // React in-game immediately, same as the minimal-background toggle.
+        if (oscSending) rebuildAndMaybeSendCombined(forceSend = true)
+        else rebuildCombinedPreviewOnly()
+    }
+
+    /** Is the source of the currently-active media app enabled? */
+    fun isActiveMediaSourceEnabled(): Boolean = when (activePackage) {
+        PKG_SPOTIFY -> mediaSourceSpotify
+        PKG_YOUTUBE -> mediaSourceYoutube
+        PKG_YTMUSIC -> mediaSourceYtMusic
+        else -> true
+    }
+
     fun onIpAddressChange(ip: String) {
         userInputIpState.value = ip
     }
@@ -1754,11 +1803,15 @@ class VrcaViewModel(
     // True only while the current special segment is an actual AD (not a DJ
     // segment). The builder checks this BEFORE isSpotifyDj — an ad blanks the
     // artist, which would otherwise make isSpotifyDj true and swallow the label.
-    private var nowPlayingIsAd by mutableStateOf(false)
+    // Read by the Media tab's now-playing card (state chip).
+    var nowPlayingIsAd by mutableStateOf(false)
+        private set
 
     // True when the active YouTube session is a live stream (non-seekable, no
     // finite duration). The builder shows a LIVE marker instead of a progress bar.
-    private var nowPlayingIsLive by mutableStateOf(false)
+    // Read by the Media tab's now-playing card (state chip).
+    var nowPlayingIsLive by mutableStateOf(false)
+        private set
 
     // =========================
     // Time feature
@@ -2014,6 +2067,23 @@ class VrcaViewModel(
                 remoteVrcaOsc.minimalBackground = it
                 localVrcaOsc.minimalBackground = it
                 rebuildCombinedPreviewOnly()
+            }
+        }
+
+        // Per-source Now Playing enables: seed + follow DataStore (local-only).
+        viewModelScope.launch {
+            userPreferencesRepository.mediaSourceSpotify.collect {
+                mediaSourceSpotify = it; rebuildCombinedPreviewOnly()
+            }
+        }
+        viewModelScope.launch {
+            userPreferencesRepository.mediaSourceYoutube.collect {
+                mediaSourceYoutube = it; rebuildCombinedPreviewOnly()
+            }
+        }
+        viewModelScope.launch {
+            userPreferencesRepository.mediaSourceYtMusic.collect {
+                mediaSourceYtMusic = it; rebuildCombinedPreviewOnly()
             }
         }
 
@@ -2980,10 +3050,17 @@ class VrcaViewModel(
         return msgs.getOrNull(cycleIndex % msgs.size).orEmpty()
     }
 
+    /** The exact music lines as they would render into the chatbox right now —
+     *  shown verbatim (monospace) in the Media tab's now-playing card. */
+    fun currentMusicChatboxLines(): List<String> = buildNowPlayingLines()
+
     private fun buildNowPlayingLines(): List<String> {
         val title = if (spotifyDemoEnabled && !nowPlayingDetected) "Pretty Girl" else lastNowPlayingTitle
         val artist = if (spotifyDemoEnabled && !nowPlayingDetected) "Clairo" else lastNowPlayingArtist
         if (!spotifyDemoEnabled && !nowPlayingDetected) return emptyList()
+        // Per-source enable (Media tab): a disabled source renders nothing —
+        // detection keeps running so re-enabling resumes instantly.
+        if (nowPlayingDetected && !isActiveMediaSourceEnabled()) return emptyList()
 
         val safeTitle = title.takeIf { it != "(blank)" }?.trim().orEmpty()
         val safeArtist = artist.takeIf { it != "(blank)" }?.trim().orEmpty()

@@ -70,6 +70,11 @@ class UserPreferencesRepository(private val context: Context) {
         val TIME_MODE                = stringPreferencesKey("time_mode")
         val CARD_ORDER               = stringPreferencesKey("card_order")
         val MINIMAL_CHATBOX_BG       = booleanPreferencesKey("minimal_chatbox_bg")
+        // Per-source Now Playing enables (Media tab). Default ON; an unlisted
+        // media app is always allowed (no key for it).
+        val MEDIA_SOURCE_SPOTIFY     = booleanPreferencesKey("media_source_spotify")
+        val MEDIA_SOURCE_YOUTUBE     = booleanPreferencesKey("media_source_youtube")
+        val MEDIA_SOURCE_YTMUSIC     = booleanPreferencesKey("media_source_ytmusic")
 
         val NOTIF_FRIEND_REQUEST       = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_FRIEND_REQUEST)
         val NOTIF_NEW_FRIEND           = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_NEW_FRIEND)
@@ -180,6 +185,9 @@ class UserPreferencesRepository(private val context: Context) {
         raw.split(",").map { it.trim().let { k -> if (k == "AFK") "Pinned" else k } }.filter { it.isNotBlank() }
     }.distinctUntilChanged()
     val minimalChatboxBg:       Flow<Boolean> = context.dataStore.data.map { it[Keys.MINIMAL_CHATBOX_BG] ?: false }.distinctUntilChanged()
+    val mediaSourceSpotify:     Flow<Boolean> = context.dataStore.data.map { it[Keys.MEDIA_SOURCE_SPOTIFY] ?: true }.distinctUntilChanged()
+    val mediaSourceYoutube:     Flow<Boolean> = context.dataStore.data.map { it[Keys.MEDIA_SOURCE_YOUTUBE] ?: true }.distinctUntilChanged()
+    val mediaSourceYtMusic:     Flow<Boolean> = context.dataStore.data.map { it[Keys.MEDIA_SOURCE_YTMUSIC] ?: true }.distinctUntilChanged()
 
     val notifFriendRequest:        Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_REQUEST]        ?: false }.distinctUntilChanged()
     val notifNewFriend:            Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_NEW_FRIEND]            ?: false }.distinctUntilChanged()
@@ -309,6 +317,9 @@ class UserPreferencesRepository(private val context: Context) {
     suspend fun saveTimeMode(v: String)                 = context.dataStore.edit { it[Keys.TIME_MODE]    = v }
     suspend fun saveCardOrder(order: List<String>)      = context.dataStore.edit { it[Keys.CARD_ORDER]   = order.joinToString(",") }
     suspend fun saveMinimalChatboxBg(v: Boolean)        = context.dataStore.edit { it[Keys.MINIMAL_CHATBOX_BG] = v }
+    suspend fun saveMediaSourceSpotify(v: Boolean)      = context.dataStore.edit { it[Keys.MEDIA_SOURCE_SPOTIFY] = v }
+    suspend fun saveMediaSourceYoutube(v: Boolean)      = context.dataStore.edit { it[Keys.MEDIA_SOURCE_YOUTUBE] = v }
+    suspend fun saveMediaSourceYtMusic(v: Boolean)      = context.dataStore.edit { it[Keys.MEDIA_SOURCE_YTMUSIC] = v }
 
     suspend fun saveNotifFriendRequest(v: Boolean)        = context.dataStore.edit { it[Keys.NOTIF_FRIEND_REQUEST]        = v }
     suspend fun saveNotifNewFriend(v: Boolean)            = context.dataStore.edit { it[Keys.NOTIF_NEW_FRIEND]            = v }

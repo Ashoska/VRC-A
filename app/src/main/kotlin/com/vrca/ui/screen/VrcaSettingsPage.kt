@@ -205,6 +205,8 @@ internal fun SettingsPage(
                         Text("Active package: ${vm.activePackage}", style = MaterialTheme.typography.bodySmall)
                         Text("Detected: ${vm.nowPlayingDetected}", style = MaterialTheme.typography.bodySmall)
                         Text("Playing: ${vm.nowPlayingIsPlaying}", style = MaterialTheme.typography.bodySmall)
+                        Text("Title: ${vm.lastNowPlayingTitle}", style = MaterialTheme.typography.bodySmall)
+                        Text("Artist: ${vm.lastNowPlayingArtist}", style = MaterialTheme.typography.bodySmall)
 
                         Text("OSC Output Preview", style = MaterialTheme.typography.labelMedium)
                         SelectionContainer {
