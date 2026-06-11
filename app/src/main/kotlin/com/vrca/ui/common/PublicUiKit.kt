@@ -215,9 +215,9 @@ fun CompactSectionCard(
  * [onLongPress] is the jump-to-edit affordance (long-press Cycle →
  * Automations).
  *
- * State indicator sits on the RIGHT edge (labels vary in width, so a dot
- * trailing the text looked ragged) and carries an explicit ON/OFF text next
- * to the dot — color alone is not enough for colorblind users.
+ * State indicator is a single dot pinned to the RIGHT edge (labels vary in
+ * width, so a dot trailing the text looked ragged). No ON/OFF text — it was
+ * tried and rejected as UI clutter; the pill's color shift is the signal.
  *
  * Input uses [combinedClickable], NOT a raw pointerInput keyed on [checked]:
  * the keyed detector was cancelled+relaunched on every state flip, so taps
@@ -268,12 +268,6 @@ fun TogglePill(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
-            )
-            Text(
-                if (checked) "ON" else "OFF",
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.SemiBold,
-                color = contentColor
             )
             StatusDot(if (checked) KitTone.Success else KitTone.Neutral, size = 8)
         }
