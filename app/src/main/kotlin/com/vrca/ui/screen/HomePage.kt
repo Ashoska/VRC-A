@@ -25,6 +25,7 @@ import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
@@ -219,9 +220,22 @@ internal fun HomePage(
             SetupHealthCard(healthItems)
         }
 
+        // Reorder mode exit — unmissable full-width button at the top of the
+        // page (the small Done in the Quick Toggles header can be off-screen
+        // while the user is moving the upper cards around).
+        if (cardReorderMode) {
+            Button(
+                onClick = { cardReorderMode = false },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Done reordering")
+            }
+        }
+
         homeOrder.forEach { cardKey ->
             HomeCardSlot(
-                key = cardKey,
                 label = when (cardKey) {
                     "Preview" -> "Preview & toggles"
                     "Connection" -> "Connection"
@@ -342,7 +356,6 @@ private fun SetupHealthCard(items: List<HealthItem>) {
  *  arrows so the page-level card order is reorderable like the toggles. */
 @Composable
 private fun HomeCardSlot(
-    key: String,
     label: String,
     reorderMode: Boolean,
     canMoveUp: Boolean,
@@ -418,11 +431,10 @@ private fun PreviewAndTogglesCard(
                            else MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            SendStatusChip(
-                sending = vm.oscSending,
-                uptime = if (vm.oscSending && vm.sendingSinceMs > 0L)
-                    formatUptime(nowTickMs - vm.sendingSinceMs) else null
-            )
+            // No uptime in the chip — "Sending · 2h 14m" squeezed the
+            // headline title into wrapping ("VRChat / Preview"). The Stop
+            // button right below carries the uptime instead.
+            SendStatusChip(sending = vm.oscSending)
             IconButton(
                 onClick = {
                     previewExpanded = !previewExpanded

@@ -53,7 +53,6 @@ import com.vrca.update.ReleaseInfo
 import com.vrca.update.checkFirestoreRelease
 import com.vrca.vrchat.VrchatAuthManager
 import com.vrca.vrchat.VrchatBanChecker
-import com.vrca.vrchat.VrchatLoginScreen
 import com.vrca.vrchat.VrchatPipelineService
 import androidx.core.content.ContextCompat
 import android.app.DownloadManager
@@ -326,9 +325,8 @@ fun VrcaApp() {
     }
 
     /* -------------------------
-       VRChat login gate (required for all users)
-       Shows VrchatLoginScreen if not yet logged in.
-       After login: runs Phase 2 ban check, starts pipeline service.
+       VRChat login state (NO forced login screen — see below).
+       After a login: runs Phase 2 ban check, starts pipeline service.
        ------------------------- */
 
     var vrcLoginDone    by remember { mutableStateOf(VrchatAuthManager.isLoggedIn(ctx)) }
@@ -337,34 +335,18 @@ fun VrcaApp() {
     var phase2Checking  by remember { mutableStateOf(false) }
     var reloginTick     by remember { mutableStateOf(0) }
 
-    // A MID-SESSION sign-out (Settings Accounts) deliberately does NOT kick the
-    // user back to the login gate anymore — the app stays usable with OSC
-    // hard-blocked by VrcaViewModel's auth gate until they sign back in from
-    // Settings (docs/ui-revamp.md, Accounts). A cold start while logged out
-    // still shows the gate below. Each successful re-login re-runs the Phase-2
-    // ban check (the new account could be a banned identity).
+    // There is NO forced login screen anymore (the only hard login gate is the
+    // onboarding tutorial's login step on first run). Being signed out — via a
+    // Settings sign-out OR a cold start while logged out — just hard-blocks OSC
+    // through VrcaViewModel's auth gate; the app stays fully usable and the user
+    // signs back in from Settings → Accounts or the VRChat tab. Each successful
+    // re-login re-runs the Phase-2 ban check below (the new account could be a
+    // banned identity) and starts the pipeline.
     LaunchedEffect(Unit) {
         VrchatAuthManager.loggedInSignal.collect {
             vrcLoginDone = true
             reloginTick++
         }
-    }
-
-    if (!vrcLoginDone) {
-        VrchatLoginScreen(pendingBanId = phase1BanId) { _, _ ->
-            // Login succeeded - mark done, LaunchedEffect below will run Phase 2
-            vrcLoginDone = true
-        }
-        LaunchedEffect(vrcLoginDone) {
-            if (!vrcLoginDone) return@LaunchedEffect
-            phase2Checking = true
-            runPhase2AndStartPipeline(
-                ctx, phase1BanId,
-                onBanned = { reason -> isBannedPhase2 = true; banPhase2Reason = reason },
-                onClean  = { phase2Checking = false }
-            )
-        }
-        return
     }
 
     // If VRC login succeeded but Phase 2 hasn't run yet (first run after login).

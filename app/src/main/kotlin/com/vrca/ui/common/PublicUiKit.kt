@@ -7,7 +7,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -211,10 +211,22 @@ fun CompactSectionCard(
 }
 
 /**
- * Compact icon + label + state toggle pill, for the Home Quick Toggles 2×2
- * grid. [onLongPress] is the jump-to-edit affordance (long-press Cycle →
- * Automations). Selection color = on-state; no separate "Selected" labels.
+ * Compact icon + label + state toggle pill for the Home Quick Toggles list.
+ * [onLongPress] is the jump-to-edit affordance (long-press Cycle →
+ * Automations).
+ *
+ * State indicator sits on the RIGHT edge (labels vary in width, so a dot
+ * trailing the text looked ragged) and carries an explicit ON/OFF text next
+ * to the dot — color alone is not enough for colorblind users.
+ *
+ * Input uses [combinedClickable], NOT a raw pointerInput keyed on [checked]:
+ * the keyed detector was cancelled+relaunched on every state flip, so taps
+ * landing mid-restart were dropped or replayed a stale `!checked` (a no-op
+ * write → no recomposition → the pill looked frozen until something else
+ * changed). combinedClickable keeps its lambdas fresh across recomposition
+ * and adds the ripple feedback the pill was missing.
  */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun TogglePill(
     label: String,
@@ -236,16 +248,15 @@ fun TogglePill(
         shape = MaterialTheme.shapes.large,
         color = container,
         modifier = modifier
-            .pointerInput(checked, enabled) {
-                if (!enabled) return@pointerInput
-                detectTapGestures(
-                    onTap = { onToggle(!checked) },
-                    onLongPress = if (onLongPress != null) { { onLongPress() } } else null
-                )
-            }
     ) {
         Row(
-            Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            Modifier
+                .combinedClickable(
+                    enabled = enabled,
+                    onClick = { onToggle(!checked) },
+                    onLongClick = onLongPress
+                )
+                .padding(horizontal = 12.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -256,7 +267,13 @@ fun TogglePill(
                 color = contentColor,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false)
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                if (checked) "ON" else "OFF",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = contentColor
             )
             StatusDot(if (checked) KitTone.Success else KitTone.Neutral, size = 8)
         }

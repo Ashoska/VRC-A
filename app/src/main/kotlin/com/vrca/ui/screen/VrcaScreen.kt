@@ -516,10 +516,7 @@ fun VrcaScreen(
                             onPersistSpotifyPreset = { UiPrefs.writeSpotifyPreset(ctx, it) }
                         )
 
-                        AppPage.VrchatStatus -> VrchatStatusPage(
-                            vm = chatboxViewModel,
-                            onOpenLogin = { /* navigate to login within page */ }
-                        )
+                        AppPage.VrchatStatus -> VrchatStatusPage(vm = chatboxViewModel)
 
                         AppPage.Settings -> SettingsPage(
                             vm = chatboxViewModel,

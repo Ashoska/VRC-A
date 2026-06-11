@@ -42,6 +42,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -79,15 +80,33 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @Composable
-internal fun VrchatStatusPage(
-    vm: VrcaViewModel,
-    onOpenLogin: () -> Unit
-) {
+internal fun VrchatStatusPage(vm: VrcaViewModel) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    val isLinked = remember { mutableStateOf(VrchatAuthManager.isLoggedIn(ctx)) }
-    val displayName = remember { mutableStateOf(VrchatAuthManager.getStoredDisplayName(ctx) ?: "") }
+    // Inline sign-in takeover (the old onOpenLogin param was wired to an
+    // empty lambda in VrcaScreen, so the Sign in button silently did
+    // nothing). Same pattern as Settings → Accounts.
+    var showLogin by rememberSaveable { mutableStateOf(false) }
+    if (showLogin) {
+        Column(Modifier.fillMaxSize()) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = { showLogin = false }) { Text("Cancel") }
+            }
+            Box(Modifier.weight(1f)) {
+                com.vrca.vrchat.VrchatLoginScreen(pendingBanId = null) { _, _ ->
+                    showLogin = false
+                }
+            }
+        }
+        return
+    }
+
+    // Reactive: vm.vrchatLoggedOut flips on the auth manager's logged-in/out
+    // signals, so a Settings sign-out (or a re-login) updates this tab
+    // immediately — the old one-shot remember froze the cold-start value.
+    val isLinked = !vm.vrchatLoggedOut && VrchatAuthManager.isLoggedIn(ctx)
+    val displayName = if (isLinked) VrchatAuthManager.getStoredDisplayName(ctx) ?: "" else ""
     val presence by VrchatPipelineState.presenceFlow.collectAsState()
     val isConnected by VrchatPipelineState.isConnectedFlow.collectAsState()
 
@@ -112,29 +131,29 @@ internal fun VrchatStatusPage(
             ) {
                 Column(Modifier.weight(1f)) {
                     Text(
-                        if (isLinked.value) displayName.value.ifBlank { "VRChat account" }
+                        if (isLinked) displayName.ifBlank { "VRChat account" }
                         else "Not signed in",
                         style = MaterialTheme.typography.titleMedium
                     )
                     Text(
                         if (isConnected) "Live connection active"
-                        else if (isLinked.value) "Connecting..."
+                        else if (isLinked) "Connecting..."
                         else "Sign in to enable notifications and presence",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                if (isLinked.value) {
+                if (isLinked) {
                     OutlinedButton(onClick = { showLogoutDialog = true }) { Text("Sign out") }
                 } else {
-                    Button(onClick = onOpenLogin) { Text("Sign in") }
+                    Button(onClick = { showLogin = true }) { Text("Sign in") }
                 }
             }
         }
 
         // Presence card
         val p = presence
-        if (p != null && isLinked.value) {
+        if (p != null && isLinked) {
             val statusColor = if (p.isOnlineInVRChat) {
                 when (p.status) {
                     "ask me" -> Color(0xFFFF9800)
@@ -254,7 +273,7 @@ internal fun VrchatStatusPage(
                     }
                 }
             }
-        } else if (isLinked.value) {
+        } else if (isLinked) {
             ElevatedCard {
                 Row(Modifier.padding(14.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
@@ -494,14 +513,14 @@ internal fun VrchatStatusPage(
             onDismissRequest = { showLogoutDialog = false },
             title = { Text("Sign out of VRChat?") },
             text = {
-                Text("Notifications and presence will stop until you sign back in. The app will require you to sign in again before you can use it.")
+                Text("Notifications and presence stop, and chatbox sending is blocked until you sign back in. Your toggles and messages are kept.")
             },
             confirmButton = {
                 TextButton(onClick = {
                     showLogoutDialog = false
+                    // logout() emits loggedOutSignal → vm.vrchatLoggedOut flips
+                    // (isLinked above is derived from it) and the OSC gate blocks.
                     VrchatAuthManager.logout(ctx)
-                    isLinked.value = false
-                    displayName.value = ""
                     // Stop pipeline service
                     ctx.stopService(
                         Intent(ctx, VrchatPipelineService::class.java)

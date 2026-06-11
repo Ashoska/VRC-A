@@ -1524,7 +1524,13 @@ class VrcaViewModel(
      * Re-login only UNBLOCKS — it never auto-starts sending; toggle config is
      * preserved and the user presses Start again.
      */
-    var vrchatLoggedOut by mutableStateOf(false)
+    // Seeded from the REAL auth state, not false: with the forced login screen
+    // removed, a signed-out cold start lands straight in the app — the OSC
+    // block must hold from the first frame, not wait for a loggedOutSignal
+    // that never fires on cold start.
+    var vrchatLoggedOut by mutableStateOf(
+        !com.vrca.vrchat.VrchatAuthManager.isLoggedIn(app.applicationContext)
+    )
         private set
 
     /** OSC is blocked when ANY gate reason is active. */
@@ -1535,6 +1541,8 @@ class VrcaViewModel(
     }
 
     private fun startVrchatAuthGateWatcher() {
+        // Apply the seeded state immediately (cold start while signed out).
+        refreshOscBlockGate()
         viewModelScope.launch {
             com.vrca.vrchat.VrchatAuthManager.loggedOutSignal.collect {
                 // Order matters: stopSending()'s chatbox-clearing send must go
