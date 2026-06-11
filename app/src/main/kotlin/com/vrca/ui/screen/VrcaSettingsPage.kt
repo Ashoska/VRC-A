@@ -20,6 +20,7 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Power
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -75,6 +76,12 @@ internal fun SettingsPage(
                 subtitle = "Stops Android pausing VRC-A when the screen is off. Strongly recommended.",
                 primary = "Request"
             ) { ctx.startActivity(vm.batteryOptimizationIntent()) }
+            SettingsRow(
+                icon = Icons.Filled.Refresh,
+                title = "Replay setup tutorial",
+                subtitle = "Walk through OSC, IP, permissions and notifications again.",
+                primary = "Start"
+            ) { com.vrca.ui.onboarding.OnboardingState.replayRequested.value = true }
         }
 
         // -- Permissions --

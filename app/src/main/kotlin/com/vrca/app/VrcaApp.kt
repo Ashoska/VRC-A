@@ -239,6 +239,60 @@ fun VrcaApp() {
                 TosPrefs.acceptedAtMs(ctx) >= remoteTosUpdatedAtMs
     }
 
+    /* -------------------------
+       First-open onboarding tutorial (docs/ui-revamp.md).
+       Pre-seeded complete for existing installs (any prior ToS acceptance)
+       so current users never see it. Replayable from Settings.
+       ------------------------- */
+
+    var onboardingDone by remember {
+        mutableStateOf(
+            com.vrca.ui.onboarding.OnboardingPrefs.isComplete(ctx).also { done ->
+                // Pre-seed: an install that already accepted ANY ToS version is an
+                // existing user — mark complete so the tutorial never shows.
+                if (!done && TosPrefs.acceptedVersion(ctx) > 0) {
+                    com.vrca.ui.onboarding.OnboardingPrefs.markComplete(ctx)
+                }
+            } || TosPrefs.acceptedVersion(ctx) > 0
+        )
+    }
+    val onboardingReplay by com.vrca.ui.onboarding.OnboardingState.replayRequested
+
+    if (!onboardingDone || onboardingReplay) {
+        com.vrca.ui.onboarding.OnboardingFlow(
+            tosVersion = requiredTosVersion,
+            tosText = remoteTosText,
+            tosUrl = remoteTosUrl,
+            tosAlreadyAccepted = tosAccepted,
+            phase1BanId = phase1BanId,
+            replay = onboardingReplay,
+            onTosAccepted = {
+                TosPrefs.accept(ctx, requiredTosVersion)
+                tosAccepted = true
+                scope.launch {
+                    runCatching {
+                        val data = hashMapOf(
+                            "tosAcceptedVersion" to requiredTosVersion,
+                            "tosAcceptedAt" to Timestamp.now(),
+                            "updatedAt" to Timestamp.now()
+                        )
+                        if (deviceHash.isNotBlank()) {
+                            FirebaseFirestore.getInstance()
+                                .collection("users").document(deviceHash)
+                                .set(data, SetOptions.merge())
+                                .await()
+                        }
+                    }
+                }
+            },
+            onFinish = {
+                onboardingDone = true
+                com.vrca.ui.onboarding.OnboardingState.replayRequested.value = false
+            }
+        )
+        return
+    }
+
     if (!tosAccepted) {
         TosGate(
             tosVersion = requiredTosVersion,
