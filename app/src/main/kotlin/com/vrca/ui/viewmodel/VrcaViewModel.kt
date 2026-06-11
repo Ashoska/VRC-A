@@ -2574,6 +2574,17 @@ class VrcaViewModel(
         return firstLine
     }
 
+    /** Full multi-line cycle preset content — the Automations preset-chip
+     *  long-press peek needs more than the first line. */
+    fun getCyclePresetFull(slot: Int): String {
+        val i = slot.coerceIn(1, 5) - 1
+        return cyclePresetMessages[i]
+    }
+
+    /** The cycle line currently on screen (or first line when idle) — drives
+     *  the Automations collapsed-card "now: '…'" summary. */
+    fun cycleCurrentLine(): String = currentCycleLinePreview()
+
     fun getMusicPresetName(preset: Int): String = when (preset.coerceIn(1, 5)) {
         1 -> "Love"
         2 -> "Minimal"

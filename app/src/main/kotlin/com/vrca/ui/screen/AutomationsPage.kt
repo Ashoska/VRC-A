@@ -1,11 +1,7 @@
 package com.vrca.ui.screen
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,24 +12,26 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Loop
+import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -41,19 +39,28 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.vrca.ui.common.CompactSectionCard
+import com.vrca.ui.common.KitSectionHeader
+import com.vrca.ui.common.KitStatusChip
+import com.vrca.ui.common.KitTone
 import com.vrca.ui.viewmodel.VrcaViewModel
 import kotlinx.coroutines.launch
+
+// VRChat's chatbox hard limit — the combined output is trimmed past this, so
+// the editors meter against it (mirrors VrcaViewModel.VRC_MAX_CHARS).
+private const val VRC_CHAR_BUDGET = 144
 
 @Composable
 internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
     val scope = rememberCoroutineScope()
-    var tab by rememberSaveable { mutableStateOf(ChatboxAutomationsTab.Pinned) }
 
     val cycleLineFields = remember { mutableStateMapOf<Int, TextFieldValue>() }
 
@@ -69,286 +76,297 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
     LaunchedEffect(vm.cycleLines.size) { syncCycleLineFieldsFromVm() }
     LaunchedEffect(vm.cycleLines.toList()) { syncCycleLineFieldsFromVm() }
 
-    fun afkPresetsPreview(): String {
-        val parts = (1..3).map { slot ->
-            val p = vm.getAfkPresetPreview(slot).ifBlank { "empty" }
-            "${slot}:${p}"
-        }
-        return parts.joinToString("  -  ").let { if (it.length > 80) it.take(79) + "..." else it }
-    }
-
-    fun cyclePresetsPreview(): String {
-        val parts = (1..5).map { slot ->
-            val p = vm.getCyclePresetPreview(slot).ifBlank { "empty" }
-            "${slot}:${p}"
-        }
-        return parts.joinToString("  -  ").let { if (it.length > 80) it.take(79) + "..." else it }
-    }
+    // Preset peek dialog state — set by long-pressing a preset chip.
+    var peek by remember { mutableStateOf<PresetPeek?>(null) }
 
     PageContainer {
-        ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-            Column(Modifier.padding(10.dp)) {
-                TabRow(selectedTabIndex = tab.ordinal) {
-                    ChatboxAutomationsTab.entries.forEachIndexed { idx, t ->
-                        Tab(
-                            selected = (tab.ordinal == idx),
-                            onClick = { tab = t },
-                            text = { Text(t.title) }
-                        )
-                    }
+        // =========================
+        // Pinned — collapsed = status ("'msg' · ON"), expanded = editor.
+        // =========================
+        CompactSectionCard(
+            title = "Pinned",
+            icon = Icons.Filled.PushPin,
+            summary = vm.afkMessage.trim().ifBlank { "No message set" },
+            trailing = {
+                KitStatusChip(
+                    if (vm.afkEnabled) "ON" else "OFF",
+                    if (vm.afkEnabled) KitTone.Success else KitTone.Neutral
+                )
+            }
+        ) {
+            OutlinedTextField(
+                value = vm.afkMessage,
+                onValueChange = { s: String -> vm.updateAfkText(s) },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("Pinned text") },
+                supportingText = { CharBudgetMeter(vm.afkMessage.length) },
+                enabled = !isBanned
+            )
+
+            KitSectionHeader(title = "Presets", trailingValue = "tap to load · hold to peek")
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                (1..3).forEach { slot ->
+                    val content = vm.getAfkPresetPreview(slot)
+                    PresetChip(
+                        slot = slot,
+                        preview = content,
+                        equipped = content.isNotBlank() && content == vm.afkMessage.trim(),
+                        enabled = !isBanned,
+                        onLoad = { scope.launch { vm.loadAfkPreset(slot) } },
+                        onPeek = {
+                            peek = PresetPeek(
+                                title = "Pinned preset $slot",
+                                content = content,
+                                onLoad = { scope.launch { vm.loadAfkPreset(slot) } },
+                                onSave = { scope.launch { vm.saveAfkPreset(slot, vm.afkMessage) } }
+                            )
+                        }
+                    )
                 }
             }
         }
 
-        when (tab) {
-            ChatboxAutomationsTab.Pinned -> {
-                SectionCard(
-                    title = "Pinned Message",
-                    subtitle = "Always shown above Cycle and Now Playing. Toggle it on Home."
-                ) {
+        // =========================
+        // Cycle — collapsed = "5 lines · 10s · now: '…'", expanded = editor.
+        // =========================
+        val cycleNow = if (vm.oscSending && vm.cycleEnabled) vm.cycleCurrentLine() else ""
+        CompactSectionCard(
+            title = "Cycle",
+            icon = Icons.Filled.Loop,
+            summary = buildString {
+                append("${vm.cycleLines.count { it.isNotBlank() }} lines · ${vm.cycleIntervalSeconds}s")
+                if (cycleNow.isNotBlank()) append(" · now: “$cycleNow”")
+            },
+            trailing = {
+                KitStatusChip(
+                    if (vm.cycleEnabled) "ON" else "OFF",
+                    if (vm.cycleEnabled) KitTone.Success else KitTone.Neutral
+                )
+            }
+        ) {
+            if (vm.cycleLines.isEmpty()) {
+                Text("No lines yet. Tap Add Line.", style = MaterialTheme.typography.bodySmall)
+            }
+
+            vm.cycleLines.forEachIndexed { idx, _ ->
+                val fieldValue =
+                    cycleLineFields[idx] ?: TextFieldValue(vm.cycleLines.getOrNull(idx).orEmpty())
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(
-                        value = vm.afkMessage,
-                        onValueChange = { s: String -> vm.updateAfkText(s) },
-                        modifier = Modifier.fillMaxWidth(),
+                        value = fieldValue,
+                        onValueChange = { v: TextFieldValue ->
+                            cycleLineFields[idx] = v
+                            vm.updateCycleLine(idx, v.text)
+                        },
+                        modifier = Modifier.weight(1f),
                         singleLine = true,
-                        label = { Text("Pinned text") },
+                        label = { Text("Line ${idx + 1}") },
+                        // Per-line meter only once the line approaches the
+                        // budget — 10 always-on meters would just be noise.
+                        supportingText = if (fieldValue.text.length > 100) {
+                            { CharBudgetMeter(fieldValue.text.length) }
+                        } else null,
                         enabled = !isBanned
                     )
-
-                    ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                        Column(
-                            Modifier
-                                .fillMaxWidth()
-                                .padding(10.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Row(
-                                Modifier
-                                    .fillMaxWidth()
-                                    .clickable(enabled = !isBanned) { vm.updateAfkPresetsCollapsed(!vm.afkPresetsCollapsed) },
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(Modifier.weight(1f)) {
-                                    Text("Pinned Presets (3)", style = MaterialTheme.typography.titleSmall)
-                                    if (vm.afkPresetsCollapsed) {
-                                        Text(
-                                            afkPresetsPreview(),
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                }
-                                Icon(
-                                    imageVector = if (vm.afkPresetsCollapsed) Icons.Filled.ExpandMore else Icons.Filled.ExpandLess,
-                                    contentDescription = null
-                                )
-                            }
-
-                            AnimatedVisibility(
-                                visible = !vm.afkPresetsCollapsed,
-                                enter = fadeIn() + slideInVertically(initialOffsetY = { it / 4 }),
-                                exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 4 })
-                            ) {
-                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    (1..3).forEach { slot ->
-                                        ElevatedCard {
-                                            Column(
-                                                Modifier.padding(10.dp),
-                                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                                            ) {
-                                                val preview = vm.getAfkPresetPreview(slot).ifBlank { "(empty)" }
-
-                                                Text(
-                                                    preview,
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                )
-
-                                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                                    OutlinedButton(
-                                                        onClick = { scope.launch { vm.loadAfkPreset(slot) } },
-                                                        modifier = Modifier.weight(1f),
-                                                        enabled = !isBanned
-                                                    ) { Text("Load") }
-
-                                                    Button(
-                                                        onClick = { scope.launch { vm.saveAfkPreset(slot, vm.afkMessage) } },
-                                                        modifier = Modifier.weight(1f),
-                                                        enabled = !isBanned
-                                                    ) { Text("Save") }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                    Spacer(Modifier.width(8.dp))
+                    IconButton(onClick = { vm.removeCycleLine(idx) }, enabled = !isBanned) {
+                        Icon(Icons.Filled.Delete, contentDescription = "Remove line")
                     }
-
                 }
             }
 
-            ChatboxAutomationsTab.Cycle -> {
-                SectionCard(
-                    title = "Cycle",
-                    subtitle = "Up to 10 lines. Toggle it on Home. Stop clears instantly."
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { vm.addCycleLine() },
+                    enabled = !isBanned && vm.cycleLines.size < 10,
+                    modifier = Modifier.weight(1f)
                 ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (vm.cycleLines.isEmpty()) {
-                            Text("No lines yet. Tap Add Line.", style = MaterialTheme.typography.bodySmall)
-                        }
+                    Icon(Icons.Filled.Add, contentDescription = null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Add line (${vm.cycleLines.size}/10)")
+                }
 
-                        vm.cycleLines.forEachIndexed { idx, _ ->
-                            val fieldValue =
-                                cycleLineFields[idx] ?: TextFieldValue(vm.cycleLines.getOrNull(idx).orEmpty())
+                OutlinedButton(
+                    onClick = { vm.clearCycleLines() },
+                    enabled = !isBanned && vm.cycleLines.isNotEmpty(),
+                    modifier = Modifier.weight(1f)
+                ) { Text("Clear") }
+            }
 
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                OutlinedTextField(
-                                    value = fieldValue,
-                                    onValueChange = { v: TextFieldValue ->
-                                        cycleLineFields[idx] = v
-                                        vm.updateCycleLine(idx, v.text)
-                                    },
-                                    modifier = Modifier.weight(1f),
-                                    singleLine = true,
-                                    label = { Text("Line ${idx + 1}") },
-                                    enabled = !isBanned
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                IconButton(onClick = { vm.removeCycleLine(idx) }, enabled = !isBanned) {
-                                    Icon(Icons.Filled.Delete, contentDescription = "Remove line")
-                                }
-                            }
-                        }
-
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedButton(
-                                onClick = { vm.addCycleLine() },
-                                enabled = !isBanned && vm.cycleLines.size < 10,
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Icon(Icons.Filled.Add, contentDescription = null)
-                                Spacer(Modifier.width(6.dp))
-                                Text("Add line (${vm.cycleLines.size}/10)")
-                            }
-
-                            OutlinedButton(
-                                onClick = { vm.clearCycleLines() },
-                                enabled = !isBanned && vm.cycleLines.isNotEmpty(),
-                                modifier = Modifier.weight(1f)
-                            ) { Text("Clear") }
-                        }
-                    }
-
-                    // Cycle speed dropdown
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+            // Cycle speed dropdown
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Cycle speed:", style = MaterialTheme.typography.bodySmall)
+                var cycleSpeedMenuOpen by remember { mutableStateOf(false) }
+                val cycleSpeedOptions = listOf(2, 5, 10, 20, 40)
+                Box {
+                    OutlinedButton(
+                        onClick = { cycleSpeedMenuOpen = true },
+                        enabled = !isBanned,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
                     ) {
-                        Text("Cycle speed:", style = MaterialTheme.typography.bodySmall)
-                        var cycleSpeedMenuOpen by remember { mutableStateOf(false) }
-                        val cycleSpeedOptions = listOf(2, 5, 10, 20, 40)
-                        Box {
-                            OutlinedButton(
-                                onClick = { cycleSpeedMenuOpen = true },
-                                enabled = !isBanned,
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-                            ) {
-                                Text("${vm.cycleIntervalSeconds}s", style = MaterialTheme.typography.bodySmall)
-                                Icon(Icons.Filled.ExpandMore, contentDescription = null, modifier = Modifier.size(16.dp))
-                            }
-                            DropdownMenu(
-                                expanded = cycleSpeedMenuOpen,
-                                onDismissRequest = { cycleSpeedMenuOpen = false }
-                            ) {
-                                cycleSpeedOptions.forEach { sec ->
-                                    DropdownMenuItem(
-                                        text = { Text("${sec} seconds") },
-                                        onClick = {
-                                            vm.updateCycleIntervalSeconds(sec)
-                                            cycleSpeedMenuOpen = false
-                                        }
-                                    )
+                        Text("${vm.cycleIntervalSeconds}s", style = MaterialTheme.typography.bodySmall)
+                        Icon(Icons.Filled.ExpandMore, contentDescription = null, modifier = Modifier.size(16.dp))
+                    }
+                    DropdownMenu(
+                        expanded = cycleSpeedMenuOpen,
+                        onDismissRequest = { cycleSpeedMenuOpen = false }
+                    ) {
+                        cycleSpeedOptions.forEach { sec ->
+                            DropdownMenuItem(
+                                text = { Text("${sec} seconds") },
+                                onClick = {
+                                    vm.updateCycleIntervalSeconds(sec)
+                                    cycleSpeedMenuOpen = false
                                 }
-                            }
+                            )
                         }
                     }
+                }
+            }
 
-                    ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                        Column(
-                            Modifier
-                                .fillMaxWidth()
-                                .padding(10.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Row(
-                                Modifier
-                                    .fillMaxWidth()
-                                    .clickable(enabled = !isBanned) { vm.updateCyclePresetsCollapsed(!vm.cyclePresetsCollapsed) },
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(Modifier.weight(1f)) {
-                                    Text("Cycle Presets (5)", style = MaterialTheme.typography.titleSmall)
-                                    if (vm.cyclePresetsCollapsed) {
-                                        Text(
-                                            cyclePresetsPreview(),
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                }
-                                Icon(
-                                    imageVector = if (vm.cyclePresetsCollapsed) Icons.Filled.ExpandMore else Icons.Filled.ExpandLess,
-                                    contentDescription = null
-                                )
-                            }
-
-                            AnimatedVisibility(
-                                visible = !vm.cyclePresetsCollapsed,
-                                enter = fadeIn() + slideInVertically(initialOffsetY = { it / 4 }),
-                                exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 4 })
-                            ) {
-                                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    (1..5).forEach { slot ->
-                                        ElevatedCard {
-                                            Column(
-                                                Modifier.padding(10.dp),
-                                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                                            ) {
-                                                val preview = vm.getCyclePresetPreview(slot).ifBlank { "(empty)" }
-
-                                                Text(
-                                                    preview,
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                )
-
-                                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                                    OutlinedButton(
-                                                        onClick = { scope.launch { vm.loadCyclePreset(slot) } },
-                                                        modifier = Modifier.weight(1f),
-                                                        enabled = !isBanned
-                                                    ) { Text("Load") }
-
-                                                    Button(
-                                                        onClick = { scope.launch { vm.saveCyclePreset(slot, vm.cycleLines.toList()) } },
-                                                        modifier = Modifier.weight(1f),
-                                                        enabled = !isBanned
-                                                    ) { Text("Save") }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+            KitSectionHeader(title = "Presets", trailingValue = "tap to load · hold to peek")
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                (1..5).forEach { slot ->
+                    val firstLine = vm.getCyclePresetPreview(slot)
+                    val full = vm.getCyclePresetFull(slot)
+                    val equipped = full.isNotBlank() &&
+                        full.lines().map { it.trim() }.filter { it.isNotEmpty() } ==
+                        vm.cycleLines.map { it.trim() }.filter { it.isNotEmpty() }
+                    PresetChip(
+                        slot = slot,
+                        preview = firstLine,
+                        equipped = equipped,
+                        enabled = !isBanned,
+                        onLoad = { scope.launch { vm.loadCyclePreset(slot) } },
+                        onPeek = {
+                            peek = PresetPeek(
+                                title = "Cycle preset $slot",
+                                content = full,
+                                onLoad = { scope.launch { vm.loadCyclePreset(slot) } },
+                                onSave = { scope.launch { vm.saveCyclePreset(slot, vm.cycleLines.toList()) } }
+                            )
                         }
-                    }
-
+                    )
                 }
             }
         }
     }
+
+    // Preset peek dialog (long-press): full content + Load / Save-here.
+    peek?.let { p ->
+        AlertDialog(
+            onDismissRequest = { peek = null },
+            title = { Text(p.title) },
+            text = {
+                Text(
+                    p.content.ifBlank { "(empty)" },
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = { p.onLoad(); peek = null },
+                    enabled = !isBanned && p.content.isNotBlank()
+                ) { Text("Load") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { p.onSave(); peek = null },
+                    enabled = !isBanned
+                ) { Text("Save current here") }
+            }
+        )
+    }
+}
+
+private data class PresetPeek(
+    val title: String,
+    val content: String,
+    val onLoad: () -> Unit,
+    val onSave: () -> Unit
+)
+
+/**
+ * Horizontal preset chip: slot number + first words of the content. Tap to
+ * equip; long-press to peek the full content (and save the current text into
+ * the slot). Highlight = the slot whose content matches what's equipped now —
+ * no separate "Selected" label.
+ */
+@Composable
+private fun PresetChip(
+    slot: Int,
+    preview: String,
+    equipped: Boolean,
+    enabled: Boolean,
+    onLoad: () -> Unit,
+    onPeek: () -> Unit
+) {
+    val container =
+        if (equipped) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+        else MaterialTheme.colorScheme.surfaceVariant
+    val contentColor =
+        if (equipped) MaterialTheme.colorScheme.primary
+        else MaterialTheme.colorScheme.onSurfaceVariant
+
+    Surface(
+        shape = MaterialTheme.shapes.large,
+        color = container,
+        modifier = Modifier
+            .widthIn(min = 72.dp, max = 160.dp)
+            .pointerInput(enabled) {
+                if (!enabled) return@pointerInput
+                detectTapGestures(
+                    onTap = { onLoad() },
+                    onLongPress = { onPeek() }
+                )
+            }
+    ) {
+        Row(
+            Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(
+                "$slot",
+                style = MaterialTheme.typography.labelLarge,
+                color = contentColor
+            )
+            Text(
+                preview.ifBlank { "empty" },
+                style = MaterialTheme.typography.labelMedium,
+                color = contentColor,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+/** Inline "87/144" budget meter — warns before the trim happens instead of
+ *  after. Amber when close, red when the line alone would already be cut. */
+@Composable
+private fun CharBudgetMeter(length: Int) {
+    val color = when {
+        length > VRC_CHAR_BUDGET -> MaterialTheme.colorScheme.error
+        length > VRC_CHAR_BUDGET - 30 -> com.vrca.ui.theme.SlimeWarning
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Text("$length/$VRC_CHAR_BUDGET", style = MaterialTheme.typography.labelSmall, color = color)
 }

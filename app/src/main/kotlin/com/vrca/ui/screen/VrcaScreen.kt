@@ -104,11 +104,6 @@ internal enum class AppPage(val title: String) {
     Admin("Admin")
 }
 
-internal enum class ChatboxAutomationsTab(val title: String) {
-    Pinned("Pinned"),
-    Cycle("Cycle")
-}
-
 private enum class ChatboxInfoTab(val title: String) {
     Overview("Overview"),
     Help("Help")
