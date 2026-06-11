@@ -137,12 +137,15 @@ internal fun SettingsPage(
         // -- About --
         SectionCard(title = "About") {
             Text(
-                "VRC-A (made by Ashoska Mitsu Sisko)\n\n" +
-                "- Sends OSC chatbox text to your Quest/PC target\n" +
-                "- Includes: Pinned, Cycle, Now Playing, Manual Send\n" +
-                "- Use Stop to halt all senders and clear the VRChat chatbox",
+                "VRC-A (made by Ashoska Mitsu Sisko)",
                 style = MaterialTheme.typography.bodyMedium
             )
+            Spacer(Modifier.height(2.dp))
+            listOf(
+                "Sends OSC chatbox text to your Quest/PC target",
+                "Includes: Pinned, Cycle, Now Playing, Manual Send",
+                "Use Stop to halt all senders and clear the VRChat chatbox"
+            ).forEach { AboutBullet(it) }
         }
 
         // -- Help (collapsible FAQ) --
@@ -225,6 +228,26 @@ internal fun SettingsPage(
                 }
             }
         }
+    }
+}
+
+/** Real styled bullet row for the About card (replaces the literal "- "
+ *  dashes flagged in docs/ui-revamp.md). */
+@Composable
+private fun AboutBullet(text: String) {
+    Row(Modifier.fillMaxWidth()) {
+        Text(
+            "•",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.primary
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f)
+        )
     }
 }
 
