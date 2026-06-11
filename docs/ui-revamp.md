@@ -219,9 +219,11 @@ Pager flow — order is FINAL:
    the exact intents; OEM screens vary). Samsung detected →
    one-line manual "Never sleeping apps" instruction.
 4. **IP entry** — writes to **slot 1**; live reachability check (green check
-   before leaving the step). Platform selector (Quest / PC / Hotspot) showing
-   only relevant instructions + images. Mention "the next step also happens in
-   the headset" for Quest users.
+   before leaving the step). Quest gets the illustrated walkthrough (the only
+   IP images — see Instructional images); PC/phone are covered by a one-line
+   text note ("find it the same way in your phone's Wi-Fi settings, or on PC
+   via `ipconfig`"). Mention "the next step also happens in the headset" for
+   Quest users.
 5. **Enable OSC in VRChat** — illustrated: radial Action Menu → Options → OSC →
    Enabled (2–3 frames).
 6. **Notification types** — skippable; the 5 section-level switches with
@@ -258,10 +260,12 @@ Mechanics:
   rounded corners, uniform crop ratios (pager must not jump heights).
 - Needed captures (owner provides raw, we crop/annotate):
   - VRChat radial menu path (2–3 frames)
-  - Quest: Settings → Wi-Fi → connected network → IP address
-  - PC: `ipconfig` with IPv4 line visible
-  - Hotspot variant (headset's IP on the phone's hotspot network — the most
-    confused setup)
+  - Quest: Settings → Wi-Fi → connected network → IP address — **the ONLY
+    IP-step images**. PC and hotspot get NO screenshots; instead a short text
+    note on the step: "You can find it the same way in your phone's Wi-Fi
+    settings, or on PC by running `ipconfig` and reading the IPv4 address."
+    (One image set to maintain; the Quest path is where people actually get
+    lost.)
 
 ---
 
