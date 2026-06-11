@@ -793,8 +793,8 @@ internal fun SectionCard(
                     Text(
                         text = title,
                         style = titleStyle ?: MaterialTheme.typography.titleMedium,
-                        maxLines = 4,
-                        overflow = TextOverflow.Clip
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                     if (!subtitle.isNullOrBlank()) {
                         Text(
@@ -807,7 +807,7 @@ internal fun SectionCard(
                 }
                 if (actions != null) {
                     Row(
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         content = actions
                     )

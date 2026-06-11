@@ -647,13 +647,27 @@ private fun StepEnableOsc() {
         ElevatedCard {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 NumberedInstruction(1, "In VRChat, open the Action Menu (radial menu)")
-                NumberedInstruction(2, "Select Options")
+                com.vrca.ui.common.TutorialImage(
+                    resId = com.vrca.R.drawable.osc_tutorial_1,
+                    contentDescription = "VRChat Action Menu showing Options"
+                )
+                NumberedInstruction(2, "Select Options, then find OSC")
+                com.vrca.ui.common.TutorialImage(
+                    resId = com.vrca.R.drawable.osc_tutorial_2,
+                    contentDescription = "Options submenu with OSC highlighted"
+                )
                 NumberedInstruction(3, "Select OSC")
+                com.vrca.ui.common.TutorialImage(
+                    resId = com.vrca.R.drawable.osc_tutorial_3,
+                    contentDescription = "OSC submenu showing Enabled toggle off"
+                )
                 NumberedInstruction(4, "Set OSC to Enabled")
+                com.vrca.ui.common.TutorialImage(
+                    resId = com.vrca.R.drawable.osc_tutorial_4,
+                    contentDescription = "OSC Enabled toggle turned on"
+                )
             }
         }
-        // TODO(assets): TutorialImage frames of the radial menu path go here
-        // once the captures are provided (docs/ui-revamp.md, Instructional images).
         TrustNote(
             "Phone and headset/PC must be on the same Wi-Fi network. " +
             "If OSC ever acts up in VRChat, the same menu has an OSC → Reset option."
