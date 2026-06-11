@@ -37,6 +37,8 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -93,7 +95,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import java.security.MessageDigest
 
-private enum class AppPage(val title: String) {
+internal enum class AppPage(val title: String) {
     Home("Home"),
     Automations("Automations"),
     Music("Media"),
@@ -119,6 +121,8 @@ internal object UiPrefs {
     private const val KEY_SPOTIFY_DEMO = "spotify_demo"
     private const val KEY_SPOTIFY_PRESET = "spotify_preset"
     private const val KEY_TUTORIAL_EXPANDED = "tutorial_expanded"
+    private const val KEY_PREVIEW_EXPANDED = "preview_expanded"
+    private const val KEY_HOME_CARD_ORDER = "home_card_order"
 
     fun readSpotifyEnabled(ctx: Context): Boolean =
         ctx.getSharedPreferences(FILE, MODE_PRIVATE).getBoolean(KEY_SPOTIFY_ENABLED, false)
@@ -146,6 +150,31 @@ internal object UiPrefs {
 
     fun writeTutorialExpanded(ctx: Context, v: Boolean) {
         ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit().putBoolean(KEY_TUTORIAL_EXPANDED, v).apply()
+    }
+
+    fun readPreviewExpanded(ctx: Context): Boolean =
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getBoolean(KEY_PREVIEW_EXPANDED, true)
+
+    fun writePreviewExpanded(ctx: Context, v: Boolean) {
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit().putBoolean(KEY_PREVIEW_EXPANDED, v).apply()
+    }
+
+    /** Home PAGE card order (Preview / Connection / ManualSend) — distinct from
+     *  the chatbox COMPONENT order (VrcaViewModel.cardOrder), which controls the
+     *  top-to-bottom order of the OSC output itself. */
+    val HOME_CARDS_DEFAULT = listOf("Preview", "Connection", "ManualSend")
+
+    fun readHomeCardOrder(ctx: Context): List<String> {
+        val raw = ctx.getSharedPreferences(FILE, MODE_PRIVATE)
+            .getString(KEY_HOME_CARD_ORDER, null) ?: return HOME_CARDS_DEFAULT
+        val saved = raw.split(",").map { it.trim() }.filter { it in HOME_CARDS_DEFAULT }
+        // Append anything missing (new cards added in later versions).
+        return saved + HOME_CARDS_DEFAULT.filter { it !in saved }
+    }
+
+    fun writeHomeCardOrder(ctx: Context, order: List<String>) {
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit()
+            .putString(KEY_HOME_CARD_ORDER, order.joinToString(",")).apply()
     }
 }
 
@@ -354,8 +383,12 @@ fun VrcaScreen(
         if (isBannedEffective) page = AppPage.Home
     }
 
-    // Setup wizard: check if VRChat linked and IP set
-    val vrcLinked = VrchatAuthManager.isLoggedIn(ctx) &&
+    // Setup health: VRChat linked + IP set. Reads vm.vrchatLoggedOut so a
+    // mid-session sign-out (Settings → Accounts) flips this reactively. Feeds
+    // the Home health checklist and the red dot on the Home nav icon — the
+    // old every-tab "Setup incomplete" banner is gone (Home-only checklist).
+    val vrcLinked = !chatboxViewModel.vrchatLoggedOut &&
+        VrchatAuthManager.isLoggedIn(ctx) &&
         VrchatAuthManager.getStoredUserId(ctx)?.isNotBlank() == true
     val ipSet = remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(Unit) {
@@ -363,7 +396,7 @@ fun VrcaScreen(
             ipSet.value = ip.isNotBlank() && ip != "127.0.0.1"
         }
     }
-    val showSetupBanner = ipSet.value != null && (!vrcLinked || ipSet.value == false)
+    val setupNeedsAttention = ipSet.value != null && (!vrcLinked || ipSet.value == false)
 
     // Discord community invite (public build): the admin sets the link in
     // config/app.discordInvite; we surface a Discord button in the top bar that
@@ -417,7 +450,14 @@ fun VrcaScreen(
                         NavigationBarItem(
                             selected = page == AppPage.Home,
                             onClick = { page = AppPage.Home },
-                            icon = { Icon(Icons.Filled.Home, contentDescription = null) },
+                            icon = {
+                                // Red dot = the Home setup-health checklist has
+                                // unresolved items (the only cross-tab signal;
+                                // the checklist itself lives on Home only).
+                                BadgedBox(badge = { if (setupNeedsAttention) Badge() }) {
+                                    Icon(Icons.Filled.Home, contentDescription = null)
+                                }
+                            },
                             label = { Text("Home") }
                         )
                         NavigationBarItem(
@@ -449,16 +489,6 @@ fun VrcaScreen(
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                // Persistent setup banner -- shows until both steps complete
-                if (showSetupBanner && !isBannedEffective) {
-                    SetupIncompleteBanner(
-                        vrcLinked = vrcLinked,
-                        ipSet = ipSet.value == true,
-                        onFixVrc = { page = AppPage.VrchatStatus },
-                        onFixIp = { page = AppPage.Settings }
-                    )
-                }
-
                 Crossfade(targetState = page, label = "page_crossfade") { p ->
                     when (p) {
                         AppPage.Home -> {
@@ -474,11 +504,11 @@ fun VrcaScreen(
                             } else {
                                 HomePage(
                                     vm = chatboxViewModel,
-                                    snackbarHostState = snackbarHostState,
-                                    onOpenSettings = { page = AppPage.Settings },
+                                    onNavigate = { page = it },
                                     announcements = announcements,
                                     moderation = moderation,
-                                    isBanned = false
+                                    isBanned = false,
+                                    vrcLinked = vrcLinked
                                 )
                             }
                         }
@@ -508,11 +538,11 @@ fun VrcaScreen(
                             } else {
                                 HomePage(
                                     vm = chatboxViewModel,
-                                    snackbarHostState = snackbarHostState,
-                                    onOpenSettings = { page = AppPage.Settings },
+                                    onNavigate = { page = it },
                                     announcements = announcements,
                                     moderation = moderation,
-                                    isBanned = isBannedEffective
+                                    isBanned = isBannedEffective,
+                                    vrcLinked = vrcLinked
                                 )
                             }
                         }
@@ -812,69 +842,6 @@ internal fun vrChatSafePreview(input: String): String {
 
     return input.lines().joinToString("\n") { line ->
         line.split(" ").joinToString(" ") { breakLongToken(it) }
-    }
-}
-
-/* =========================
-   Setup incomplete banner
-   Shown persistently until VRChat is linked AND IP is set.
-   ========================= */
-
-@Composable
-private fun SetupIncompleteBanner(
-    vrcLinked: Boolean,
-    ipSet: Boolean,
-    onFixVrc: () -> Unit,
-    onFixIp: () -> Unit
-) {
-    Card(
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.tertiaryContainer
-        ),
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-    ) {
-        Column(
-            Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Text(
-                "Setup incomplete",
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.onTertiaryContainer
-            )
-            if (!vrcLinked) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        "VRChat account not linked",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onTertiaryContainer,
-                        modifier = Modifier.weight(1f)
-                    )
-                    TextButton(onClick = onFixVrc) { Text("Fix") }
-                }
-            }
-            if (!ipSet) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        "PC/Quest IP not configured",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onTertiaryContainer,
-                        modifier = Modifier.weight(1f)
-                    )
-                    TextButton(onClick = onFixIp) { Text("Fix") }
-                }
-            }
-        }
     }
 }
 

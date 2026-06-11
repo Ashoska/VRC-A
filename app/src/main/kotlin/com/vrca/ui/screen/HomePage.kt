@@ -2,15 +2,8 @@ package com.vrca.ui.screen
 
 import android.content.Context
 import android.os.PowerManager
-import android.provider.Settings
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
@@ -32,15 +25,17 @@ import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Loop
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Power
+import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -56,11 +51,8 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Divider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -74,42 +66,41 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.vrca.ui.common.CompactSectionCard
+import com.vrca.ui.common.KitStatusChip
+import com.vrca.ui.common.KitTone
+import com.vrca.ui.common.StatusDot
+import com.vrca.ui.common.TogglePill
 import com.vrca.ui.settings.ToggleRow
 import com.vrca.ui.viewmodel.VrcaViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 internal fun HomePage(
     vm: VrcaViewModel,
-    snackbarHostState: SnackbarHostState,
-    onOpenSettings: () -> Unit,
+    onNavigate: (AppPage) -> Unit,
     announcements: List<AnnouncementUi>,
     moderation: ModerationUi,
-    isBanned: Boolean
+    isBanned: Boolean,
+    vrcLinked: Boolean
 ) {
     val uiState by vm.messengerUiState.collectAsState()
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
 
     val connectionBring = remember { BringIntoViewRequester() }
-    val manualSendBring = remember { BringIntoViewRequester() }
-
-    var tutorialExpanded by remember { mutableStateOf(UiPrefs.readTutorialExpanded(ctx)) }
-
-    var overlayGranted by remember { mutableStateOf(Settings.canDrawOverlays(ctx)) }
-    LaunchedEffect(Unit) { overlayGranted = Settings.canDrawOverlays(ctx) }
 
     val pm = remember(ctx) { ctx.getSystemService(Context.POWER_SERVICE) as PowerManager }
     var batteryOk by remember { mutableStateOf(pm.isIgnoringBatteryOptimizations(ctx.packageName)) }
@@ -117,6 +108,30 @@ internal fun HomePage(
 
     val notifOk = vm.listenerConnected
     val ipOk = uiState.ipAddress.isNotBlank() && uiState.ipAddress != "127.0.0.1"
+
+    // 1s wall-clock tick while sending — drives the uptime label and the
+    // "Next cycle in Ns" countdown. No ticking while idle.
+    var nowTickMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(vm.oscSending) {
+        while (vm.oscSending) {
+            nowTickMs = System.currentTimeMillis()
+            delay(1_000L)
+        }
+    }
+
+    // Shared Edit mode: reorders the chatbox COMPONENT order (Quick Toggles)
+    // AND the page-level card order — one mode, every card participates.
+    var cardReorderMode by remember { mutableStateOf(false) }
+    var homeOrder by remember { mutableStateOf(UiPrefs.readHomeCardOrder(ctx)) }
+    fun moveHomeCard(key: String, delta: Int) {
+        val order = homeOrder.toMutableList()
+        val idx = order.indexOf(key)
+        val to = idx + delta
+        if (idx < 0 || to < 0 || to >= order.size) return
+        order[idx] = order[to]; order[to] = key
+        homeOrder = order
+        UiPrefs.writeHomeCardOrder(ctx, order)
+    }
 
     val topAnnouncements = remember(announcements) {
         announcements
@@ -168,31 +183,268 @@ internal fun HomePage(
             }
         }
 
-        SectionCard(
-            title = "VRChat Preview",
-            titleStyle = MaterialTheme.typography.headlineSmall,
-            subtitle = "What will appear in VRChat.",
-            actions = {
-                // Invisible Chatbox Border quick-toggle — tiny, unlabeled by design;
-                // the preview's reaction IS the explanation.
-                IconButton(
-                    onClick = { vm.setMinimalChatboxBgFlag(!vm.minimalChatboxBg) },
-                    modifier = Modifier.size(36.dp)
+        // Setup health checklist — Home-only replacement for the old every-tab
+        // "Setup incomplete" banner. Shows ONLY the red rows; disappears
+        // entirely when everything is green. Each row deep-links to its fix.
+        val healthItems = buildList {
+            if (!vrcLinked) add(
+                HealthItem(
+                    "VRChat account not linked",
+                    "OSC sending is blocked until you sign in."
+                ) { onNavigate(AppPage.VrchatStatus) }
+            )
+            if (!ipOk) add(
+                HealthItem(
+                    "Headset IP not set",
+                    "Set your Quest/PC IP in the Connection card."
+                ) { scope.launch { connectionBring.bringIntoView() } }
+            )
+            if (!batteryOk) add(
+                HealthItem(
+                    "Battery optimization is on",
+                    "Android may pause VRC-A when the screen is off."
                 ) {
+                    ctx.startActivity(vm.batteryOptimizationIntent())
+                    batteryOk = pm.isIgnoringBatteryOptimizations(ctx.packageName)
+                }
+            )
+            if (vm.spotifyEnabled && !notifOk) add(
+                HealthItem(
+                    "Notification Access missing",
+                    "Now Playing is on but can't detect media without it."
+                ) { ctx.startActivity(vm.notificationAccessIntent()) }
+            )
+        }
+        if (healthItems.isNotEmpty()) {
+            SetupHealthCard(healthItems)
+        }
+
+        homeOrder.forEach { cardKey ->
+            HomeCardSlot(
+                key = cardKey,
+                label = when (cardKey) {
+                    "Preview" -> "Preview & toggles"
+                    "Connection" -> "Connection"
+                    else -> "Manual Send"
+                },
+                reorderMode = cardReorderMode,
+                canMoveUp = homeOrder.indexOf(cardKey) > 0,
+                canMoveDown = homeOrder.indexOf(cardKey) < homeOrder.size - 1,
+                onMove = { delta -> moveHomeCard(cardKey, delta) }
+            ) {
+                when (cardKey) {
+                    "Preview" -> PreviewAndTogglesCard(
+                        vm = vm,
+                        isBanned = isBanned,
+                        nowTickMs = nowTickMs,
+                        cardReorderMode = cardReorderMode,
+                        onToggleReorderMode = { cardReorderMode = it },
+                        onResetOrder = {
+                            vm.resetCardOrder()
+                            homeOrder = UiPrefs.HOME_CARDS_DEFAULT
+                            UiPrefs.writeHomeCardOrder(ctx, UiPrefs.HOME_CARDS_DEFAULT)
+                        },
+                        onNavigate = onNavigate
+                    )
+
+                    "Connection" -> Column(Modifier.bringIntoViewRequester(connectionBring)) {
+                        ConnectionCard(vm = vm, ipAddress = uiState.ipAddress, ipOk = ipOk)
+                    }
+
+                    "ManualSend" -> CompactSectionCard(
+                        title = "Manual Send",
+                        icon = Icons.Filled.Send,
+                        summary = "One-off message · doesn't affect Pinned/Cycle/Now Playing"
+                    ) {
+                        OutlinedTextField(
+                            value = vm.messageText.value,
+                            onValueChange = { v: TextFieldValue -> vm.onMessageTextChange(v) },
+                            modifier = Modifier.fillMaxWidth(),
+                            minLines = 2,
+                            label = { Text("Message") },
+                            enabled = !isBanned
+                        )
+                        Button(
+                            onClick = { vm.sendMessage() },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !isBanned
+                        ) {
+                            Text("Send")
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* =========================
+   Setup health checklist
+   ========================= */
+
+private data class HealthItem(
+    val title: String,
+    val subtitle: String,
+    val onFix: () -> Unit
+)
+
+@Composable
+private fun SetupHealthCard(items: List<HealthItem>) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                "Setup health",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onTertiaryContainer
+            )
+            items.forEach { item ->
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable { item.onFix() }
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    StatusDot(KitTone.Error, size = 8)
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            item.title,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer
+                        )
+                        Text(
+                            item.subtitle,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.8f)
+                        )
+                    }
                     Icon(
-                        if (vm.minimalChatboxBg) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
-                        contentDescription = null,
-                        modifier = Modifier.size(20.dp),
-                        tint = if (vm.minimalChatboxBg) MaterialTheme.colorScheme.primary
-                               else MaterialTheme.colorScheme.onSurfaceVariant
+                        Icons.Filled.ChevronRight,
+                        contentDescription = "Fix",
+                        tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                        modifier = Modifier.size(18.dp)
                     )
                 }
-                SendStatusChip(sending = vm.oscSending)
             }
-        ) {
-            val previewTextRaw = vm.debugLastCombinedOsc.ifBlank { "(nothing active)" }
-            val previewText = remember(previewTextRaw) { vrChatSafePreview(previewTextRaw) }
+        }
+    }
+}
 
+/* =========================
+   Reorderable page-card slot
+   ========================= */
+
+/** Wraps a Home card; in Edit mode a slim strip above it carries up/down
+ *  arrows so the page-level card order is reorderable like the toggles. */
+@Composable
+private fun HomeCardSlot(
+    key: String,
+    label: String,
+    reorderMode: Boolean,
+    canMoveUp: Boolean,
+    canMoveDown: Boolean,
+    onMove: (Int) -> Unit,
+    content: @Composable () -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        if (reorderMode) {
+            Surface(
+                shape = MaterialTheme.shapes.small,
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    Modifier.padding(horizontal = 10.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        label,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row {
+                        IconButton(onClick = { onMove(-1) }, enabled = canMoveUp, modifier = Modifier.size(28.dp)) {
+                            Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "Move $label up", modifier = Modifier.size(18.dp))
+                        }
+                        IconButton(onClick = { onMove(1) }, enabled = canMoveDown, modifier = Modifier.size(28.dp)) {
+                            Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Move $label down", modifier = Modifier.size(18.dp))
+                        }
+                    }
+                }
+            }
+        }
+        content()
+    }
+}
+
+/* =========================
+   Preview + Start/Stop + Quick Toggles
+   ========================= */
+
+@Composable
+private fun PreviewAndTogglesCard(
+    vm: VrcaViewModel,
+    isBanned: Boolean,
+    nowTickMs: Long,
+    cardReorderMode: Boolean,
+    onToggleReorderMode: (Boolean) -> Unit,
+    onResetOrder: () -> Unit,
+    onNavigate: (AppPage) -> Unit
+) {
+    val ctx = LocalContext.current
+    var previewExpanded by remember { mutableStateOf(UiPrefs.readPreviewExpanded(ctx)) }
+
+    SectionCard(
+        title = "VRChat Preview",
+        titleStyle = MaterialTheme.typography.headlineSmall,
+        subtitle = "What will appear in VRChat.",
+        actions = {
+            // Invisible Chatbox Border quick-toggle — tiny, unlabeled by design;
+            // the preview's reaction IS the explanation.
+            IconButton(
+                onClick = { vm.setMinimalChatboxBgFlag(!vm.minimalChatboxBg) },
+                modifier = Modifier.size(36.dp)
+            ) {
+                Icon(
+                    if (vm.minimalChatboxBg) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp),
+                    tint = if (vm.minimalChatboxBg) MaterialTheme.colorScheme.primary
+                           else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            SendStatusChip(
+                sending = vm.oscSending,
+                uptime = if (vm.oscSending && vm.sendingSinceMs > 0L)
+                    formatUptime(nowTickMs - vm.sendingSinceMs) else null
+            )
+            IconButton(
+                onClick = {
+                    previewExpanded = !previewExpanded
+                    UiPrefs.writePreviewExpanded(ctx, previewExpanded)
+                },
+                modifier = Modifier.size(36.dp)
+            ) {
+                Icon(
+                    if (previewExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                    contentDescription = if (previewExpanded) "Collapse preview" else "Expand preview",
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+    ) {
+        val previewTextRaw = vm.debugLastCombinedOsc.ifBlank { "(nothing active)" }
+        val previewText = remember(previewTextRaw) { vrChatSafePreview(previewTextRaw) }
+
+        if (previewExpanded) {
+            // Full in-game simulation — the original visual identity (bubble
+            // over the avatar silhouette). Do not restyle (two redesigns were
+            // reverted per user preference).
             Box(
                 Modifier
                     .fillMaxWidth()
@@ -300,377 +552,358 @@ internal fun HomePage(
                     drawPath(path, color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.06f))
                 }
             }
-
-            // Primary Start / Stop control — gates whether the configured toggles
-            // actually transmit over OSC. Start launches the senders for whatever is
-            // toggled on; Stop halts sending and clears the VRChat chatbox WITHOUT
-            // untoggling anything (so Start resumes exactly what was set up).
-            if (vm.oscSending) {
-                Button(
-                    onClick = { vm.stopSending() },
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.error
-                    )
-                ) {
-                    Icon(
-                        Icons.Filled.Stop,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp),
-                        tint = MaterialTheme.colorScheme.onError
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text("Stop sending", color = MaterialTheme.colorScheme.onError)
-                }
-            } else {
-                Button(
-                    onClick = { vm.startSending() },
-                    enabled = !isBanned,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Icon(
-                        Icons.Filled.PlayArrow,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text("Start sending")
-                }
+        } else {
+            // Collapsed "live chip": the same bubble styling, compact — still
+            // answers "what is in my chatbox right now" without the 280dp sim.
+            Surface(
+                tonalElevation = 3.dp,
+                shape = MaterialTheme.shapes.large,
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        previewExpanded = true
+                        UiPrefs.writePreviewExpanded(ctx, true)
+                    }
+            ) {
+                Text(
+                    text = previewText,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall,
+                    textAlign = TextAlign.Center,
+                    softWrap = true,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
+        }
 
-            // Warning chips under the preview
-            if (vm.cycleTrimWarning.isNotBlank()) {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        "${vm.cycleTrimWarning}",
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onTertiaryContainer
-                    )
-                }
+        // Cycle countdown — only meaningful while the cycle loop is running.
+        if (vm.oscSending && vm.cycleEnabled && vm.nextCycleAtMs > 0L) {
+            val secsLeft = ((vm.nextCycleAtMs - nowTickMs) / 1000L).coerceAtLeast(0L)
+            Text(
+                "Next cycle in ${secsLeft}s",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+
+        // Primary Start / Stop control — gates whether the configured toggles
+        // actually transmit over OSC. Start launches the senders for whatever is
+        // toggled on; Stop halts sending and clears the VRChat chatbox WITHOUT
+        // untoggling anything (so Start resumes exactly what was set up).
+        if (vm.oscSending) {
+            Button(
+                onClick = { vm.stopSending() },
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error
+                )
+            ) {
+                Icon(
+                    Icons.Filled.Stop,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.onError
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "Stop sending" + if (vm.sendingSinceMs > 0L)
+                        " · ${formatUptime(nowTickMs - vm.sendingSinceMs)}" else "",
+                    color = MaterialTheme.colorScheme.onError
+                )
             }
+        } else {
+            Button(
+                onClick = { vm.startSending() },
+                enabled = !isBanned,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    Icons.Filled.PlayArrow,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text("Start sending")
+            }
+        }
 
-            ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        // Warning chips under the preview
+        if (vm.cycleTrimWarning.isNotBlank()) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    "${vm.cycleTrimWarning}",
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                )
+            }
+        }
 
-                    // Quick Toggles title row with Edit/Done toggle and Reset button
-                    var cardReorderMode by remember { mutableStateOf(false) }
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column {
-                            Text("Quick Toggles", style = MaterialTheme.typography.titleSmall)
+        ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+
+                // Quick Toggles title row with Edit/Done toggle and Reset button
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text("Quick Toggles", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            (if (vm.oscSending) "Edits show live" else "Press Start when ready") +
+                                " · hold a pill to edit",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        if (cardReorderMode) {
+                            TextButton(
+                                onClick = onResetOrder,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                            ) { Text("Reset", style = MaterialTheme.typography.labelSmall) }
+                        }
+                        TextButton(
+                            onClick = { onToggleReorderMode(!cardReorderMode) },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
                             Text(
-                                if (vm.oscSending) "Edits show live"
-                                else "Press Start when Ready",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                if (cardReorderMode) "Done" else "Edit",
+                                style = MaterialTheme.typography.labelSmall
                             )
                         }
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            if (cardReorderMode) {
-                                TextButton(
-                                    onClick = { vm.resetCardOrder() },
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                                ) { Text("Reset", style = MaterialTheme.typography.labelSmall) }
-                            }
-                            TextButton(
-                                onClick = { cardReorderMode = !cardReorderMode },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                            ) {
-                                Text(
-                                    if (cardReorderMode) "Done" else "Edit",
-                                    style = MaterialTheme.typography.labelSmall
-                                )
+                    }
+                }
+
+                if (cardReorderMode) {
+                    // Edit mode: vertical rows with up/down arrows — order =
+                    // top-to-bottom in the chatbox output.
+                    QuickTogglesReorderList(vm = vm, isBanned = isBanned)
+                } else {
+                    // Normal mode: compact 2×2 pill grid in chatbox-output order.
+                    QuickTogglesGrid(vm = vm, isBanned = isBanned, onNavigate = onNavigate)
+                }
+            }
+        }
+    }
+}
+
+/** 2×2 grid of TogglePills in [VrcaViewModel.cardOrder] order. Long-press
+ *  jumps to the feature's edit page (Time long-press opens its UTC menu). */
+@Composable
+private fun QuickTogglesGrid(
+    vm: VrcaViewModel,
+    isBanned: Boolean,
+    onNavigate: (AppPage) -> Unit
+) {
+    var timeMenuOpen by remember { mutableStateOf(false) }
+    val timeModeOptions: List<String> = remember {
+        buildList {
+            add("Device"); add("UTC")
+            for (h in 1..14) add("UTC+$h")
+            for (h in 1..12) add("UTC-$h")
+        }
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        vm.cardOrder.chunked(2).forEach { rowItems ->
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                rowItems.forEach { component ->
+                    when (component) {
+                        "Pinned" -> TogglePill(
+                            label = "Pinned",
+                            icon = Icons.Filled.PushPin,
+                            checked = vm.afkEnabled,
+                            enabled = !isBanned,
+                            onLongPress = { onNavigate(AppPage.Automations) },
+                            modifier = Modifier.weight(1f)
+                        ) { vm.setAfkEnabledFlag(it) }
+
+                        "Cycle" -> TogglePill(
+                            label = "Cycle",
+                            icon = Icons.Filled.Loop,
+                            checked = vm.cycleEnabled,
+                            enabled = !isBanned,
+                            onLongPress = { onNavigate(AppPage.Automations) },
+                            modifier = Modifier.weight(1f)
+                        ) { vm.setCycleEnabledFlag(it) }
+
+                        "NowPlaying" -> TogglePill(
+                            label = "Now Playing",
+                            icon = Icons.Filled.MusicNote,
+                            checked = vm.spotifyEnabled,
+                            enabled = !isBanned,
+                            onLongPress = { onNavigate(AppPage.Music) },
+                            modifier = Modifier.weight(1f)
+                        ) { vm.setSpotifyEnabledFlag(it) }
+
+                        "Time" -> Box(Modifier.weight(1f)) {
+                            TogglePill(
+                                label = "Time · ${vm.timeMode}",
+                                icon = Icons.Filled.Schedule,
+                                checked = vm.timeEnabled,
+                                enabled = !isBanned,
+                                onLongPress = { timeMenuOpen = true },
+                                modifier = Modifier.fillMaxWidth()
+                            ) { vm.updateTimeEnabled(it) }
+                            DropdownMenu(expanded = timeMenuOpen, onDismissRequest = { timeMenuOpen = false }) {
+                                timeModeOptions.forEach { mode: String ->
+                                    DropdownMenuItem(
+                                        text = { Text(mode) },
+                                        onClick = { vm.updateTimeMode(mode); timeMenuOpen = false }
+                                    )
+                                }
                             }
                         }
                     }
+                }
+                if (rowItems.size == 1) Spacer(Modifier.weight(1f))
+            }
+        }
+    }
+}
 
-                    // Reorderable component rows - order = top-to-bottom in chatbox output
-                    vm.cardOrder.forEachIndexed { idx: Int, component: String ->
-                        Row(
+/** Edit-mode vertical list — the pre-existing reorder UI for the chatbox
+ *  component order, unchanged in behavior. */
+@Composable
+private fun QuickTogglesReorderList(vm: VrcaViewModel, isBanned: Boolean) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        vm.cardOrder.forEachIndexed { idx: Int, component: String ->
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(Modifier.weight(1f)) {
+                    when (component) {
+                        "Pinned" -> ToggleRow("Pinned", vm.afkEnabled, enabled = !isBanned) { vm.setAfkEnabledFlag(it) }
+                        "Cycle" -> ToggleRow("Cycle", vm.cycleEnabled, enabled = !isBanned) { vm.setCycleEnabledFlag(it) }
+                        "NowPlaying" -> ToggleRow("Now Playing", vm.spotifyEnabled, enabled = !isBanned) { vm.setSpotifyEnabledFlag(it) }
+                        "Time" -> Row(
                             Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            // Component toggle or time row
-                            Box(Modifier.weight(1f)) {
-                                when {
-                                    component == "Pinned" -> ToggleRow("Pinned", vm.afkEnabled, enabled = !isBanned) { vm.setAfkEnabledFlag(it) }
-                                    component == "Cycle" -> ToggleRow("Cycle", vm.cycleEnabled, enabled = !isBanned) { vm.setCycleEnabledFlag(it) }
-                                    component == "NowPlaying" -> ToggleRow("Now Playing", vm.spotifyEnabled, enabled = !isBanned) { vm.setSpotifyEnabledFlag(it) }
-                                    component == "Time" -> Row(
-                                        Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text("Time")
-                                        Row(
-                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            var timeModeMenuOpen by remember { mutableStateOf(false) }
-                                            val timeModeOptions: List<String> = remember {
-                                                buildList {
-                                                    add("Device"); add("UTC")
-                                                    for (h in 1..14) add("UTC+$h")
-                                                    for (h in 1..12) add("UTC-$h")
-                                                }
-                                            }
-                                            Box {
-                                                OutlinedButton(
-                                                    onClick = { timeModeMenuOpen = true },
-                                                    enabled = !isBanned,
-                                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-                                                ) {
-                                                    Text(vm.timeMode, style = MaterialTheme.typography.bodySmall)
-                                                    Icon(Icons.Filled.ExpandMore, contentDescription = null, modifier = Modifier.size(16.dp))
-                                                }
-                                                DropdownMenu(expanded = timeModeMenuOpen, onDismissRequest = { timeModeMenuOpen = false }) {
-                                                    timeModeOptions.forEach { mode: String ->
-                                                        DropdownMenuItem(text = { Text(mode) }, onClick = { vm.updateTimeMode(mode); timeModeMenuOpen = false })
-                                                    }
-                                                }
-                                            }
-                                            Switch(checked = vm.timeEnabled, onCheckedChange = { vm.updateTimeEnabled(it) }, enabled = !isBanned)
-                                        }
-                                    }
-                                }
-                            }
-                            if (cardReorderMode) {
-                                Row {
-                                    IconButton(
-                                        onClick = {
-                                            val order = vm.cardOrder.toMutableList()
-                                            if (idx > 0) { val tmp = order[idx]; order[idx] = order[idx - 1]; order[idx - 1] = tmp; vm.updateCardOrder(order) }
-                                        },
-                                        enabled = idx > 0
-                                    ) {
-                                        Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "Move up", modifier = Modifier.size(18.dp))
-                                    }
-                                    IconButton(
-                                        onClick = {
-                                            val order = vm.cardOrder.toMutableList()
-                                            if (idx < order.size - 1) { val tmp = order[idx]; order[idx] = order[idx + 1]; order[idx + 1] = tmp; vm.updateCardOrder(order) }
-                                        },
-                                        enabled = idx < vm.cardOrder.size - 1
-                                    ) {
-                                        Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Move down", modifier = Modifier.size(18.dp))
-                                    }
-                                }
-                            }
+                            Text("Time · ${vm.timeMode}")
+                            Switch(checked = vm.timeEnabled, onCheckedChange = { vm.updateTimeEnabled(it) }, enabled = !isBanned)
                         }
                     }
-
                 }
-            }
-        }
-
-        SectionCard(
-            title = "Setup Tutorial",
-            subtitle = "Tap each step to open settings or jump to the right place.",
-            actions = {
-                IconButton(onClick = {
-                    tutorialExpanded = !tutorialExpanded
-                    UiPrefs.writeTutorialExpanded(ctx, tutorialExpanded)
-                }) {
-                    Icon(
-                        imageVector = if (tutorialExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                        contentDescription = null
-                    )
-                }
-            }
-        ) {
-            AnimatedVisibility(
-                visible = tutorialExpanded,
-                enter = fadeIn() + slideInVertically(initialOffsetY = { it / 3 }),
-                exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 3 })
-            ) {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    TutorialStep(
-                        number = 0,
-                        title = "Enable OSC in VRChat",
-                        subtitle = "VRChat -> Settings -> OSC -> Enable OSC.",
-                        icon = Icons.Filled.Bolt,
-                        primary = "How"
-                    ) { scope.launch { snackbarHostState.showSnackbar("Open VRChat -> Settings -> OSC -> Enable OSC") } }
-
-                    TutorialStep(
-                        number = 1,
-                        title = "Enable Notification Access",
-                        subtitle = if (notifOk) "Enabled." else "Required for Now Playing detection.",
-                        icon = Icons.Filled.MusicNote,
-                        primary = "Open"
-                    ) { ctx.startActivity(vm.notificationAccessIntent()) }
-
-                    TutorialStep(
-                        number = 2,
-                        title = "Allow Overlay permission",
-                        subtitle = if (overlayGranted) "Enabled." else "Only needed if you use overlay.",
-                        icon = Icons.Filled.Bolt,
-                        primary = "Open"
+                Row {
+                    IconButton(
+                        onClick = {
+                            val order = vm.cardOrder.toMutableList()
+                            if (idx > 0) { val tmp = order[idx]; order[idx] = order[idx - 1]; order[idx - 1] = tmp; vm.updateCardOrder(order) }
+                        },
+                        enabled = idx > 0
                     ) {
-                        ctx.startActivity(vm.overlayPermissionIntent())
-                        overlayGranted = Settings.canDrawOverlays(ctx)
+                        Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "Move up", modifier = Modifier.size(18.dp))
                     }
-
-                    TutorialStep(
-                        number = 3,
-                        title = "Disable Battery Optimization",
-                        subtitle = if (batteryOk) "Disabled (good)." else "Stops Android pausing the app when screen is off.",
-                        icon = Icons.Filled.Power,
-                        primary = "Request"
+                    IconButton(
+                        onClick = {
+                            val order = vm.cardOrder.toMutableList()
+                            if (idx < order.size - 1) { val tmp = order[idx]; order[idx] = order[idx + 1]; order[idx + 1] = tmp; vm.updateCardOrder(order) }
+                        },
+                        enabled = idx < vm.cardOrder.size - 1
                     ) {
-                        ctx.startActivity(vm.batteryOptimizationIntent())
-                        batteryOk = pm.isIgnoringBatteryOptimizations(ctx.packageName)
+                        Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Move down", modifier = Modifier.size(18.dp))
                     }
-
-                    TutorialStep(
-                        number = 4,
-                        title = "Set Headset IP",
-                        subtitle = if (ipOk) "Looks set." else "Quest/PC IP on the same Wi-Fi.",
-                        icon = Icons.Filled.Wifi,
-                        primary = "Go"
-                    ) { scope.launch { connectionBring.bringIntoView() } }
-
-                    TutorialStep(
-                        number = 5,
-                        title = "Manual Test Send",
-                        subtitle = "Type a message and hit Send.",
-                        icon = Icons.Filled.ChevronRight,
-                        primary = "Go"
-                    ) { scope.launch { manualSendBring.bringIntoView() } }
-                }
-            }
-        }
-
-        SectionCard(
-            title = "Connection",
-            subtitle = "Headset IP (Quest / PC)."
-        ) {
-            Column(Modifier.bringIntoViewRequester(connectionBring)) {
-                com.vrca.ui.conversation.IpField(
-                    chatboxViewModel = vm,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-        }
-
-        SectionCard(
-            title = "Manual Send",
-            subtitle = "One-off message (doesn't affect Pinned/Cycle/Now Playing)."
-        ) {
-            Column(Modifier.bringIntoViewRequester(manualSendBring)) {
-                OutlinedTextField(
-                    value = vm.messageText.value,
-                    onValueChange = { v: TextFieldValue -> vm.onMessageTextChange(v) },
-                    modifier = Modifier.fillMaxWidth(),
-                    minLines = 2,
-                    label = { Text("Message") },
-                    enabled = !isBanned
-                )
-                Button(
-                    onClick = { vm.sendMessage() },
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = !isBanned
-                ) {
-                    Text("Send")
                 }
             }
         }
     }
 }
 
+/* =========================
+   Connection card
+   ========================= */
+
+@Composable
+private fun ConnectionCard(
+    vm: VrcaViewModel,
+    ipAddress: String,
+    ipOk: Boolean
+) {
+    val repo = vm.userPreferencesRepository
+    val activeSlot by repo.activeIpSlot.collectAsState(initial = 1)
+    val n1 by repo.ip1Name.collectAsState(initial = "Home")
+    val n2 by repo.ip2Name.collectAsState(initial = "Hotspot")
+    val n3 by repo.ip3Name.collectAsState(initial = "Other")
+    val slotName = when (activeSlot) { 2 -> n2; 3 -> n3; else -> n1 }
+
+    // Live reachability: lightweight periodic ping of the active target. OSC is
+    // UDP fire-and-forget, so "no reply" is a WARNING (many devices simply
+    // don't answer pings), not proof the target is dead — but a green check
+    // catches "started sending into a dead IP" before the user wonders why
+    // nothing shows in VRChat.
+    var reachable by remember(ipAddress) { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(ipAddress) {
+        if (!ipOk) return@LaunchedEffect
+        while (true) {
+            reachable = withContext(Dispatchers.IO) {
+                try { java.net.InetAddress.getByName(ipAddress).isReachable(1500) }
+                catch (_: Throwable) { false }
+            }
+            delay(20_000L)
+        }
+    }
+
+    CompactSectionCard(
+        title = "Connection",
+        icon = Icons.Filled.Wifi,
+        summary = if (ipOk) "$ipAddress · $slotName" else "No headset IP set",
+        trailing = {
+            when {
+                !ipOk -> KitStatusChip("Not set", KitTone.Error)
+                reachable == null -> KitStatusChip("Checking", KitTone.Neutral)
+                reachable == true -> KitStatusChip("Reachable", KitTone.Success)
+                else -> KitStatusChip("No reply", KitTone.Warning)
+            }
+        }
+    ) {
+        com.vrca.ui.conversation.IpField(
+            chatboxViewModel = vm,
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
+}
+
+/* =========================
+   Status chip + uptime
+   ========================= */
+
+private fun formatUptime(elapsedMs: Long): String {
+    val s = (elapsedMs / 1000L).coerceAtLeast(0L)
+    return when {
+        s < 60 -> "${s}s"
+        s < 3600 -> "${s / 60}m"
+        else -> "${s / 3600}h ${(s % 3600) / 60}m"
+    }
+}
 
 /**
- * Compact OSC send-state indicator. A filled amber circle + "Sending" while OSC
- * is transmitting; a muted grey circle + "Idle" when nothing is being sent. This
- * is the at-a-glance answer to "is the chatbox actually updating right now?".
+ * Compact OSC send-state indicator. A filled amber circle + "Sending · 2h 14m"
+ * while OSC is transmitting (uptime counts since Start was pressed and survives
+ * OEM kills); a muted grey circle + "Idle" when nothing is being sent. This is
+ * the at-a-glance answer to "is the chatbox actually updating right now?".
  */
 @Composable
-private fun SendStatusChip(sending: Boolean) {
-    val dotColor = if (sending) Color(0xFFFFC107) else MaterialTheme.colorScheme.outline
-    val label = if (sending) "Sending" else "Idle"
-    val container =
-        if (sending) Color(0xFFFFC107).copy(alpha = 0.16f)
-        else MaterialTheme.colorScheme.surfaceVariant
-    Surface(
-        shape = MaterialTheme.shapes.large,
-        color = container
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Box(
-                Modifier
-                    .size(10.dp)
-                    .clip(CircleShape)
-                    .background(dotColor)
-            )
-            Text(
-                label,
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-        }
+private fun SendStatusChip(sending: Boolean, uptime: String? = null) {
+    val label = when {
+        sending && uptime != null -> "Sending · $uptime"
+        sending -> "Sending"
+        else -> "Idle"
     }
-}
-
-@Composable
-private fun TutorialStep(
-    number: Int,
-    title: String,
-    subtitle: String,
-    icon: ImageVector,
-    primary: String,
-    onPrimary: () -> Unit
-) {
-    ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .clickable { onPrimary() }
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Surface(
-                modifier = Modifier.size(36.dp),
-                shape = MaterialTheme.shapes.small,
-                color = MaterialTheme.colorScheme.surface
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(icon, contentDescription = null)
-                }
-            }
-
-            Spacer(Modifier.width(10.dp))
-
-            Column(Modifier.weight(1f)) {
-                Text(
-                    text = "$number. $title",
-                    style = MaterialTheme.typography.titleSmall,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = subtitle,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            TextButton(onClick = onPrimary, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
-                Text(primary)
-                Spacer(Modifier.width(4.dp))
-                Icon(Icons.Filled.ChevronRight, contentDescription = null)
-            }
-        }
-    }
+    KitStatusChip(label, if (sending) KitTone.Warning else KitTone.Neutral)
 }

@@ -109,6 +109,11 @@ class VrcaViewModel(
         // costs exactly one write. This is what stops "edit then close → reverts on
         // reopen" (the app-open read no longer overwrites a not-yet-synced edit).
         private const val SELF_SYNC_DEBOUNCE_MS = 30_000L
+
+        // Uptime-counter restore grace: >15 min so it spans the watchdog's
+        // ~15-min recovery cycle after an OEM kill (same reasoning as the
+        // Discord RPC ONLINE_GRACE_MS).
+        private const val UPTIME_RESTORE_GRACE_MS = 20 * 60_000L
         // Live-mode write interval — only used when an admin is watching.
         private const val LIVE_SYNC_INTERVAL_MS = 10_000L
         // When an admin is browsing (dashboard/users list) but not actively
@@ -1674,6 +1679,21 @@ class VrcaViewModel(
     var oscSending by mutableStateOf(savedState["oscSending"] ?: false)
         private set
 
+    // Epoch ms of when the current sending session started — drives the Home
+    // "Sending · 2h 14m" uptime label. 0 while idle. Persisted through
+    // FeatureSessionStore using the RPC-counter pattern: an OS-kill revival
+    // inside the 20-min grace window CONTINUES the counter (the watchdog gap is
+    // not subtracted — the label is framed as "since you pressed Start"); a
+    // deliberate swipe disarms restore so the next session starts fresh.
+    var sendingSinceMs by mutableStateOf(savedState["sendingSinceMs"] ?: 0L)
+        private set
+    private var uptimeHeartbeatJob: Job? = null
+
+    // Epoch ms of the cycle sender's next line advance — drives the Home
+    // "Next cycle in 12s" ticker. 0 when the cycle loop isn't running.
+    var nextCycleAtMs by mutableStateOf(0L)
+        private set
+
     // =========================
     // AFK
     // =========================
@@ -2284,6 +2304,11 @@ class VrcaViewModel(
         clearJob?.cancel(); clearJob = null
         oscSending = true
         savedState["oscSending"] = true
+        // Fresh Start stamps the uptime epoch; a restore that pre-seeded a
+        // surviving epoch (OS-kill revival inside the grace window) keeps it.
+        if (sendingSinceMs <= 0L) sendingSinceMs = System.currentTimeMillis()
+        savedState["sendingSinceMs"] = sendingSinceMs
+        startUptimeHeartbeat()
         persistFeatureSession()
         // Launch whatever is configured. Each starter no-ops if its toggle is off.
         startAfkSender(local)
@@ -2300,6 +2325,9 @@ class VrcaViewModel(
     fun stopSending(local: Boolean = false) {
         oscSending = false
         savedState["oscSending"] = false
+        sendingSinceMs = 0L
+        savedState["sendingSinceMs"] = 0L
+        uptimeHeartbeatJob?.cancel(); uptimeHeartbeatJob = null
         persistFeatureSession()
         stopAll(clearFromChatbox = false)
         keepaliveJob?.cancel(); keepaliveJob = null
@@ -2316,6 +2344,8 @@ class VrcaViewModel(
     fun killStopAndClear(local: Boolean = false) {
         stopAll(clearFromChatbox = false)
         oscSending = false; savedState["oscSending"] = false
+        sendingSinceMs = 0L; savedState["sendingSinceMs"] = 0L
+        uptimeHeartbeatJob?.cancel(); uptimeHeartbeatJob = null
         afkEnabled = false; savedState["afkEnabled"] = false
         cycleEnabled = false; savedState["cycleEnabled"] = false
         spotifyEnabled = false; savedState["spotifyEnabled"] = false
@@ -2336,8 +2366,23 @@ class VrcaViewModel(
             cycle = cycleEnabled,
             spotify = spotifyEnabled,
             time = timeEnabled,
-            sending = oscSending
+            sending = oscSending,
+            sendingSinceMs = sendingSinceMs
         )
+    }
+
+    /** Slow (~60s) heartbeat while OSC is transmitting. The persisted timestamp
+     *  is what lets [restoreFeatureSession] distinguish a short OS-kill→watchdog
+     *  gap (uptime counter continues) from a long dead window (counter resets,
+     *  sending still resumes). */
+    private fun startUptimeHeartbeat() {
+        uptimeHeartbeatJob?.cancel()
+        uptimeHeartbeatJob = viewModelScope.launch {
+            while (oscSending) {
+                FeatureSessionStore.heartbeatSending(app.applicationContext)
+                delay(60_000L)
+            }
+        }
     }
 
     /** Restore the toggle CONFIG that was set up before an unexpected kill, and
@@ -2357,7 +2402,15 @@ class VrcaViewModel(
         timeEnabled = pending.time; savedState["timeEnabled"] = pending.time
         oscSending = false; savedState["oscSending"] = false
         if (pending.sending && pending.anyEnabled) {
-            // Was actively sending → resume seamlessly.
+            // Was actively sending → resume seamlessly. Continue the uptime
+            // counter only when the dead window is short (the kill→watchdog
+            // gap); after a long gap the counter starts fresh while sending
+            // still resumes (same grace-window pattern as the RPC counter).
+            val sinceSeen = System.currentTimeMillis() - pending.lastSendingSeenMs
+            sendingSinceMs =
+                if (pending.sendingSinceMs > 0L && sinceSeen in 0..UPTIME_RESTORE_GRACE_MS) pending.sendingSinceMs
+                else 0L
+            savedState["sendingSinceMs"] = sendingSinceMs
             restoredActiveSending = true
             startSending()
         } else {
@@ -2665,6 +2718,7 @@ class VrcaViewModel(
                     // (clears the chatbox if nothing else is enabled) and keep
                     // looping so re-adding a line resumes automatically.
                     rebuildAndMaybeSendCombined(forceSend = true, local = local, forceClearIfAllOff = true)
+                    nextCycleAtMs = System.currentTimeMillis() + cycleIntervalSeconds.toLong() * 1000L
                     delay(cycleIntervalSeconds.toLong() * 1000L)
                     continue
                 }
@@ -2678,9 +2732,11 @@ class VrcaViewModel(
                 // the wait cycleIndex must still point at the line on screen so
                 // currentCycleLinePreview() (preview + the other sender loops'
                 // null-override rebuilds) agrees with what this tick sent.
+                nextCycleAtMs = System.currentTimeMillis() + cycleIntervalSeconds.toLong() * 1000L
                 delay(cycleIntervalSeconds.toLong() * 1000L)
                 cycleIndex = (cycleIndex + 1) % live.size
             }
+            nextCycleAtMs = 0L
         }
         startSelfSyncLoopIfNeeded()
     }
@@ -2688,6 +2744,7 @@ class VrcaViewModel(
     fun stopCycle(clearFromChatbox: Boolean) {
         cycleJob?.cancel()
         cycleJob = null
+        nextCycleAtMs = 0L
         if (clearFromChatbox && !isBanned) rebuildAndMaybeSendCombined(forceSend = true, forceClearIfAllOff = true)
         lastCyclePreviewAdvanceMs = 0L
         startSelfSyncLoopIfNeeded()

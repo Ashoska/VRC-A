@@ -24,6 +24,8 @@ object FeatureSessionStore {
     private const val KEY_SPOTIFY = "feature_spotify_enabled"
     private const val KEY_TIME = "feature_time_enabled"
     private const val KEY_SENDING = "feature_osc_sending"
+    private const val KEY_SENDING_SINCE = "feature_sending_since"
+    private const val KEY_SENDING_SEEN = "feature_sending_seen"
 
     data class State(
         val afk: Boolean,
@@ -33,7 +35,13 @@ object FeatureSessionStore {
         /** Whether OSC was actively transmitting (START pressed) at persist time.
          *  Restore only RESUMES sending when this is true — having toggles
          *  configured but never started must not auto-start the chatbox. */
-        val sending: Boolean
+        val sending: Boolean,
+        /** Epoch ms of when the current sending session started (the Home uptime
+         *  counter). 0 when not sending. */
+        val sendingSinceMs: Long = 0L,
+        /** Last heartbeat while sending — the grace-window key for the uptime
+         *  restore (same pattern as the Discord RPC online counter). */
+        val lastSendingSeenMs: Long = 0L
     ) {
         val anyEnabled: Boolean get() = afk || cycle || spotify || time
     }
@@ -48,17 +56,32 @@ object FeatureSessionStore {
         cycle: Boolean,
         spotify: Boolean,
         time: Boolean,
-        sending: Boolean
+        sending: Boolean,
+        sendingSinceMs: Long = 0L
     ) {
         try {
-            prefs(context).edit()
+            val editor = prefs(context).edit()
                 .putBoolean(KEY_ARMED, true)
                 .putBoolean(KEY_AFK, afk)
                 .putBoolean(KEY_CYCLE, cycle)
                 .putBoolean(KEY_SPOTIFY, spotify)
                 .putBoolean(KEY_TIME, time)
                 .putBoolean(KEY_SENDING, sending)
-                .apply()
+                .putLong(KEY_SENDING_SINCE, if (sending) sendingSinceMs else 0L)
+            // Every persist while sending also refreshes the heartbeat — the
+            // restore grace window keys on how recently sending was last alive.
+            if (sending) editor.putLong(KEY_SENDING_SEEN, System.currentTimeMillis())
+            editor.apply()
+        } catch (_: Throwable) {}
+    }
+
+    /** Refresh the sending heartbeat without touching the toggle set. Called on
+     *  a slow cadence (~60s) while OSC is transmitting so an OS-kill revival can
+     *  tell a short watchdog gap (continue the uptime counter) from a long dead
+     *  window (start the counter fresh). */
+    fun heartbeatSending(context: Context) {
+        try {
+            prefs(context).edit().putLong(KEY_SENDING_SEEN, System.currentTimeMillis()).apply()
         } catch (_: Throwable) {}
     }
 
@@ -73,7 +96,9 @@ object FeatureSessionStore {
                 cycle = p.getBoolean(KEY_CYCLE, false),
                 spotify = p.getBoolean(KEY_SPOTIFY, false),
                 time = p.getBoolean(KEY_TIME, false),
-                sending = p.getBoolean(KEY_SENDING, false)
+                sending = p.getBoolean(KEY_SENDING, false),
+                sendingSinceMs = p.getLong(KEY_SENDING_SINCE, 0L),
+                lastSendingSeenMs = p.getLong(KEY_SENDING_SEEN, 0L)
             )
         } catch (_: Throwable) {
             null
