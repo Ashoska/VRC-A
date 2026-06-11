@@ -335,9 +335,19 @@ fun VrcaApp() {
     var isBannedPhase2  by remember { mutableStateOf(false) }
     var banPhase2Reason by remember { mutableStateOf("") }
     var phase2Checking  by remember { mutableStateOf(false) }
+    var reloginTick     by remember { mutableStateOf(0) }
 
+    // A MID-SESSION sign-out (Settings Accounts) deliberately does NOT kick the
+    // user back to the login gate anymore — the app stays usable with OSC
+    // hard-blocked by VrcaViewModel's auth gate until they sign back in from
+    // Settings (docs/ui-revamp.md, Accounts). A cold start while logged out
+    // still shows the gate below. Each successful re-login re-runs the Phase-2
+    // ban check (the new account could be a banned identity).
     LaunchedEffect(Unit) {
-        VrchatAuthManager.loggedOutSignal.collect { vrcLoginDone = false }
+        VrchatAuthManager.loggedInSignal.collect {
+            vrcLoginDone = true
+            reloginTick++
+        }
     }
 
     if (!vrcLoginDone) {
@@ -357,8 +367,10 @@ fun VrcaApp() {
         return
     }
 
-    // If VRC login succeeded but Phase 2 hasn't run yet (first run after login)
-    LaunchedEffect(vrcLoginDone) {
+    // If VRC login succeeded but Phase 2 hasn't run yet (first run after login).
+    // Also keyed on reloginTick so a Settings re-login (possibly a DIFFERENT
+    // VRChat account) re-runs the ban check + pipeline restart.
+    LaunchedEffect(vrcLoginDone, reloginTick) {
         if (!vrcLoginDone || phase2Checking) return@LaunchedEffect
         phase2Checking = true
         runPhase2AndStartPipeline(

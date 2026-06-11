@@ -68,7 +68,6 @@ import com.vrca.discord.DiscordLoginWebView
 import com.vrca.discord.DiscordRpcService
 import com.vrca.discord.DiscordRpcState
 import com.vrca.discord.DiscordRpcStatus
-import com.vrca.ui.settings.NotificationToggleSection
 import com.vrca.ui.settings.ToggleRow
 import com.vrca.ui.viewmodel.VrcaViewModel
 import com.vrca.vrchat.InAppAlertGroup
@@ -264,9 +263,10 @@ internal fun VrchatStatusPage(
             }
         }
 
-        // -- VRChat Notification Toggles (collapsible categories) --
+        // Notification toggles moved to Settings → Notifications (config, not
+        // daily use — docs/ui-revamp.md). NotificationToggleSection import kept
+        // out; the section now renders in VrcaSettingsPage.
         val repo = vm.userPreferencesRepository
-        NotificationToggleSection(vm = vm)
 
         // -- Discord Rich Presence --
         val discordEnabled by repo.discordRpcEnabled.collectAsState(initial = false)

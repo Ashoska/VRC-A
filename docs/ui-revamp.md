@@ -109,7 +109,8 @@ Findings: TWO stacked identity cards; five collapsed notification sections eat
 
 - **Merge identity cards** into one header row: avatar + name + status dot +
   platform chip + trust rank; Sign out and View Profile as small trailing
-  actions. Fix the "stars :0" label (formatting bug/placeholder).
+  actions. ("stars :0" in the screenshot is the owner's VRChat STATUS TEXT,
+  not a bug — render it as the status description, do NOT "fix" it.)
 - **Move ALL notification toggle sections to Settings** (they are config, not
   daily use), with per-section master rows showing counts ("Friends activity ·
   6/10 on").

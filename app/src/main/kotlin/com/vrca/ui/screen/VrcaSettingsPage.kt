@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -28,6 +29,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -42,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import com.vrca.BuildConfig
 import com.vrca.ui.settings.ToggleRow
 import com.vrca.ui.viewmodel.VrcaViewModel
+import kotlinx.coroutines.launch
 
 @Composable
 internal fun SettingsPage(
@@ -51,8 +54,30 @@ internal fun SettingsPage(
 ) {
     val ctx = LocalContext.current
     var debugExpanded by rememberSaveable { mutableStateOf(false) }
+    var showVrchatLogin by rememberSaveable { mutableStateOf(false) }
+
+    // Inline VRChat re-login (Accounts → Sign in). Full-screen takeover; on
+    // success VrchatAuthManager.loggedInSignal lifts the OSC gate and VrcaApp
+    // re-runs the Phase-2 ban check. pendingBanId=null — the re-login ban check
+    // runs through the normal Phase-2 path keyed on reloginTick.
+    if (showVrchatLogin) {
+        Column(Modifier.fillMaxSize()) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = { showVrchatLogin = false }) { Text("Cancel") }
+            }
+            Box(Modifier.weight(1f)) {
+                com.vrca.vrchat.VrchatLoginScreen(pendingBanId = null) { _, _ ->
+                    showVrchatLogin = false
+                }
+            }
+        }
+        return
+    }
 
     PageContainer {
+        // -- Accounts --
+        AccountsSection(vm, onSignInVrchat = { showVrchatLogin = true })
+
         // -- Chatbox display --
         SectionCard(title = "Chatbox display") {
             ToggleRow(
@@ -82,6 +107,13 @@ internal fun SettingsPage(
                 subtitle = "Walk through OSC, IP, permissions and notifications again.",
                 primary = "Start"
             ) { com.vrca.ui.onboarding.OnboardingState.replayRequested.value = true }
+            StorageRow()
+        }
+
+        // -- Notifications (moved here from the VRChat tab — configuration,
+        //    not daily use; docs/ui-revamp.md Settings) --
+        SectionCard(title = "Notifications") {
+            com.vrca.ui.settings.NotificationToggleSection(vm = vm)
         }
 
         // -- Permissions --
@@ -260,6 +292,158 @@ private fun SettingsRow(
             Text(primary)
             Spacer(Modifier.width(4.dp))
             Icon(Icons.Filled.ChevronRight, contentDescription = null)
+        }
+    }
+}
+
+/* =========================================================================
+   Accounts (docs/ui-revamp.md, Settings): VRChat + Discord rows with sign-out
+   and inline re-login. Signing out of VRChat hard-blocks all OSC output (the
+   VrcaViewModel auth gate) until a VRChat account is signed in again.
+   ========================================================================= */
+
+@Composable
+private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
+    val ctx = LocalContext.current
+    val repo = (ctx.applicationContext as com.vrca.app.VrcaApplication).userPreferencesRepository
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+
+    // VRChat state: vm.vrchatLoggedOut flips reactively on the auth signals;
+    // also consult isLoggedIn for cold truth (covers process restarts).
+    val vrcSignedIn = !vm.vrchatLoggedOut &&
+        com.vrca.vrchat.VrchatAuthManager.isLoggedIn(ctx)
+    val vrcName = com.vrca.vrchat.VrchatAuthManager.getStoredDisplayName(ctx) ?: ""
+
+    val discordSeeded by repo.discordSessionSeeded.collectAsStateInitially(false)
+    val discordEnabled by repo.discordRpcEnabled.collectAsStateInitially(false)
+
+    var confirmVrcSignOut by rememberSaveable { mutableStateOf(false) }
+    var confirmDiscordDisconnect by rememberSaveable { mutableStateOf(false) }
+
+    SectionCard(title = "Accounts") {
+        // VRChat row
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("VRChat", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    if (vrcSignedIn) vrcName.ifBlank { "Signed in" } else "Signed out — chatbox sending is blocked",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (vrcSignedIn) MaterialTheme.colorScheme.onSurfaceVariant
+                            else MaterialTheme.colorScheme.error
+                )
+            }
+            if (vrcSignedIn) {
+                TextButton(onClick = { confirmVrcSignOut = true }) { Text("Sign out") }
+            } else {
+                TextButton(onClick = onSignInVrchat) { Text("Sign in") }
+            }
+        }
+
+        // Discord row
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Discord", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    when {
+                        discordSeeded && discordEnabled -> "Connected — Rich Presence on"
+                        discordSeeded -> "Connected — Rich Presence off"
+                        else -> "Not connected (set up in the VRChat tab)"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (discordSeeded) {
+                TextButton(onClick = { confirmDiscordDisconnect = true }) { Text("Disconnect") }
+            }
+        }
+    }
+
+    if (confirmVrcSignOut) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { confirmVrcSignOut = false },
+            title = { Text("Sign out of VRChat?") },
+            text = { Text("Chatbox sending stops immediately and stays blocked until you sign in again. Your toggles and messages are kept.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmVrcSignOut = false
+                    com.vrca.vrchat.VrchatAuthManager.logout(ctx)
+                }) { Text("Sign out") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmVrcSignOut = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (confirmDiscordDisconnect) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { confirmDiscordDisconnect = false },
+            title = { Text("Disconnect Discord?") },
+            text = { Text("Rich Presence stops and the on-device Discord session is cleared. Disconnecting may invalidate Discord sessions on other devices.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDiscordDisconnect = false
+                    scope.launch {
+                        repo.saveDiscordRpcEnabled(false)
+                        repo.saveDiscordSessionSeeded(false)
+                        android.webkit.CookieManager.getInstance().removeAllCookies(null)
+                        val svcIntent = android.content.Intent(ctx, com.vrca.discord.DiscordRpcService::class.java)
+                        svcIntent.action = com.vrca.discord.DiscordRpcService.ACTION_STOP
+                        ctx.startService(svcIntent)
+                    }
+                }) { Text("Disconnect") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDiscordDisconnect = false }) { Text("Cancel") }
+            }
+        )
+    }
+}
+
+/** Small helper: collectAsState with an initial value (Flow<T> ext). */
+@Composable
+private fun <T> kotlinx.coroutines.flow.Flow<T>.collectAsStateInitially(initial: T) =
+    this.collectAsState(initial = initial)
+
+/**
+ * Storage row: live measured cache size + a button to the system App Info
+ * page — Android doesn't let an app fully wipe its own cache, so the system
+ * page's Clear Cache is the honest route. Clearing cache never touches
+ * logins or settings.
+ */
+@Composable
+private fun StorageRow() {
+    val ctx = LocalContext.current
+    var cacheBytes by androidx.compose.runtime.remember { mutableStateOf(-1L) }
+
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        cacheBytes = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            fun dirSize(dir: java.io.File?): Long {
+                if (dir == null || !dir.exists()) return 0L
+                return dir.walkBottomUp().fold(0L) { acc, f -> acc + (if (f.isFile) f.length() else 0L) }
+            }
+            dirSize(ctx.cacheDir) + dirSize(ctx.externalCacheDir) + dirSize(ctx.codeCacheDir)
+        }
+    }
+
+    val sizeLabel = when {
+        cacheBytes < 0 -> "measuring..."
+        cacheBytes < 1024 * 1024 -> "${cacheBytes / 1024} KB"
+        else -> String.format("%.1f MB", cacheBytes / (1024.0 * 1024.0))
+    }
+
+    SettingsRow(
+        icon = Icons.Filled.Bolt,
+        title = "Storage",
+        subtitle = "Cache: $sizeLabel. Opens the system page where Clear Cache lives — it never touches logins or settings.",
+        primary = "Open"
+    ) {
+        runCatching {
+            ctx.startActivity(
+                android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                    .setData(android.net.Uri.parse("package:${ctx.packageName}"))
+            )
         }
     }
 }

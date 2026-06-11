@@ -31,6 +31,12 @@ object VrchatAuthManager {
     private val _loggedOutSignal = kotlinx.coroutines.flow.MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val loggedOutSignal: kotlinx.coroutines.flow.SharedFlow<Unit> = _loggedOutSignal
 
+    // Emitted on every successful manual login (Basic-auth success or 2FA verify
+    // success). Used by VrcaViewModel to lift the VRChat-logout OSC gate and by
+    // VrcaApp to re-run the Phase-2 ban check after a Settings re-login.
+    private val _loggedInSignal = kotlinx.coroutines.flow.MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val loggedInSignal: kotlinx.coroutines.flow.SharedFlow<Unit> = _loggedInSignal
+
     private const val TAG = "VrchatAuth"
     private const val BASE = "https://api.vrchat.cloud/api/1"
     private const val USER_AGENT = "VRC-A-Companion/1.0 (Android; companion app)"
@@ -498,6 +504,7 @@ object VrchatAuthManager {
                                     ?.putLong(KEY_2FA_COOKIE_STORED_AT, now)
                             }
                             editor?.apply()
+                            _loggedInSignal.tryEmit(Unit)
                             AuthResult.Success(userId, displayName)
                         } else {
                             // Unusual: 200 but no id or cookie - log the body for diagnosis
@@ -595,6 +602,7 @@ object VrchatAuthManager {
                             saveSession(context, partialCookie,
                                 twoFaCookieValue,
                                 userId, displayName)
+                            _loggedInSignal.tryEmit(Unit)
                             TwoFaResult.Success(userId, displayName)
                         } else {
                             TwoFaResult.Error("Could not retrieve user after verification.")

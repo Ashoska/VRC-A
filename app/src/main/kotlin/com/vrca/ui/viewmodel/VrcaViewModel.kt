@@ -1500,14 +1500,50 @@ class VrcaViewModel(
     fun applyForceUpdateGate(pending: Boolean) {
         if (forceUpdatePending == pending) return
         forceUpdatePending = pending
-        remoteVrcaOsc.blocked = pending
-        localVrcaOsc.blocked = pending
+        refreshOscBlockGate()
         if (pending) {
             // Stop any in-flight typing indicator immediately (state safety; the
             // OSC send is already blocked). Sender loops keep their config but
             // every transmission no-ops at the chokepoint above.
             remoteVrcaOsc.typing = false
             localVrcaOsc.typing = false
+        }
+    }
+
+    /**
+     * True while the user is signed OUT of VRChat. Per docs/ui-revamp.md
+     * (Settings Accounts): signing out force-stops all OSC output until a
+     * VRChat account is signed in again — same chokepoint as the force-update
+     * gate. Driven by VrchatAuthManager's loggedOut/loggedIn signals (collected
+     * in init on the app-scoped VM, so the gate works even with no Activity).
+     * Re-login only UNBLOCKS — it never auto-starts sending; toggle config is
+     * preserved and the user presses Start again.
+     */
+    var vrchatLoggedOut by mutableStateOf(false)
+        private set
+
+    /** OSC is blocked when ANY gate reason is active. */
+    private fun refreshOscBlockGate() {
+        val blocked = forceUpdatePending || vrchatLoggedOut
+        remoteVrcaOsc.blocked = blocked
+        localVrcaOsc.blocked = blocked
+    }
+
+    private fun startVrchatAuthGateWatcher() {
+        viewModelScope.launch {
+            com.vrca.vrchat.VrchatAuthManager.loggedOutSignal.collect {
+                // Order matters: stopSending()'s chatbox-clearing send must go
+                // out BEFORE the gate blocks the chokepoint.
+                if (oscSending) stopSending()
+                vrchatLoggedOut = true
+                refreshOscBlockGate()
+            }
+        }
+        viewModelScope.launch {
+            com.vrca.vrchat.VrchatAuthManager.loggedInSignal.collect {
+                vrchatLoggedOut = false
+                refreshOscBlockGate()
+            }
         }
     }
 
@@ -1871,6 +1907,9 @@ class VrcaViewModel(
         // Public build: attach moderation listeners (also drives watcher detection
         // and remote-config snapshots). Admin build skips self-sync entirely.
         attachModerationListenersLoopOnce()
+
+        // VRChat sign-out hard-blocks OSC until re-login (Settings Accounts).
+        startVrchatAuthGateWatcher()
 
         // Live-mode loop: idle until an admin starts watching.
         startLiveSyncWatcher()
