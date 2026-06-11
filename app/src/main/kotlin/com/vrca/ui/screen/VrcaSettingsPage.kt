@@ -32,6 +32,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -318,9 +319,28 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
 
     val discordSeeded by repo.discordSessionSeeded.collectAsStateInitially(false)
     val discordEnabled by repo.discordRpcEnabled.collectAsStateInitially(false)
+    val discordRiskAccepted by repo.discordRiskAccepted.collectAsStateInitially(false)
+    val discordStatus by com.vrca.discord.DiscordRpcState.statusFlow.collectAsState()
+    val discordFailureMsg by com.vrca.discord.DiscordRpcState.failureMessageFlow.collectAsState()
 
     var confirmVrcSignOut by rememberSaveable { mutableStateOf(false) }
     var confirmDiscordDisconnect by rememberSaveable { mutableStateOf(false) }
+    var showDiscordLogin by rememberSaveable { mutableStateOf(false) }
+    var showRiskConsent by rememberSaveable { mutableStateOf(false) }
+
+    fun setDiscordRpcEnabled(enabled: Boolean) {
+        scope.launch {
+            repo.saveDiscordRpcEnabled(enabled)
+            val svcIntent = android.content.Intent(ctx, com.vrca.discord.DiscordRpcService::class.java)
+            if (enabled) {
+                svcIntent.action = com.vrca.discord.DiscordRpcService.ACTION_START
+                ctx.startForegroundService(svcIntent)
+            } else {
+                svcIntent.action = com.vrca.discord.DiscordRpcService.ACTION_STOP
+                ctx.startService(svcIntent)
+            }
+        }
+    }
 
     SectionCard(title = "Accounts") {
         // VRChat row
@@ -341,24 +361,145 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
             }
         }
 
-        // Discord row
+        // Discord row — full Rich Presence management lives HERE now (moved
+        // from the VRChat tab per docs/ui-revamp.md; that tab keeps only a
+        // small RPC status chip on the identity header).
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("Discord", style = MaterialTheme.typography.titleSmall)
                 Text(
                     when {
-                        discordSeeded && discordEnabled -> "Connected — Rich Presence on"
-                        discordSeeded -> "Connected — Rich Presence off"
-                        else -> "Not connected (set up in the VRChat tab)"
+                        !discordSeeded -> "Not connected"
+                        discordStatus == com.vrca.discord.DiscordRpcStatus.SESSION_EXPIRED -> "Session expired — sign in again"
+                        discordStatus == com.vrca.discord.DiscordRpcStatus.FAILED -> "Connection failed"
+                        discordEnabled && discordStatus == com.vrca.discord.DiscordRpcStatus.CONNECTED -> "Connected — Rich Presence on"
+                        discordEnabled -> "Connecting Rich Presence..."
+                        else -> "Connected — Rich Presence off"
                     },
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = if (discordStatus == com.vrca.discord.DiscordRpcStatus.SESSION_EXPIRED ||
+                        discordStatus == com.vrca.discord.DiscordRpcStatus.FAILED)
+                        MaterialTheme.colorScheme.error
+                    else MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                if (discordFailureMsg != null) {
+                    Text(
+                        discordFailureMsg!!,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
             }
             if (discordSeeded) {
                 TextButton(onClick = { confirmDiscordDisconnect = true }) { Text("Disconnect") }
+            } else {
+                TextButton(onClick = {
+                    if (!discordRiskAccepted) showRiskConsent = true else showDiscordLogin = true
+                }) { Text("Sign in") }
             }
         }
+        if (discordSeeded) {
+            ToggleRow(
+                label = "Discord Rich Presence",
+                checked = discordEnabled,
+                description = "Show your VRChat activity on your Discord profile."
+            ) { enabled ->
+                if (enabled && !discordRiskAccepted) showRiskConsent = true
+                else setDiscordRpcEnabled(enabled)
+            }
+            if (discordStatus == com.vrca.discord.DiscordRpcStatus.SESSION_EXPIRED) {
+                TextButton(onClick = { showDiscordLogin = true }) { Text("Sign in to Discord again") }
+            }
+        }
+    }
+
+    // Discord risk consent (moved with the card; consent persists once).
+    if (showRiskConsent) {
+        var riskChecked by remember { mutableStateOf(false) }
+        var confirmEnabled by remember { mutableStateOf(false) }
+        androidx.compose.runtime.LaunchedEffect(riskChecked) {
+            if (riskChecked) {
+                confirmEnabled = false
+                kotlinx.coroutines.delay(4000)
+                confirmEnabled = true
+            } else {
+                confirmEnabled = false
+            }
+        }
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showRiskConsent = false },
+            title = { Text("Discord Rich Presence") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "This feature runs a hidden Discord web session on your device to show " +
+                        "VRChat activity on your Discord profile.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text("Please be aware:", style = MaterialTheme.typography.labelLarge)
+                    Text(
+                        "• A background Discord web session will be active while enabled\n" +
+                        "• This uses additional battery and data\n" +
+                        "• Your Discord session cookies are stored on-device only\n" +
+                        "• While unlikely, Discord could flag unusual client behavior\n" +
+                        "• Disconnecting clears your Discord session — Discord may also " +
+                        "invalidate your sessions on other devices when it detects an " +
+                        "unauthorized client, logging you out everywhere\n" +
+                        "• You can disable this at any time from settings",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.clickable { riskChecked = !riskChecked }
+                    ) {
+                        androidx.compose.material3.Checkbox(
+                            checked = riskChecked,
+                            onCheckedChange = { riskChecked = it }
+                        )
+                        Text("I understand and accept these risks",
+                            style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            },
+            confirmButton = {
+                androidx.compose.material3.Button(
+                    onClick = {
+                        scope.launch {
+                            repo.saveDiscordRiskAccepted(true)
+                            showRiskConsent = false
+                            if (discordSeeded) setDiscordRpcEnabled(true)
+                            else showDiscordLogin = true
+                        }
+                    },
+                    enabled = confirmEnabled
+                ) { Text(if (confirmEnabled) "Continue" else "Please wait...") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRiskConsent = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    // Discord login WebView (moved with the card).
+    if (showDiscordLogin) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showDiscordLogin = false },
+            confirmButton = {},
+            text = {
+                Box(Modifier.fillMaxWidth().height(500.dp)) {
+                    com.vrca.discord.DiscordLoginWebView(
+                        onLoginComplete = {
+                            scope.launch {
+                                repo.saveDiscordSessionSeeded(true)
+                                showDiscordLogin = false
+                            }
+                        },
+                        onDismiss = { showDiscordLogin = false }
+                    )
+                }
+            }
+        )
     }
 
     if (confirmVrcSignOut) {

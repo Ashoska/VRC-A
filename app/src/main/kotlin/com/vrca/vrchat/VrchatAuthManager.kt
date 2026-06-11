@@ -662,7 +662,10 @@ object VrchatAuthManager {
         // VRChat+ custom profile picture (profilePicOverride, falling back to
         // userIcon). Blank when the user has no VRChat+ custom picture — in that
         // case VRChat itself just renders their name letters.
-        val profilePicUrl: String = ""
+        val profilePicUrl: String = "",
+        // Raw system_trust_* tag (highest), shown as a chip on the VRChat tab
+        // identity header. Blank when tags were unavailable.
+        val trustRank: String = ""
     )
 
     suspend fun fetchPresence(context: Context): VrcUserPresence? = withContext(Dispatchers.IO) {
@@ -691,6 +694,7 @@ object VrchatAuthManager {
             // VRChat+ profile picture: profilePicOverride wins, then userIcon.
             var profilePic = json.optString("profilePicOverride", "")
                 .ifBlank { json.optString("userIcon", "") }
+            var trustRank = extractTrustRankFromTags(json.optJSONArray("tags"))
 
             Log.d(TAG, "fetchPresence /auth/user: state=$state status=$status location=$location")
 
@@ -719,6 +723,7 @@ object VrchatAuthManager {
                         uj.optString("profilePicOverride", "").let { if (it.isNotBlank()) profilePic = it }
                         if (profilePic.isBlank())
                             uj.optString("userIcon", "").let { if (it.isNotBlank()) profilePic = it }
+                        extractTrustRankFromTags(uj.optJSONArray("tags")).let { if (it.isNotBlank()) trustRank = it }
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "Could not fetch /users/$userId", e)
@@ -777,7 +782,8 @@ object VrchatAuthManager {
                 currentAvatarThumbnailUrl = avatarThumb,
                 isOnlineInVRChat = isOnline,
                 worldImageUrl = worldImageUrl,
-                profilePicUrl = profilePic
+                profilePicUrl = profilePic,
+                trustRank = trustRank
             )
         } catch (e: Exception) {
             Log.e(TAG, "fetchPresence failed", e)

@@ -369,9 +369,6 @@ private fun StepVrchatLogin(
     onLoggedIn: () -> Unit,
     onNext: () -> Unit
 ) {
-    var statusWarning by remember { mutableStateOf<VrchatStatusWarning?>(null) }
-    LaunchedEffect(Unit) { statusWarning = fetchVrchatStatusWarning() }
-
     if (alreadyLoggedIn) {
         StepContainer(
             title = "VRChat account",
@@ -382,29 +379,11 @@ private fun StepVrchatLogin(
         return
     }
 
-    Column(Modifier.fillMaxSize()) {
-        statusWarning?.let { w ->
-            Surface(
-                color = MaterialTheme.colorScheme.errorContainer,
-                modifier = Modifier.fillMaxWidth().padding(12.dp).clip(MaterialTheme.shapes.medium)
-            ) {
-                Column(Modifier.padding(12.dp)) {
-                    Text(
-                        "VRChat is having platform issues right now (${w.description}).",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onErrorContainer
-                    )
-                    Text(
-                        "Login may fail — it's not you. You can retry later.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onErrorContainer
-                    )
-                }
-            }
-        }
-        Box(Modifier.weight(1f)) {
-            VrchatLoginScreen(pendingBanId = phase1BanId) { _, _ -> onLoggedIn() }
-        }
+    // The platform-status warning ("VRChat is having issues — it's not you")
+    // now lives INSIDE VrchatLoginScreen so the Settings / VRChat-tab login
+    // takeovers show it too; embedding it here as well would double it up.
+    Box(Modifier.fillMaxSize()) {
+        VrchatLoginScreen(pendingBanId = phase1BanId) { _, _ -> onLoggedIn() }
     }
 }
 

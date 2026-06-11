@@ -734,6 +734,15 @@ class VrchatPipelineService : Service() {
                         delay(OFFLINE_COOLDOWN_MS)
                         if (pendingOffline.containsKey(userId)) {
                             pendingOffline.remove(userId)
+                            // Confirmed offline (no friend-online flap within the
+                            // cooldown) — reflect it in the cache so the friends-
+                            // online count drops; the entry itself is kept for
+                            // unfriend notifications. A transient flap was cleared
+                            // from pendingOffline by friend-online and never lands.
+                            friendsCache[userId]?.let {
+                                friendsCache[userId] = it.copy(status = "offline", location = "offline")
+                                persistFriendsCache()
+                            }
                             val displayName = friendsCache[userId]?.displayName ?: "A friend"
                             fireEventNotification(
                                 id = "offline_$userId".hashCode(),
@@ -1369,6 +1378,19 @@ class VrchatPipelineService : Service() {
         } catch (e: Exception) {
             Log.w(TAG, "persistFriendsCache error", e)
         }
+        publishFriendsOnline()
+    }
+
+    /** Publish the (online, total) friend count for the VRChat tab — computed
+     *  from the cache on every mutation, no API call. "Online" = any non-offline
+     *  status (in-game or website-active), matching VRChat's own sidebar. */
+    private fun publishFriendsOnline() {
+        val total = friendsCache.size
+        if (total == 0) return
+        val online = friendsCache.values.count {
+            it.status.isNotBlank() && !it.status.equals("offline", true)
+        }
+        VrchatPipelineState.friendsOnline = online to total
     }
 
     private fun loadSeenNotifIds() {
@@ -1457,6 +1479,7 @@ class VrchatPipelineService : Service() {
             saved.forEach { (id, entry) -> friendsCache[id] = entry }
             friendsCacheLoaded = friendsCache.isNotEmpty()
             Log.i(TAG, "Restored ${friendsCache.size} friends from local cache")
+            publishFriendsOnline()
         } catch (e: Exception) {
             Log.w(TAG, "Could not restore friends cache from local store", e)
         }
@@ -3184,4 +3207,12 @@ object VrchatPipelineState {
     var statusPageState: VrchatStatusPageData?
         get() = _statusPageState.value
         set(value) { _statusPageState.value = value }
+
+    // (online, total) friends from the local friends cache — fed by the service
+    // on every cache mutation, ZERO extra API calls. Null until the cache loads.
+    private val _friendsOnline = MutableStateFlow<Pair<Int, Int>?>(null)
+    val friendsOnlineFlow: StateFlow<Pair<Int, Int>?> = _friendsOnline.asStateFlow()
+    var friendsOnline: Pair<Int, Int>?
+        get() = _friendsOnline.value
+        set(value) { _friendsOnline.value = value }
 }
