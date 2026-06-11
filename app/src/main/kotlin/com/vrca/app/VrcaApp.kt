@@ -11,8 +11,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -543,6 +545,15 @@ fun VrcaApp() {
     VrcaScreen(chatboxViewModel = vm)
 }
 
+/**
+ * Update dialog (redesigned — docs/ui-revamp.md "Update dialog").
+ * Patch notes live in a SCROLLABLE area capped below half the screen so
+ * arbitrarily long release notes never clip the dialog off-screen (the old
+ * fixed block clipped long notes). Notes render through the same styled-block
+ * parser as the ToS, so "- bullet" lines get real bullets. The forced variant
+ * (the current default — ALL releases are forced) shows a single full-width
+ * Download action; "Later" exists only for the legacy non-forced path.
+ */
 @Composable
 private fun UpdateDialog(
     info: ReleaseInfo,
@@ -552,6 +563,8 @@ private fun UpdateDialog(
     onDismiss: () -> Unit,
     onDownload: (String) -> Unit
 ) {
+    val noteBlocks = remember(info.notes) { parseTosBlocks(info.notes) }
+
     androidx.compose.ui.window.Dialog(
         onDismissRequest = { if (!forced) onDismiss() }
     ) {
@@ -562,36 +575,50 @@ private fun UpdateDialog(
             )
         ) {
             Column(
-                modifier = Modifier.padding(24.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                // Header
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                // Header: title + version pill
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
                     Text(
                         if (forced) "Update Required" else "Update Available",
                         style = MaterialTheme.typography.titleLarge,
                         color = MaterialTheme.colorScheme.onSurface
                     )
-                    Text(
-                        info.versionName,
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                    Surface(
+                        shape = MaterialTheme.shapes.large,
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                    ) {
+                        Text(
+                            info.versionName,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
                 }
 
-                // Release notes
+                // Release notes — bounded height + scroll so long logs never clip
                 if (info.notes.isNotBlank()) {
+                    val screenH = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp
                     Surface(
                         shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
                         color = MaterialTheme.colorScheme.surfaceVariant,
                         tonalElevation = 1.dp
                     ) {
-                        Text(
-                            info.notes,
-                            modifier = Modifier.padding(12.dp).fillMaxWidth(),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = (screenH * 0.45f).dp)
+                                .verticalScroll(rememberScrollState())
+                                .padding(12.dp)
+                        ) {
+                            StyledBlocks(noteBlocks)
+                        }
                     }
                 }
 
@@ -627,19 +654,12 @@ private fun UpdateDialog(
                     )
                 }
 
-                // Buttons
-                androidx.compose.foundation.layout.Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End)
-                ) {
-                    if (!forced) {
-                        OutlinedButton(onClick = onDismiss) {
-                            Text("Later")
-                        }
-                    }
+                // Actions: forced = single full-width Download; legacy = Later + Download
+                if (forced) {
                     Button(
                         onClick = { if (!downloading) onDownload(info.downloadUrl) },
-                        enabled = !downloading
+                        enabled = !downloading,
+                        modifier = Modifier.fillMaxWidth()
                     ) {
                         if (downloading) {
                             CircularProgressIndicator(
@@ -650,7 +670,30 @@ private fun UpdateDialog(
                             Spacer(Modifier.widthIn(min = 8.dp))
                             Text("Downloading")
                         } else {
-                            Text(if (error != null) "Retry" else "Download")
+                            Text(if (error != null) "Retry Download" else "Download Update")
+                        }
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End)
+                    ) {
+                        OutlinedButton(onClick = onDismiss) { Text("Later") }
+                        Button(
+                            onClick = { if (!downloading) onDownload(info.downloadUrl) },
+                            enabled = !downloading
+                        ) {
+                            if (downloading) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.height(18.dp).widthIn(max = 18.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.onPrimary
+                                )
+                                Spacer(Modifier.widthIn(min = 8.dp))
+                                Text("Downloading")
+                            } else {
+                                Text(if (error != null) "Retry" else "Download")
+                            }
                         }
                     }
                 }
@@ -1106,8 +1149,97 @@ private object TosPrefs {
     }
 }
 
+/* =========================================================================
+   ToS rendering (redesigned — docs/ui-revamp.md "ToS screen").
+
+   The admin-configurable tosText is plain text with markdown-ish habits:
+   numbered section headers ("3. Data & Privacy"), `*`/`-` bullets, and the
+   occasional literal markdown link ("[url](url)") that used to render raw.
+   parseTosBlocks() turns that into styled blocks; nothing about the stored
+   text format changes, so existing Firestore content renders correctly.
+   ========================================================================= */
+
+private sealed class TosBlock {
+    data class Header(val text: String) : TosBlock()
+    data class Bullet(val text: String) : TosBlock()
+    data class Paragraph(val text: String) : TosBlock()
+}
+
+/** Collapses literal markdown links "[x](y)" down to just the URL once. */
+private fun sanitizeTosLine(line: String): String =
+    Regex("""\[([^\]]*)]\(([^)]*)\)""").replace(line) { m ->
+        m.groupValues[2].ifBlank { m.groupValues[1] }
+    }
+
+private fun parseTosBlocks(text: String): List<TosBlock> {
+    val blocks = mutableListOf<TosBlock>()
+    val para = StringBuilder()
+    fun flushPara() {
+        val p = para.toString().trim()
+        if (p.isNotBlank()) blocks += TosBlock.Paragraph(p)
+        para.clear()
+    }
+    text.lines().forEach { raw ->
+        val line = sanitizeTosLine(raw.trim())
+        when {
+            line.isBlank() -> flushPara()
+            // "1. Agreement" / "10. Contact" — numbered section headers
+            Regex("""^\d+\.\s+\S""").containsMatchIn(line) -> {
+                flushPara(); blocks += TosBlock.Header(line)
+            }
+            line.startsWith("* ") || line.startsWith("- ") -> {
+                flushPara(); blocks += TosBlock.Bullet(line.drop(2).trim())
+            }
+            else -> {
+                if (para.isNotEmpty()) para.append(' ')
+                para.append(line)
+            }
+        }
+    }
+    flushPara()
+    return blocks
+}
+
+/** Shared styled-text body for ToS sections and update-dialog patch notes. */
 @Composable
-private fun TosGate(
+private fun StyledBlocks(blocks: List<TosBlock>, warnHeaderKeywords: List<String> = emptyList()) {
+    var inWarnSection = false
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        blocks.forEach { block ->
+            when (block) {
+                is TosBlock.Header -> {
+                    inWarnSection = warnHeaderKeywords.any { block.text.contains(it, ignoreCase = true) }
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        block.text,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = if (inWarnSection) MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.primary
+                    )
+                }
+                is TosBlock.Bullet -> Row {
+                    Text(
+                        "•  ",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        block.text,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                is TosBlock.Paragraph -> Text(
+                    block.text,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+        }
+    }
+}
+
+@Composable
+internal fun TosGate(
     tosVersion: Int,
     tosText: String,
     tosUrl: String,
@@ -1131,54 +1263,91 @@ If you do not agree, close the app.
         """.trimIndent()
     }
 
+    val blocks = remember(tosText) { parseTosBlocks(tosText.ifBlank { fallbackText }) }
+
     Surface {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text("Terms of Service", style = MaterialTheme.typography.headlineSmall)
-            Text(
-                "Version $tosVersion",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            ElevatedCard {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(Modifier.fillMaxSize()) {
+            // Sticky header: title + version pill (never scrolls away)
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Terms of Service", style = MaterialTheme.typography.headlineSmall)
+                Surface(
+                    shape = MaterialTheme.shapes.large,
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                ) {
                     Text(
-                        text = tosText.ifBlank { fallbackText },
-                        style = MaterialTheme.typography.bodyMedium
+                        "v$tosVersion",
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
                     )
-
-                    if (tosUrl.isNotBlank()) {
-                        OutlinedButton(
-                            onClick = { onOpenUrl(tosUrl.trim()) },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text("Open full ToS link")
-                        }
-                    }
                 }
             }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+            // Scrollable body
+            Column(
+                Modifier
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Text("I agree to the Terms of Service")
-                Switch(checked = checked, onCheckedChange = { checked = it })
+                ElevatedCard {
+                    Column(Modifier.padding(14.dp)) {
+                        StyledBlocks(
+                            blocks,
+                            warnHeaderKeywords = listOf("Risk", "Moderation", "Acceptable Use")
+                        )
+                    }
+                }
+                if (tosUrl.isNotBlank()) {
+                    OutlinedButton(
+                        onClick = { onOpenUrl(tosUrl.trim()) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Open full ToS link")
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
             }
 
-            Button(
-                onClick = onAccept,
-                enabled = checked,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("Accept & Continue")
+            // Pinned accept bar (checkbox, not a settings-style switch)
+            Surface(tonalElevation = 3.dp) {
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(MaterialTheme.shapes.medium)
+                            .clickable { checked = !checked },
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        androidx.compose.material3.Checkbox(
+                            checked = checked,
+                            onCheckedChange = { checked = it }
+                        )
+                        Text(
+                            "I agree to the Terms of Service",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                    Button(
+                        onClick = onAccept,
+                        enabled = checked,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Accept & Continue")
+                    }
+                }
             }
         }
     }
