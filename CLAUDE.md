@@ -8,6 +8,7 @@ Display name embedded in UI strings: "Ashoska Mitsu Sisko".
 
 ## Repository Structure
 - Main app source: `app/src/main/kotlin/com/vrca/`
+- **UI revamp + onboarding spec**: `docs/ui-revamp.md` — approved design doc (not yet implemented) covering the public-build UI compaction, first-open onboarding tutorial, Settings account management (VRChat/Discord logout + inline re-login, OSC hard-blocked while logged out of VRChat), ToS/login redesign, and implementation order. Read it before starting any public UI work.
 - Kotlin package: `com.vrca` (applicationId stays `com.scrapw.chatbox` for install continuity)
 - Subpackages: `admin/`, `app/`, `data/`, `discord/`, `keepalive/`, `nowplaying/`, `osc/`, `overlay/`, `sync/`, `ui/` (with `common/`, `conversation/`, `screen/`, `settings/`, `theme/`, `viewmodel/`), `update/`, `vrchat/`
 - Admin vs public build separation: `BuildConfig.IS_ADMIN_BUILD`
