@@ -253,8 +253,13 @@ class VrchatPipelineService : Service() {
                     // outright after this method returns START_NOT_STICKY (so it
                     // won't be recreated again). The brief delay lets the return
                     // value register before the process dies.
+                    val appCtx = applicationContext
                     Thread {
                         try { Thread.sleep(300) } catch (_: Throwable) {}
+                        // Sweep the shared persistent notification (id 1001) in
+                        // case the stopForeground removal races the kill — the
+                        // cancel runs in system_server so it survives our death.
+                        com.vrca.app.AppShutdown.cancelPersistentNotification(appCtx)
                         android.os.Process.killProcess(android.os.Process.myPid())
                         kotlin.system.exitProcess(0)
                     }.start()

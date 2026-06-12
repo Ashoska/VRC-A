@@ -87,8 +87,14 @@ class KeepAliveService : Service() {
             try { wakeLock?.let { if (it.isHeld) it.release() } } catch (_: Throwable) {}
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
+            val appCtx = applicationContext
             Thread {
                 try { Thread.sleep(300) } catch (_: Throwable) {}
+                // onCreate posted the shared notification (id 1001) BEFORE this
+                // guard ran; stopForeground removes it, but the removal can race
+                // the kill below on some OEMs. Cancel explicitly — processed in
+                // system_server, so it lands even after the process dies.
+                com.vrca.app.AppShutdown.cancelPersistentNotification(appCtx)
                 android.os.Process.killProcess(android.os.Process.myPid())
                 kotlin.system.exitProcess(0)
             }.start()

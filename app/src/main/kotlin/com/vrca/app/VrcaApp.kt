@@ -14,8 +14,18 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ElevatedCard
@@ -35,8 +45,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -70,6 +85,7 @@ import androidx.core.content.FileProvider
 import java.io.File
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import java.security.MessageDigest
@@ -187,9 +203,14 @@ fun VrcaApp() {
     }
 
     if (bootOk && !phase1Checked) {
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            CircularProgressIndicator()
-        }
+        // Same screen as the bootstrap so the whole boot reads as one
+        // continuous loading experience instead of dropping to a bare spinner.
+        BootstrapScreen(
+            working = true,
+            error = null,
+            onRetry = {},
+            status = "Checking account status…"
+        )
         return
     }
 
@@ -974,59 +995,176 @@ private fun secureRandomHex(numBytes: Int): String {
    UI: Bootstrap + Crash
    ========================================================= */
 
+/** Rotating "did you know" facts shown while the app boots. Keep each one
+ *  short (fits ~2 lines) and free of em dashes. */
+private val BOOT_TIPS = listOf(
+    "Long-press a Quick Toggle pill to jump straight to its editor.",
+    "The eye icon under the Home preview shrinks your in-game chatbox bubble.",
+    "Cycle can rotate up to 10 lines through your chatbox.",
+    "Now Playing works with Spotify, YouTube and YouTube Music.",
+    "Toggles only set things up. Press Start on Home when your preview looks right.",
+    "Discord RPC can show your current VRChat world on your Discord profile.",
+    "Swiping the app away stops everything until you open it again.",
+    "You can replay the setup tutorial anytime from Settings."
+)
+
 @Composable
 private fun BootstrapScreen(
     working: Boolean,
     error: String?,
-    onRetry: () -> Unit
+    onRetry: () -> Unit,
+    status: String = "Preparing device session\u2026"
 ) {
+    val colors = MaterialTheme.colorScheme
+    // Soft vertical wash: theme background into a faint primary tint at the
+    // bottom. Gives the screen depth without fighting the dark theme.
+    val gradient = Brush.verticalGradient(
+        0f to colors.background,
+        0.55f to colors.background,
+        1f to lerp(colors.background, colors.primary, 0.12f)
+    )
+
+    // Gentle breathing pulse on the logo while working.
+    val pulse = rememberInfiniteTransition(label = "bootPulse")
+    val logoScale by pulse.animateFloat(
+        initialValue = 1f,
+        targetValue = if (working) 1.06f else 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1400),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "bootLogoScale"
+    )
+
+    // Tip carousel: advance every 4s while working (paused on error so the
+    // user can read the failure instead).
+    var tipIndex by remember { mutableStateOf(0) }
+    LaunchedEffect(working) {
+        while (working) {
+            delay(4_000L)
+            tipIndex = (tipIndex + 1) % BOOT_TIPS.size
+        }
+    }
+
     Surface {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(20.dp),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text(
-                "Starting VRC-A\u2026",
-                style = MaterialTheme.typography.headlineSmall,
-                textAlign = TextAlign.Center
-            )
+        Box(Modifier.fillMaxSize().background(gradient)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(28.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                // Logo in a tonal circle.
+                Surface(
+                    shape = CircleShape,
+                    color = colors.primary.copy(alpha = 0.10f),
+                    modifier = Modifier
+                        .size(112.dp)
+                        .scale(logoScale)
+                ) {
+                    Image(
+                        painter = painterResource(com.vrca.R.drawable.ic_launcher_foreground),
+                        contentDescription = null,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
 
-            Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(20.dp))
 
-            Text(
-                "Preparing device session\u2026",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center
-            )
+                Text(
+                    "VRC-A",
+                    style = MaterialTheme.typography.displaySmall,
+                    fontWeight = FontWeight.Bold,
+                    color = colors.primary,
+                    textAlign = TextAlign.Center
+                )
+                Text(
+                    "VRChat Assistant",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = colors.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
 
-            Spacer(Modifier.height(18.dp))
+                Spacer(Modifier.height(28.dp))
 
-            if (working) CircularProgressIndicator() else Spacer(Modifier.height(4.dp))
+                if (working) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(28.dp),
+                        strokeWidth = 3.dp
+                    )
+                    Spacer(Modifier.height(12.dp))
+                }
+                Text(
+                    status,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = colors.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
 
-            if (error != null) {
-                Spacer(Modifier.height(18.dp))
-
-                ElevatedCard(modifier = Modifier.widthIn(max = 520.dp)) {
-                    Column(
-                        Modifier.padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                if (error == null) {
+                    Spacer(Modifier.height(36.dp))
+                    // Rotating tip card.
+                    Surface(
+                        shape = MaterialTheme.shapes.large,
+                        color = colors.surfaceVariant.copy(alpha = 0.5f),
+                        modifier = Modifier.widthIn(max = 420.dp).fillMaxWidth()
                     ) {
-                        Text("Startup error", style = MaterialTheme.typography.titleSmall)
-                        Text(
-                            error,
-                            fontFamily = FontFamily.Monospace,
-                            style = MaterialTheme.typography.bodySmall
-                        )
+                        Column(Modifier.padding(horizontal = 18.dp, vertical = 14.dp)) {
+                            Text(
+                                "DID YOU KNOW",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = colors.primary
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            Crossfade(
+                                targetState = tipIndex,
+                                animationSpec = tween(450),
+                                label = "bootTip"
+                            ) { idx ->
+                                Text(
+                                    BOOT_TIPS[idx],
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = colors.onSurface,
+                                    minLines = 2
+                                )
+                            }
+                        }
                     }
                 }
 
-                Spacer(Modifier.height(12.dp))
-                Button(onClick = onRetry) { Text("Retry") }
+                if (error != null) {
+                    Spacer(Modifier.height(18.dp))
+
+                    ElevatedCard(modifier = Modifier.widthIn(max = 520.dp)) {
+                        Column(
+                            Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text("Startup error", style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                error,
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(12.dp))
+                    Button(onClick = onRetry) { Text("Retry") }
+                }
             }
+
+            // Version footer pinned to the bottom edge.
+            Text(
+                "v${BuildConfig.VERSION_NAME}",
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.onSurfaceVariant.copy(alpha = 0.6f),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 18.dp)
+            )
         }
     }
 }

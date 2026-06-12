@@ -37,7 +37,36 @@ object AppShutdown {
     const val KEY_SWIPED_AWAY = "swiped_away"
     const val MANUAL_KILL_WINDOW_MS = 15_000L
 
+    /** The notification id ALL four foreground services share (KeepAlive,
+     *  Pipeline, Discord RPC, Overlay). Mirrored here so the shutdown path can
+     *  cancel it without referencing each service's private constant. */
+    const val SHARED_NOTIF_ID = 1001
+
+    /** Minimum time between issuing the service stops and killProcess. The
+     *  stop requests are only QUEUED from onTaskRemoved (main thread) — the
+     *  actual onDestroy/ACTION_STOP handling runs on the main looper after it
+     *  returns. If the offline write resolves instantly (or its task is null),
+     *  killProcess used to fire while all four services were still in
+     *  started-foreground state; abrupt FGS death is exactly where OEMs
+     *  (Samsung in particular) leave the stale "Connected as X" notification
+     *  in the shade. This floor guarantees the main thread gets to process the
+     *  stops (and their notification removals reach system_server) first. */
+    private const val MIN_SHUTDOWN_DELAY_MS = 1_200L
+
     private val shuttingDown = AtomicBoolean(false)
+
+    /** Belt-and-braces removal of the shared persistent notification. Safe to
+     *  call from any thread/state: a cancel for a notification still bound to a
+     *  live foreground service is ignored by the system, and once the services
+     *  have stopped it deletes any copy an OEM failed to clean up. The cancel
+     *  is processed in system_server, so it survives our process death. */
+    fun cancelPersistentNotification(context: Context) {
+        try {
+            val nm = context.applicationContext
+                .getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+            nm.cancel(SHARED_NOTIF_ID)
+        } catch (_: Throwable) {}
+    }
 
     /** True once a swipe-away shutdown has begun. The ViewModel reads this in
      *  onCleared to skip its own offline write — AppShutdown owns the single swipe
@@ -141,6 +170,7 @@ object AppShutdown {
         stopOtherServices(app)
 
         Thread {
+            val startedAt = android.os.SystemClock.uptimeMillis()
             try {
                 val task = buildOfflineWriteTask(app)
                 if (task != null) {
@@ -150,6 +180,18 @@ object AppShutdown {
             } catch (e: Throwable) {
                 Log.w(TAG, "offline write failed", e)
             }
+            // Floor the shutdown so the main thread has actually processed the
+            // queued stopService/ACTION_STOP requests before we hard-kill — a
+            // fast (or null-task) offline write used to let killProcess race
+            // the stops, leaving four still-foreground services to die
+            // abruptly and (on some OEMs) their shared notification lingering.
+            val elapsed = android.os.SystemClock.uptimeMillis() - startedAt
+            if (elapsed < MIN_SHUTDOWN_DELAY_MS) {
+                try { Thread.sleep(MIN_SHUTDOWN_DELAY_MS - elapsed) } catch (_: Throwable) {}
+            }
+            // Final sweep: by now the services have stopped, so this removes
+            // any copy of the persistent notification an OEM left behind.
+            cancelPersistentNotification(app)
             android.os.Process.killProcess(android.os.Process.myPid())
             exitProcess(0)
         }.start()

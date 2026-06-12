@@ -185,8 +185,12 @@ class DiscordRpcService : Service() {
             stopSelf()
             // Kill the resurrected process so it doesn't linger in the
             // background; START_NOT_STICKY (returned below) prevents a re-restart.
+            val appCtx = applicationContext
             Thread {
                 try { Thread.sleep(300) } catch (_: Throwable) {}
+                // Sweep the shared persistent notification (id 1001) in case the
+                // stopForeground removal races the kill below.
+                com.vrca.app.AppShutdown.cancelPersistentNotification(appCtx)
                 android.os.Process.killProcess(android.os.Process.myPid())
                 kotlin.system.exitProcess(0)
             }.start()
