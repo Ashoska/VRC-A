@@ -532,6 +532,12 @@ private fun PreviewAndTogglesCard(
                                         modifier = Modifier.fillMaxWidth(),
                                         fontFamily = FontFamily.Monospace,
                                         style = MaterialTheme.typography.bodyMedium,
+                                        // Explicit bright color: Surface(surfaceVariant)
+                                        // switches LocalContentColor to the muted
+                                        // onSurfaceVariant, which dimmed the preview
+                                        // text ("the box is on top of the text").
+                                        // In-game chatbox text is white — match it.
+                                        color = MaterialTheme.colorScheme.onSurface,
                                         textAlign = TextAlign.Center,
                                         softWrap = true,
                                         maxLines = 9,
@@ -633,6 +639,9 @@ private fun PreviewAndTogglesCard(
                         .padding(12.dp),
                     fontFamily = FontFamily.Monospace,
                     style = MaterialTheme.typography.bodySmall,
+                    // Same explicit bright color as the expanded bubble — the
+                    // surfaceVariant Surface otherwise dims text to onSurfaceVariant.
+                    color = MaterialTheme.colorScheme.onSurface,
                     textAlign = TextAlign.Center,
                     softWrap = true,
                     maxLines = 9,
