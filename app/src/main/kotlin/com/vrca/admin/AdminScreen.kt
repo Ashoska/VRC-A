@@ -158,6 +158,17 @@ private const val REFRESH_SKEW_MARGIN_MS = 5L * 60L * 1000L
 // advanced since the cursor (activity-bounded — under the hourly model an idle base is
 // just the per-query minimum), so a swipe surfaces within one cycle without a full scan.
 private const val DIRECTORY_LIVE_REFRESH_MS = 30L * 1000L
+// The total-user count() value at which the directory last ran a reconcile full
+// pull. A doc with NEITHER lastActiveAt NOR offlineAt — a brand-new user still on
+// an app version predating the hourly liveness model — can never match the
+// incremental whereGreaterThan queries (Firestore inequality filters exclude docs
+// missing the field entirely), so it would never enter the cache no matter how
+// often the admin refreshes. The already-paid total count() exposes the
+// divergence; one bounded full pull resyncs. Throttled per count VALUE: if a
+// reconcile didn't resolve the mismatch (a permanent skew between the count's
+// adminBuild filter and the directory's self-filter), re-fetching won't either,
+// so we wait for the count to actually change before trying again.
+private val lastReconciledTotalCount = java.util.concurrent.atomic.AtomicInteger(Int.MIN_VALUE)
 
 @Composable
 fun AdminScreen() {
@@ -382,7 +393,7 @@ fun AdminScreen() {
     // (recently swiped) since the cursor, then merge over the cached list. Never scans
     // the whole collection; idle base ≈ the per-query minimum. Shared by the TTL-gated
     // entry/resume refresh AND the periodic live loop below.
-    suspend fun incrementalDirectoryRefresh() {
+    suspend fun incrementalDirectoryRefresh(includeLegacySweep: Boolean = true) {
         try {
             val last = lastDirectoryRefreshMs.get()
             val cursorMs = if (last > 0L) last - REFRESH_SKEW_MARGIN_MS
@@ -401,7 +412,27 @@ fun AdminScreen() {
                 .limit(sharedLiveLimit.toLong())
                 .get(Source.SERVER)
                 .await()
-            val fresh = (activeSnap.documents + offlineSnap.documents)
+            // Legacy-version sweep: a user on an app version predating the hourly
+            // model writes ONLY lastSeenAt (never lastActiveAt), so the two queries
+            // above can never refresh their row — their cached liveness would decay
+            // to offline while their app is alive and heartbeating. Only runs while
+            // the cache actually CONTAINS such a row (self-extinguishing once the
+            // stragglers update or vanish), and only from the tab-entry/TTL/manual
+            // paths, not the 30s live loop — current-version users mirror lastSeenAt
+            // on every liveness write, so this query re-reads roughly the same
+            // recently-active docs as the lastActiveAt query (~2x reads per run).
+            val legacyDocs = if (includeLegacySweep &&
+                sharedUsers.any { it.lastActiveAt == null && it.lastSeenAt != null }
+            ) {
+                db.collection("users")
+                    .whereGreaterThan("lastSeenAt", cursorTs)
+                    .orderBy("lastSeenAt", Query.Direction.DESCENDING)
+                    .limit(sharedLiveLimit.toLong())
+                    .get(Source.SERVER)
+                    .await()
+                    .documents
+            } else emptyList()
+            val fresh = (activeSnap.documents + offlineSnap.documents + legacyDocs)
                 .filter { it.id != deviceHash }
                 .associateBy { it.id }          // de-dupe docs hit by both queries
                 .values
@@ -421,6 +452,35 @@ fun AdminScreen() {
             throw e
         } catch (e: Throwable) {
             Log.e("AdminScreen", "Directory liveness refresh failed", e)
+        }
+    }
+
+    // One bounded full pull (≤ sharedLiveLimit docs) that REPLACES the cache.
+    // Used by the first-ever load (nothing cached) and the count-mismatch
+    // reconcile below — server truth: missing users appear, deleted ghosts drop.
+    suspend fun fullDirectoryFetch(key: String) {
+        try {
+            val snap = db.collection("users")
+                .limit(sharedLiveLimit.toLong())
+                .get(Source.SERVER)
+                .await()
+            val rows = snap.documents
+                .filter { it.id != deviceHash }
+                .map { parseUserRow(it) }
+                .sortedByDescending {
+                    (it.lastActiveAt ?: it.lastSeenAt)?.toDate()?.time ?: 0L
+                }
+            sharedUsers = rows
+            UsersDirectoryCache.save(ctx, rows)
+            lastFetchedKey = key
+            // A full fetch already freshened everything — reset the staleness
+            // clock so the targeted refresh doesn't also fire right after.
+            lastDirectoryRefreshMs.set(System.currentTimeMillis())
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Log.e("AdminScreen", "Users fetch failed", e)
+            setErr(e.message ?: "Users load failed")
         }
     }
 
@@ -445,34 +505,18 @@ fun AdminScreen() {
         //    When the cache already has data, a manual Refresh uses the cheap
         //    incremental path instead of re-reading the whole collection.
         val explicitRefresh = key != lastFetchedKey
-        if (explicitRefresh && sharedUsers.isNotEmpty()) {
+        // +500 paging changes the LIMIT — that must be a genuine full pull: the
+        // incremental path only refreshes/merges recently-active docs and can
+        // never extend the loaded base. A plain Refresh (same limit, refreshTick
+        // bumped) stays on the cheap incremental path; the count-mismatch
+        // reconcile in the stats effect catches any structurally-missed docs.
+        val limitChanged = lastFetchedKey.substringBefore(':') != "$sharedLiveLimit"
+        if (explicitRefresh && !limitChanged && sharedUsers.isNotEmpty()) {
             lastFetchedKey = key
             incrementalDirectoryRefresh()
         } else if (sharedUsers.isEmpty() || explicitRefresh) {
             sharedUsersLoading = sharedUsers.isEmpty()
-            try {
-                val snap = db.collection("users")
-                    .limit(sharedLiveLimit.toLong())
-                    .get(Source.SERVER)
-                    .await()
-                val rows = snap.documents
-                    .filter { it.id != deviceHash }
-                    .map { parseUserRow(it) }
-                    .sortedByDescending {
-                        (it.lastActiveAt ?: it.lastSeenAt)?.toDate()?.time ?: 0L
-                    }
-                sharedUsers = rows
-                UsersDirectoryCache.save(ctx, rows)
-                lastFetchedKey = key
-                // A full fetch already freshened everything — reset the staleness
-                // clock so the targeted refresh doesn't also fire right after.
-                lastDirectoryRefreshMs.set(System.currentTimeMillis())
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Throwable) {
-                Log.e("AdminScreen", "Users fetch failed", e)
-                setErr(e.message ?: "Users load failed")
-            }
+            fullDirectoryFetch(key)
         } else if (System.currentTimeMillis() - lastDirectoryRefreshMs.get() > DIRECTORY_REFRESH_TTL_MS) {
             // Directory shown (tab entry OR foreground-return via resumeTick) with a
             // populated cache that's gone stale: targeted INCREMENTAL liveness refresh
@@ -499,7 +543,10 @@ fun AdminScreen() {
             delay(DIRECTORY_LIVE_REFRESH_MS)
             if (sharedUsers.isNotEmpty() &&
                 System.currentTimeMillis() - lastDirectoryRefreshMs.get() >= DIRECTORY_LIVE_REFRESH_MS) {
-                incrementalDirectoryRefresh()
+                // No legacy sweep on the 30s loop — it would re-read the whole
+                // recently-active set every cycle while a straggler exists.
+                // Stragglers refresh at tab-entry/TTL/manual granularity instead.
+                incrementalDirectoryRefresh(includeLegacySweep = false)
             }
         }
     }
@@ -516,6 +563,22 @@ fun AdminScreen() {
                 .get(com.google.firebase.firestore.AggregateSource.SERVER)
                 .await()
             totalUsersCount = totalSnap.count.toInt()
+
+            // Reconcile: a doc the incremental refresh structurally can't see (a
+            // new user on a pre-hourly-model app version — no lastActiveAt, no
+            // offlineAt; Firestore inequality filters skip docs missing the field)
+            // is still counted here, so a count that disagrees with the cached row
+            // count means the directory has diverged from the truth. One bounded
+            // full pull resyncs it. Skipped while the directory's own first load
+            // is in flight (it owns that fetch) and throttled per count value
+            // (see lastReconciledTotalCount).
+            if (sharedUsers.isNotEmpty() && !sharedUsersLoading &&
+                totalUsersCount != sharedUsers.size &&
+                lastReconciledTotalCount.get() != totalUsersCount
+            ) {
+                lastReconciledTotalCount.set(totalUsersCount)
+                fullDirectoryFetch("$sharedLiveLimit:$refreshTick")
+            }
 
             val warnedSnap = db.collection("users")
                 .whereEqualTo("warned", true)
