@@ -65,6 +65,25 @@ class VrcaOsc(
     @Volatile
     var blocked = false
 
+    // VRChat "minimal background" trick (same as VRCOSC / MagicChatbox):
+    // appending U+0003 (END OF TEXT) + U+001F (UNIT SEPARATOR) corrupts the
+    // chatbox bubble's text-bounds measurement, collapsing the background to
+    // its minimum pill while the text still renders normally. Applied at this
+    // chokepoint so every /chatbox/input path gets it and it never leaks into
+    // the in-app preview. @Volatile — flipped from the VM, read by sender loops.
+    @Volatile
+    var minimalBackground = false
+
+    private fun withMinimalBackground(text: String): String {
+        // Blank stays blank: a chatbox CLEAR must remain a truly empty payload,
+        // otherwise the suffix would keep an empty mini-bubble alive in VRChat.
+        if (!minimalBackground || text.isBlank()) return text
+        // Cap content at 142 so the 2 control chars always survive VRChat's
+        // 144-char limit — they are appended AFTER the cap, never trimmed off.
+        val capped = if (text.length > 142) text.substring(0, 142) else text
+        return capped + "\u0003\u001F"
+    }
+
     var typing = false
         set(value) {
             field = value
@@ -73,6 +92,11 @@ class VrcaOsc(
 
     private fun sendOscMessage(address: String, arguments: List<Any?>, delay: Long = 0) {
         if (blocked) return
+        // Lifetime "chatbox updates sent" counter (boot screen stat). Counts
+        // every non-blank content send; typing signals and blank clears don't.
+        if (address == "/chatbox/input" && (arguments.firstOrNull() as? String)?.isNotBlank() == true) {
+            com.vrca.app.ChatboxStats.increment()
+        }
         CoroutineScope(Dispatchers.IO).launch {
 
             val message = OSCMessage(address, arguments)
@@ -89,7 +113,7 @@ class VrcaOsc(
     }
 
     fun sendMessage(text: String, sendImmediately: Boolean, triggerSFX: Boolean) {
-        sendOscMessage("/chatbox/input", listOf(text, sendImmediately, triggerSFX))
+        sendOscMessage("/chatbox/input", listOf(withMinimalBackground(text), sendImmediately, triggerSFX))
         latestMsgTimestamp = System.currentTimeMillis()
     }
 
@@ -113,7 +137,7 @@ class VrcaOsc(
                 delay(realtimeMsgInterval - (timeStamp - latestMsgTimestamp))
             }
 
-            sendOscMessage("/chatbox/input", listOf(text, true, false))
+            sendOscMessage("/chatbox/input", listOf(withMinimalBackground(text), true, false))
             sendOscMessage("/chatbox/typing", listOf(text.isNotEmpty()), 50)
 
             latestMsgTimestamp = System.currentTimeMillis()

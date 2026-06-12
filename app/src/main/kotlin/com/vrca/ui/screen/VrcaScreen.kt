@@ -26,8 +26,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Gavel
@@ -37,6 +39,8 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -93,18 +97,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import java.security.MessageDigest
 
-private enum class AppPage(val title: String) {
+internal enum class AppPage(val title: String) {
     Home("Home"),
     Automations("Automations"),
     Music("Media"),
     VrchatStatus("VRChat"),
     Settings("Settings"),
     Admin("Admin")
-}
-
-internal enum class ChatboxAutomationsTab(val title: String) {
-    Pinned("Pinned"),
-    Cycle("Cycle")
 }
 
 private enum class ChatboxInfoTab(val title: String) {
@@ -119,6 +118,8 @@ internal object UiPrefs {
     private const val KEY_SPOTIFY_DEMO = "spotify_demo"
     private const val KEY_SPOTIFY_PRESET = "spotify_preset"
     private const val KEY_TUTORIAL_EXPANDED = "tutorial_expanded"
+    private const val KEY_PREVIEW_EXPANDED = "preview_expanded"
+    private const val KEY_HOME_CARD_ORDER = "home_card_order"
 
     fun readSpotifyEnabled(ctx: Context): Boolean =
         ctx.getSharedPreferences(FILE, MODE_PRIVATE).getBoolean(KEY_SPOTIFY_ENABLED, false)
@@ -146,6 +147,31 @@ internal object UiPrefs {
 
     fun writeTutorialExpanded(ctx: Context, v: Boolean) {
         ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit().putBoolean(KEY_TUTORIAL_EXPANDED, v).apply()
+    }
+
+    fun readPreviewExpanded(ctx: Context): Boolean =
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).getBoolean(KEY_PREVIEW_EXPANDED, true)
+
+    fun writePreviewExpanded(ctx: Context, v: Boolean) {
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit().putBoolean(KEY_PREVIEW_EXPANDED, v).apply()
+    }
+
+    /** Home PAGE card order (Preview / Connection / ManualSend) — distinct from
+     *  the chatbox COMPONENT order (VrcaViewModel.cardOrder), which controls the
+     *  top-to-bottom order of the OSC output itself. */
+    val HOME_CARDS_DEFAULT = listOf("Preview", "Connection", "ManualSend")
+
+    fun readHomeCardOrder(ctx: Context): List<String> {
+        val raw = ctx.getSharedPreferences(FILE, MODE_PRIVATE)
+            .getString(KEY_HOME_CARD_ORDER, null) ?: return HOME_CARDS_DEFAULT
+        val saved = raw.split(",").map { it.trim() }.filter { it in HOME_CARDS_DEFAULT }
+        // Append anything missing (new cards added in later versions).
+        return saved + HOME_CARDS_DEFAULT.filter { it !in saved }
+    }
+
+    fun writeHomeCardOrder(ctx: Context, order: List<String>) {
+        ctx.getSharedPreferences(FILE, MODE_PRIVATE).edit()
+            .putString(KEY_HOME_CARD_ORDER, order.joinToString(",")).apply()
     }
 }
 
@@ -343,8 +369,10 @@ fun VrcaScreen(
     // user left running when they backgrounded the app. Toggles already start OFF on
     // a fresh process (VM defaults) and must survive Activity recreation.
     LaunchedEffect(Unit) {
-        chatboxViewModel.setSpotifyDemoFlag(UiPrefs.readSpotifyDemo(ctx))
-        chatboxViewModel.updateSpotifyPreset(UiPrefs.readSpotifyPreset(ctx))
+        val demo = UiPrefs.readSpotifyDemo(ctx)
+        val preset = UiPrefs.readSpotifyPreset(ctx)
+        if (chatboxViewModel.spotifyDemoEnabled != demo) chatboxViewModel.setSpotifyDemoFlag(demo)
+        if (chatboxViewModel.spotifyPreset != preset) chatboxViewModel.updateSpotifyPreset(preset)
     }
 
     // If banned, always keep them on Home (so they see ban screen)
@@ -352,8 +380,12 @@ fun VrcaScreen(
         if (isBannedEffective) page = AppPage.Home
     }
 
-    // Setup wizard: check if VRChat linked and IP set
-    val vrcLinked = VrchatAuthManager.isLoggedIn(ctx) &&
+    // Setup health: VRChat linked + IP set. Reads vm.vrchatLoggedOut so a
+    // mid-session sign-out (Settings → Accounts) flips this reactively. Feeds
+    // the Home health checklist and the red dot on the Home nav icon — the
+    // old every-tab "Setup incomplete" banner is gone (Home-only checklist).
+    val vrcLinked = !chatboxViewModel.vrchatLoggedOut &&
+        VrchatAuthManager.isLoggedIn(ctx) &&
         VrchatAuthManager.getStoredUserId(ctx)?.isNotBlank() == true
     val ipSet = remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(Unit) {
@@ -361,7 +393,7 @@ fun VrcaScreen(
             ipSet.value = ip.isNotBlank() && ip != "127.0.0.1"
         }
     }
-    val showSetupBanner = ipSet.value != null && (!vrcLinked || ipSet.value == false)
+    val setupNeedsAttention = ipSet.value != null && (!vrcLinked || ipSet.value == false)
 
     // Discord community invite (public build): the admin sets the link in
     // config/app.discordInvite; we surface a Discord button in the top bar that
@@ -415,7 +447,14 @@ fun VrcaScreen(
                         NavigationBarItem(
                             selected = page == AppPage.Home,
                             onClick = { page = AppPage.Home },
-                            icon = { Icon(Icons.Filled.Home, contentDescription = null) },
+                            icon = {
+                                // Red dot = the Home setup-health checklist has
+                                // unresolved items (the only cross-tab signal;
+                                // the checklist itself lives on Home only).
+                                BadgedBox(badge = { if (setupNeedsAttention) Badge() }) {
+                                    Icon(Icons.Filled.Home, contentDescription = null)
+                                }
+                            },
                             label = { Text("Home") }
                         )
                         NavigationBarItem(
@@ -447,16 +486,6 @@ fun VrcaScreen(
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                // Persistent setup banner -- shows until both steps complete
-                if (showSetupBanner && !isBannedEffective) {
-                    SetupIncompleteBanner(
-                        vrcLinked = vrcLinked,
-                        ipSet = ipSet.value == true,
-                        onFixVrc = { page = AppPage.VrchatStatus },
-                        onFixIp = { page = AppPage.Settings }
-                    )
-                }
-
                 Crossfade(targetState = page, label = "page_crossfade") { p ->
                     when (p) {
                         AppPage.Home -> {
@@ -472,11 +501,11 @@ fun VrcaScreen(
                             } else {
                                 HomePage(
                                     vm = chatboxViewModel,
-                                    snackbarHostState = snackbarHostState,
-                                    onOpenSettings = { page = AppPage.Settings },
+                                    onNavigate = { page = it },
                                     announcements = announcements,
                                     moderation = moderation,
-                                    isBanned = false
+                                    isBanned = false,
+                                    vrcLinked = vrcLinked
                                 )
                             }
                         }
@@ -489,10 +518,7 @@ fun VrcaScreen(
                             onPersistSpotifyPreset = { UiPrefs.writeSpotifyPreset(ctx, it) }
                         )
 
-                        AppPage.VrchatStatus -> VrchatStatusPage(
-                            vm = chatboxViewModel,
-                            onOpenLogin = { /* navigate to login within page */ }
-                        )
+                        AppPage.VrchatStatus -> VrchatStatusPage(vm = chatboxViewModel)
 
                         AppPage.Settings -> SettingsPage(
                             vm = chatboxViewModel,
@@ -506,11 +532,11 @@ fun VrcaScreen(
                             } else {
                                 HomePage(
                                     vm = chatboxViewModel,
-                                    snackbarHostState = snackbarHostState,
-                                    onOpenSettings = { page = AppPage.Settings },
+                                    onNavigate = { page = it },
                                     announcements = announcements,
                                     moderation = moderation,
-                                    isBanned = isBannedEffective
+                                    isBanned = isBannedEffective,
+                                    vrcLinked = vrcLinked
                                 )
                             }
                         }
@@ -725,10 +751,17 @@ private fun DrawerItem(
 
 @Composable
 internal fun PageContainer(content: @Composable ColumnScope.() -> Unit) {
+    // Tapping empty space anywhere on a page clears text-field focus (and the
+    // keyboard). detectTapGestures on a parent only sees taps the children
+    // didn't claim, so buttons/fields keep working normally.
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
+            .pointerInput(Unit) {
+                detectTapGestures(onTap = { focusManager.clearFocus() })
+            }
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
         content = content
@@ -757,11 +790,33 @@ internal fun SectionCard(
                         .weight(1f)
                         .padding(end = 10.dp)
                 ) {
+                    // The title must always render WHOLE on ONE line and never
+                    // move ("VRChat Preview" was ellipsized when the wider
+                    // "Sending" chip squeezed it). On width overflow the font
+                    // shrinks a notch and relayouts until the full text fits.
+                    val baseTitleStyle = titleStyle ?: MaterialTheme.typography.titleMedium
+                    var fittedTitleStyle by remember(baseTitleStyle, title) {
+                        mutableStateOf(baseTitleStyle)
+                    }
                     Text(
                         text = title,
-                        style = titleStyle ?: MaterialTheme.typography.titleMedium,
-                        maxLines = 4,
-                        overflow = TextOverflow.Clip
+                        style = fittedTitleStyle,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                        onTextLayout = { result ->
+                            // With overflow=Ellipsis the truncated layout "fits",
+                            // so didOverflowWidth stays false — isLineEllipsized
+                            // is the signal that actually fires.
+                            if ((result.isLineEllipsized(0) || result.didOverflowWidth) &&
+                                fittedTitleStyle.fontSize.isSp &&
+                                fittedTitleStyle.fontSize.value > 11f
+                            ) {
+                                fittedTitleStyle = fittedTitleStyle.copy(
+                                    fontSize = fittedTitleStyle.fontSize * 0.92f
+                                )
+                            }
+                        }
                     )
                     if (!subtitle.isNullOrBlank()) {
                         Text(
@@ -774,7 +829,7 @@ internal fun SectionCard(
                 }
                 if (actions != null) {
                     Row(
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         content = actions
                     )
@@ -810,69 +865,6 @@ internal fun vrChatSafePreview(input: String): String {
 
     return input.lines().joinToString("\n") { line ->
         line.split(" ").joinToString(" ") { breakLongToken(it) }
-    }
-}
-
-/* =========================
-   Setup incomplete banner
-   Shown persistently until VRChat is linked AND IP is set.
-   ========================= */
-
-@Composable
-private fun SetupIncompleteBanner(
-    vrcLinked: Boolean,
-    ipSet: Boolean,
-    onFixVrc: () -> Unit,
-    onFixIp: () -> Unit
-) {
-    Card(
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.tertiaryContainer
-        ),
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 6.dp)
-    ) {
-        Column(
-            Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Text(
-                "Setup incomplete",
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.onTertiaryContainer
-            )
-            if (!vrcLinked) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        "VRChat account not linked",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onTertiaryContainer,
-                        modifier = Modifier.weight(1f)
-                    )
-                    TextButton(onClick = onFixVrc) { Text("Fix") }
-                }
-            }
-            if (!ipSet) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        "PC/Quest IP not configured",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onTertiaryContainer,
-                        modifier = Modifier.weight(1f)
-                    )
-                    TextButton(onClick = onFixIp) { Text("Fix") }
-                }
-            }
-        }
     }
 }
 
@@ -991,17 +983,16 @@ internal fun VrchatStatusBanner() {
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .padding(vertical = 8.dp),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
+                                        Canvas(Modifier.size(6.dp)) {
+                                            drawCircle(color = bannerColor)
+                                        }
                                         Text(
-                                            c.name
-                                                .replace("Realtime Player State Changes",
-                                                    "Realtime Player State"),
+                                            c.name,
                                             style = MaterialTheme.typography.bodyMedium,
                                             color = onContainerColor,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
                                             modifier = Modifier.weight(1f)
                                         )
                                         Surface(

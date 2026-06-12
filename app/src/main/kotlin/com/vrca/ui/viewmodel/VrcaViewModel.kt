@@ -30,6 +30,7 @@ import com.vrca.BuildConfig
 import com.vrca.app.FeatureSessionStore
 import com.vrca.app.VrcaApplication
 import com.vrca.nowplaying.NowPlayingState
+import com.vrca.nowplaying.TitleCleaner
 import com.vrca.data.UserPreferencesRepository
 import com.vrca.osc.VrcaOsc
 import com.vrca.vrchat.VrchatPipelineState
@@ -87,6 +88,14 @@ class VrcaViewModel(
 
         private const val VRC_MAX_CHARS = 144
         private const val VRC_MAX_LINES = 9
+        // Chars reserved from the 144 budget for the minimal-background control
+        // suffix (U+0003+U+001F, appended in VrcaOsc) while that toggle is ON.
+        private const val MINIMAL_BG_RESERVED_CHARS = 2
+
+        // Known media-source packages (per-source Now Playing enables).
+        const val PKG_SPOTIFY = "com.spotify.music"
+        const val PKG_YOUTUBE = "com.google.android.youtube"
+        const val PKG_YTMUSIC = "com.google.android.apps.youtube.music"
 
         private const val SEND_FLOOR_MS = 500L
 
@@ -105,6 +114,11 @@ class VrcaViewModel(
         // costs exactly one write. This is what stops "edit then close → reverts on
         // reopen" (the app-open read no longer overwrites a not-yet-synced edit).
         private const val SELF_SYNC_DEBOUNCE_MS = 30_000L
+
+        // Uptime-counter restore grace: >15 min so it spans the watchdog's
+        // ~15-min recovery cycle after an OEM kill (same reasoning as the
+        // Discord RPC ONLINE_GRACE_MS).
+        private const val UPTIME_RESTORE_GRACE_MS = 20 * 60_000L
         // Live-mode write interval — only used when an admin is watching.
         private const val LIVE_SYNC_INTERVAL_MS = 10_000L
         // When an admin is browsing (dashboard/users list) but not actively
@@ -256,6 +270,21 @@ class VrcaViewModel(
     // race conditions between heartbeat and self-sync writes.
     private val lastSyncedValues = mutableMapOf<String, Any?>()
 
+    // Set by applyRemoteContentBeforeSync when the SERVER read confirms the user's
+    // doc already exists. The cold-open performSelfSync uses this to write LIVENESS
+    // ONLY (never content/toggles) for an existing doc — so a cold-open write can
+    // physically never overwrite an admin's offline edit (the edit lives on the
+    // server; the apply path + moderation listener pull it into local; the later
+    // debounced/hourly write pushes any genuine user edit up). A true first install
+    // (doc absent) still does the full creating write.
+    @Volatile private var remoteDocConfirmedExists = false
+
+    // True when restoreFeatureSession() resumed an ACTIVE OSC session after an OS
+    // kill. Used by applyOfflineToggleEdits to avoid letting a stale server `false`
+    // (no baseline) stop a just-revived user's OSC. A deliberate admin disable
+    // (remote != baseline) still applies.
+    @Volatile private var restoredActiveSending = false
+
     // Gate self-sync until DataStore has provided its initial values. Without this
     // gate, an immediate sync on cold start writes the empty default ViewModel
     // state to Firestore, which then echoes back via the snapshot listener and
@@ -282,6 +311,20 @@ class VrcaViewModel(
     // The liveness fields written on every delta sync. A delta containing only these
     // (no content change) is what the cold-open throttle skips on a rapid restart.
     private val LIVENESS_KEYS = setOf("isOnlineInApp", "lastActiveAt", "lastSeenAt", "updatedAt")
+    private val TOGGLE_KEYS = setOf("afkEnabled", "cycleEnabled", "spotifyEnabled", "spotifyDemoEnabled", "timeEnabled")
+    // Volatile preview/nowPlaying/presence keys carried by captureStateForSync so the
+    // hourly delta refreshes an unwatched user's directory row. Excluded from the
+    // swipe-time offline write (captureContentForOfflineWrite) — that write is
+    // documented to omit volatile preview, and the pipeline service's own offline
+    // write already carries final presence.
+    private val VOLATILE_SYNC_KEYS = setOf(
+        "combinedPreviewText", "nowPlayingDetected", "nowPlayingIsPlaying",
+        "nowPlayingTitle", "nowPlayingArtist", "activePackage",
+        "vrchatUserId", "vrchatDisplayName", "vrchatState", "vrchatStatus",
+        "vrchatStatusDescription", "vrchatWorld", "vrchatLocation",
+        "vrchatInstancePlayerCount", "vrchatInstanceCapacity",
+        "vrchatPlatform", "vrchatIsOnline"
+    )
 
     private fun readLastSelfSyncMs(): Long = prefs().getLong(PREF_LAST_SELF_SYNC_MS, 0L)
 
@@ -407,9 +450,8 @@ class VrcaViewModel(
         data["nowPlayingArtist"] = lastNowPlayingArtist.takeIf { it != "(blank)" }?.trim().orEmpty()
         data["activePackage"] = activePackage
 
-        // Profile pictures are intentionally NOT written to Firestore (cost): the
-        // admin panel resolves VRChat+ pictures on demand by vrchatUserId using the
-        // admin's own VRChat session (see AdminAvatar / VrchatImageLoader).
+        // Profile pictures are intentionally NOT written to Firestore (cost) and
+        // NOT shown in the admin panel (AdminAvatar renders name initials).
 
         // Multi-IP slots
         val activeSlot = runCatching {
@@ -469,6 +511,7 @@ class VrcaViewModel(
         "timeEnabled" to timeEnabled,
         "lastReportedTime" to if (timeEnabled) currentTimeString() else "",
         "lastTimeUpdateAt" to FieldValue.serverTimestamp(),
+        "lastActiveAt" to FieldValue.serverTimestamp(),
         "lastSeenAt" to FieldValue.serverTimestamp()
     )
 
@@ -577,29 +620,58 @@ class VrcaViewModel(
         // Intentionally empty — directory browsing no longer triggers writes.
     }
 
-    private fun captureStateForSync(): Map<String, Any?> = mapOf(
-        "afkEnabled" to afkEnabled,
-        "afkMessage" to afkMessage.trim(),
-        "cycleEnabled" to cycleEnabled,
-        "cycleIntervalSeconds" to cycleIntervalSeconds,
-        "cycleLinesText" to cycleLines.joinToString("\n").trim(),
-        "spotifyEnabled" to spotifyEnabled,
-        "spotifyDemoEnabled" to spotifyDemoEnabled,
-        "spotifyPreset" to spotifyPreset,
-        "timeEnabled" to timeEnabled,
-        "timeMode" to timeMode,
-        "afkPreset1" to getAfkPresetPreview(1),
-        "afkPreset2" to getAfkPresetPreview(2),
-        "afkPreset3" to getAfkPresetPreview(3),
-        "cyclePreset1" to (cyclePresetMessages.getOrNull(0)?.trim().orEmpty()),
-        "cyclePreset2" to (cyclePresetMessages.getOrNull(1)?.trim().orEmpty()),
-        "cyclePreset3" to (cyclePresetMessages.getOrNull(2)?.trim().orEmpty()),
-        "cyclePreset4" to (cyclePresetMessages.getOrNull(3)?.trim().orEmpty()),
-        "cyclePreset5" to (cyclePresetMessages.getOrNull(4)?.trim().orEmpty()),
-        // Profile pictures are deliberately NOT synced to Firestore (cost). The
-        // admin panel resolves VRChat+ pictures on demand by vrchatUserId via the
-        // admin's own VRChat session — see AdminAvatar / VrchatImageLoader.
-    )
+    private fun captureStateForSync(): Map<String, Any?> = buildMap {
+        put("afkEnabled", afkEnabled)
+        put("afkMessage", afkMessage.trim())
+        put("cycleEnabled", cycleEnabled)
+        put("cycleIntervalSeconds", cycleIntervalSeconds)
+        put("cycleLinesText", cycleLines.joinToString("\n").trim())
+        put("spotifyEnabled", spotifyEnabled)
+        put("spotifyDemoEnabled", spotifyDemoEnabled)
+        put("spotifyPreset", spotifyPreset)
+        put("timeEnabled", timeEnabled)
+        put("timeMode", timeMode)
+        put("afkPreset1", getAfkPresetPreview(1))
+        put("afkPreset2", getAfkPresetPreview(2))
+        put("afkPreset3", getAfkPresetPreview(3))
+        put("cyclePreset1", cyclePresetMessages.getOrNull(0)?.trim().orEmpty())
+        put("cyclePreset2", cyclePresetMessages.getOrNull(1)?.trim().orEmpty())
+        put("cyclePreset3", cyclePresetMessages.getOrNull(2)?.trim().orEmpty())
+        put("cyclePreset4", cyclePresetMessages.getOrNull(3)?.trim().orEmpty())
+        put("cyclePreset5", cyclePresetMessages.getOrNull(4)?.trim().orEmpty())
+        // Profile pictures are deliberately NOT synced to Firestore (cost) and
+        // NOT shown in the admin panel (AdminAvatar renders name initials).
+
+        // Volatile preview/nowPlaying + VRChat presence ride the hourly delta so
+        // an UNWATCHED user's directory row stays roughly current (Firestore bills
+        // per document write, not per field — these piggyback on the write that
+        // happens anyway). The 30s edit debounce is still only scheduled by
+        // genuine content edits, so these fields never CAUSE a write on their own;
+        // they're swept up whenever one fires. While watched, the 10s live loop
+        // remains the real-time source. (These were silently dropped from the
+        // delta path when captureStateForSync was introduced — buildUserSnapshot
+        // carries them but only fires on first install / uid change — leaving
+        // unwatched previews frozen at the last watch session.)
+        put("combinedPreviewText", combinedPreviewText.trim())
+        put("nowPlayingDetected", nowPlayingDetected)
+        put("nowPlayingIsPlaying", nowPlayingIsPlaying)
+        put("nowPlayingTitle", lastNowPlayingTitle.takeIf { it != "(blank)" }?.trim().orEmpty())
+        put("nowPlayingArtist", lastNowPlayingArtist.takeIf { it != "(blank)" }?.trim().orEmpty())
+        put("activePackage", activePackage)
+        VrchatPipelineState.presence?.let { p ->
+            put("vrchatUserId", p.userId)
+            put("vrchatDisplayName", p.displayName)
+            put("vrchatState", p.state)
+            put("vrchatStatus", p.status)
+            put("vrchatStatusDescription", p.statusDescription)
+            put("vrchatWorld", p.worldName)
+            put("vrchatLocation", p.location)
+            put("vrchatInstancePlayerCount", p.instancePlayerCount)
+            put("vrchatInstanceCapacity", p.instanceCapacity)
+            put("vrchatPlatform", p.platform)
+            put("vrchatIsOnline", p.isOnlineInVRChat)
+        }
+    }
 
     /**
      * Content snapshot for the swipe-time offline write (called by [com.vrca.app.AppShutdown]
@@ -612,7 +684,9 @@ class VrcaViewModel(
     fun captureContentForOfflineWrite(): Map<String, Any> {
         if (BuildConfig.IS_ADMIN_BUILD) return emptyMap()
         val m = mutableMapOf<String, Any>()
-        captureStateForSync().forEach { (k, v) -> if (v != null) m[k] = v }
+        captureStateForSync().forEach { (k, v) ->
+            if (v != null && k !in VOLATILE_SYNC_KEYS) m[k] = v
+        }
         m["cycleLines"] = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(10)
         return m
     }
@@ -620,34 +694,138 @@ class VrcaViewModel(
     private suspend fun applyRemoteContentBeforeSync() {
         if (BuildConfig.IS_ADMIN_BUILD) return
         runCatching {
+            ensureAnonAuth()
             val deviceHash = readDeviceHashFromPrefs()
-            if (!isValidDeviceHash(deviceHash)) return@runCatching
-            val snap = db.collection(COL_USERS).document(deviceHash).get().await()
-            if (snap == null || !snap.exists()) return@runCatching
+            if (!isValidDeviceHash(deviceHash)) {
+                Log.w("VrcaViewModel", "applyRemoteContentBeforeSync: invalid deviceHash, skipping")
+                return@runCatching
+            }
+            // Read from the SERVER, not Firestore's local cache. The default get()
+            // returns the cached doc on a cold start — which holds this device's
+            // OLD pre-edit values, so an admin edit made while the app was closed
+            // would never be seen (old-vs-old comparison applies nothing). Source.SERVER
+            // forces the fresh doc with the admin's edits. If it times out (the caller
+            // wraps this in withTimeoutOrNull), the moderation snapshot listener is the
+            // backstop — it also delivers server data and applies admin edits.
+            val snap = db.collection(COL_USERS).document(deviceHash)
+                .get(com.google.firebase.firestore.Source.SERVER).await()
+            if (snap == null || !snap.exists()) {
+                Log.w("VrcaSync", "applyRemoteContentBeforeSync: no remote doc yet (server read)")
+                return@runCatching
+            }
+            Log.i("VrcaSync", "applyRemoteContentBeforeSync: server read OK — " +
+                "afkMsg='${snap.getString("afkMessage")}' afkEnabled=${snap.getBoolean("afkEnabled")} " +
+                "baselineKeys=${lastSyncedValues.keys}")
+            // The doc exists → the cold-open write must NOT write content/toggles
+            // (it would risk clobbering admin offline edits). Liveness-only from here.
+            remoteDocConfirmedExists = true
+            // Apply admin content/toggle edits. Each apply updates lastSyncedValues for
+            // the field it changed (so the moderation listener suppresses the duplicate);
+            // un-applied keys keep their prefs baseline so the listener can still apply a
+            // real admin edit and the delta can still push a genuine user offline edit.
+            // We deliberately do NOT blanket-seed the baseline from the snapshot — that
+            // poisoned the listener (it saw remote==baseline and suppressed un-applied
+            // admin edits) AND, combined with a stale local value, made the cold-open
+            // delta write the local value back, OVERWRITING the admin's edit.
             applyContentFromSnapshot(snap)
+            applyOfflineToggleEdits(snap)
+            Log.d("VrcaViewModel", "applyRemoteContentBeforeSync: applied remote content/toggles")
+        }.onFailure { e ->
+            Log.w("VrcaSync", "applyRemoteContentBeforeSync FAILED (listener will backstop): ${e.message}")
         }
+    }
+
+    /**
+     * Apply admin toggle edits made while this user was offline. **Toggles are special
+     * because of the OS-kill revival path**: [restoreFeatureSession] runs first and may
+     * have just resumed OSC sending with the toggles ON. So we apply a toggle change
+     * ONLY when there is a REAL persisted baseline ([lastSyncedValues]) that the admin
+     * genuinely changed (`remote != baseline`). We deliberately SKIP on a null baseline
+     * (return) instead of falling back to local — falling back to local could flip a
+     * just-restored toggle on a stale/missing baseline and STOP a revived user's OSC.
+     * With a real baseline, `remote == baseline` means the admin didn't touch it → we
+     * leave the restored toggle (and its OSC) alone; `remote != baseline` means the
+     * admin edited it (e.g. DISABLED afk while the app was OEM-killed) → we apply via
+     * the same setter the UI uses (which starts/stops the sender, gated on oscSending).
+     * The cold-open [performSelfSync] also SKIPS toggle keys (and writes liveness-only
+     * for an existing doc), so it never writes a toggle value back either way.
+     *
+     * We update [lastSyncedValues] for any toggle we apply so the moderation listener
+     * (which also processes the same snapshot) sees `remote == baseline` and suppresses
+     * the duplicate — without poisoning un-applied keys.
+     */
+    private fun applyOfflineToggleEdits(
+        snap: com.google.firebase.firestore.DocumentSnapshot
+    ) {
+        fun applyToggle(key: String, current: Boolean, setter: (Boolean) -> Unit) {
+            val remote = snap.getBoolean(key) ?: return
+            val baseline = lastSyncedValues[key] as? Boolean
+            // If we have a baseline and the server matches it, the admin didn't
+            // change this toggle since our last sync — leave it (and don't fight a
+            // restored OSC session).
+            if (baseline != null && remote == baseline) {
+                Log.d("VrcaSync", "toggle $key: remote=$remote == baseline → skip")
+                return
+            }
+            // Revival protection: if we just restored an ACTIVE OSC session and have
+            // no baseline proof the admin turned this OFF, a stale server `false`
+            // must not stop the revived user's OSC. Skip only that exact case.
+            if (restoredActiveSending && baseline == null && !remote) {
+                Log.d("VrcaSync", "toggle $key: stale false during active restore → skip")
+                return
+            }
+            // Either a real admin edit (remote != baseline) OR no baseline at all
+            // (empty/partial prefs) — cold open is server-authoritative, so apply.
+            if (remote != current) {
+                Log.i("VrcaSync", "toggle $key: APPLY remote=$remote (was $current, baseline=$baseline)")
+                setter(remote)
+            }
+            lastSyncedValues[key] = remote
+        }
+        applyToggle("afkEnabled", afkEnabled) { setAfkEnabledFlag(it) }
+        applyToggle("cycleEnabled", cycleEnabled) { setCycleEnabledFlag(it) }
+        applyToggle("spotifyEnabled", spotifyEnabled) { setSpotifyEnabledFlag(it) }
+        applyToggle("timeEnabled", timeEnabled) { updateTimeEnabled(it) }
     }
 
     private suspend fun applyContentFromSnapshot(
         snap: com.google.firebase.firestore.DocumentSnapshot
     ) {
+        // Apply admin-edited content when the remote value differs from the persisted
+        // baseline ([lastSyncedValues]) — i.e. the admin changed it since our last sync.
+        // With a real baseline, remote==baseline means "admin didn't change it" so we
+        // keep the user's local edit (a later debounced/hourly write pushes it up); both
+        // edited → admin wins. When there's NO baseline for a key (null), we fall back to
+        // the current LOCAL value so the server/admin value still wins on first sync.
+        //
+        // For every field we APPLY, we set lastSyncedValues[key] = remote so the
+        // moderation listener (processing the same snapshot) suppresses the duplicate.
+        // We do NOT seed un-applied keys — leaving their baseline as the prefs value lets
+        // the listener correctly distinguish a real admin edit from an echo, and lets the
+        // cold-open/debounced delta push a genuine user offline edit.
         snap.getString("afkMessage")?.trim()?.let { remote ->
-            if (remote != afkMessage.trim()) {
+            val baseline = (lastSyncedValues["afkMessage"] as? String) ?: afkMessage.trim()
+            if (remote != baseline && remote != afkMessage.trim()) {
                 afkMessage = remote
                 userPreferencesRepository.saveAfkMessage(remote)
+                lastSyncedValues["afkMessage"] = remote
             }
         }
         snap.getLong("cycleIntervalSeconds")?.toInt()?.coerceAtLeast(2)?.let { remote ->
-            if (remote != cycleIntervalSeconds) {
+            val baseline = (lastSyncedValues["cycleIntervalSeconds"] as? Int) ?: cycleIntervalSeconds
+            if (remote != baseline && remote != cycleIntervalSeconds) {
                 cycleIntervalSeconds = remote
                 userPreferencesRepository.saveCycleInterval(remote)
+                lastSyncedValues["cycleIntervalSeconds"] = remote
             }
         }
         snap.getString("cycleLinesText")?.trim()?.let { remote ->
             val local = cycleLines.joinToString("\n").trim()
-            if (remote != local) {
+            val baseline = (lastSyncedValues["cycleLinesText"] as? String) ?: local
+            if (remote != baseline && remote != local) {
                 setCycleLinesFromTextPreserve(remote)
                 userPreferencesRepository.saveCycleMessages(remote)
+                lastSyncedValues["cycleLinesText"] = remote
             }
         }
         val afkPresetSavers = listOf<suspend (String) -> Unit>(
@@ -657,9 +835,12 @@ class VrcaViewModel(
         )
         for (i in 1..3) {
             snap.getString("afkPreset$i")?.trim()?.let { remote ->
-                if (remote != afkPresetTexts[i - 1].trim()) {
+                val local = afkPresetTexts[i - 1].trim()
+                val baseline = (lastSyncedValues["afkPreset$i"] as? String) ?: local
+                if (remote != baseline && remote != local) {
                     afkPresetTexts[i - 1] = remote
                     afkPresetSavers[i - 1](remote)
+                    lastSyncedValues["afkPreset$i"] = remote
                 }
             }
         }
@@ -672,17 +853,22 @@ class VrcaViewModel(
         )
         for (i in 1..5) {
             snap.getString("cyclePreset$i")?.trim()?.let { remote ->
-                if (remote != (cyclePresetMessages.getOrNull(i - 1)?.trim().orEmpty())) {
+                val local = cyclePresetMessages.getOrNull(i - 1)?.trim().orEmpty()
+                val baseline = (lastSyncedValues["cyclePreset$i"] as? String) ?: local
+                if (remote != baseline && remote != local) {
                     cyclePresetMessages[i - 1] = remote
                     val interval = cyclePresetIntervals.getOrElse(i - 1) { 10 }
                     presetSavers[i - 1](remote, interval, null)
+                    lastSyncedValues["cyclePreset$i"] = remote
                 }
             }
         }
         snap.getLong("spotifyPreset")?.toInt()?.coerceIn(1, 5)?.let { remote ->
-            if (remote != spotifyPreset) {
+            val baseline = (lastSyncedValues["spotifyPreset"] as? Int) ?: spotifyPreset
+            if (remote != baseline && remote != spotifyPreset) {
                 spotifyPreset = remote
                 userPreferencesRepository.saveSpotifyPreset(remote)
+                lastSyncedValues["spotifyPreset"] = remote
             }
         }
     }
@@ -744,6 +930,7 @@ class VrcaViewModel(
         }
     }
 
+    @Suppress("UNUSED_PARAMETER")
     private suspend fun performSelfSync(coldOpen: Boolean = false) {
         if (BuildConfig.IS_ADMIN_BUILD) return
         if (!initialDataLoaded) return
@@ -759,10 +946,27 @@ class VrcaViewModel(
             val currentState = captureStateForSync()
             val uidChanged = lastSyncedValues["_authUid"]?.let { it != authUid } ?: false
             val isFirstSync = lastSyncedValues.isEmpty()
+            // If Source.SERVER failed in applyRemoteContentBeforeSync and the prefs
+            // baseline is empty, check the LOCAL Firestore cache before deciding on a
+            // full write — a returning user with corrupted/empty prefs still has the
+            // doc in cache, and a full write would clobber admin offline edits.
+            if (coldOpen && !remoteDocConfirmedExists && isFirstSync) {
+                remoteDocConfirmedExists = try {
+                    db.collection(COL_USERS).document(deviceHash)
+                        .get(com.google.firebase.firestore.Source.CACHE).await()
+                        .exists()
+                } catch (_: Throwable) { false }
+            }
+            val livenessOnlyExistingDoc = coldOpen && remoteDocConfirmedExists
 
-            if (isFirstSync || uidChanged) {
-                // Full write: first ever install, first cold-open with no
-                // persisted baseline, or auth UID changed. Handles doc
+            Log.i("VrcaSync", "performSelfSync coldOpen=$coldOpen isFirstSync=$isFirstSync " +
+                "docExists=$remoteDocConfirmedExists uidChanged=$uidChanged " +
+                "→ ${if ((isFirstSync && !remoteDocConfirmedExists) || uidChanged) "FULL-WRITE" else if (livenessOnlyExistingDoc) "LIVENESS-ONLY" else "DELTA"}")
+
+            if ((isFirstSync && !remoteDocConfirmedExists) || uidChanged) {
+                // Full write: first ever install (doc absent), or auth UID changed
+                // (rules require uid/authUid to match the new auth, so a delta that
+                // omits them would be denied — must rewrite the whole doc). Handles doc
                 // creation and writes all fields for backward compat.
                 try {
                     db.collection(COL_USERS).document(deviceHash)
@@ -798,6 +1002,11 @@ class VrcaViewModel(
                 "updatedAt" to FieldValue.serverTimestamp()
             )
             for ((key, value) in currentState) {
+                // Existing-doc cold open → liveness only (never write content/toggles).
+                if (livenessOnlyExistingDoc) continue
+                // First-install cold open still skips toggles (they start OFF; writing
+                // OFF back would race an admin's enabled toggle before it's applied).
+                if (coldOpen && key in TOGGLE_KEYS) continue
                 if (value != lastSyncedValues[key] && value != null) {
                     delta[key] = value
                 }
@@ -807,13 +1016,15 @@ class VrcaViewModel(
                     .filter { it.isNotEmpty() }.take(10)
             }
 
-            // Cold-open liveness throttle: if this is the app-open write, the delta is
-            // liveness-ONLY (no content changed), and the last real write was recent,
-            // skip it. The fresh lastActiveAt already proves online; the hourly heartbeat
-            // (anchored to the last real write) backstops the 65-min window. This is what
-            // stops every process resurrection from re-paying the liveness write.
+            // Liveness throttle: if the delta is liveness-ONLY (no content changed)
+            // and the last real write was recent, skip it. The fresh lastActiveAt
+            // already proves online; the hourly heartbeat (anchored to the last real
+            // write) backstops the 65-min window. This applies to BOTH the cold-open
+            // write (process resurrection churn) AND the debounced write (spurious
+            // DataStore re-emissions) — but never the hourly heartbeat (coldOpen=false
+            // and the debounce job is a separate path from the heartbeat).
             val livenessOnly = delta.keys.all { it in LIVENESS_KEYS }
-            if (coldOpen && livenessOnly &&
+            if (livenessOnly &&
                 System.currentTimeMillis() - readLastSelfSyncMs() < COLD_OPEN_LIVENESS_THROTTLE_MS
             ) {
                 lastSelfSyncError = ""
@@ -824,6 +1035,20 @@ class VrcaViewModel(
                 db.collection(COL_USERS).document(deviceHash)
                     .set(delta, SetOptions.merge())
                     .await()
+                if (livenessOnlyExistingDoc) {
+                    // We wrote ONLY liveness — we did NOT write content/toggles, so we
+                    // must NOT rebaseline them to local. Overwriting the baseline with
+                    // local here would (a) drop the prefs baseline that lets the listener
+                    // apply admin offline edits, and (b) make a later write/listener
+                    // clobber a user's own offline edit. Keep the existing baseline
+                    // (prefs + any per-field updates the apply path made) and just
+                    // record _authUid + the write timestamp.
+                    lastSyncedValues["_authUid"] = authUid
+                    persistLastSyncedValues()
+                    markSelfSyncWritten()
+                    lastSelfSyncError = ""
+                    return@runCatching
+                }
                 lastSyncedValues.clear()
                 lastSyncedValues.putAll(currentState)
                 lastSyncedValues["_authUid"] = authUid
@@ -950,58 +1175,40 @@ class VrcaViewModel(
                     continue
                 }
 
-                // Attach once.
                 if (moderationUserReg == null) {
-                    moderationLastError = ""
-                    moderationConnected = true
-
                     moderationUserReg = db.collection(COL_USERS).document(deviceHash)
                         .addSnapshotListener { snap, e ->
                             if (e != null) {
-                                moderationLastError = (e.message ?: "Moderation listen failed").take(4000)
+                                moderationLastError = (e.message ?: "User-doc listen failed").take(4000)
                                 moderationConnected = false
+                                enforceIfBannedChanged()
                                 return@addSnapshotListener
                             }
 
                             if (snap == null || !snap.exists()) {
-                                warned = false
-                                warnReason = ""
-                                uidBanned = false
-                                banReason = ""
-                                moderationConnected = true
-                                moderationLastError = ""
+                                warned = false; warnReason = ""
+                                uidBanned = false; banReason = ""
+                                moderationConnected = true; moderationLastError = ""
                                 enforceIfBannedChanged()
                                 return@addSnapshotListener
                             }
 
                             warned = snap.getBoolean("warned") ?: false
                             warnReason = (snap.getString("warnReason") ?: "").trim()
-
                             uidBanned = snap.getBoolean("banned") ?: false
                             banReason = (snap.getString("banReason") ?: "").trim()
-
-                            moderationConnected = true
-                            moderationLastError = ""
+                            moderationConnected = true; moderationLastError = ""
                             enforceIfBannedChanged()
 
                             val killSignal = snap.getTimestamp("killSignal")
                             if (killSignal != null) {
                                 val killMs = killSignal.seconds * 1000L + (killSignal.nanoseconds / 1_000_000L)
                                 val ageMs = System.currentTimeMillis() - killMs
-                                if (ageMs in 0L..60_000L) {
-                                    handleAdminKill()
-                                }
+                                if (ageMs in 0L..60_000L) handleAdminKill()
                             }
 
                             targetedUpdateUrl = (snap.getString("targetedUpdateUrl") ?: "").trim()
                             targetedUpdateNotes = (snap.getString("targetedUpdateNotes") ?: "").trim()
-
-                            // Apply remote config on every non-echo snapshot.
-                            // Echo suppression is handled inside applyRemoteConfig
-                            // via the per-field lastSyncedValues map — no need to
-                            // gate on hasPendingWrites() which blocks admin edits
-                            // during live-mode (writes every 500ms keep pending
-                            // state almost perpetually true).
                             applyRemoteConfig(snap)
                         }
                 }
@@ -1046,152 +1253,121 @@ class VrcaViewModel(
      * existing flow collectors to update ViewModel state). Fields without DataStore
      * backing are set directly on the ViewModel.
      */
-    private var initialSnapshotProcessed = false
-
-    /**
-     * Seed [lastSyncedValues] from a Firestore snapshot. Called on the very
-     * first snapshot AND after [applyRemoteContentBeforeSync] so the snapshot
-     * listener has a baseline to compare admin edits against — without this,
-     * admin toggle/preset writes would be silently dropped during the window
-     * between listener-attach and the first successful [performSelfSync].
-     */
-    private fun seedLastSyncedFromSnapshot(snap: com.google.firebase.firestore.DocumentSnapshot) {
-        snap.getBoolean("afkEnabled")?.let { lastSyncedValues["afkEnabled"] = it }
-        snap.getBoolean("cycleEnabled")?.let { lastSyncedValues["cycleEnabled"] = it }
-        snap.getBoolean("spotifyEnabled")?.let { lastSyncedValues["spotifyEnabled"] = it }
-        snap.getBoolean("timeEnabled")?.let { lastSyncedValues["timeEnabled"] = it }
-        snap.getString("afkMessage")?.let { lastSyncedValues["afkMessage"] = it.trim() }
-        snap.getLong("cycleIntervalSeconds")?.let { lastSyncedValues["cycleIntervalSeconds"] = it.toInt().coerceAtLeast(2) }
-        snap.getString("cycleLinesText")?.let { lastSyncedValues["cycleLinesText"] = it.trim() }
-        for (i in 1..3) snap.getString("afkPreset$i")?.let { lastSyncedValues["afkPreset$i"] = it.trim() }
-        for (i in 1..5) snap.getString("cyclePreset$i")?.let { lastSyncedValues["cyclePreset$i"] = it.trim() }
-        snap.getLong("spotifyPreset")?.let { lastSyncedValues["spotifyPreset"] = it.toInt().coerceIn(1, 5) }
-        snap.getString("timeMode")?.let { lastSyncedValues["timeMode"] = it }
-    }
 
     private fun applyRemoteConfig(snap: com.google.firebase.firestore.DocumentSnapshot) {
-        // Admin build does not apply remote config to itself. It is never the
-        // target of admin edits, and applying a stale own-doc snapshot would
-        // overwrite its local DataStore presets. (Watcher detection is also
-        // meaningless here since the admin is filtered out of its own list.)
         if (BuildConfig.IS_ADMIN_BUILD) return
-        // Watcher detection runs on EVERY snapshot (even the first). Admins
-        // refresh `watcherActiveAt` from the admin panel; if recent enough
-        // we flip [AdminWatchState.isWatched] to true and the live-sync
-        // loop starts streaming volatile fields. No traffic when nobody
-        // is watching.
         val watcherActiveAtMs = runCatching {
             snap.getTimestamp("watcherActiveAt")?.toDate()?.time
         }.getOrNull()
         com.vrca.sync.AdminWatchState.updateFromTimestampMs(watcherActiveAtMs)
 
         viewModelScope.launch {
-            if (!initialSnapshotProcessed) {
-                initialSnapshotProcessed = true
-                // Seed baseline from the first snapshot so admin edits arriving
-                // before the first performSelfSync write can still be detected.
-                // We drop the first snapshot's content (DataStore wins cold start)
-                // but record what's on the doc so subsequent changes are caught.
-                seedLastSyncedFromSnapshot(snap)
-                return@launch
-            }
+            // Two-layer comparison for each field:
+            //  1. remote != local  — is the value actually different from what we have?
+            //     If same, skip entirely (no change needed, prevents echo loops).
+            //  2. baseline == null || remote != baseline — is this a REAL admin edit, or
+            //     just an echo of our pending local write (heartbeat during active watching)?
+            //     When the user toggled locally but the write hasn't landed on Firestore yet,
+            //     the heartbeat snapshot echoes the OLD server value. baseline matches that
+            //     old value (we wrote it), so remote == baseline → skip (don't revert the
+            //     user's local toggle). When an admin ACTUALLY changed the field, remote !=
+            //     baseline → apply. Null baseline (first snapshot / empty prefs) always
+            //     passes through to the local comparison, so admin edits on cold-open are
+            //     never blocked by missing baseline data.
+            //
+            // Always update lastSyncedValues to remote so subsequent echoes are suppressed.
 
-            // For each field, compare remote value against what we LAST WROTE
-            // to Firestore (lastSyncedValues). If it matches our last write,
-            // the snapshot is just an echo (from self-sync, watcher heartbeat,
-            // or live-mode write) — skip. If it differs, an admin actually
-            // changed the field, so apply.
-            //
-            // Comparing against current local state would break here: when an
-            // admin starts watching and the heartbeat fires, the snapshot
-            // contains the OLD field values (Firestore hasn't received the
-            // user's pending local toggle yet), so `remote != local` would
-            // revert whatever the user just toggled. lastSyncedValues stays
-            // in lock-step with what's actually on the doc, so it's the right
-            // reference for distinguishing echoes from real admin edits.
-            //
-            // Both branches update lastSyncedValues to the snapshot value so
-            // the subsequent self-sync echo is correctly suppressed.
             snap.getBoolean("afkEnabled")?.let { remote ->
-                if (remote != lastSyncedValues["afkEnabled"]) {
-                    afkEnabled = remote
-                    savedState["afkEnabled"] = remote
-                    lastSyncedValues["afkEnabled"] = remote
-                    rebuildCombinedPreviewOnly()
-                    if (!remote) stopAfkSender(clearFromChatbox = true)
-                    startSelfSyncLoopIfNeeded()
-                } else {
-                    lastSyncedValues["afkEnabled"] = remote
+                if (remote != afkEnabled) {
+                    val baseline = lastSyncedValues["afkEnabled"]
+                    if (baseline == null || remote != baseline) {
+                        afkEnabled = remote
+                        savedState["afkEnabled"] = remote
+                        rebuildCombinedPreviewOnly()
+                        if (!remote) stopAfkSender(clearFromChatbox = true)
+                        startSelfSyncLoopIfNeeded()
+                    }
                 }
+                lastSyncedValues["afkEnabled"] = remote
             }
             snap.getBoolean("cycleEnabled")?.let { remote ->
-                if (remote != lastSyncedValues["cycleEnabled"]) {
-                    cycleEnabled = remote
-                    savedState["cycleEnabled"] = remote
-                    lastSyncedValues["cycleEnabled"] = remote
-                    rebuildCombinedPreviewOnly()
-                    if (!remote) stopCycle(clearFromChatbox = true)
-                    if (remote) lastCyclePreviewAdvanceMs = 0L
-                    startSelfSyncLoopIfNeeded()
-                } else {
-                    lastSyncedValues["cycleEnabled"] = remote
+                if (remote != cycleEnabled) {
+                    val baseline = lastSyncedValues["cycleEnabled"]
+                    if (baseline == null || remote != baseline) {
+                        cycleEnabled = remote
+                        savedState["cycleEnabled"] = remote
+                        rebuildCombinedPreviewOnly()
+                        if (!remote) stopCycle(clearFromChatbox = true)
+                        if (remote) lastCyclePreviewAdvanceMs = 0L
+                        startSelfSyncLoopIfNeeded()
+                    }
                 }
+                lastSyncedValues["cycleEnabled"] = remote
             }
             snap.getBoolean("spotifyEnabled")?.let { remote ->
-                if (remote != lastSyncedValues["spotifyEnabled"]) {
-                    spotifyEnabled = remote
-                    savedState["spotifyEnabled"] = remote
-                    lastSyncedValues["spotifyEnabled"] = remote
-                    rebuildCombinedPreviewOnly()
-                    if (!remote) stopNowPlayingSender(clearFromChatbox = true)
-                    startSelfSyncLoopIfNeeded()
-                } else {
-                    lastSyncedValues["spotifyEnabled"] = remote
+                if (remote != spotifyEnabled) {
+                    val baseline = lastSyncedValues["spotifyEnabled"]
+                    if (baseline == null || remote != baseline) {
+                        spotifyEnabled = remote
+                        savedState["spotifyEnabled"] = remote
+                        rebuildCombinedPreviewOnly()
+                        if (!remote) stopNowPlayingSender(clearFromChatbox = true)
+                        startSelfSyncLoopIfNeeded()
+                    }
                 }
+                lastSyncedValues["spotifyEnabled"] = remote
             }
             snap.getBoolean("timeEnabled")?.let { remote ->
-                if (remote != lastSyncedValues["timeEnabled"]) {
-                    timeEnabled = remote
-                    savedState["timeEnabled"] = remote
-                    lastSyncedValues["timeEnabled"] = remote
-                    rebuildCombinedPreviewOnly()
-                    startSelfSyncLoopIfNeeded()
-                } else {
-                    lastSyncedValues["timeEnabled"] = remote
+                if (remote != timeEnabled) {
+                    val baseline = lastSyncedValues["timeEnabled"]
+                    if (baseline == null || remote != baseline) {
+                        timeEnabled = remote
+                        savedState["timeEnabled"] = remote
+                        rebuildCombinedPreviewOnly()
+                        startSelfSyncLoopIfNeeded()
+                    }
                 }
+                lastSyncedValues["timeEnabled"] = remote
             }
 
-            // For string/int fields we fall back to the current local state when
-            // there's no baseline yet — without this, admin edits that arrive
-            // before performSelfSync's first write are silently dropped.
+            // Content fields: compare against LOCAL value first (does the ViewModel
+            // actually need updating?), then baseline for echo suppression. Directly
+            // set ViewModel fields so the change takes effect immediately — relying
+            // solely on async DataStore collector propagation was a source of races
+            // where the cold-open DataStore load overwrote the applied value.
             snap.getString("afkMessage")?.let { remote ->
-                val baseline = (lastSyncedValues["afkMessage"] as? String) ?: afkMessage.trim()
-                if (remote.trim() != baseline) {
-                    userPreferencesRepository.saveAfkMessage(remote.trim())
-                    lastSyncedValues["afkMessage"] = remote.trim()
-                } else {
-                    lastSyncedValues["afkMessage"] = remote.trim()
+                val trimmed = remote.trim()
+                if (trimmed != afkMessage.trim()) {
+                    val baseline = lastSyncedValues["afkMessage"] as? String
+                    if (baseline == null || trimmed != baseline) {
+                        afkMessage = trimmed
+                        userPreferencesRepository.saveAfkMessage(trimmed)
+                    }
                 }
+                lastSyncedValues["afkMessage"] = trimmed
             }
             snap.getLong("cycleIntervalSeconds")?.let { remote ->
                 val intVal = remote.toInt().coerceAtLeast(2)
-                val baseline = (lastSyncedValues["cycleIntervalSeconds"] as? Int) ?: cycleIntervalSeconds
-                if (intVal != baseline) {
-                    userPreferencesRepository.saveCycleInterval(intVal)
-                    lastSyncedValues["cycleIntervalSeconds"] = intVal
-                } else {
-                    lastSyncedValues["cycleIntervalSeconds"] = intVal
+                if (intVal != cycleIntervalSeconds) {
+                    val baseline = lastSyncedValues["cycleIntervalSeconds"] as? Int
+                    if (baseline == null || intVal != baseline) {
+                        cycleIntervalSeconds = intVal
+                        userPreferencesRepository.saveCycleInterval(intVal)
+                    }
                 }
+                lastSyncedValues["cycleIntervalSeconds"] = intVal
             }
             snap.getString("cycleLinesText")?.let { remote ->
-                val baseline = (lastSyncedValues["cycleLinesText"] as? String)
-                    ?: cycleLines.joinToString("\n").trim()
-                if (remote.trim() != baseline) {
-                    userPreferencesRepository.saveCycleMessages(remote.trim())
-                    lastSyncedValues["cycleLinesText"] = remote.trim()
-                } else {
-                    lastSyncedValues["cycleLinesText"] = remote.trim()
+                val trimmed = remote.trim()
+                val local = cycleLines.joinToString("\n").trim()
+                if (trimmed != local) {
+                    val baseline = lastSyncedValues["cycleLinesText"] as? String
+                    if (baseline == null || trimmed != baseline) {
+                        setCycleLinesFromTextPreserve(trimmed)
+                        userPreferencesRepository.saveCycleMessages(trimmed)
+                    }
                 }
+                lastSyncedValues["cycleLinesText"] = trimmed
             }
             val afkPresetSavers = listOf<suspend (String) -> Unit>(
                 { v -> userPreferencesRepository.saveAfkPreset1(v) },
@@ -1200,12 +1376,16 @@ class VrcaViewModel(
             )
             for (i in 1..3) {
                 val remoteMsg = snap.getString("afkPreset$i") ?: continue
-                val baseline = (lastSyncedValues["afkPreset$i"] as? String)
-                    ?: afkPresetTexts.getOrNull(i - 1)?.trim().orEmpty()
-                if (remoteMsg.trim() != baseline) {
-                    afkPresetSavers[i - 1](remoteMsg.trim())
+                val trimmed = remoteMsg.trim()
+                val local = afkPresetTexts.getOrNull(i - 1)?.trim().orEmpty()
+                if (trimmed != local) {
+                    val baseline = lastSyncedValues["afkPreset$i"] as? String
+                    if (baseline == null || trimmed != baseline) {
+                        afkPresetTexts[i - 1] = trimmed
+                        afkPresetSavers[i - 1](trimmed)
+                    }
                 }
-                lastSyncedValues["afkPreset$i"] = remoteMsg.trim()
+                lastSyncedValues["afkPreset$i"] = trimmed
             }
             val presetSavers = listOf<suspend (String, Int, String?) -> Unit>(
                 userPreferencesRepository::saveCyclePreset1,
@@ -1216,13 +1396,28 @@ class VrcaViewModel(
             )
             for (i in 1..5) {
                 val remoteMsg = snap.getString("cyclePreset$i") ?: continue
-                val baseline = (lastSyncedValues["cyclePreset$i"] as? String)
-                    ?: cyclePresetMessages.getOrNull(i - 1)?.trim().orEmpty()
-                if (remoteMsg.trim() != baseline) {
-                    val interval = cyclePresetIntervals.getOrElse(i - 1) { 10 }
-                    presetSavers[i - 1](remoteMsg.trim(), interval, null)
+                val trimmed = remoteMsg.trim()
+                val local = cyclePresetMessages.getOrNull(i - 1)?.trim().orEmpty()
+                if (trimmed != local) {
+                    val baseline = lastSyncedValues["cyclePreset$i"] as? String
+                    if (baseline == null || trimmed != baseline) {
+                        cyclePresetMessages[i - 1] = trimmed
+                        val interval = cyclePresetIntervals.getOrElse(i - 1) { 10 }
+                        presetSavers[i - 1](trimmed, interval, null)
+                    }
                 }
-                lastSyncedValues["cyclePreset$i"] = remoteMsg.trim()
+                lastSyncedValues["cyclePreset$i"] = trimmed
+            }
+            snap.getLong("spotifyPreset")?.let { remote ->
+                val intVal = remote.toInt().coerceIn(1, 5)
+                if (intVal != spotifyPreset) {
+                    val baseline = lastSyncedValues["spotifyPreset"] as? Int
+                    if (baseline == null || intVal != baseline) {
+                        spotifyPreset = intVal
+                        userPreferencesRepository.saveSpotifyPreset(intVal)
+                    }
+                }
+                lastSyncedValues["spotifyPreset"] = intVal
             }
         }
     }
@@ -1313,8 +1508,7 @@ class VrcaViewModel(
     fun applyForceUpdateGate(pending: Boolean) {
         if (forceUpdatePending == pending) return
         forceUpdatePending = pending
-        remoteVrcaOsc.blocked = pending
-        localVrcaOsc.blocked = pending
+        refreshOscBlockGate()
         if (pending) {
             // Stop any in-flight typing indicator immediately (state safety; the
             // OSC send is already blocked). Sender loops keep their config but
@@ -1322,6 +1516,130 @@ class VrcaViewModel(
             remoteVrcaOsc.typing = false
             localVrcaOsc.typing = false
         }
+    }
+
+    /**
+     * True while the user is signed OUT of VRChat. Per docs/ui-revamp.md
+     * (Settings Accounts): signing out force-stops all OSC output until a
+     * VRChat account is signed in again — same chokepoint as the force-update
+     * gate. Driven by VrchatAuthManager's loggedOut/loggedIn signals (collected
+     * in init on the app-scoped VM, so the gate works even with no Activity).
+     * Re-login only UNBLOCKS — it never auto-starts sending; toggle config is
+     * preserved and the user presses Start again.
+     */
+    // Seeded from the REAL auth state, not false: with the forced login screen
+    // removed, a signed-out cold start lands straight in the app — the OSC
+    // block must hold from the first frame, not wait for a loggedOutSignal
+    // that never fires on cold start.
+    var vrchatLoggedOut by mutableStateOf(
+        !com.vrca.vrchat.VrchatAuthManager.isLoggedIn(app.applicationContext)
+    )
+        private set
+
+    /** OSC is blocked when ANY gate reason is active. */
+    private fun refreshOscBlockGate() {
+        val blocked = forceUpdatePending || vrchatLoggedOut
+        remoteVrcaOsc.blocked = blocked
+        localVrcaOsc.blocked = blocked
+    }
+
+    private fun startVrchatAuthGateWatcher() {
+        // Apply the seeded state immediately (cold start while signed out).
+        refreshOscBlockGate()
+        viewModelScope.launch {
+            com.vrca.vrchat.VrchatAuthManager.loggedOutSignal.collect {
+                // Order matters: stopSending()'s chatbox-clearing send must go
+                // out BEFORE the gate blocks the chokepoint.
+                if (oscSending) stopSending()
+                vrchatLoggedOut = true
+                refreshOscBlockGate()
+            }
+        }
+        viewModelScope.launch {
+            com.vrca.vrchat.VrchatAuthManager.loggedInSignal.collect {
+                vrchatLoggedOut = false
+                refreshOscBlockGate()
+            }
+        }
+    }
+
+    /**
+     * Minimal chatbox background (the VRCOSC/MagicChatbox "skinny bubble" trick).
+     * When ON, [VrcaOsc] appends U+0003+U+001F to every outgoing chatbox message
+     * (collapsing the in-game bubble background) and the combined-text builder
+     * reserves 2 chars of the 144 budget so the suffix can never be trimmed off.
+     * Persisted to DataStore like the notification toggles — survives close/swipe
+     * (it is a display preference, NOT a sender toggle: it never starts OSC and
+     * is not part of the feature-session restore or Firestore sync).
+     */
+    var minimalChatboxBg by mutableStateOf(false)
+        private set
+
+    fun setMinimalChatboxBgFlag(enabled: Boolean) {
+        minimalChatboxBg = enabled
+        remoteVrcaOsc.minimalBackground = enabled
+        localVrcaOsc.minimalBackground = enabled
+        viewModelScope.launch { userPreferencesRepository.saveMinimalChatboxBg(enabled) }
+        // Re-send immediately while sending so the bubble reacts in-game the
+        // moment the user flips the eye toggle (instead of on the next tick).
+        if (oscSending) rebuildAndMaybeSendCombined(forceSend = true)
+        else rebuildCombinedPreviewOnly()
+    }
+
+    /**
+     * Per-source Now Playing enables (Media tab). When the currently-detected
+     * media app's source is OFF, [buildNowPlayingLines] renders nothing — the
+     * chatbox/preview drop the music block while detection itself keeps
+     * running (so re-enabling the source picks the track straight back up).
+     * An unlisted media app is always allowed. DataStore-persisted, local-only
+     * (not synced to Firestore, not part of the feature-session restore).
+     */
+    var mediaSourceSpotify by mutableStateOf(true)
+        private set
+    var mediaSourceYoutube by mutableStateOf(true)
+        private set
+    var mediaSourceYtMusic by mutableStateOf(true)
+        private set
+
+    fun setMediaSourceFlag(pkg: String, enabled: Boolean) {
+        when (pkg) {
+            PKG_SPOTIFY -> {
+                mediaSourceSpotify = enabled
+                viewModelScope.launch { userPreferencesRepository.saveMediaSourceSpotify(enabled) }
+            }
+            PKG_YOUTUBE -> {
+                mediaSourceYoutube = enabled
+                viewModelScope.launch { userPreferencesRepository.saveMediaSourceYoutube(enabled) }
+            }
+            PKG_YTMUSIC -> {
+                mediaSourceYtMusic = enabled
+                viewModelScope.launch { userPreferencesRepository.saveMediaSourceYtMusic(enabled) }
+            }
+            else -> return
+        }
+        // React in-game immediately, same as the minimal-background toggle.
+        if (oscSending) rebuildAndMaybeSendCombined(forceSend = true)
+        else rebuildCombinedPreviewOnly()
+    }
+
+    /** Is the source of the currently-active media app enabled? */
+    fun isActiveMediaSourceEnabled(): Boolean = when (activePackage) {
+        PKG_SPOTIFY -> mediaSourceSpotify
+        PKG_YOUTUBE -> mediaSourceYoutube
+        PKG_YTMUSIC -> mediaSourceYtMusic
+        else -> true
+    }
+
+    /** Now Playing progress bar+time line. OFF = title only (Media tab toggle).
+     *  DataStore-persisted, local-only. */
+    var musicShowProgress by mutableStateOf(true)
+        private set
+
+    fun setMusicShowProgressFlag(enabled: Boolean) {
+        musicShowProgress = enabled
+        viewModelScope.launch { userPreferencesRepository.saveMusicShowProgress(enabled) }
+        if (oscSending) rebuildAndMaybeSendCombined(forceSend = true)
+        else rebuildCombinedPreviewOnly()
     }
 
     fun onIpAddressChange(ip: String) {
@@ -1428,6 +1746,21 @@ class VrcaViewModel(
     var oscSending by mutableStateOf(savedState["oscSending"] ?: false)
         private set
 
+    // Epoch ms of when the current sending session started — drives the Home
+    // "Sending · 2h 14m" uptime label. 0 while idle. Persisted through
+    // FeatureSessionStore using the RPC-counter pattern: an OS-kill revival
+    // inside the 20-min grace window CONTINUES the counter (the watchdog gap is
+    // not subtracted — the label is framed as "since you pressed Start"); a
+    // deliberate swipe disarms restore so the next session starts fresh.
+    var sendingSinceMs by mutableStateOf(savedState["sendingSinceMs"] ?: 0L)
+        private set
+    private var uptimeHeartbeatJob: Job? = null
+
+    // Epoch ms of the cycle sender's next line advance — drives the Home
+    // "Next cycle in 12s" ticker. 0 when the cycle loop isn't running.
+    var nextCycleAtMs by mutableStateOf(0L)
+        private set
+
     // =========================
     // AFK
     // =========================
@@ -1480,7 +1813,15 @@ class VrcaViewModel(
     // True only while the current special segment is an actual AD (not a DJ
     // segment). The builder checks this BEFORE isSpotifyDj — an ad blanks the
     // artist, which would otherwise make isSpotifyDj true and swallow the label.
-    private var nowPlayingIsAd by mutableStateOf(false)
+    // Read by the Media tab's now-playing card (state chip).
+    var nowPlayingIsAd by mutableStateOf(false)
+        private set
+
+    // True when the active YouTube session is a live stream (non-seekable, no
+    // finite duration). The builder shows a LIVE marker instead of a progress bar.
+    // Read by the Media tab's now-playing card (state chip).
+    var nowPlayingIsLive by mutableStateOf(false)
+        private set
 
     // =========================
     // Time feature
@@ -1514,6 +1855,18 @@ class VrcaViewModel(
         startSelfSyncLoopIfNeeded()
     }
 
+    // 12-hour (default, with AM/PM) vs 24-hour clock for the Time line.
+    // Settings → Chatbox display. (`Flag` suffix avoids the JVM setter clash.)
+    var time24h by mutableStateOf(false)
+        private set
+
+    fun setTime24hFlag(enabled: Boolean) {
+        time24h = enabled
+        viewModelScope.launch { userPreferencesRepository.saveTimeFormat24h(enabled) }
+        if (oscSending) rebuildAndMaybeSendCombined(forceSend = true)
+        else rebuildCombinedPreviewOnly()
+    }
+
     private fun currentTimeString(): String {
         val zone: java.time.ZoneId = when {
             timeMode == "Device" || timeMode == "LOCAL" ->
@@ -1531,7 +1884,10 @@ class VrcaViewModel(
             else -> java.time.ZoneId.systemDefault()
         }
         val now = java.time.LocalDateTime.now(zone)
-        return DateTimeFormatter.ofPattern("HH:mm").format(now)
+        // 12-hour with AM/PM by default; 24-hour when the Settings toggle is on.
+        // Locale.US keeps the marker a stable uppercase "AM"/"PM".
+        return if (time24h) DateTimeFormatter.ofPattern("HH:mm").format(now)
+        else DateTimeFormatter.ofPattern("h:mm a", java.util.Locale.US).format(now)
     }
 
     var musicRefreshSeconds by mutableStateOf(MUSIC_REFRESH_SECONDS_LOCKED)
@@ -1658,6 +2014,9 @@ class VrcaViewModel(
         // and remote-config snapshots). Admin build skips self-sync entirely.
         attachModerationListenersLoopOnce()
 
+        // VRChat sign-out hard-blocks OSC until re-login (Settings Accounts).
+        startVrchatAuthGateWatcher()
+
         // Live-mode loop: idle until an admin starts watching.
         startLiveSyncWatcher()
         // Browse-mode volatile loop: idle until an admin browses the directory.
@@ -1697,9 +2056,12 @@ class VrcaViewModel(
             // made while the user was offline aren't clobbered by our
             // app-open write. Toggles always start OFF per design, so we
             // only merge content fields (messages, presets, intervals).
-            // Timeout after 5s — DataStore already has the latest local
-            // state, so this is best-effort optimization, not a gate.
-            kotlinx.coroutines.withTimeoutOrNull(5_000L) {
+            // Timeout after 12s — the read is now Source.SERVER (a network
+            // round-trip after anon-auth), which can exceed 5s on a cold start over
+            // cellular. DataStore already has the latest local state and the
+            // moderation snapshot listener is the backstop (it also delivers server
+            // data and applies admin edits), so this is best-effort, not a gate.
+            kotlinx.coroutines.withTimeoutOrNull(12_000L) {
                 applyRemoteContentBeforeSync()
             }
             // Cold-open write: this is the "user got online" write, anchored to
@@ -1719,6 +2081,47 @@ class VrcaViewModel(
         viewModelScope.launch {
             if (BuildConfig.IS_ADMIN_BUILD) return@launch
             applyCrossDeviceSync()
+        }
+
+        // Minimal chatbox background: seed from DataStore on every VM creation
+        // (incl. headless revival) and keep the OSC chokepoint flags in sync.
+        // Deliberately no startSelfSyncLoopIfNeeded — local-only preference.
+        viewModelScope.launch {
+            userPreferencesRepository.minimalChatboxBg.collect {
+                minimalChatboxBg = it
+                remoteVrcaOsc.minimalBackground = it
+                localVrcaOsc.minimalBackground = it
+                rebuildCombinedPreviewOnly()
+            }
+        }
+
+        // Per-source Now Playing enables: seed + follow DataStore (local-only).
+        viewModelScope.launch {
+            userPreferencesRepository.mediaSourceSpotify.collect {
+                mediaSourceSpotify = it; rebuildCombinedPreviewOnly()
+            }
+        }
+        viewModelScope.launch {
+            userPreferencesRepository.mediaSourceYoutube.collect {
+                mediaSourceYoutube = it; rebuildCombinedPreviewOnly()
+            }
+        }
+        viewModelScope.launch {
+            userPreferencesRepository.mediaSourceYtMusic.collect {
+                mediaSourceYtMusic = it; rebuildCombinedPreviewOnly()
+            }
+        }
+
+        // 12/24-hour clock + Now Playing progress-bar visibility (local-only).
+        viewModelScope.launch {
+            userPreferencesRepository.timeFormat24h.collect {
+                time24h = it; rebuildCombinedPreviewOnly()
+            }
+        }
+        viewModelScope.launch {
+            userPreferencesRepository.musicShowProgress.collect {
+                musicShowProgress = it; rebuildCombinedPreviewOnly()
+            }
         }
 
         viewModelScope.launch {
@@ -1827,13 +2230,22 @@ class VrcaViewModel(
 
                 nowPlayingSpecialActive = s.specialActive
                 nowPlayingAdInfo = s.adInfo
+                nowPlayingIsLive = s.isLive
 
                 // Track ad segment count: increment only when transitioning INTO an ad,
                 // not on every tick. Reset when ad ends so next ad gets a fresh count.
                 val isAdNow = s.specialActive && s.title.trim().lowercase().let { t ->
                     t.contains("advert") || t == "ad" || t.contains("advertisement") || t.contains("sponsored")
                 } || (s.specialActive && s.activePackage == "com.spotify.music" && s.title.trim() == "AD")
-                if (isAdNow && !lastSpecialWasAd) adSegmentCount++
+                if (isAdNow && !lastSpecialWasAd) {
+                    adSegmentCount++
+                } else if (!isAdNow && lastSpecialWasAd) {
+                    // Ad break ended — reset so the NEXT break starts at "Ad 1" instead of
+                    // climbing 1→2→3 across the whole session. (Combined with the
+                    // service-side window lock that keeps isAdNow continuously true through
+                    // a single ad, this stops the count incrementing randomly mid-ad.)
+                    adSegmentCount = 0
+                }
                 lastSpecialWasAd = isAdNow
                 nowPlayingIsAd = isAdNow
 
@@ -1944,7 +2356,14 @@ class VrcaViewModel(
             return false
         }
 
-        // YouTube-specific: NowPlayingState already ran stall detection and forced
+        // YouTube MUSIC: its raw position is unreliable (advances while paused / freezes
+        // while playing) so any motion heuristic INVERTS it. Its reported state is honest
+        // — trust it directly in BOTH directions and skip all motion logic below.
+        if (activePackage == "com.google.android.apps.youtube.music") {
+            return nowPlayingReportedIsPlaying
+        }
+
+        // YouTube VIDEO app: NowPlayingState already ran stall detection and forced
         // isPlaying=false. Trust it directly -- skip motion heuristics for YouTube
         // because YouTube keeps reporting speed=1f and position advances via extrapolation
         // even when truly paused, which fools the motion ticker.
@@ -2000,6 +2419,11 @@ class VrcaViewModel(
         clearJob?.cancel(); clearJob = null
         oscSending = true
         savedState["oscSending"] = true
+        // Fresh Start stamps the uptime epoch; a restore that pre-seeded a
+        // surviving epoch (OS-kill revival inside the grace window) keeps it.
+        if (sendingSinceMs <= 0L) sendingSinceMs = System.currentTimeMillis()
+        savedState["sendingSinceMs"] = sendingSinceMs
+        startUptimeHeartbeat()
         persistFeatureSession()
         // Launch whatever is configured. Each starter no-ops if its toggle is off.
         startAfkSender(local)
@@ -2016,6 +2440,9 @@ class VrcaViewModel(
     fun stopSending(local: Boolean = false) {
         oscSending = false
         savedState["oscSending"] = false
+        sendingSinceMs = 0L
+        savedState["sendingSinceMs"] = 0L
+        uptimeHeartbeatJob?.cancel(); uptimeHeartbeatJob = null
         persistFeatureSession()
         stopAll(clearFromChatbox = false)
         keepaliveJob?.cancel(); keepaliveJob = null
@@ -2032,6 +2459,8 @@ class VrcaViewModel(
     fun killStopAndClear(local: Boolean = false) {
         stopAll(clearFromChatbox = false)
         oscSending = false; savedState["oscSending"] = false
+        sendingSinceMs = 0L; savedState["sendingSinceMs"] = 0L
+        uptimeHeartbeatJob?.cancel(); uptimeHeartbeatJob = null
         afkEnabled = false; savedState["afkEnabled"] = false
         cycleEnabled = false; savedState["cycleEnabled"] = false
         spotifyEnabled = false; savedState["spotifyEnabled"] = false
@@ -2052,8 +2481,23 @@ class VrcaViewModel(
             cycle = cycleEnabled,
             spotify = spotifyEnabled,
             time = timeEnabled,
-            sending = oscSending
+            sending = oscSending,
+            sendingSinceMs = sendingSinceMs
         )
+    }
+
+    /** Slow (~60s) heartbeat while OSC is transmitting. The persisted timestamp
+     *  is what lets [restoreFeatureSession] distinguish a short OS-kill→watchdog
+     *  gap (uptime counter continues) from a long dead window (counter resets,
+     *  sending still resumes). */
+    private fun startUptimeHeartbeat() {
+        uptimeHeartbeatJob?.cancel()
+        uptimeHeartbeatJob = viewModelScope.launch {
+            while (oscSending) {
+                FeatureSessionStore.heartbeatSending(app.applicationContext)
+                delay(60_000L)
+            }
+        }
     }
 
     /** Restore the toggle CONFIG that was set up before an unexpected kill, and
@@ -2073,7 +2517,16 @@ class VrcaViewModel(
         timeEnabled = pending.time; savedState["timeEnabled"] = pending.time
         oscSending = false; savedState["oscSending"] = false
         if (pending.sending && pending.anyEnabled) {
-            // Was actively sending → resume seamlessly.
+            // Was actively sending → resume seamlessly. Continue the uptime
+            // counter only when the dead window is short (the kill→watchdog
+            // gap); after a long gap the counter starts fresh while sending
+            // still resumes (same grace-window pattern as the RPC counter).
+            val sinceSeen = System.currentTimeMillis() - pending.lastSendingSeenMs
+            sendingSinceMs =
+                if (pending.sendingSinceMs > 0L && sinceSeen in 0..UPTIME_RESTORE_GRACE_MS) pending.sendingSinceMs
+                else 0L
+            savedState["sendingSinceMs"] = sendingSinceMs
+            restoredActiveSending = true
             startSending()
         } else {
             // Configured but idle → just reflect the toggles in the preview.
@@ -2236,6 +2689,17 @@ class VrcaViewModel(
         return firstLine
     }
 
+    /** Full multi-line cycle preset content — the Automations preset-chip
+     *  long-press peek needs more than the first line. */
+    fun getCyclePresetFull(slot: Int): String {
+        val i = slot.coerceIn(1, 5) - 1
+        return cyclePresetMessages[i]
+    }
+
+    /** The cycle line currently on screen (or first line when idle) — drives
+     *  the Automations collapsed-card "now: '…'" summary. */
+    fun cycleCurrentLine(): String = currentCycleLinePreview()
+
     fun getMusicPresetName(preset: Int): String = when (preset.coerceIn(1, 5)) {
         1 -> "Love"
         2 -> "Minimal"
@@ -2369,14 +2833,36 @@ class VrcaViewModel(
         cycleJob = viewModelScope.launch {
             cycleIndex = 0
             while (cycleEnabled && oscSending && !isBanned) {
+                // Re-read the LIVE lines every tick. The loop used to iterate a
+                // list captured ONCE at start, so a mid-send edit kept flashing
+                // the pre-edit text at each rotation boundary (every other path
+                // reads live cycleLines, so only this loop was stale) until a
+                // Stop/Start re-captured it.
+                val live = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(10)
+                if (live.isEmpty()) {
+                    // All lines deleted mid-send: render without a cycle line
+                    // (clears the chatbox if nothing else is enabled) and keep
+                    // looping so re-adding a line resumes automatically.
+                    rebuildAndMaybeSendCombined(forceSend = true, local = local, forceClearIfAllOff = true)
+                    nextCycleAtMs = System.currentTimeMillis() + cycleIntervalSeconds.toLong() * 1000L
+                    delay(cycleIntervalSeconds.toLong() * 1000L)
+                    continue
+                }
+                if (cycleIndex >= live.size) cycleIndex = 0
                 rebuildAndMaybeSendCombined(
                     forceSend = true,
                     local = local,
-                    cycleLineOverride = msgs[cycleIndex % msgs.size]
+                    cycleLineOverride = live[cycleIndex]
                 )
-                cycleIndex = (cycleIndex + 1) % msgs.size
+                // Advance AFTER the interval, not right after the send — during
+                // the wait cycleIndex must still point at the line on screen so
+                // currentCycleLinePreview() (preview + the other sender loops'
+                // null-override rebuilds) agrees with what this tick sent.
+                nextCycleAtMs = System.currentTimeMillis() + cycleIntervalSeconds.toLong() * 1000L
                 delay(cycleIntervalSeconds.toLong() * 1000L)
+                cycleIndex = (cycleIndex + 1) % live.size
             }
+            nextCycleAtMs = 0L
         }
         startSelfSyncLoopIfNeeded()
     }
@@ -2384,6 +2870,7 @@ class VrcaViewModel(
     fun stopCycle(clearFromChatbox: Boolean) {
         cycleJob?.cancel()
         cycleJob = null
+        nextCycleAtMs = 0L
         if (clearFromChatbox && !isBanned) rebuildAndMaybeSendCombined(forceSend = true, forceClearIfAllOff = true)
         lastCyclePreviewAdvanceMs = 0L
         startSelfSyncLoopIfNeeded()
@@ -2548,7 +3035,11 @@ class VrcaViewModel(
             }
         }
 
-        val limited = limitWithPriority(rawLines, VRC_MAX_CHARS, VRC_MAX_LINES)
+        // With minimal background ON, give the control suffix its 2 chars back
+        // out of the content budget so it can never be cut by the 144 limit;
+        // OFF returns the full budget to content.
+        val charBudget = if (minimalChatboxBg) VRC_MAX_CHARS - MINIMAL_BG_RESERVED_CHARS else VRC_MAX_CHARS
+        val limited = limitWithPriority(rawLines, charBudget, VRC_MAX_LINES)
 
         if (limited.cycleWasModifiedToPreserveMusic) {
             cycleTrimWarning = "Cycle was trimmed to preserve Now Playing (VRChat limits)."
@@ -2596,10 +3087,17 @@ class VrcaViewModel(
         return msgs.getOrNull(cycleIndex % msgs.size).orEmpty()
     }
 
+    /** The exact music lines as they would render into the chatbox right now —
+     *  shown verbatim (monospace) in the Media tab's now-playing card. */
+    fun currentMusicChatboxLines(): List<String> = buildNowPlayingLines()
+
     private fun buildNowPlayingLines(): List<String> {
         val title = if (spotifyDemoEnabled && !nowPlayingDetected) "Pretty Girl" else lastNowPlayingTitle
         val artist = if (spotifyDemoEnabled && !nowPlayingDetected) "Clairo" else lastNowPlayingArtist
         if (!spotifyDemoEnabled && !nowPlayingDetected) return emptyList()
+        // Per-source enable (Media tab): a disabled source renders nothing —
+        // detection keeps running so re-enabling resumes instantly.
+        if (nowPlayingDetected && !isActiveMediaSourceEnabled()) return emptyList()
 
         val safeTitle = title.takeIf { it != "(blank)" }?.trim().orEmpty()
         val safeArtist = artist.takeIf { it != "(blank)" }?.trim().orEmpty()
@@ -2616,14 +3114,33 @@ class VrcaViewModel(
         // title with a progress bar instead of "Ad 1 of 1". Check the explicit ad
         // flag FIRST and return early so ads always show their index.
         if (nowPlayingIsAd) {
-            // Prefer the player's real ad index ("Ad 1 of 1"); else fall back to the
-            // session counter, coerced to at least 1 so it never shows "Ad 0".
-            val label = if (nowPlayingAdInfo.isNotBlank()) {
-                "Ad $nowPlayingAdInfo"
-            } else {
-                "Ad ${adSegmentCount.coerceAtLeast(1)}"
+            // The ad index ("Ad 1 of 1") was unreliable, so just show a bare "Ad".
+            val label = "Ad"
+            if (!musicShowProgress) return listOf(label)
+            // Keep the progress bar during ads — it must NEVER vanish. Ads always
+            // play, so force playing and render the ad's OWN position/duration
+            // countdown. When the player reports NO duration (some audio ads),
+            // render a static zero-position bar with no time instead of dropping
+            // the bar entirely (the old fallback). No brand/title is shown — only
+            // the neutral "Ad" label + the bar — so nothing leaks.
+            val adDur = nowPlayingDurationMs
+            if (adDur > 0L) {
+                val spd = if (nowPlayingSpeed > 0f) nowPlayingSpeed else 1f
+                val elapsed = SystemClock.elapsedRealtime() - nowPlayingPositionUpdateTimeMs
+                val adj = (elapsed * spd).toLong()
+                val pos = (nowPlayingPositionMs + max(0L, adj)).coerceAtMost(adDur)
+                val bar = renderProgressBar(spotifyPreset, pos, max(1L, adDur), true, true)
+                val time = "${fmtTime(pos)}/${fmtTime(adDur)}"
+                return listOfNotNull(label, (bar + time).takeIf { it.isNotBlank() })
             }
-            return listOf(label)
+            val bar = renderProgressBar(spotifyPreset, 0L, 1L, true, true)
+            return listOfNotNull(label, bar.takeIf { it.isNotBlank() })
+        }
+
+        if (nowPlayingIsLive) {
+            val maxLine = 42
+            val line1 = TitleCleaner.fitOneLine(safeTitle, safeArtist, maxLine)
+            return listOfNotNull(line1.takeIf { it.isNotBlank() }, "● LIVE")
         }
 
         val isSpotifyDj = activePackage == "com.spotify.music" &&
@@ -2633,17 +3150,10 @@ class VrcaViewModel(
         val effectiveIsPlaying = if (nowPlayingSpecialActive || isSpotifyDj) true else nowPlayingIsPlaying
 
         val maxLine = 42
-        val twoLineBudget = maxLine * 2
+        val line1 = TitleCleaner.fitOneLine(safeTitle, safeArtist, maxLine)
 
-        val combinedName = if (safeArtist.isNotBlank()) "$safeArtist \u2014 $safeTitle" else safeTitle
-        val preferNoArtist = safeArtist.isNotBlank() && combinedName.length > twoLineBudget
-
-        val primary = if (preferNoArtist) safeTitle else combinedName
-        val line1 = when {
-            primary.length <= maxLine -> primary
-            safeTitle.length <= maxLine -> safeTitle
-            else -> safeTitle.take(maxLine - 1) + "…"
-        }.trim()
+        // Media tab "Show progress bar" off → title only, no bar/time line.
+        if (!musicShowProgress) return listOfNotNull(line1.takeIf { it.isNotBlank() })
 
         val dur = if (spotifyDemoEnabled && !nowPlayingDetected) 205_000L else nowPlayingDurationMs
         val posSnapshot = if (spotifyDemoEnabled && !nowPlayingDetected) 78_000L else nowPlayingPositionMs
@@ -2759,7 +3269,6 @@ class VrcaViewModel(
     // Progress bars
     // =========================
 
-    // \u25C9 = playing (circled dot). \u23F8 = paused (classic double-bar pause symbol).
     private fun posDot(isPlaying: Boolean): Char = if (isPlaying) '\u25C9' else '\u23F8'
 
     // isPlaying   = animation state (smoothed - suppress stall/DJ flicker on position advance)
@@ -2772,24 +3281,31 @@ class VrcaViewModel(
         val duration = max(1L, durMs)
         val p = min(1f, max(0f, posMs.toFloat() / duration.toFloat()))
         val dot = posDot(dotIsPlaying)
+        // The paused marker (\u23F8) renders as a wide emoji in VRChat's chatbox font
+        // (the playing \u25C9 is a normal text glyph), pushing the bar+time line past
+        // the box width \u2014 "the time wraps when paused but not when playing".
+        // Compensate by dropping ONE filler slot while paused: every slot is the
+        // same glyph, so the bar just reads one char shorter; the marker index
+        // rescales automatically and the slot returns on resume.
+        val pausedTrim = if (dotIsPlaying) 0 else 1
 
         return when (preset.coerceIn(1, 5)) {
             1 -> {
-                val innerSlots = 8
+                val innerSlots = 8 - pausedTrim
                 val idx = (p * (innerSlots - 1)).toInt()
                 val inner = CharArray(innerSlots) { '\u2501' }
                 inner[idx] = dot
                 "\u2661" + inner.concatToString() + "\u2661"
             }
             2 -> {
-                val slots = 10
+                val slots = 10 - pausedTrim
                 val idx = (p * (slots - 1)).toInt()
                 val bg = CharArray(slots) { '\u2500' }
                 bg[idx] = dot
                 bg.concatToString()
             }
             3 -> {
-                val slots = 10
+                val slots = 10 - pausedTrim
                 val idx = (p * (slots - 1)).toInt()
                 val out = CharArray(slots) { i ->
                     when {
@@ -2802,7 +3318,7 @@ class VrcaViewModel(
             }
             4 -> renderSoundwaveBar(p, posMs, isPlaying, dotIsPlaying)
             else -> {
-                val slots = 10
+                val slots = 10 - pausedTrim
                 val idx = (p * (slots - 1)).toInt()
                 val out = CharArray(slots) { i ->
                     when {
@@ -2832,7 +3348,8 @@ class VrcaViewModel(
     private val soundwavePaused: IntArray = intArrayOf(4, 5, 4, 6, 4, 5, 4, 6, 4, 5, 4, 6)
 
     private fun renderSoundwaveBar(progress01: Float, posMs: Long, isPlaying: Boolean, dotIsPlaying: Boolean = isPlaying): String {
-        val slots = 8
+        // Same paused-trim as renderProgressBar: the [⏸] marker is emoji-wide.
+        val slots = if (dotIsPlaying) 8 else 7
         val idx = (progress01 * (slots - 1)).toInt().coerceIn(0, slots - 1)
 
         val patternIndex = if (isPlaying) ((posMs / 1400L) % soundwavePatterns.size).toInt() else -1

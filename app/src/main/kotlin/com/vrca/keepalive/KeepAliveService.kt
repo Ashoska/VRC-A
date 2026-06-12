@@ -87,25 +87,33 @@ class KeepAliveService : Service() {
             try { wakeLock?.let { if (it.isHeld) it.release() } } catch (_: Throwable) {}
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
+            val appCtx = applicationContext
             Thread {
                 try { Thread.sleep(300) } catch (_: Throwable) {}
+                // onCreate posted the shared notification (id 1001) BEFORE this
+                // guard ran; stopForeground removes it, but the removal can race
+                // the kill below on some OEMs. Cancel explicitly — processed in
+                // system_server, so it lands even after the process dies.
+                com.vrca.app.AppShutdown.cancelPersistentNotification(appCtx)
                 android.os.Process.killProcess(android.os.Process.myPid())
                 kotlin.system.exitProcess(0)
             }.start()
             return START_NOT_STICKY
         }
         // After an OS-initiated kill the process is brought back here (START_STICKY /
-        // watchdog / boot) with no Activity, so the chatbox senders — which live in the
-        // app-scoped VrcaViewModel — would stay dead until the user reopened the app.
-        // Only recreate the ViewModel headlessly if OSC was actively SENDING when the
-        // process died (the user had pressed START) — that's the background work that
-        // needs to resume. Toggles configured but not started have no background work,
-        // so there's nothing to revive (and `restoreFeatureSession` won't transmit).
+        // watchdog / boot) with no Activity, so the app-scoped VrcaViewModel — which owns
+        // the chatbox senders AND the hourly liveness heartbeat AND the moderation/watch
+        // listener — would stay dead until the user reopened the app. We ALWAYS recreate it
+        // on revival (the swipe guard above already returned for a deliberate swipe, so this
+        // only runs for a genuine OS kill where the process should keep working in the
+        // background). This is required even when nothing is OSC-sending: the heartbeat keeps
+        // the user reporting ONLINE and the moderation listener keeps admin watch/kill/toggles
+        // reachable — both are runtime concerns independent of whether the chatbox is sending.
+        // OSC transmission stays separately gated: `restoreFeatureSession()` only calls
+        // startSending() when the persisted session was actually sending, so rebuilding the VM
+        // never makes a configured-but-idle (e.g. Discord-RPC-only) user start transmitting.
         try {
-            val pending = com.vrca.app.FeatureSessionStore.pendingRestore(this)
-            if (pending != null && pending.sending && pending.anyEnabled) {
-                (applicationContext as? com.vrca.app.VrcaApplication)?.ensureRuntimeViewModel()
-            }
+            (applicationContext as? com.vrca.app.VrcaApplication)?.ensureRuntimeViewModel()
         } catch (_: Throwable) {}
 
         // If killed, try to come back.

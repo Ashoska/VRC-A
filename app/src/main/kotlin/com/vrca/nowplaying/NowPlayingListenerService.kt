@@ -36,6 +36,36 @@ class NowPlayingListenerService : NotificationListenerService() {
         "com.google.android.apps.youtube.music"
     )
 
+    // YouTube ads are short (5–60s, rarely up to 3 min). Anything non-seekable
+    // beyond this threshold is a live stream, not an ad.
+    private val YOUTUBE_AD_MAX_DURATION_MS = 5 * 60 * 1000L
+
+    // Require this many CONSECUTIVE ad-candidate PLAYING samples before declaring an
+    // ad. The raw signal is noisy — a single stray frame (a non-seekable frame on the
+    // video app, or a transient short-duration frame at song start on YT Music) must
+    // not flash "Ad". 2 samples ≈ 1s.
+    private val YT_AD_ENTRY_STREAK = 2
+
+    // YouTube MUSIC ad detection is RELATIVE, not a fixed ceiling (ads have been seen at
+    // 55s+, and the real cap is unknowable). An ad reuses the previous song's title but
+    // reports a much shorter duration; we flag it when the SAME title is suddenly playing
+    // a duration far below that title's established (longest-seen) length:
+    //  - it must collapse by at least this much (guards against metadata jitter),
+    private val YT_MUSIC_AD_COLLAPSE_MS = 20 * 1000L
+    //  - and the short duration must be under this absolute cap (YT Music ads are never
+    //    longer than a few minutes; stops a freak "collapse" under a 30-min track from
+    //    being read as an ad).
+    private val YT_MUSIC_AD_ABS_MAX_MS = 3 * 60 * 1000L
+    //  - A title that has NEVER been seen longer than this is "unconfirmed" — a short
+    //    duration on it is treated as an ad even with no long baseline to collapse from.
+    //    This catches the PRE-ROLL ad, which shows the UPCOMING song's title at the ad's
+    //    short length (so the collapse rule alone can't see it — there's no established
+    //    long length yet). Conversely, once a title is seen LONGER than this it's a
+    //    confirmed real song and only the collapse rule applies to it. Tradeoff: a real
+    //    song shorter than this (rare) would be read as an ad. Covers the 55s ads seen
+    //    plus margin.
+    private val YT_MUSIC_AD_MAX_MS = 60 * 1000L
+
     // Catches a newly-started media session the instant it goes active, instead of
     // waiting for the app to post/update its media notification (the pickup delay).
     private var activeSessionsListener:
@@ -59,6 +89,22 @@ class NowPlayingListenerService : NotificationListenerService() {
     // Spotify ad/DJ: only activate special window when metadata explicitly says "ad" or "dj".
     // Stall-based detection is removed entirely — it caused false positives on normal skips.
     private val specialUntilElapsedByPackage = HashMap<String, Long>()
+
+    // YouTube ad-detection state machine (per package):
+    //  - ytSeekNStreakByPackage: consecutive non-seekable PLAYING samples (entry hysteresis)
+    //  - specialWindowIsAdByPackage: whether the currently-open special window is an AD
+    //    window — lets us LOCK the redacted "AD" title for the whole window so a seek=Y
+    //    flap mid-ad can't leak the real song title.
+    //  - lastAdInfoByPackage: the last parsed "X of Y" ad index for the open window.
+    private val ytSeekNStreakByPackage = HashMap<String, Int>()
+    private val specialWindowIsAdByPackage = HashMap<String, Boolean>()
+    private val lastAdInfoByPackage = HashMap<String, String>()
+
+    // YT Music: the current title and its ESTABLISHED (longest-seen) duration. A title
+    // change means a genuine new track (ads never change the title); an ad is detected
+    // when the SAME title's duration collapses far below its established length.
+    private val lastSongTitleByPackage = HashMap<String, String>()
+    private val songEstablishedDurByPackage = HashMap<String, Long>()
 
     // Debounce: when metadata changes rapidly (skip/seek), wait before pushing to avoid flicker.
     private val lastMetaChangeElapsedByPackage = HashMap<String, Long>()
@@ -293,6 +339,109 @@ class NowPlayingListenerService : NotificationListenerService() {
 
         val isPlaying = pb?.state == PlaybackState.STATE_PLAYING
 
+        // YouTube ad / live-stream detection. The two apps need DIFFERENT signals:
+        //
+        // • YouTube MUSIC: on-device traces proved ACTION_SEEK_TO is IDENTICAL for songs
+        //   and ads (both seek=Y, both STATE_PLAYING) — so seekability is useless here.
+        //   The reliable tell is DURATION: an ad collapses the reported duration to a
+        //   short value (≈5–30s) while YT Music KEEPS displaying the PREVIOUS song's
+        //   title. So an ad = a short finite duration while the shown title is still the
+        //   last real song's title. Matching on the carried-over title means a genuinely
+        //   SHORT real track (it has its OWN title) is NOT mistaken for an ad. At cold
+        //   start (no song baseline yet) we fall back to "short finite duration = ad".
+        //
+        // • YouTube VIDEO app: ACTION_SEEK_TO IS stripped during ads, so the seekability
+        //   state machine works (seek=N + finite dur = ad, zero/absent = live stream),
+        //   with a buffering gate + entry hysteresis to reject the noisy raw signal.
+        var ytAdDetected = false
+        var isLive = false
+        if (pkg in youtubePackages) {
+            val actions = pb?.actions ?: 0L
+            val seekable = (actions and PlaybackState.ACTION_SEEK_TO) != 0L
+            val pbState = pb?.state ?: PlaybackState.STATE_NONE
+            val buffering = pbState == PlaybackState.STATE_BUFFERING ||
+                pbState == PlaybackState.STATE_CONNECTING
+
+            if (pkg == "com.google.android.apps.youtube.music") {
+                // RELATIVE duration-collapse detection (no fixed ceiling — ads have been
+                // seen at 55s+ and the cap is unknowable). An ad reuses the PREVIOUS
+                // song's title but reports a duration far SHORTER than that song; a real
+                // new track changes the title. So track each title's ESTABLISHED
+                // (longest-seen) length and flag an ad when the SAME title is suddenly
+                // playing a much shorter duration than its established length. This works
+                // for a 44s, 55s, or 90s ad alike, and spares genuinely short real songs
+                // (they carry their OWN title → their own established length).
+                val curTitle = title.trim()
+                if (curTitle.isNotBlank() && curTitle != lastSongTitleByPackage[pkg]) {
+                    // New title = genuine new track (ads never change the title). Adopt it
+                    // and seed its established length with the current duration.
+                    lastSongTitleByPackage[pkg] = curTitle
+                    songEstablishedDurByPackage[pkg] = duration
+                }
+                val seeded = songEstablishedDurByPackage[pkg] ?: duration
+                if (duration > seeded) songEstablishedDurByPackage[pkg] = duration
+                var establishedDur = songEstablishedDurByPackage[pkg] ?: duration
+
+                // Ground-truth from the iTunes Search API (best-effort, additive). Warm the
+                // cache for this title/artist; if we already have the song's REAL length use
+                // it to RAISE establishedDur. This catches the PRE-ROLL ad even on its first
+                // appearance: the ad shows the UPCOMING song's title at the ad's short length
+                // (no long device baseline yet), but iTunes tells us the song is much longer,
+                // so the collapse rule fires immediately instead of waiting for the real song.
+                if (curTitle.isNotBlank()) {
+                    ITunesDurationLookup.prefetch(curTitle, artist)
+                    val itunesDur = ITunesDurationLookup.cached(curTitle, artist) ?: 0L
+                    if (itunesDur > establishedDur) {
+                        establishedDur = itunesDur
+                        songEstablishedDurByPackage[pkg] = itunesDur
+                    }
+                }
+
+                // Two ad shapes, both NOT gated on `playing` (a PAUSED ad keeps title=song
+                // + the ad's short duration, so detection must survive a pause — gating on
+                // `playing` was the cause of "pausing mid-ad reverts to the song title"):
+                //  (1) COLLAPSE — the title was already established LONG (a real song
+                //      played), and now the SAME title is suddenly playing far shorter:
+                //      the classic mid-roll ad reusing the current song's title.
+                val collapsed = duration in 1 until establishedDur &&
+                    (establishedDur - duration) >= YT_MUSIC_AD_COLLAPSE_MS &&
+                    duration <= YT_MUSIC_AD_ABS_MAX_MS
+                //  (2) SHORT-UNCONFIRMED — a short duration on a title we have NEVER seen
+                //      longer than an ad. This is the PRE-ROLL ad, which shows the UPCOMING
+                //      song's title at the ad's short length, so there is no established
+                //      long length to collapse from (the "first ad of a pod is missed,
+                //      second works" cause). Once the real song plays and establishes a
+                //      long length, this stops firing and only (1) applies.
+                val titleConfirmedLong = establishedDur > YT_MUSIC_AD_MAX_MS
+                val shortUnconfirmed = duration in 1..YT_MUSIC_AD_MAX_MS && !titleConfirmedLong
+                if (collapsed || shortUnconfirmed) {
+                    val streak = (ytSeekNStreakByPackage[pkg] ?: 0) + 1
+                    ytSeekNStreakByPackage[pkg] = streak
+                    if (streak >= YT_AD_ENTRY_STREAK) ytAdDetected = true
+                } else {
+                    ytSeekNStreakByPackage[pkg] = 0
+                }
+            } else {
+                // YouTube video app — seekability works.
+                when {
+                    // A seekable sample is a genuine scrubable track — clear the streak.
+                    seekable -> ytSeekNStreakByPackage[pkg] = 0
+                    // Loading a real track — hold the streak, never confirm an ad here.
+                    buffering -> { /* no-op */ }
+                    else -> {
+                        val streak = (ytSeekNStreakByPackage[pkg] ?: 0) + 1
+                        ytSeekNStreakByPackage[pkg] = streak
+                        if (streak >= YT_AD_ENTRY_STREAK) {
+                            when {
+                                duration in 1..YOUTUBE_AD_MAX_DURATION_MS -> ytAdDetected = true
+                                duration <= 0L -> isLive = true
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         val snapshotUpdateTime =
             if (lastUpdate > 0L) lastUpdate else SystemClock.elapsedRealtime()
 
@@ -307,8 +456,7 @@ class NowPlayingListenerService : NotificationListenerService() {
             lastMetaChangeElapsedByPackage[pkg] = SystemClock.elapsedRealtime()
         }
 
-        // Spotify ad/DJ: only trigger on explicit metadata match
-        val special = classifySpecial(pkg, title, artist)
+        val special = if (ytAdDetected) SpecialKind.AD else classifySpecial(pkg, title, artist)
         var adInfo = ""
         if (special != null) {
             when (special) {
@@ -321,7 +469,13 @@ class NowPlayingListenerService : NotificationListenerService() {
                     title = "AD"; artist = ""
                 }
             }
-            markSpecialWindow(pkg, 10_000L)
+            // YouTube ads use a short window (2s) because the 500ms continuous
+            // poll refreshes it every cycle while seek=N holds. After the ad ends
+            // the window expires in ≤2s — fast enough to not linger over the next
+            // song. Spotify/other ads keep the 10s window (no continuous poll).
+            markSpecialWindow(pkg, if (ytAdDetected) 2_000L else 10_000L)
+            specialWindowIsAdByPackage[pkg] = (special == SpecialKind.AD)
+            if (special == SpecialKind.AD) lastAdInfoByPackage[pkg] = adInfo
             if (controller != null) startPollForRealTrack(pkg, controller)
         } else if (isSpecialWindowActive(pkg)) {
             // The ad/DJ segment just ended. As soon as a real track with genuine
@@ -330,9 +484,27 @@ class NowPlayingListenerService : NotificationListenerService() {
             // for the remainder of the 10s window even though a normal song is now
             // playing. While the metadata is still blank (mid-transition), keep the
             // window + polling so the chatbox doesn't flicker to empty/"Paused".
-            if (title.isNotBlank() || artist.isNotBlank()) {
+            //
+            // YouTube packages are EXEMPT from the eager clear. Their continuous
+            // 500ms poll can race with onMetadataChanged callbacks: the callback
+            // reads controller.playbackState which may still carry the OLD actions
+            // (seek=Y) before the PlaybackState update propagates, causing a false
+            // "ad ended" that clears the window AND kills the continuous poll.
+            // Instead, let the short 2s window expire naturally — the poll keeps
+            // running and refreshes it every cycle while the ad is ongoing. AND, while
+            // it's an AD window, LOCK the redacted "AD" title for the WHOLE window so a
+            // single seek=Y flap mid-ad can't leak the real song title (the cause of
+            // "the ad shows the actual music title"). The window only lapses (≤2s) once
+            // the ad genuinely ends and seek=N stops refreshing it.
+            if (pkg in youtubePackages) {
+                if (specialWindowIsAdByPackage[pkg] == true) {
+                    adInfo = lastAdInfoByPackage[pkg].orEmpty()
+                    title = "AD"; artist = ""
+                }
+            } else if (title.isNotBlank() || artist.isNotBlank()) {
                 clearSpecialWindow(pkg)
                 stopPoll(pkg)
+                specialWindowIsAdByPackage[pkg] = false
             } else if (pkg == "com.spotify.music" && controller != null) {
                 startPollForRealTrack(pkg, controller)
             }
@@ -358,7 +530,8 @@ class NowPlayingListenerService : NotificationListenerService() {
                 playbackSpeed = speed,
                 isPlaying = isPlaying,
                 specialActive = isSpecialWindowActive(pkg),
-                adInfo = adInfo
+                adInfo = adInfo,
+                isLive = isLive
             )
         )
     }

@@ -253,8 +253,13 @@ class VrchatPipelineService : Service() {
                     // outright after this method returns START_NOT_STICKY (so it
                     // won't be recreated again). The brief delay lets the return
                     // value register before the process dies.
+                    val appCtx = applicationContext
                     Thread {
                         try { Thread.sleep(300) } catch (_: Throwable) {}
+                        // Sweep the shared persistent notification (id 1001) in
+                        // case the stopForeground removal races the kill — the
+                        // cancel runs in system_server so it survives our death.
+                        com.vrca.app.AppShutdown.cancelPersistentNotification(appCtx)
                         android.os.Process.killProcess(android.os.Process.myPid())
                         kotlin.system.exitProcess(0)
                     }.start()
@@ -529,9 +534,8 @@ class VrchatPipelineService : Service() {
                     lastConnectedNotifText = notifText
                     updatePersistentNotif(notifText)
                     serviceScope.launch { fireConnectionNotification(true) }
-                    // Profile pictures are NOT written to Firestore (cost). The admin
-                    // panel resolves VRChat+ pictures on demand by vrchatUserId using
-                    // the admin's own VRChat session — see AdminAvatar.
+                    // Profile pictures are NOT written to Firestore (cost) and NOT
+                    // shown in the admin panel (AdminAvatar renders name initials).
                     // Auto-start Discord RPC if enabled
                     serviceScope.launch {
                         try {
@@ -734,6 +738,15 @@ class VrchatPipelineService : Service() {
                         delay(OFFLINE_COOLDOWN_MS)
                         if (pendingOffline.containsKey(userId)) {
                             pendingOffline.remove(userId)
+                            // Confirmed offline (no friend-online flap within the
+                            // cooldown) — reflect it in the cache so the friends-
+                            // online count drops; the entry itself is kept for
+                            // unfriend notifications. A transient flap was cleared
+                            // from pendingOffline by friend-online and never lands.
+                            friendsCache[userId]?.let {
+                                friendsCache[userId] = it.copy(status = "offline", location = "offline")
+                                persistFriendsCache()
+                            }
                             val displayName = friendsCache[userId]?.displayName ?: "A friend"
                             fireEventNotification(
                                 id = "offline_$userId".hashCode(),
@@ -1176,11 +1189,15 @@ class VrchatPipelineService : Service() {
         return ""
     }
 
+    // VRChat's tag names are OFFSET from the displayed rank names (the same
+    // mapping VRCX uses): system_trust_known displays as "User",
+    // system_trust_trusted as "Known User", system_trust_veteran as
+    // "Trusted User", system_trust_legend as "Veteran" (hidden rank).
     private fun prettyTrustRank(rank: String): String = when (rank) {
-        "system_trust_legend"  -> "Legendary"
-        "system_trust_veteran" -> "Veteran"
-        "system_trust_trusted" -> "Trusted"
-        "system_trust_known"   -> "Known"
+        "system_trust_legend"  -> "Veteran"
+        "system_trust_veteran" -> "Trusted User"
+        "system_trust_trusted" -> "Known User"
+        "system_trust_known"   -> "User"
         "system_trust_basic"   -> "New User"
         else -> rank.removePrefix("system_trust_").replaceFirstChar { it.uppercase() }
     }
@@ -1369,6 +1386,28 @@ class VrchatPipelineService : Service() {
         } catch (e: Exception) {
             Log.w(TAG, "persistFriendsCache error", e)
         }
+        publishFriendsOnline()
+    }
+
+    /** Publish the (online, total) friend count for the VRChat tab — computed
+     *  from the cache on every mutation, no API call. "Online" = any non-offline
+     *  status (in-game or website-active), matching VRChat's own sidebar.
+     *
+     *  Counts by status OR location: the WebSocket friend-online /
+     *  friend-location payloads don't always carry a `user.status` field (the
+     *  user object is optional), so a status-only predicate never changed the
+     *  count on live events — it only refreshed when the REST friends reload
+     *  ran on reconnect, i.e. "the count only updates when I reopen the app".
+     *  A live location (wrld_/private/traveling) proves online even when the
+     *  event omitted status; friend-offline explicitly stamps both fields. */
+    private fun publishFriendsOnline() {
+        val total = friendsCache.size
+        if (total == 0) return
+        val online = friendsCache.values.count {
+            (it.status.isNotBlank() && !it.status.equals("offline", true)) ||
+                (it.location.isNotBlank() && !it.location.equals("offline", true))
+        }
+        VrchatPipelineState.friendsOnline = online to total
     }
 
     private fun loadSeenNotifIds() {
@@ -1457,6 +1496,7 @@ class VrchatPipelineService : Service() {
             saved.forEach { (id, entry) -> friendsCache[id] = entry }
             friendsCacheLoaded = friendsCache.isNotEmpty()
             Log.i(TAG, "Restored ${friendsCache.size} friends from local cache")
+            publishFriendsOnline()
         } catch (e: Exception) {
             Log.w(TAG, "Could not restore friends cache from local store", e)
         }
@@ -3184,4 +3224,12 @@ object VrchatPipelineState {
     var statusPageState: VrchatStatusPageData?
         get() = _statusPageState.value
         set(value) { _statusPageState.value = value }
+
+    // (online, total) friends from the local friends cache — fed by the service
+    // on every cache mutation, ZERO extra API calls. Null until the cache loads.
+    private val _friendsOnline = MutableStateFlow<Pair<Int, Int>?>(null)
+    val friendsOnlineFlow: StateFlow<Pair<Int, Int>?> = _friendsOnline.asStateFlow()
+    var friendsOnline: Pair<Int, Int>?
+        get() = _friendsOnline.value
+        set(value) { _friendsOnline.value = value }
 }

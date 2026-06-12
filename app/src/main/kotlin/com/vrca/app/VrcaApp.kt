@@ -11,9 +11,20 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ElevatedCard
@@ -33,8 +44,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -51,7 +68,6 @@ import com.vrca.update.ReleaseInfo
 import com.vrca.update.checkFirestoreRelease
 import com.vrca.vrchat.VrchatAuthManager
 import com.vrca.vrchat.VrchatBanChecker
-import com.vrca.vrchat.VrchatLoginScreen
 import com.vrca.vrchat.VrchatPipelineService
 import androidx.core.content.ContextCompat
 import android.app.DownloadManager
@@ -69,6 +85,7 @@ import androidx.core.content.FileProvider
 import java.io.File
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import java.security.MessageDigest
@@ -156,7 +173,7 @@ fun VrcaApp() {
             } catch (t: kotlinx.coroutines.TimeoutCancellationException) {
                 bootError = "Couldn't reach server. Check your connection and try again."
             } catch (t: Throwable) {
-                bootError = (t.message ?: t.toString()).take(4000)
+                bootError = sanitizeBackendRefs((t.message ?: t.toString()).take(4000))
             } finally {
                 bootWorking = false
             }
@@ -186,9 +203,14 @@ fun VrcaApp() {
     }
 
     if (bootOk && !phase1Checked) {
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            CircularProgressIndicator()
-        }
+        // Same screen as the bootstrap so the whole boot reads as one
+        // continuous loading experience instead of dropping to a bare spinner.
+        BootstrapScreen(
+            working = true,
+            error = null,
+            onRetry = {},
+            phase = 2
+        )
         return
     }
 
@@ -237,88 +259,11 @@ fun VrcaApp() {
                 TosPrefs.acceptedAtMs(ctx) >= remoteTosUpdatedAtMs
     }
 
-    if (!tosAccepted) {
-        TosGate(
-            tosVersion = requiredTosVersion,
-            tosText = remoteTosText,
-            tosUrl = remoteTosUrl,
-            onOpenUrl = { url ->
-                runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
-            },
-            onAccept = {
-                TosPrefs.accept(ctx, requiredTosVersion)
-                tosAccepted = true
-
-                scope.launch {
-                    runCatching {
-                        val data = hashMapOf(
-                            "tosAcceptedVersion" to requiredTosVersion,
-                            "tosAcceptedAt" to Timestamp.now(),
-                            "updatedAt" to Timestamp.now()
-                        )
-                        if (deviceHash.isNotBlank()) {
-                            FirebaseFirestore.getInstance()
-                                .collection("users").document(deviceHash)
-                                .set(data, SetOptions.merge())
-                                .await()
-                        }
-                    }
-                }
-            }
-        )
-        return
-    }
-
     /* -------------------------
-       VRChat login gate (required for all users)
-       Shows VrchatLoginScreen if not yet logged in.
-       After login: runs Phase 2 ban check, starts pipeline service.
-       ------------------------- */
-
-    var vrcLoginDone    by remember { mutableStateOf(VrchatAuthManager.isLoggedIn(ctx)) }
-    var isBannedPhase2  by remember { mutableStateOf(false) }
-    var banPhase2Reason by remember { mutableStateOf("") }
-    var phase2Checking  by remember { mutableStateOf(false) }
-
-    LaunchedEffect(Unit) {
-        VrchatAuthManager.loggedOutSignal.collect { vrcLoginDone = false }
-    }
-
-    if (!vrcLoginDone) {
-        VrchatLoginScreen(pendingBanId = phase1BanId) { _, _ ->
-            // Login succeeded - mark done, LaunchedEffect below will run Phase 2
-            vrcLoginDone = true
-        }
-        LaunchedEffect(vrcLoginDone) {
-            if (!vrcLoginDone) return@LaunchedEffect
-            phase2Checking = true
-            runPhase2AndStartPipeline(
-                ctx, phase1BanId,
-                onBanned = { reason -> isBannedPhase2 = true; banPhase2Reason = reason },
-                onClean  = { phase2Checking = false }
-            )
-        }
-        return
-    }
-
-    // If VRC login succeeded but Phase 2 hasn't run yet (first run after login)
-    LaunchedEffect(vrcLoginDone) {
-        if (!vrcLoginDone || phase2Checking) return@LaunchedEffect
-        phase2Checking = true
-        runPhase2AndStartPipeline(
-            ctx, phase1BanId,
-            onBanned = { reason -> isBannedPhase2 = true; banPhase2Reason = reason },
-            onClean  = { phase2Checking = false }
-        )
-    }
-
-    if (isBannedPhase2) {
-        BannedScreen(reason = banPhase2Reason)
-        return
-    }
-
-    /* -------------------------
-       Update check (public build only)
+       Update check (public build only).
+       Runs BEFORE the onboarding gate so the forced-update dialog renders on
+       top of the tutorial too — a brand-new user should install the latest
+       version before setting anything up.
        ------------------------- */
 
     // Scope the runtime ViewModel to the Application (process lifetime), NOT this
@@ -495,20 +440,175 @@ fun VrcaApp() {
             onDismiss = { updateDismissed = true },
             onDownload = { url ->
                 downloadError = null
-                val dm = ctx.getSystemService(android.content.Context.DOWNLOAD_SERVICE) as DownloadManager
+                // DownloadManager can be disabled/unavailable on some OEM builds (reported
+                // on Samsung Galaxy) — getSystemService returns null or enqueue() throws
+                // (IllegalArgumentException "Unknown URL"/SecurityException). Catch every
+                // failure and fall back to opening the APK URL in the browser so the user
+                // can always get the update instead of the popup silently doing nothing.
                 val fileName = "vrc-a-update.apk"
-                val dest = File(ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), fileName)
-                if (dest.exists()) dest.delete()
-                val request = DownloadManager.Request(Uri.parse(url)).apply {
-                    setTitle("VRC-A Update")
-                    setDescription("Downloading update...")
-                    setDestinationInExternalFilesDir(ctx, Environment.DIRECTORY_DOWNLOADS, fileName)
-                    setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
+                var enqueued = false
+                try {
+                    val dm = ctx.getSystemService(android.content.Context.DOWNLOAD_SERVICE) as? DownloadManager
+                    if (dm != null) {
+                        val dest = File(ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), fileName)
+                        if (dest.exists()) dest.delete()
+                        val request = DownloadManager.Request(Uri.parse(url)).apply {
+                            setTitle("VRC-A Update")
+                            setDescription("Downloading update...")
+                            setDestinationInExternalFilesDir(ctx, Environment.DIRECTORY_DOWNLOADS, fileName)
+                            setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
+                        }
+                        downloadId = dm.enqueue(request)
+                        downloadDone = false
+                        enqueued = true
+                    }
+                } catch (_: Throwable) {
+                    // fall through to the browser fallback below
                 }
-                downloadId = dm.enqueue(request)
-                downloadDone = false
+                if (!enqueued) {
+                    try {
+                        ctx.startActivity(
+                            Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                        downloadError = "In-app download unavailable on this device — " +
+                            "opened the update in your browser instead."
+                    } catch (_: Throwable) {
+                        downloadError = "Couldn't start the download. Update manually from: $url"
+                    }
+                }
             }
         )
+    }
+
+    /* -------------------------
+       First-open onboarding tutorial (docs/ui-revamp.md).
+       Pre-seeded complete for existing installs (any prior ToS acceptance)
+       so current users never see it. Replayable from Settings.
+       ------------------------- */
+
+    var onboardingDone by remember {
+        mutableStateOf(
+            com.vrca.ui.onboarding.OnboardingPrefs.isComplete(ctx).also { done ->
+                // Pre-seed: an install that already accepted ANY ToS version is an
+                // existing user — mark complete so the tutorial never shows.
+                if (!done && TosPrefs.acceptedVersion(ctx) > 0) {
+                    com.vrca.ui.onboarding.OnboardingPrefs.markComplete(ctx)
+                }
+            } || TosPrefs.acceptedVersion(ctx) > 0
+        )
+    }
+    val onboardingReplay by com.vrca.ui.onboarding.OnboardingState.replayRequested
+
+    if (!onboardingDone || onboardingReplay) {
+        com.vrca.ui.onboarding.OnboardingFlow(
+            vm = vm,
+            tosVersion = requiredTosVersion,
+            tosText = remoteTosText,
+            tosUrl = remoteTosUrl,
+            tosAlreadyAccepted = tosAccepted,
+            phase1BanId = phase1BanId,
+            replay = onboardingReplay,
+            onTosAccepted = {
+                TosPrefs.accept(ctx, requiredTosVersion)
+                tosAccepted = true
+                scope.launch {
+                    runCatching {
+                        val data = hashMapOf(
+                            "tosAcceptedVersion" to requiredTosVersion,
+                            "tosAcceptedAt" to Timestamp.now(),
+                            "updatedAt" to Timestamp.now()
+                        )
+                        if (deviceHash.isNotBlank()) {
+                            FirebaseFirestore.getInstance()
+                                .collection("users").document(deviceHash)
+                                .set(data, SetOptions.merge())
+                                .await()
+                        }
+                    }
+                }
+            },
+            onFinish = {
+                onboardingDone = true
+                com.vrca.ui.onboarding.OnboardingState.replayRequested.value = false
+            }
+        )
+        return
+    }
+
+    if (!tosAccepted) {
+        TosGate(
+            tosVersion = requiredTosVersion,
+            tosText = remoteTosText,
+            tosUrl = remoteTosUrl,
+            onOpenUrl = { url ->
+                runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+            },
+            onAccept = {
+                TosPrefs.accept(ctx, requiredTosVersion)
+                tosAccepted = true
+
+                scope.launch {
+                    runCatching {
+                        val data = hashMapOf(
+                            "tosAcceptedVersion" to requiredTosVersion,
+                            "tosAcceptedAt" to Timestamp.now(),
+                            "updatedAt" to Timestamp.now()
+                        )
+                        if (deviceHash.isNotBlank()) {
+                            FirebaseFirestore.getInstance()
+                                .collection("users").document(deviceHash)
+                                .set(data, SetOptions.merge())
+                                .await()
+                        }
+                    }
+                }
+            }
+        )
+        return
+    }
+
+    /* -------------------------
+       VRChat login state (NO forced login screen — see below).
+       After a login: runs Phase 2 ban check, starts pipeline service.
+       ------------------------- */
+
+    var vrcLoginDone    by remember { mutableStateOf(VrchatAuthManager.isLoggedIn(ctx)) }
+    var isBannedPhase2  by remember { mutableStateOf(false) }
+    var banPhase2Reason by remember { mutableStateOf("") }
+    var phase2Checking  by remember { mutableStateOf(false) }
+    var reloginTick     by remember { mutableStateOf(0) }
+
+    // There is NO forced login screen anymore (the only hard login gate is the
+    // onboarding tutorial's login step on first run). Being signed out — via a
+    // Settings sign-out OR a cold start while logged out — just hard-blocks OSC
+    // through VrcaViewModel's auth gate; the app stays fully usable and the user
+    // signs back in from Settings → Accounts or the VRChat tab. Each successful
+    // re-login re-runs the Phase-2 ban check below (the new account could be a
+    // banned identity) and starts the pipeline.
+    LaunchedEffect(Unit) {
+        VrchatAuthManager.loggedInSignal.collect {
+            vrcLoginDone = true
+            reloginTick++
+        }
+    }
+
+    // If VRC login succeeded but Phase 2 hasn't run yet (first run after login).
+    // Also keyed on reloginTick so a Settings re-login (possibly a DIFFERENT
+    // VRChat account) re-runs the ban check + pipeline restart.
+    LaunchedEffect(vrcLoginDone, reloginTick) {
+        if (!vrcLoginDone || phase2Checking) return@LaunchedEffect
+        phase2Checking = true
+        runPhase2AndStartPipeline(
+            ctx, phase1BanId,
+            onBanned = { reason -> isBannedPhase2 = true; banPhase2Reason = reason },
+            onClean  = { phase2Checking = false }
+        )
+    }
+
+    if (isBannedPhase2) {
+        BannedScreen(reason = banPhase2Reason)
+        return
     }
 
     /* -------------------------
@@ -518,6 +618,15 @@ fun VrcaApp() {
     VrcaScreen(chatboxViewModel = vm)
 }
 
+/**
+ * Update dialog (redesigned — docs/ui-revamp.md "Update dialog").
+ * Patch notes live in a SCROLLABLE area capped below half the screen so
+ * arbitrarily long release notes never clip the dialog off-screen (the old
+ * fixed block clipped long notes). Notes render through the same styled-block
+ * parser as the ToS, so "- bullet" lines get real bullets. The forced variant
+ * (the current default — ALL releases are forced) shows a single full-width
+ * Download action; "Later" exists only for the legacy non-forced path.
+ */
 @Composable
 private fun UpdateDialog(
     info: ReleaseInfo,
@@ -527,6 +636,8 @@ private fun UpdateDialog(
     onDismiss: () -> Unit,
     onDownload: (String) -> Unit
 ) {
+    val noteBlocks = remember(info.notes) { parseTosBlocks(info.notes) }
+
     androidx.compose.ui.window.Dialog(
         onDismissRequest = { if (!forced) onDismiss() }
     ) {
@@ -537,36 +648,50 @@ private fun UpdateDialog(
             )
         ) {
             Column(
-                modifier = Modifier.padding(24.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                // Header
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                // Header: title + version pill
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
                     Text(
                         if (forced) "Update Required" else "Update Available",
                         style = MaterialTheme.typography.titleLarge,
                         color = MaterialTheme.colorScheme.onSurface
                     )
-                    Text(
-                        info.versionName,
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                    Surface(
+                        shape = MaterialTheme.shapes.large,
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                    ) {
+                        Text(
+                            info.versionName,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
                 }
 
-                // Release notes
+                // Release notes — bounded height + scroll so long logs never clip
                 if (info.notes.isNotBlank()) {
+                    val screenH = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp
                     Surface(
                         shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
                         color = MaterialTheme.colorScheme.surfaceVariant,
                         tonalElevation = 1.dp
                     ) {
-                        Text(
-                            info.notes,
-                            modifier = Modifier.padding(12.dp).fillMaxWidth(),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = (screenH * 0.45f).dp)
+                                .verticalScroll(rememberScrollState())
+                                .padding(12.dp)
+                        ) {
+                            StyledBlocks(noteBlocks)
+                        }
                     }
                 }
 
@@ -602,19 +727,12 @@ private fun UpdateDialog(
                     )
                 }
 
-                // Buttons
-                androidx.compose.foundation.layout.Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End)
-                ) {
-                    if (!forced) {
-                        OutlinedButton(onClick = onDismiss) {
-                            Text("Later")
-                        }
-                    }
+                // Actions: forced = single full-width Download; legacy = Later + Download
+                if (forced) {
                     Button(
                         onClick = { if (!downloading) onDownload(info.downloadUrl) },
-                        enabled = !downloading
+                        enabled = !downloading,
+                        modifier = Modifier.fillMaxWidth()
                     ) {
                         if (downloading) {
                             CircularProgressIndicator(
@@ -625,9 +743,52 @@ private fun UpdateDialog(
                             Spacer(Modifier.widthIn(min = 8.dp))
                             Text("Downloading")
                         } else {
-                            Text(if (error != null) "Retry" else "Download")
+                            Text(if (error != null) "Retry Download" else "Download Update")
                         }
                     }
+                } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End)
+                    ) {
+                        OutlinedButton(onClick = onDismiss) { Text("Later") }
+                        Button(
+                            onClick = { if (!downloading) onDownload(info.downloadUrl) },
+                            enabled = !downloading
+                        ) {
+                            if (downloading) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.height(18.dp).widthIn(max = 18.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.onPrimary
+                                )
+                                Spacer(Modifier.widthIn(min = 8.dp))
+                                Text("Downloading")
+                            } else {
+                                Text(if (error != null) "Retry" else "Download")
+                            }
+                        }
+                    }
+                }
+
+                // Manual fallback: always-visible link that opens the release URL in the
+                // browser, for devices where the in-app DownloadManager flow fails.
+                val dialogCtx = LocalContext.current
+                TextButton(
+                    onClick = {
+                        runCatching {
+                            dialogCtx.startActivity(
+                                Intent(Intent.ACTION_VIEW, Uri.parse(info.downloadUrl))
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            )
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        "Download failed? Tap here to download in your browser",
+                        style = MaterialTheme.typography.bodySmall
+                    )
                 }
             }
         }
@@ -714,10 +875,20 @@ private suspend fun bootstrapFirebaseAndCache(ctx: Context) {
 
     // Admin build must not appear in the public user directory.
     if (!BuildConfig.IS_ADMIN_BUILD) {
-        runCatching {
-            db.collection("users").document(deviceHash)
-                .set(safeUser, SetOptions.merge())
-                .await()
+        // Throttle the bootstrap liveness write: the VM cold-open write also
+        // writes lastSeenAt/updatedAt seconds later, so this is redundant when
+        // a recent write already landed. Skip when the last real self-sync
+        // was within 20 min (matches the VM's COLD_OPEN_LIVENESS_THROTTLE_MS).
+        val lastSyncMs = ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
+            .getLong("last_self_sync_ms", 0L)
+        val recentWrite = System.currentTimeMillis() - lastSyncMs < 20L * 60L * 1000L
+
+        if (!recentWrite) {
+            runCatching {
+                db.collection("users").document(deviceHash)
+                    .set(safeUser, SetOptions.merge())
+                    .await()
+            }
         }
 
         runCatching {
@@ -824,59 +995,275 @@ private fun secureRandomHex(numBytes: Int): String {
    UI: Bootstrap + Crash
    ========================================================= */
 
+/**
+ * Strip backend-implementation names from USER-VISIBLE error/debug text.
+ * Exception messages and class names would otherwise reveal which backend the
+ * app runs on, which is information an attacker can use \u2014 every string that
+ * reaches the screen (boot errors, crash text, debug panel) routes through
+ * this. Logs (Logcat) keep the raw text for real debugging.
+ */
+internal fun sanitizeBackendRefs(text: String): String = text
+    // Fully-qualified class/package paths first (most specific).
+    .replace(Regex("""com\.google\.(firebase|android\.gms)[.\w$]*"""), "backend")
+    // Then any remaining brand tokens, e.g. "FirebaseFirestoreException:
+    // PERMISSION_DENIED" -> "server: PERMISSION_DENIED".
+    .replace(Regex("""Fire(base|store)\w*""", RegexOption.IGNORE_CASE), "server")
+
+/**
+ * Process-level one-shot VRChat platform status for the boot checklist. Held
+ * OUTSIDE the composable because BootstrapScreen is composed twice during a
+ * normal boot (the bootstrap gate, then the phase-1 ban check) \u2014 local state
+ * would refetch and flash the row back to "checking" between the two.
+ * stateOf: 0 = checking, 1 = all operational, 2 = issues, 3 = unreachable.
+ */
+private object BootVrcStatus {
+    val state = mutableStateOf(0)
+    val detail = mutableStateOf("")
+    val fetchStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+}
+
+private suspend fun fetchBootVrcStatus() = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+    try {
+        val conn = java.net.URL("https://status.vrchat.com/api/v2/summary.json")
+            .openConnection() as java.net.HttpURLConnection
+        conn.connectTimeout = 6000
+        conn.readTimeout = 6000
+        conn.useCaches = false
+        val body = conn.inputStream.bufferedReader().use { it.readText() }
+        conn.disconnect()
+        val status = org.json.JSONObject(body).optJSONObject("status")
+        val indicator = status?.optString("indicator", "none") ?: "none"
+        if (indicator == "none" || indicator.isBlank()) {
+            BootVrcStatus.state.value = 1
+        } else {
+            BootVrcStatus.detail.value =
+                status?.optString("description", "")?.takeIf { it.isNotBlank() }
+                    ?: "VRChat is having platform issues"
+            BootVrcStatus.state.value = 2
+        }
+    } catch (_: Throwable) {
+        BootVrcStatus.state.value = 3
+    }
+}
+
+/** One row of the boot checklist. state: 0 = pending, 1 = active (spinner),
+ *  2 = done (green check), 3 = warn (amber !), 4 = unknown (grey ?). */
+@Composable
+private fun BootCheckRow(label: String, state: Int, detail: String = "") {
+    val colors = MaterialTheme.colorScheme
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
+            when (state) {
+                1 -> CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp
+                )
+                2 -> Surface(shape = CircleShape, color = Color(0xFF2BCF5C), modifier = Modifier.size(18.dp)) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text("\u2713", color = Color.Black, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    }
+                }
+                3 -> Surface(shape = CircleShape, color = Color(0xFFFFB74D), modifier = Modifier.size(18.dp)) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text("!", color = Color.Black, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    }
+                }
+                4 -> Surface(shape = CircleShape, color = colors.onSurfaceVariant.copy(alpha = 0.35f), modifier = Modifier.size(18.dp)) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text("?", color = colors.surface, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    }
+                }
+                else -> Surface(
+                    shape = CircleShape,
+                    color = colors.onSurfaceVariant.copy(alpha = 0.15f),
+                    modifier = Modifier.size(10.dp)
+                ) {}
+            }
+        }
+        Column(Modifier.padding(start = 12.dp)) {
+            Text(
+                label,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (state == 0) colors.onSurfaceVariant.copy(alpha = 0.6f) else colors.onSurface
+            )
+            if (detail.isNotBlank()) {
+                Text(
+                    detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (state == 3) Color(0xFFFFB74D) else colors.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun BootstrapScreen(
     working: Boolean,
     error: String?,
-    onRetry: () -> Unit
+    onRetry: () -> Unit,
+    phase: Int = 1
 ) {
+    val colors = MaterialTheme.colorScheme
+    // Soft vertical wash: theme background into a faint primary tint at the
+    // bottom. Gives the screen depth without fighting the dark theme.
+    val gradient = Brush.verticalGradient(
+        0f to colors.background,
+        0.55f to colors.background,
+        1f to lerp(colors.background, colors.primary, 0.12f)
+    )
+
+    // Gentle breathing pulse on the logo while working.
+    val pulse = rememberInfiniteTransition(label = "bootPulse")
+    val logoScale by pulse.animateFloat(
+        initialValue = 1f,
+        targetValue = if (working) 1.06f else 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1400),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "bootLogoScale"
+    )
+
+    // Kick off the one-shot VRChat platform status check. Process-level guard:
+    // the second BootstrapScreen composition (ban check) must not refetch.
+    LaunchedEffect(Unit) {
+        if (BootVrcStatus.fetchStarted.compareAndSet(false, true)) {
+            fetchBootVrcStatus()
+        }
+    }
+
     Surface {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(20.dp),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text(
-                "Starting VRC-A\u2026",
-                style = MaterialTheme.typography.headlineSmall,
-                textAlign = TextAlign.Center
-            )
+        Box(Modifier.fillMaxSize().background(gradient)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(28.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                // The REAL app icon (@mipmap/ic_launcher — the VRC-A character
+                // art, same as the manifest android:icon), clipped circular by
+                // the Surface shape. Do NOT use ic_launcher_foreground.xml —
+                // that vector is a leftover template gradient, not the logo.
+                Surface(
+                    shape = CircleShape,
+                    color = colors.primary.copy(alpha = 0.10f),
+                    modifier = Modifier
+                        .size(112.dp)
+                        .scale(logoScale)
+                ) {
+                    Image(
+                        painter = painterResource(com.vrca.R.mipmap.ic_launcher),
+                        contentDescription = null,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
 
-            Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(20.dp))
 
-            Text(
-                "Preparing device session\u2026",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center
-            )
+                Text(
+                    "VRC-A",
+                    style = MaterialTheme.typography.displaySmall,
+                    fontWeight = FontWeight.Bold,
+                    color = colors.primary,
+                    textAlign = TextAlign.Center
+                )
+                Text(
+                    "VRChat Assistant",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = colors.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
 
-            Spacer(Modifier.height(18.dp))
+                Spacer(Modifier.height(28.dp))
 
-            if (working) CircularProgressIndicator() else Spacer(Modifier.height(4.dp))
-
-            if (error != null) {
-                Spacer(Modifier.height(18.dp))
-
-                ElevatedCard(modifier = Modifier.widthIn(max = 520.dp)) {
+                // Boot checklist: the real phases, with live per-row states.
+                Surface(
+                    shape = MaterialTheme.shapes.large,
+                    color = colors.surfaceVariant.copy(alpha = 0.5f),
+                    modifier = Modifier.widthIn(max = 420.dp).fillMaxWidth()
+                ) {
                     Column(
-                        Modifier.padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                        Modifier.padding(horizontal = 18.dp, vertical = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        Text("Startup error", style = MaterialTheme.typography.titleSmall)
-                        Text(
-                            error,
-                            fontFamily = FontFamily.Monospace,
-                            style = MaterialTheme.typography.bodySmall
+                        BootCheckRow(
+                            label = "Device session",
+                            state = when {
+                                phase >= 2 -> 2
+                                error != null -> 3
+                                else -> 1
+                            }
+                        )
+                        BootCheckRow(
+                            label = "Account status",
+                            state = if (phase >= 2) 1 else 0
+                        )
+                        val vrcState by BootVrcStatus.state
+                        val vrcDetail by BootVrcStatus.detail
+                        BootCheckRow(
+                            label = "VRChat systems",
+                            state = when (vrcState) {
+                                1 -> 2
+                                2 -> 3
+                                3 -> 4
+                                else -> 1
+                            },
+                            detail = when (vrcState) {
+                                1 -> "All systems operational"
+                                2 -> vrcDetail
+                                3 -> "Couldn't check status"
+                                else -> ""
+                            }
                         )
                     }
                 }
 
-                Spacer(Modifier.height(12.dp))
-                Button(onClick = onRetry) { Text("Retry") }
+                // Lifetime stat line (hidden until it's a number worth showing,
+                // so a fresh install never sees "0 chatbox updates").
+                val lifetimeSends = remember { ChatboxStats.totalSends() }
+                if (error == null && lifetimeSends >= 100) {
+                    Spacer(Modifier.height(20.dp))
+                    Text(
+                        "You've sent ${String.format(java.util.Locale.US, "%,d", lifetimeSends)} chatbox updates",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = colors.onSurfaceVariant.copy(alpha = 0.8f),
+                        textAlign = TextAlign.Center
+                    )
+                }
+
+                if (error != null) {
+                    Spacer(Modifier.height(18.dp))
+
+                    ElevatedCard(modifier = Modifier.widthIn(max = 520.dp)) {
+                        Column(
+                            Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text("Startup error", style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                error,
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(12.dp))
+                    Button(onClick = onRetry) { Text("Retry") }
+                }
             }
+
+            // Version footer pinned to the bottom edge.
+            Text(
+                "v${BuildConfig.VERSION_NAME}",
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.onSurfaceVariant.copy(alpha = 0.6f),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 18.dp)
+            )
         }
     }
 }
@@ -903,7 +1290,9 @@ private fun CrashScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
-                        crashText.ifBlank { "(no crash text saved)" },
+                        // Sanitized on display only — the stored crash log keeps
+                        // the raw stack trace for real debugging via Logcat/file.
+                        sanitizeBackendRefs(crashText).ifBlank { "(no crash text saved)" },
                         fontFamily = FontFamily.Monospace,
                         style = MaterialTheme.typography.bodySmall
                     )
@@ -1051,8 +1440,97 @@ private object TosPrefs {
     }
 }
 
+/* =========================================================================
+   ToS rendering (redesigned — docs/ui-revamp.md "ToS screen").
+
+   The admin-configurable tosText is plain text with markdown-ish habits:
+   numbered section headers ("3. Data & Privacy"), `*`/`-` bullets, and the
+   occasional literal markdown link ("[url](url)") that used to render raw.
+   parseTosBlocks() turns that into styled blocks; nothing about the stored
+   text format changes, so existing Firestore content renders correctly.
+   ========================================================================= */
+
+private sealed class TosBlock {
+    data class Header(val text: String) : TosBlock()
+    data class Bullet(val text: String) : TosBlock()
+    data class Paragraph(val text: String) : TosBlock()
+}
+
+/** Collapses literal markdown links "[x](y)" down to just the URL once. */
+private fun sanitizeTosLine(line: String): String =
+    Regex("""\[([^\]]*)]\(([^)]*)\)""").replace(line) { m ->
+        m.groupValues[2].ifBlank { m.groupValues[1] }
+    }
+
+private fun parseTosBlocks(text: String): List<TosBlock> {
+    val blocks = mutableListOf<TosBlock>()
+    val para = StringBuilder()
+    fun flushPara() {
+        val p = para.toString().trim()
+        if (p.isNotBlank()) blocks += TosBlock.Paragraph(p)
+        para.clear()
+    }
+    text.lines().forEach { raw ->
+        val line = sanitizeTosLine(raw.trim())
+        when {
+            line.isBlank() -> flushPara()
+            // "1. Agreement" / "10. Contact" — numbered section headers
+            Regex("""^\d+\.\s+\S""").containsMatchIn(line) -> {
+                flushPara(); blocks += TosBlock.Header(line)
+            }
+            line.startsWith("* ") || line.startsWith("- ") -> {
+                flushPara(); blocks += TosBlock.Bullet(line.drop(2).trim())
+            }
+            else -> {
+                if (para.isNotEmpty()) para.append(' ')
+                para.append(line)
+            }
+        }
+    }
+    flushPara()
+    return blocks
+}
+
+/** Shared styled-text body for ToS sections and update-dialog patch notes. */
 @Composable
-private fun TosGate(
+private fun StyledBlocks(blocks: List<TosBlock>, warnHeaderKeywords: List<String> = emptyList()) {
+    var inWarnSection = false
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        blocks.forEach { block ->
+            when (block) {
+                is TosBlock.Header -> {
+                    inWarnSection = warnHeaderKeywords.any { block.text.contains(it, ignoreCase = true) }
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        block.text,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = if (inWarnSection) MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.primary
+                    )
+                }
+                is TosBlock.Bullet -> Row {
+                    Text(
+                        "•  ",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        block.text,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                is TosBlock.Paragraph -> Text(
+                    block.text,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+        }
+    }
+}
+
+@Composable
+internal fun TosGate(
     tosVersion: Int,
     tosText: String,
     tosUrl: String,
@@ -1076,54 +1554,91 @@ If you do not agree, close the app.
         """.trimIndent()
     }
 
+    val blocks = remember(tosText) { parseTosBlocks(tosText.ifBlank { fallbackText }) }
+
     Surface {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text("Terms of Service", style = MaterialTheme.typography.headlineSmall)
-            Text(
-                "Version $tosVersion",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            ElevatedCard {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(Modifier.fillMaxSize()) {
+            // Sticky header: title + version pill (never scrolls away)
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Terms of Service", style = MaterialTheme.typography.headlineSmall)
+                Surface(
+                    shape = MaterialTheme.shapes.large,
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                ) {
                     Text(
-                        text = tosText.ifBlank { fallbackText },
-                        style = MaterialTheme.typography.bodyMedium
+                        "v$tosVersion",
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
                     )
-
-                    if (tosUrl.isNotBlank()) {
-                        OutlinedButton(
-                            onClick = { onOpenUrl(tosUrl.trim()) },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text("Open full ToS link")
-                        }
-                    }
                 }
             }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+            // Scrollable body
+            Column(
+                Modifier
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Text("I agree to the Terms of Service")
-                Switch(checked = checked, onCheckedChange = { checked = it })
+                ElevatedCard {
+                    Column(Modifier.padding(14.dp)) {
+                        StyledBlocks(
+                            blocks,
+                            warnHeaderKeywords = listOf("Risk", "Moderation", "Acceptable Use")
+                        )
+                    }
+                }
+                if (tosUrl.isNotBlank()) {
+                    OutlinedButton(
+                        onClick = { onOpenUrl(tosUrl.trim()) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Open full ToS link")
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
             }
 
-            Button(
-                onClick = onAccept,
-                enabled = checked,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("Accept & Continue")
+            // Pinned accept bar (checkbox, not a settings-style switch)
+            Surface(tonalElevation = 3.dp) {
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(MaterialTheme.shapes.medium)
+                            .clickable { checked = !checked },
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        androidx.compose.material3.Checkbox(
+                            checked = checked,
+                            onCheckedChange = { checked = it }
+                        )
+                        Text(
+                            "I agree to the Terms of Service",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                    Button(
+                        onClick = onAccept,
+                        enabled = checked,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Accept & Continue")
+                    }
+                }
             }
         }
     }

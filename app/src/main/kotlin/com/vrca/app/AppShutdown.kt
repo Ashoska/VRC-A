@@ -37,7 +37,36 @@ object AppShutdown {
     const val KEY_SWIPED_AWAY = "swiped_away"
     const val MANUAL_KILL_WINDOW_MS = 15_000L
 
+    /** The notification id ALL four foreground services share (KeepAlive,
+     *  Pipeline, Discord RPC, Overlay). Mirrored here so the shutdown path can
+     *  cancel it without referencing each service's private constant. */
+    const val SHARED_NOTIF_ID = 1001
+
+    /** Minimum time between issuing the service stops and killProcess. The
+     *  stop requests are only QUEUED from onTaskRemoved (main thread) — the
+     *  actual onDestroy/ACTION_STOP handling runs on the main looper after it
+     *  returns. If the offline write resolves instantly (or its task is null),
+     *  killProcess used to fire while all four services were still in
+     *  started-foreground state; abrupt FGS death is exactly where OEMs
+     *  (Samsung in particular) leave the stale "Connected as X" notification
+     *  in the shade. This floor guarantees the main thread gets to process the
+     *  stops (and their notification removals reach system_server) first. */
+    private const val MIN_SHUTDOWN_DELAY_MS = 1_200L
+
     private val shuttingDown = AtomicBoolean(false)
+
+    /** Belt-and-braces removal of the shared persistent notification. Safe to
+     *  call from any thread/state: a cancel for a notification still bound to a
+     *  live foreground service is ignored by the system, and once the services
+     *  have stopped it deletes any copy an OEM failed to clean up. The cancel
+     *  is processed in system_server, so it survives our process death. */
+    fun cancelPersistentNotification(context: Context) {
+        try {
+            val nm = context.applicationContext
+                .getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+            nm.cancel(SHARED_NOTIF_ID)
+        } catch (_: Throwable) {}
+    }
 
     /** True once a swipe-away shutdown has begun. The ViewModel reads this in
      *  onCleared to skip its own offline write — AppShutdown owns the single swipe
@@ -72,13 +101,18 @@ object AppShutdown {
             .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getBoolean(KEY_SWIPED_AWAY, false)
 
-    /** Clear the persistent swipe flag — called on a legitimate app open / reboot. */
+    /** Clear the persistent swipe flag — called on a legitimate app open / reboot.
+     *  Also clears the liveness-throttle timestamp so the cold-open write always
+     *  lands: after a swipe, `offlineAt` sits on the Firestore doc and must be
+     *  overridden by a fresh `lastActiveAt` — the 20-min throttle must not suppress
+     *  that write or the user stays offline in the admin directory. */
     fun clearSwipedAway(context: Context) {
         try {
             context.applicationContext
                 .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit()
                 .putBoolean(KEY_SWIPED_AWAY, false)
+                .putLong("last_self_sync_ms", 0L)
                 .apply()
         } catch (_: Throwable) {}
     }
@@ -115,6 +149,13 @@ object AppShutdown {
         // chatbox auto-resumes on the next process start.
         FeatureSessionStore.disarm(app)
 
+        // Clear toggle keys from the persisted lastSyncedValues baseline so the
+        // next cold open sees null baselines and applies admin toggle edits
+        // server-authoritatively. Without this, the baseline matches the server
+        // (both have the admin's value) but the local toggle was reset to OFF by
+        // disarm() above — the echo-suppression would block re-application.
+        clearToggleBaselines(app)
+
         // Clear the process-lifetime ViewModelStore so VrcaViewModel.onCleared()
         // runs exactly once on a genuine shutdown — cancels the chatbox senders and
         // sync loops and fires the going-offline write. (onTaskRemoved is delivered
@@ -129,6 +170,7 @@ object AppShutdown {
         stopOtherServices(app)
 
         Thread {
+            val startedAt = android.os.SystemClock.uptimeMillis()
             try {
                 val task = buildOfflineWriteTask(app)
                 if (task != null) {
@@ -138,6 +180,18 @@ object AppShutdown {
             } catch (e: Throwable) {
                 Log.w(TAG, "offline write failed", e)
             }
+            // Floor the shutdown so the main thread has actually processed the
+            // queued stopService/ACTION_STOP requests before we hard-kill — a
+            // fast (or null-task) offline write used to let killProcess race
+            // the stops, leaving four still-foreground services to die
+            // abruptly and (on some OEMs) their shared notification lingering.
+            val elapsed = android.os.SystemClock.uptimeMillis() - startedAt
+            if (elapsed < MIN_SHUTDOWN_DELAY_MS) {
+                try { Thread.sleep(MIN_SHUTDOWN_DELAY_MS - elapsed) } catch (_: Throwable) {}
+            }
+            // Final sweep: by now the services have stopped, so this removes
+            // any copy of the persistent notification an OEM left behind.
+            cancelPersistentNotification(app)
             android.os.Process.killProcess(android.os.Process.myPid())
             exitProcess(0)
         }.start()
@@ -188,25 +242,69 @@ object AppShutdown {
             if (presence != null) {
                 data["vrchatState"] = presence.status
                 data["vrchatLocation"] = presence.location
-                data["vrchatWorldName"] = presence.worldName
+                data["vrchatWorld"] = presence.worldName
                 data["vrchatDisplayName"] = presence.displayName
             }
-            // Carry the user's LAST content state (presets / messages / intervals /
-            // toggles) so the admin sees what they had even if they swiped before the
-            // 30s edit-debounce flushed. NOT the volatile preview text. This is the
-            // backup for "edit then hard-kill before the debounce fired". Public build
-            // only — captureContentForOfflineWrite() returns empty for the admin build.
-            try {
-                if (com.vrca.ui.viewmodel.VrcaViewModel.isInstanceInitialized()) {
-                    data.putAll(com.vrca.ui.viewmodel.VrcaViewModel.getInstance()
-                        .captureContentForOfflineWrite())
-                }
-            } catch (_: Throwable) {}
+            // IMPORTANT: we deliberately do NOT write the user's content snapshot
+            // (presets / messages / intervals / toggles) here.
+            //
+            // This swipe write has only ~5s before killProcess, so on mobile it
+            // frequently does NOT reach the server in time — Firestore then PERSISTS
+            // it in its on-disk mutation queue (offline persistence is on by default)
+            // and REPLAYS it on the next app launch. If an admin edited this user's
+            // doc while the app was closed, that stale replayed content write would
+            // OVERWRITE the admin's edits — making "admin edits to an offline user
+            // don't apply on reopen" (the bug). The user's own content edits are
+            // already synced by the 30s debounce / hourly / live-sync while the app
+            // was alive, so re-writing them on swipe adds nothing but the clobber
+            // risk. Only the offline marker (isOnlineInApp=false, offlineAt) +
+            // current VRChat presence are written — neither conflicts with admin
+            // content edits, so a queued replay of them is harmless.
             FirebaseFirestore.getInstance()
                 .collection("users").document(deviceHash)
                 .set(data, SetOptions.merge())
         } catch (_: Throwable) {
             null
         }
+    }
+
+    /**
+     * Toggle keys mirrored from VrcaViewModel.TOGGLE_KEYS. Kept here so the swipe
+     * path can strip them from the persisted baseline without a ViewModel instance.
+     */
+    private val TOGGLE_KEYS = setOf(
+        "afkEnabled", "cycleEnabled", "spotifyEnabled", "spotifyDemoEnabled", "timeEnabled"
+    )
+    private const val KEY_LAST_SYNCED_JSON = "last_synced_values_json"
+
+    /**
+     * Remove the feature-toggle keys from the persisted `lastSyncedValues` baseline.
+     *
+     * On a deliberate swipe [FeatureSessionStore.disarm] makes the next launch start
+     * with toggles OFF. But the persisted baseline still holds whatever the admin
+     * last set (e.g. afkEnabled=true), and the server doc also still holds that value.
+     * On the next cold open the moderation listener / applyOfflineToggleEdits would
+     * see `remote == baseline` and ECHO-SUPPRESS the admin's edit — so the toggle
+     * stays OFF instead of reflecting the admin's setting ("toggles don't stay off and
+     * save what the admin did prior"). Dropping these keys leaves a null baseline, so
+     * the next cold open applies the server value authoritatively. Content keys are
+     * left intact (they restore from DataStore + the same listener path).
+     */
+    private fun clearToggleBaselines(app: Context) {
+        try {
+            val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val json = prefs.getString(KEY_LAST_SYNCED_JSON, null) ?: return
+            val obj = org.json.JSONObject(json)
+            var changed = false
+            for (key in TOGGLE_KEYS) {
+                if (obj.has(key)) {
+                    obj.remove(key)
+                    changed = true
+                }
+            }
+            if (changed) {
+                prefs.edit().putString(KEY_LAST_SYNCED_JSON, obj.toString()).commit()
+            }
+        } catch (_: Throwable) {}
     }
 }

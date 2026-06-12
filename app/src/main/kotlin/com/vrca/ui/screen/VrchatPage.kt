@@ -23,13 +23,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -41,16 +39,18 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -59,36 +59,48 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.vrca.discord.DiscordLoginWebView
-import com.vrca.discord.DiscordRpcService
 import com.vrca.discord.DiscordRpcState
 import com.vrca.discord.DiscordRpcStatus
-import com.vrca.ui.settings.NotificationToggleSection
-import com.vrca.ui.settings.ToggleRow
 import com.vrca.ui.viewmodel.VrcaViewModel
 import com.vrca.vrchat.InAppAlertGroup
 import com.vrca.vrchat.InAppAlertState
 import com.vrca.vrchat.VrchatAuthManager
 import com.vrca.vrchat.VrchatPipelineService
 import com.vrca.vrchat.VrchatPipelineState
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 @Composable
-internal fun VrchatStatusPage(
-    vm: VrcaViewModel,
-    onOpenLogin: () -> Unit
-) {
+internal fun VrchatStatusPage(vm: VrcaViewModel) {
     val ctx = LocalContext.current
-    val scope = rememberCoroutineScope()
 
-    val isLinked = remember { mutableStateOf(VrchatAuthManager.isLoggedIn(ctx)) }
-    val displayName = remember { mutableStateOf(VrchatAuthManager.getStoredDisplayName(ctx) ?: "") }
+    // Inline sign-in takeover (the old onOpenLogin param was wired to an
+    // empty lambda in VrcaScreen, so the Sign in button silently did
+    // nothing). Same pattern as Settings → Accounts.
+    var showLogin by rememberSaveable { mutableStateOf(false) }
+    if (showLogin) {
+        // Cancel renders inside the login screen itself (the old top-bar Row
+        // placement clashed with the app bar).
+        com.vrca.vrchat.VrchatLoginScreen(
+            pendingBanId = null,
+            onCancel = { showLogin = false }
+        ) { _, _ ->
+            showLogin = false
+        }
+        return
+    }
+
+    // Reactive: vm.vrchatLoggedOut flips on the auth manager's logged-in/out
+    // signals, so a Settings sign-out (or a re-login) updates this tab
+    // immediately — the old one-shot remember froze the cold-start value.
+    val isLinked = !vm.vrchatLoggedOut && VrchatAuthManager.isLoggedIn(ctx)
+    val displayName = if (isLinked) VrchatAuthManager.getStoredDisplayName(ctx) ?: "" else ""
     val presence by VrchatPipelineState.presenceFlow.collectAsState()
     val isConnected by VrchatPipelineState.isConnectedFlow.collectAsState()
 
@@ -97,127 +109,171 @@ internal fun VrchatStatusPage(
     LaunchedEffect(Unit) { InAppAlertState.load(ctx) }
 
     PageContainer {
-        VrchatStatusBanner()
-
-        // In-app alerts (persistent until dismissed)
-        InAppAlertCards()
-
-        // Connection status header
-        ElevatedCard {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(14.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        if (isLinked.value) displayName.value.ifBlank { "VRChat account" }
-                        else "Not signed in",
-                        style = MaterialTheme.typography.titleMedium
-                    )
-                    Text(
-                        if (isConnected) "Live connection active"
-                        else if (isLinked.value) "Connecting..."
-                        else "Sign in to enable notifications and presence",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                if (isLinked.value) {
-                    OutlinedButton(onClick = { showLogoutDialog = true }) { Text("Sign out") }
-                } else {
-                    Button(onClick = onOpenLogin) { Text("Sign in") }
-                }
-            }
-        }
-
-        // Presence card
+        // =========================
+        // Identity header — ONE merged card (docs/ui-revamp.md, VRChat tab):
+        // avatar + name + status dot + platform/trust chips + RPC dot, with
+        // Sign out / View Profile as small trailing actions. The old separate
+        // "connection status" + "presence" cards are gone.
+        // =========================
         val p = presence
-        if (p != null && isLinked.value) {
-            val statusColor = if (p.isOnlineInVRChat) {
-                when (p.status) {
-                    "ask me" -> Color(0xFFFF9800)
-                    "busy"   -> Color(0xFFF44336)
-                    "join me" -> Color(0xFF2196F3)
-                    else     -> Color(0xFF4CAF50)
-                }
-            } else {
-                MaterialTheme.colorScheme.onSurfaceVariant
-            }
-            val statusText = if (p.isOnlineInVRChat) {
-                when (p.status) {
-                    "ask me" -> "Ask Me"
-                    "busy"   -> "Do Not Disturb"
-                    "join me" -> "Join Me"
-                    else     -> "Online"
-                }
-            } else "Offline"
+        val friendsOnline by VrchatPipelineState.friendsOnlineFlow.collectAsState()
+        val repoHdr = vm.userPreferencesRepository
+        val discordSeededHdr by repoHdr.discordSessionSeeded.collectAsState(initial = false)
+        val discordStatusHdr by DiscordRpcState.statusFlow.collectAsState()
 
-            val platform = when (p.platform) {
-                "standalonewindows" -> "Desktop"
-                "android"           -> "Android/Quest"
-                "ios"               -> "iOS"
-                else                -> ""
-            }
-
-            ElevatedCard {
-                Column(
-                    Modifier.padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    // Status header with colored dot
+        // VRChat+ banner (profilePicOverride) as the card BACKGROUND — the round
+        // userIcon stays the avatar. No banner (no VRChat+) → plain card.
+        val bannerUrl = if (isLinked) p?.bannerUrl.orEmpty() else ""
+        val hasBanner = bannerUrl.isNotBlank()
+        ElevatedCard {
+            Box {
+                if (hasBanner) {
+                    coil.compose.AsyncImage(
+                        model = bannerUrl,
+                        imageLoader = com.vrca.admin.VrchatImageLoader.get(ctx),
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.matchParentSize()
+                    )
+                    // Scrim so name/status/chips/buttons stay readable over any banner.
+                    Box(
+                        Modifier
+                            .matchParentSize()
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(
+                                        Color.Black.copy(alpha = 0.45f),
+                                        Color.Black.copy(alpha = 0.72f)
+                                    )
+                                )
+                            )
+                    )
+                }
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (!isLinked) {
                     Row(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Canvas(Modifier.size(12.dp)) {
-                                drawCircle(color = statusColor)
-                            }
-                            Column {
+                        Column(Modifier.weight(1f)) {
+                            Text("Not signed in", style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                "Sign in to enable notifications and presence",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Button(onClick = { showLogin = true }) { Text("Sign in") }
+                    }
+                } else {
+                    val statusColor = presenceStatusColor(p)
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        SelfAvatar(
+                            name = (p?.displayName ?: displayName).ifBlank { "?" },
+                            picUrl = p?.profilePicUrl.orEmpty(),
+                            statusColor = statusColor
+                        )
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                (p?.displayName ?: displayName).ifBlank { "VRChat account" },
+                                style = MaterialTheme.typography.titleMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                presenceStatusText(p),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = statusColor
+                            )
+                            // The user's own status TEXT (e.g. "stars :0") —
+                            // render verbatim; it is their VRChat status, not a bug.
+                            if (!p?.statusDescription.isNullOrBlank()) {
                                 Text(
-                                    p.displayName,
-                                    style = MaterialTheme.typography.titleMedium
-                                )
-                                Text(
-                                    statusText,
+                                    p!!.statusDescription,
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = statusColor
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
+                        // Small trailing actions — over a banner they get a dark
+                        // circle backing so they never blend into the image.
+                        val actionBg = Modifier.size(36.dp).let {
+                            if (hasBanner) it.background(Color.Black.copy(alpha = 0.40f), CircleShape) else it
+                        }
+                        if (p?.userId?.isNotBlank() == true) {
+                            IconButton(onClick = {
+                                ctx.startActivity(
+                                    Intent(Intent.ACTION_VIEW,
+                                        Uri.parse("https://vrchat.com/home/user/${p.userId}"))
+                                )
+                            }, modifier = actionBg) {
+                                Icon(
+                                    Icons.Filled.OpenInNew,
+                                    contentDescription = "View VRChat profile",
+                                    modifier = Modifier.size(18.dp),
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                        IconButton(onClick = { showLogoutDialog = true }, modifier = actionBg) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.Logout,
+                                contentDescription = "Sign out of VRChat",
+                                modifier = Modifier.size(18.dp),
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
+
+                    // Chips row: platform · trust rank · Discord RPC state
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val platform = prettyPlatform(p?.platform.orEmpty())
                         if (platform.isNotBlank()) {
-                            Badge(
-                                containerColor = MaterialTheme.colorScheme.surfaceVariant
-                            ) {
+                            Badge(containerColor = MaterialTheme.colorScheme.surfaceVariant) {
                                 Text(platform, style = MaterialTheme.typography.labelSmall)
                             }
                         }
+                        trustBadge(p?.trustRank.orEmpty())?.let { tb ->
+                            Badge(containerColor = tb.color.copy(alpha = 0.22f)) {
+                                Text(
+                                    tb.label,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = tb.color
+                                )
+                            }
+                        }
+                        if (discordSeededHdr) {
+                            val rpcOn = discordStatusHdr == DiscordRpcStatus.CONNECTED
+                            Badge(containerColor = MaterialTheme.colorScheme.surfaceVariant) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Canvas(Modifier.size(6.dp)) {
+                                        drawCircle(
+                                            color = if (rpcOn) Color(0xFF4CAF50) else Color(0xFF9E9E9E)
+                                        )
+                                    }
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("RPC", style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                        }
                     }
 
-                    if (p.statusDescription.isNotBlank()) {
-                        Text(
-                            p.statusDescription,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-
-                    // World info
-                    if (p.isOnlineInVRChat) {
+                    // World line when in-game
+                    if (p?.isOnlineInVRChat == true) {
                         Divider()
                         if (p.worldName.isNotBlank()) {
-                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text(
-                                    p.worldName,
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
+                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text(p.worldName, style = MaterialTheme.typography.bodyMedium)
                                 val count = if (p.instanceCapacity > 0)
                                     "${p.instancePlayerCount} / ${p.instanceCapacity} players"
                                 else "${p.instancePlayerCount} players"
@@ -240,252 +296,57 @@ internal fun VrchatStatusPage(
                         }
                     }
 
-                    // VRChat profile link
-                    if (p.userId.isNotBlank()) {
+                    // Friends online — free, from the local friends cache.
+                    friendsOnline?.let { (online, total) ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                Icons.Filled.Group,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                "$online of $total friends online",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    if (p == null) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Text(
+                                if (isConnected) "Fetching presence..." else "Connecting...",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    } else if (!isConnected) {
                         Text(
-                            text = "View VRChat Profile",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.clickable {
-                                val intent = Intent(Intent.ACTION_VIEW,
-                                    Uri.parse("https://vrchat.com/home/user/${p.userId}"))
-                                ctx.startActivity(intent)
-                            }
+                            "Reconnecting to VRChat...",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
             }
-        } else if (isLinked.value) {
-            ElevatedCard {
-                Row(Modifier.padding(14.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                    Text("Fetching presence...", style = MaterialTheme.typography.bodySmall)
-                }
             }
         }
 
-        // -- VRChat Notification Toggles (collapsible categories) --
-        val repo = vm.userPreferencesRepository
-        NotificationToggleSection(vm = vm)
+        VrchatStatusBanner()
 
-        // -- Discord Rich Presence --
-        val discordEnabled by repo.discordRpcEnabled.collectAsState(initial = false)
-        val discordSeeded by repo.discordSessionSeeded.collectAsState(initial = false)
-        val discordRiskAccepted by repo.discordRiskAccepted.collectAsState(initial = false)
-        val discordStatus by DiscordRpcState.statusFlow.collectAsState()
-        val discordFailureMsg by DiscordRpcState.failureMessageFlow.collectAsState()
-        var showDiscordLogin by remember { mutableStateOf(false) }
-        var showRiskConsent by remember { mutableStateOf(false) }
-        SectionCard(
-            title = "Discord Rich Presence",
-            subtitle = "Show VRChat activity on your Discord profile."
-        ) {
-            Text(
-                "Uses a hidden Discord web session to set your activity. " +
-                "Sign in below to connect your Discord account.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(Modifier.height(4.dp))
+        // In-app alerts (persistent until dismissed)
+        InAppAlertCards()
 
-            if (discordSeeded) {
-                // Status indicator
-                val (statusColor, statusLabel) = when (discordStatus) {
-                    DiscordRpcStatus.CONNECTED -> MaterialTheme.colorScheme.primary to "Connected"
-                    DiscordRpcStatus.CONNECTING -> MaterialTheme.colorScheme.tertiary to "Connecting..."
-                    DiscordRpcStatus.RECONNECTING -> MaterialTheme.colorScheme.tertiary to "Reconnecting..."
-                    DiscordRpcStatus.SESSION_EXPIRED -> MaterialTheme.colorScheme.error to "Session Expired"
-                    DiscordRpcStatus.FAILED -> MaterialTheme.colorScheme.error to "Failed"
-                    DiscordRpcStatus.IDLE -> MaterialTheme.colorScheme.onSurfaceVariant to "Idle"
-                }
-                Card(colors = CardDefaults.cardColors(
-                    containerColor = if (discordStatus == DiscordRpcStatus.SESSION_EXPIRED || discordStatus == DiscordRpcStatus.FAILED)
-                        MaterialTheme.colorScheme.errorContainer
-                    else MaterialTheme.colorScheme.primaryContainer
-                )) {
-                    Column(Modifier.padding(10.dp)) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically) {
-                            Canvas(Modifier.size(8.dp)) {
-                                drawCircle(color = statusColor)
-                            }
-                            Text(statusLabel, style = MaterialTheme.typography.bodySmall,
-                                color = statusColor)
-                        }
-                        if (discordFailureMsg != null) {
-                            Text(discordFailureMsg!!, style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onErrorContainer)
-                        }
-                    }
-                }
-
-                // Re-login button when session expired
-                if (discordStatus == DiscordRpcStatus.SESSION_EXPIRED) {
-                    Button(onClick = { showDiscordLogin = true },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.error
-                        )) {
-                        Text("Sign in again")
-                    }
-                }
-
-                ToggleRow("Enable Discord RPC", discordEnabled) { enabled ->
-                    if (enabled && !discordRiskAccepted) {
-                        showRiskConsent = true
-                    } else {
-                        scope.launch {
-                            repo.saveDiscordRpcEnabled(enabled)
-                            val svcIntent = Intent(ctx, DiscordRpcService::class.java)
-                            if (enabled) {
-                                svcIntent.action = DiscordRpcService.ACTION_START
-                                ctx.startForegroundService(svcIntent)
-                            } else {
-                                svcIntent.action = DiscordRpcService.ACTION_STOP
-                                ctx.startService(svcIntent)
-                            }
-                        }
-                    }
-                }
-                OutlinedButton(onClick = {
-                    scope.launch {
-                        repo.saveDiscordRpcEnabled(false)
-                        repo.saveDiscordSessionSeeded(false)
-                        android.webkit.CookieManager.getInstance().removeAllCookies(null)
-                        val svcIntent = Intent(ctx, DiscordRpcService::class.java)
-                        svcIntent.action = DiscordRpcService.ACTION_STOP
-                        ctx.startService(svcIntent)
-                    }
-                }, modifier = Modifier.fillMaxWidth()) {
-                    Text("Disconnect Discord")
-                }
-            } else {
-                Button(
-                    onClick = {
-                        if (!discordRiskAccepted) {
-                            showRiskConsent = true
-                        } else {
-                            showDiscordLogin = true
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("Sign in to Discord") }
-            }
-            Text(
-                "Your session is stored securely on-device only.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-
-        // Risk consent dialog
-        if (showRiskConsent) {
-            var riskChecked by remember { mutableStateOf(false) }
-            var confirmEnabled by remember { mutableStateOf(false) }
-            LaunchedEffect(riskChecked) {
-                if (riskChecked) {
-                    confirmEnabled = false
-                    delay(4000)
-                    confirmEnabled = true
-                } else {
-                    confirmEnabled = false
-                }
-            }
-            AlertDialog(
-                onDismissRequest = { showRiskConsent = false },
-                title = { Text("Discord Rich Presence") },
-                text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(
-                            "This feature runs a hidden Discord web session on your device to show " +
-                            "VRChat activity on your Discord profile.",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                        Text(
-                            "Please be aware:",
-                            style = MaterialTheme.typography.labelLarge
-                        )
-                        Text(
-                            "• A background Discord web session will be active while enabled\n" +
-                            "• This uses additional battery and data\n" +
-                            "• Your Discord session cookies are stored on-device only\n" +
-                            "• While unlikely, Discord could flag unusual client behavior\n" +
-                            "• Disconnecting clears your Discord session — Discord may also " +
-                            "invalidate your sessions on other devices when it detects an " +
-                            "unauthorized client, logging you out everywhere\n" +
-                            "• You can disable this at any time from settings",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                        Spacer(Modifier.height(4.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.clickable { riskChecked = !riskChecked }) {
-                            Checkbox(checked = riskChecked, onCheckedChange = { riskChecked = it })
-                            Text("I understand and accept these risks",
-                                style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
-                },
-                confirmButton = {
-                    Button(
-                        onClick = {
-                            scope.launch {
-                                repo.saveDiscordRiskAccepted(true)
-                                showRiskConsent = false
-                                if (discordSeeded) {
-                                    repo.saveDiscordRpcEnabled(true)
-                                    val svcIntent = Intent(ctx, DiscordRpcService::class.java)
-                                    svcIntent.action = DiscordRpcService.ACTION_START
-                                    ctx.startForegroundService(svcIntent)
-                                } else {
-                                    showDiscordLogin = true
-                                }
-                            }
-                        },
-                        enabled = confirmEnabled
-                    ) {
-                        Text(if (confirmEnabled) "Continue" else "Please wait...")
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showRiskConsent = false }) {
-                        Text("Cancel")
-                    }
-                }
-            )
-        }
-
-        // Discord login dialog
-        if (showDiscordLogin) {
-            AlertDialog(
-                onDismissRequest = { showDiscordLogin = false },
-                confirmButton = {},
-                text = {
-                    Box(Modifier.fillMaxWidth().height(500.dp)) {
-                        DiscordLoginWebView(
-                            onLoginComplete = {
-                                scope.launch {
-                                    repo.saveDiscordSessionSeeded(true)
-                                    showDiscordLogin = false
-                                }
-                            },
-                            onDismiss = { showDiscordLogin = false }
-                        )
-                    }
-                }
-            )
-        }
-
-        // Info card
-        ElevatedCard {
-            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("About", style = MaterialTheme.typography.titleSmall)
-                Text(
-                    "VRC-A uses VRChat's API for status, notifications, and friend tracking. Discord RPC shows your VRChat activity on your Discord profile via a hidden web session.\n\nYour VRChat password is only used to get a session cookie - it is never stored. Your Discord session stays on-device only.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
+        // Discord RPC management + the duplicated About/trust card are GONE
+        // from this tab (docs/ui-revamp.md): the full Discord setup lives in
+        // Settings → Accounts; the identity header above keeps the small RPC
+        // status chip. The tab is now the live feed: identity + status banner
+        // + alerts + friends count.
     }
 
     // Sign out confirmation
@@ -494,14 +355,14 @@ internal fun VrchatStatusPage(
             onDismissRequest = { showLogoutDialog = false },
             title = { Text("Sign out of VRChat?") },
             text = {
-                Text("Notifications and presence will stop until you sign back in. The app will require you to sign in again before you can use it.")
+                Text("Notifications and presence stop, and chatbox sending is blocked until you sign back in. Your toggles and messages are kept.")
             },
             confirmButton = {
                 TextButton(onClick = {
                     showLogoutDialog = false
+                    // logout() emits loggedOutSignal → vm.vrchatLoggedOut flips
+                    // (isLinked above is derived from it) and the OSC gate blocks.
                     VrchatAuthManager.logout(ctx)
-                    isLinked.value = false
-                    displayName.value = ""
                     // Stop pipeline service
                     ctx.stopService(
                         Intent(ctx, VrchatPipelineService::class.java)
@@ -517,14 +378,150 @@ internal fun VrchatStatusPage(
 
 private const val VISIBLE_ALERT_LIMIT = 3
 
+/**
+ * Process-level expand state for the "Notifications (N)" alert section.
+ * Default EXPANDED; the user's choice persists across tab switches for the
+ * life of the process and resets to expanded only on a real reopen (a fresh
+ * process with the user looking at it). A headless OEM revival restarts the
+ * process with no UI on screen, so by the time the user actually opens the
+ * app again, resetting to the expanded default is exactly the intended
+ * "reopen" behavior — no extra persistence needed.
+ */
+internal object AlertSectionState {
+    val expanded = mutableStateOf(true)
+}
+
+/* =========================
+   Identity header helpers
+   ========================= */
+
+@Composable
+private fun presenceStatusColor(p: VrchatAuthManager.VrcUserPresence?): Color =
+    if (p?.isOnlineInVRChat == true) {
+        when (p.status) {
+            "ask me" -> Color(0xFFFF9800)
+            "busy"   -> Color(0xFFF44336)
+            "join me" -> Color(0xFF2196F3)
+            else     -> Color(0xFF4CAF50)
+        }
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+private fun presenceStatusText(p: VrchatAuthManager.VrcUserPresence?): String =
+    if (p?.isOnlineInVRChat == true) {
+        when (p.status) {
+            "ask me" -> "Ask Me"
+            "busy"   -> "Do Not Disturb"
+            "join me" -> "Join Me"
+            else     -> "Online"
+        }
+    } else "Offline"
+
+private fun prettyPlatform(platform: String): String = when (platform) {
+    "standalonewindows" -> "Desktop"
+    "android"           -> "Android/Quest"
+    "ios"               -> "iOS"
+    else                -> ""
+}
+
+/**
+ * Trust rank chip: VRChat's tag names are OFFSET from the displayed rank names
+ * (same mapping VRCX uses) — system_trust_known displays as "User",
+ * system_trust_trusted as "Known User", system_trust_veteran as "Trusted User",
+ * system_trust_legend as the hidden "Veteran". Colors follow VRChat's rank
+ * colors (New User blue, User green, Known User orange, Trusted User purple,
+ * Veteran yellow; Visitor grey). "Legendary" is deliberately excluded — it
+ * does not exist.
+ */
+private data class TrustBadge(val label: String, val color: Color)
+
+private fun trustBadge(rank: String): TrustBadge? = when (rank) {
+    "system_trust_legend"  -> TrustBadge("Veteran", Color(0xFFFFD000))
+    "system_trust_veteran" -> TrustBadge("Trusted User", Color(0xFFB18FE4))
+    "system_trust_trusted" -> TrustBadge("Known User", Color(0xFFFF7B42))
+    "system_trust_known"   -> TrustBadge("User", Color(0xFF2BCF5C))
+    "system_trust_basic"   -> TrustBadge("New User", Color(0xFF1778FF))
+    "" -> null
+    else -> TrustBadge("Visitor", Color(0xFFCCCCCC))
+}
+
+/** The user's OWN avatar: VRChat+ profile picture loaded through the
+ *  session-authenticated image loader (api.vrchat.cloud 401s otherwise),
+ *  falling back to an initial circle — with a status dot pinned bottom-end. */
+@Composable
+private fun SelfAvatar(name: String, picUrl: String, statusColor: Color, size: Int = 48) {
+    val ctx = LocalContext.current
+    Box {
+        if (picUrl.isNotBlank()) {
+            coil.compose.AsyncImage(
+                model = picUrl,
+                imageLoader = com.vrca.admin.VrchatImageLoader.get(ctx),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .size(size.dp)
+                    .clip(CircleShape)
+            )
+        } else {
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f),
+                modifier = Modifier.size(size.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(
+                        name.take(1).uppercase(),
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+        }
+        Box(
+            Modifier
+                .align(Alignment.BottomEnd)
+                .size(14.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.surface),
+            contentAlignment = Alignment.Center
+        ) {
+            Box(
+                Modifier
+                    .size(10.dp)
+                    .clip(CircleShape)
+                    .background(statusColor)
+            )
+        }
+    }
+}
+
+/* =========================
+   In-app alerts
+   ========================= */
+
+// Alert filter chips (docs/ui-revamp.md): Groups = group announcements/events,
+// Bio = bio diffs, Friends = every other per-user alert. Keyed on the alert
+// group id prefixes set by fireEventNotification's alertGroupKey.
+private fun alertMatchesFilter(groupId: String, filter: String): Boolean = when (filter) {
+    "Groups" -> groupId.startsWith("announcement_") || groupId.startsWith("event_")
+    "Bio" -> groupId.startsWith("bio_")
+    "Friends" -> !groupId.startsWith("announcement_") && !groupId.startsWith("event_") &&
+        !groupId.startsWith("bio_")
+    else -> true
+}
+
 @Composable
 private fun InAppAlertCards() {
     val ctx = LocalContext.current
     val groups by InAppAlertState.groups.collectAsState()
     if (groups.isEmpty()) return
 
-    var sectionExpanded by remember { mutableStateOf(false) }
+    // Shared, process-scoped: expanded by default, survives tab switches,
+    // resets only on a genuine app reopen (see AlertSectionState).
+    var sectionExpanded by AlertSectionState.expanded
     var showAll by remember { mutableStateOf(false) }
+    var filter by rememberSaveable { mutableStateOf("All") }
 
     Surface(
         color = Color.Transparent,
@@ -557,9 +554,28 @@ private fun InAppAlertCards() {
                 exit = fadeOut() + shrinkVertically()
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    val visible = if (showAll || groups.size <= VISIBLE_ALERT_LIMIT) groups
-                        else groups.take(VISIBLE_ALERT_LIMIT)
-                    val hiddenCount = groups.size - visible.size
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf("All", "Friends", "Groups", "Bio").forEach { f ->
+                            FilterChip(
+                                selected = filter == f,
+                                onClick = { filter = f; showAll = false },
+                                label = { Text(f, style = MaterialTheme.typography.labelMedium) }
+                            )
+                        }
+                    }
+
+                    val filtered = groups.filter { alertMatchesFilter(it.groupId, filter) }
+                    if (filtered.isEmpty()) {
+                        Text(
+                            "No ${filter.lowercase()} alerts.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 4.dp)
+                        )
+                    }
+                    val visible = if (showAll || filtered.size <= VISIBLE_ALERT_LIMIT) filtered
+                        else filtered.take(VISIBLE_ALERT_LIMIT)
+                    val hiddenCount = filtered.size - visible.size
 
                     for (group in visible) {
                         // Key by group identity so each card's expanded state stays

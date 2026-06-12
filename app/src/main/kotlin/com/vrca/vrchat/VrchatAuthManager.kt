@@ -31,6 +31,12 @@ object VrchatAuthManager {
     private val _loggedOutSignal = kotlinx.coroutines.flow.MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val loggedOutSignal: kotlinx.coroutines.flow.SharedFlow<Unit> = _loggedOutSignal
 
+    // Emitted on every successful manual login (Basic-auth success or 2FA verify
+    // success). Used by VrcaViewModel to lift the VRChat-logout OSC gate and by
+    // VrcaApp to re-run the Phase-2 ban check after a Settings re-login.
+    private val _loggedInSignal = kotlinx.coroutines.flow.MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val loggedInSignal: kotlinx.coroutines.flow.SharedFlow<Unit> = _loggedInSignal
+
     private const val TAG = "VrchatAuth"
     private const val BASE = "https://api.vrchat.cloud/api/1"
     private const val USER_AGENT = "VRC-A-Companion/1.0 (Android; companion app)"
@@ -132,8 +138,10 @@ object VrchatAuthManager {
             if (code != 200) return@withContext ""
             captureRolledCookies(context, rawCookies)
             val json = JSONObject(body)
-            val pic = json.optString("profilePicOverride", "")
-                .ifBlank { json.optString("userIcon", "") }
+            // userIcon is the round profile picture; profilePicOverride is the
+            // wide BANNER — only fall back to it when no icon is set.
+            val pic = json.optString("userIcon", "")
+                .ifBlank { json.optString("profilePicOverride", "") }
             // Store whatever we got (including blank → no VRChat+, so we don't
             // keep re-fetching a value that will never appear).
             getPrefs(context)?.edit()?.putString(KEY_PROFILE_PIC, pic)?.apply()
@@ -144,51 +152,32 @@ object VrchatAuthManager {
         }
     }
 
-    /**
-     * On-demand profile-pic resolution by VRChat userId, using THIS device's
-     * session (used by the admin directory so it can show any user's VRChat+
-     * picture without that picture ever being stored in Firestore). Returns the
-     * `profilePicOverride` (falling back to `userIcon`) URL, or "" if the user
-     * has no VRChat+ pic / we're not logged in / the fetch failed.
-     *
-     * Results (including blank) are cached per-userId for the process lifetime so
-     * scrolling the directory doesn't re-hit `GET /users/{id}` and risk rate
-     * limits — the caller is expected to only request VISIBLE rows.
-     */
-    private val profilePicUrlCache = java.util.concurrent.ConcurrentHashMap<String, String>()
-    suspend fun fetchProfilePicUrl(context: Context, userId: String): String =
-        withContext(Dispatchers.IO) {
-            if (userId.isBlank()) return@withContext ""
-            profilePicUrlCache[userId]?.let { return@withContext it }
-            val cookieHeader = getCookieHeader(context) ?: return@withContext ""
-            try {
-                val (code, body, rawCookies) = get("$BASE/users/$userId", null, cookieHeader)
-                if (code != 200) return@withContext ""
-                captureRolledCookies(context, rawCookies)
-                val json = JSONObject(body)
-                val pic = json.optString("profilePicOverride", "")
-                    .ifBlank { json.optString("userIcon", "") }
-                profilePicUrlCache[userId] = pic // cache blank too — no refetch storm
-                pic
-            } catch (e: Exception) {
-                Log.w(TAG, "fetchProfilePicUrl failed for $userId", e)
-                ""
-            }
-        }
-
     /** Live instance occupancy from a single `GET /instances/{location}` call. */
     data class InstanceCount(val players: Int, val capacity: Int)
 
     /**
-     * Derives the live in-instance headcount from a `/instances/{loc}` JSON body.
-     * VRChat's `n_users` is a CACHED aggregate that lags the real count, so the
-     * number drifts from what the website shows. The website (and tools like
-     * VRCX) instead sum the live per-platform breakdown (`platforms`:
-     * standalonewindows / android / ios), which tracks reality far more closely.
-     * We prefer that sum whenever the `platforms` object is present, and only
-     * fall back to `n_users` / `userCount` when it is absent.
+     * Derives the in-instance headcount from a `/instances/{loc}` JSON body.
+     *
+     * VRChat exposes THREE candidate counts and they disagree by a few users:
+     *  - `userCount` is what the **in-game client's** instance panel shows (the
+     *    number the player and everyone in the instance actually see in-headset).
+     *  - `n_users` and the per-platform breakdown (`platforms`: standalonewindows
+     *    / android / ios, which sums to the **website / VRCX** number) AGREE with
+     *    each other but run a few HIGH — they count users mid-join / in-transit /
+     *    timing-out that the in-game client has already dropped.
+     *
+     * Confirmed empirically (debug overlay vs the in-game panel: userCount=36 ==
+     * in-game, while n_users=47 and platformsSum=47 both over-counted). We match
+     * the in-game client by preferring `userCount`, falling back to `n_users`
+     * then the platforms sum only when it is absent.
      */
     private fun extractInstanceUserCount(inst: JSONObject): Int {
+        val userCount = inst.optInt("userCount", -1)
+        if (userCount >= 0) return userCount
+
+        val nUsers = inst.optInt("n_users", -1)
+        if (nUsers >= 0) return nUsers
+
         val platforms = inst.optJSONObject("platforms")
         if (platforms != null) {
             var sum = 0
@@ -198,9 +187,7 @@ object VrchatAuthManager {
             }
             return sum
         }
-        val nUsers = inst.optInt("n_users", -1)
-        if (nUsers >= 0) return nUsers
-        return inst.optInt("userCount", 0)
+        return 0
     }
 
     /**
@@ -461,8 +448,9 @@ object VrchatAuthManager {
                         val userId = json.optString("id")
                         val displayName = json.optString("displayName")
                         // VRChat+ custom profile picture (blank without VRChat+).
-                        val profilePic = json.optString("profilePicOverride", "")
-                            .ifBlank { json.optString("userIcon", "") }
+                        // userIcon is the round pfp; profilePicOverride is the banner.
+                        val profilePic = json.optString("userIcon", "")
+                            .ifBlank { json.optString("profilePicOverride", "") }
 
                         if (authCookieValue != null && userId.isNotBlank()) {
                             // Update the auth cookie + user info. If VRChat re-issued
@@ -487,6 +475,7 @@ object VrchatAuthManager {
                                     ?.putLong(KEY_2FA_COOKIE_STORED_AT, now)
                             }
                             editor?.apply()
+                            _loggedInSignal.tryEmit(Unit)
                             AuthResult.Success(userId, displayName)
                         } else {
                             // Unusual: 200 but no id or cookie - log the body for diagnosis
@@ -584,6 +573,7 @@ object VrchatAuthManager {
                             saveSession(context, partialCookie,
                                 twoFaCookieValue,
                                 userId, displayName)
+                            _loggedInSignal.tryEmit(Unit)
                             TwoFaResult.Success(userId, displayName)
                         } else {
                             TwoFaResult.Error("Could not retrieve user after verification.")
@@ -640,10 +630,18 @@ object VrchatAuthManager {
         val currentAvatarThumbnailUrl: String,
         val isOnlineInVRChat: Boolean,
         val worldImageUrl: String = "",
-        // VRChat+ custom profile picture (profilePicOverride, falling back to
-        // userIcon). Blank when the user has no VRChat+ custom picture — in that
-        // case VRChat itself just renders their name letters.
-        val profilePicUrl: String = ""
+        // VRChat+ custom profile picture — the round `userIcon`. NOT the wide
+        // profile banner (`profilePicOverride`); cropping the banner into the
+        // avatar circle was the "banner used as pfp" bug. Blank when the user
+        // has no VRChat+ icon — the UI renders their name initial instead.
+        val profilePicUrl: String = "",
+        // VRChat+ profile BANNER (`profilePicOverride`) — the wide image shown
+        // at the top of the website profile. Used as the identity-card
+        // background on the VRChat tab; blank for non-VRChat+ users.
+        val bannerUrl: String = "",
+        // Raw system_trust_* tag (highest), shown as a chip on the VRChat tab
+        // identity header. Blank when tags were unavailable.
+        val trustRank: String = ""
     )
 
     suspend fun fetchPresence(context: Context): VrcUserPresence? = withContext(Dispatchers.IO) {
@@ -669,9 +667,11 @@ object VrchatAuthManager {
             var platform = json.optString("last_platform", "")
             var displayName = json.optString("displayName")
             var avatarThumb = json.optString("currentAvatarThumbnailImageUrl", "")
-            // VRChat+ profile picture: profilePicOverride wins, then userIcon.
-            var profilePic = json.optString("profilePicOverride", "")
-                .ifBlank { json.optString("userIcon", "") }
+            // VRChat+ images: userIcon is the round profile picture; the
+            // profilePicOverride is the wide BANNER — keep them separate.
+            var profilePic = json.optString("userIcon", "")
+            var bannerPic = json.optString("profilePicOverride", "")
+            var trustRank = extractTrustRankFromTags(json.optJSONArray("tags"))
 
             Log.d(TAG, "fetchPresence /auth/user: state=$state status=$status location=$location")
 
@@ -696,10 +696,10 @@ object VrchatAuthManager {
                         uj.optString("displayName", "").let { if (it.isNotBlank()) displayName = it }
                         uj.optString("currentAvatarThumbnailImageUrl", "").let { if (it.isNotBlank()) avatarThumb = it }
                         // The /users/{id} endpoint is the authoritative source for
-                        // the VRChat+ profile picture fields.
-                        uj.optString("profilePicOverride", "").let { if (it.isNotBlank()) profilePic = it }
-                        if (profilePic.isBlank())
-                            uj.optString("userIcon", "").let { if (it.isNotBlank()) profilePic = it }
+                        // the VRChat+ profile picture / banner fields.
+                        uj.optString("userIcon", "").let { if (it.isNotBlank()) profilePic = it }
+                        uj.optString("profilePicOverride", "").let { if (it.isNotBlank()) bannerPic = it }
+                        extractTrustRankFromTags(uj.optJSONArray("tags")).let { if (it.isNotBlank()) trustRank = it }
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "Could not fetch /users/$userId", e)
@@ -758,7 +758,9 @@ object VrchatAuthManager {
                 currentAvatarThumbnailUrl = avatarThumb,
                 isOnlineInVRChat = isOnline,
                 worldImageUrl = worldImageUrl,
-                profilePicUrl = profilePic
+                profilePicUrl = profilePic,
+                bannerUrl = bannerPic,
+                trustRank = trustRank
             )
         } catch (e: Exception) {
             Log.e(TAG, "fetchPresence failed", e)

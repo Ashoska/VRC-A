@@ -37,6 +37,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun VrchatLoginScreen(
     pendingBanId: String?,
+    onCancel: (() -> Unit)? = null,
     onLoginSuccess: (userId: String, displayName: String) -> Unit
 ) {
     val ctx = LocalContext.current
@@ -56,6 +57,16 @@ fun VrchatLoginScreen(
     var codeInput by remember { mutableStateOf("") }
     var codeLoading by remember { mutableStateOf(false) }
     var codeError by remember { mutableStateOf<String?>(null) }
+
+    // VRChat platform status (docs/ui-revamp.md, login polish): the pipeline's
+    // status poll only runs post-login, so every login surface does its own
+    // one-shot fetch — and re-fetches on a FAILED attempt so a mid-outage user
+    // learns "it's not you" reactively. Lives here (not in the onboarding
+    // wrapper) so the Settings / VRChat-tab takeovers get it too.
+    var statusWarning by remember {
+        mutableStateOf<com.vrca.ui.onboarding.VrchatStatusWarning?>(null)
+    }
+    LaunchedEffect(Unit) { statusWarning = com.vrca.ui.onboarding.fetchVrchatStatusWarning() }
 
     val codeFocus = remember { FocusRequester() }
     val passwordFocus = remember { FocusRequester() }
@@ -90,6 +101,9 @@ fun VrchatLoginScreen(
                 is VrchatAuthManager.AuthResult.Error -> {
                     isLoading = false
                     errorMessage = result.message
+                    // A failure during a platform outage isn't the user's fault —
+                    // surface/refresh the warning so they know.
+                    statusWarning = com.vrca.ui.onboarding.fetchVrchatStatusWarning()
                 }
             }
         }
@@ -123,6 +137,21 @@ fun VrchatLoginScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
 
+            statusWarning?.let { w ->
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer)
+                ) {
+                    Text(
+                        "VRChat is having platform issues right now (${w.description}). " +
+                            "Login may fail, it's not you. You can retry later.",
+                        modifier = Modifier.padding(12.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                }
+            }
+
             if (!awaitingCode) {
                 // -- Step 1: Credentials ----------------------------------
                 Text(
@@ -131,7 +160,7 @@ fun VrchatLoginScreen(
                     textAlign = TextAlign.Center
                 )
                 Text(
-                    "VRC-A uses your VRChat account to show your status, detect notifications, and identify you in the moderation system. Your credentials are only used to obtain a session cookie from VRChat's servers - they are never stored elsewhere.",
+                    "Your VRChat account powers status, notifications, and moderation identity. Credentials are only used to get a session cookie and are never stored anywhere else.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center
@@ -251,6 +280,13 @@ fun VrchatLoginScreen(
                     )
                 }
 
+                Text(
+                    "VRChat will remember this device, so you won't be asked again.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
+
                 Spacer(Modifier.height(4.dp))
 
                 OutlinedTextField(
@@ -306,6 +342,16 @@ fun VrchatLoginScreen(
                     }
                 ) {
                     Text("<- Back to sign in")
+                }
+            }
+
+            // Cancel lives INSIDE the screen content (Settings / VRChat-tab
+            // re-login takeovers used to pin it to a bar above the screen,
+            // which clashed with the app bar). Hidden during onboarding, where
+            // the login step is a hard gate (onCancel = null).
+            if (onCancel != null) {
+                TextButton(onClick = onCancel, modifier = Modifier.fillMaxWidth()) {
+                    Text("Cancel")
                 }
             }
 
