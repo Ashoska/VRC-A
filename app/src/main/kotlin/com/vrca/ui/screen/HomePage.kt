@@ -673,6 +673,17 @@ private fun PreviewAndTogglesCard(
                            else MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+            // Cycle countdown sits inline so it doesn't shift the layout
+            // when it appears/disappears while sending.
+            if (vm.oscSending && vm.cycleEnabled && vm.nextCycleAtMs > 0L) {
+                val secsLeft = ((vm.nextCycleAtMs - nowTickMs) / 1000L).coerceAtLeast(0L)
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    "Next cycle in ${secsLeft}s",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             Spacer(Modifier.weight(1f))
             val used = vm.debugLastCombinedOsc.length
             val budget = if (vm.minimalChatboxBg) 142 else 144
@@ -684,18 +695,6 @@ private fun PreviewAndTogglesCard(
                     used > budget - 30 -> androidx.compose.ui.graphics.Color(0xFFFFB300)
                     else -> MaterialTheme.colorScheme.onSurfaceVariant
                 }
-            )
-        }
-
-        // Cycle countdown — only meaningful while the cycle loop is running.
-        if (vm.oscSending && vm.cycleEnabled && vm.nextCycleAtMs > 0L) {
-            val secsLeft = ((vm.nextCycleAtMs - nowTickMs) / 1000L).coerceAtLeast(0L)
-            Text(
-                "Next cycle in ${secsLeft}s",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth()
             )
         }
 
