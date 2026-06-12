@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -47,6 +46,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -173,7 +173,7 @@ fun VrcaApp() {
             } catch (t: kotlinx.coroutines.TimeoutCancellationException) {
                 bootError = "Couldn't reach server. Check your connection and try again."
             } catch (t: Throwable) {
-                bootError = (t.message ?: t.toString()).take(4000)
+                bootError = sanitizeBackendRefs((t.message ?: t.toString()).take(4000))
             } finally {
                 bootWorking = false
             }
@@ -209,7 +209,7 @@ fun VrcaApp() {
             working = true,
             error = null,
             onRetry = {},
-            status = "Checking account status…"
+            phase = 2
         )
         return
     }
@@ -995,25 +995,114 @@ private fun secureRandomHex(numBytes: Int): String {
    UI: Bootstrap + Crash
    ========================================================= */
 
-/** Rotating "did you know" facts shown while the app boots. Keep each one
- *  short (fits ~2 lines) and free of em dashes. */
-private val BOOT_TIPS = listOf(
-    "Long-press a Quick Toggle pill to jump straight to its editor.",
-    "The eye icon under the Home preview shrinks your in-game chatbox bubble.",
-    "Cycle can rotate up to 10 lines through your chatbox.",
-    "Now Playing works with Spotify, YouTube and YouTube Music.",
-    "Toggles only set things up. Press Start on Home when your preview looks right.",
-    "Discord RPC can show your current VRChat world on your Discord profile.",
-    "Swiping the app away stops everything until you open it again.",
-    "You can replay the setup tutorial anytime from Settings."
-)
+/**
+ * Strip backend-implementation names from USER-VISIBLE error/debug text.
+ * Exception messages and class names would otherwise reveal which backend the
+ * app runs on, which is information an attacker can use \u2014 every string that
+ * reaches the screen (boot errors, crash text, debug panel) routes through
+ * this. Logs (Logcat) keep the raw text for real debugging.
+ */
+internal fun sanitizeBackendRefs(text: String): String = text
+    // Fully-qualified class/package paths first (most specific).
+    .replace(Regex("""com\.google\.(firebase|android\.gms)[.\w$]*"""), "backend")
+    // Then any remaining brand tokens, e.g. "FirebaseFirestoreException:
+    // PERMISSION_DENIED" -> "server: PERMISSION_DENIED".
+    .replace(Regex("""Fire(base|store)\w*""", RegexOption.IGNORE_CASE), "server")
+
+/**
+ * Process-level one-shot VRChat platform status for the boot checklist. Held
+ * OUTSIDE the composable because BootstrapScreen is composed twice during a
+ * normal boot (the bootstrap gate, then the phase-1 ban check) \u2014 local state
+ * would refetch and flash the row back to "checking" between the two.
+ * stateOf: 0 = checking, 1 = all operational, 2 = issues, 3 = unreachable.
+ */
+private object BootVrcStatus {
+    val state = mutableStateOf(0)
+    val detail = mutableStateOf("")
+    val fetchStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+}
+
+private suspend fun fetchBootVrcStatus() = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+    try {
+        val conn = java.net.URL("https://status.vrchat.com/api/v2/summary.json")
+            .openConnection() as java.net.HttpURLConnection
+        conn.connectTimeout = 6000
+        conn.readTimeout = 6000
+        conn.useCaches = false
+        val body = conn.inputStream.bufferedReader().use { it.readText() }
+        conn.disconnect()
+        val status = org.json.JSONObject(body).optJSONObject("status")
+        val indicator = status?.optString("indicator", "none") ?: "none"
+        if (indicator == "none" || indicator.isBlank()) {
+            BootVrcStatus.state.value = 1
+        } else {
+            BootVrcStatus.detail.value =
+                status?.optString("description", "")?.takeIf { it.isNotBlank() }
+                    ?: "VRChat is having platform issues"
+            BootVrcStatus.state.value = 2
+        }
+    } catch (_: Throwable) {
+        BootVrcStatus.state.value = 3
+    }
+}
+
+/** One row of the boot checklist. state: 0 = pending, 1 = active (spinner),
+ *  2 = done (green check), 3 = warn (amber !), 4 = unknown (grey ?). */
+@Composable
+private fun BootCheckRow(label: String, state: Int, detail: String = "") {
+    val colors = MaterialTheme.colorScheme
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
+            when (state) {
+                1 -> CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp
+                )
+                2 -> Surface(shape = CircleShape, color = Color(0xFF2BCF5C), modifier = Modifier.size(18.dp)) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text("\u2713", color = Color.Black, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    }
+                }
+                3 -> Surface(shape = CircleShape, color = Color(0xFFFFB74D), modifier = Modifier.size(18.dp)) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text("!", color = Color.Black, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    }
+                }
+                4 -> Surface(shape = CircleShape, color = colors.onSurfaceVariant.copy(alpha = 0.35f), modifier = Modifier.size(18.dp)) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text("?", color = colors.surface, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    }
+                }
+                else -> Surface(
+                    shape = CircleShape,
+                    color = colors.onSurfaceVariant.copy(alpha = 0.15f),
+                    modifier = Modifier.size(10.dp)
+                ) {}
+            }
+        }
+        Column(Modifier.padding(start = 12.dp)) {
+            Text(
+                label,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (state == 0) colors.onSurfaceVariant.copy(alpha = 0.6f) else colors.onSurface
+            )
+            if (detail.isNotBlank()) {
+                Text(
+                    detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (state == 3) Color(0xFFFFB74D) else colors.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
 
 @Composable
 private fun BootstrapScreen(
     working: Boolean,
     error: String?,
     onRetry: () -> Unit,
-    status: String = "Preparing device session\u2026"
+    phase: Int = 1
 ) {
     val colors = MaterialTheme.colorScheme
     // Soft vertical wash: theme background into a faint primary tint at the
@@ -1036,13 +1125,11 @@ private fun BootstrapScreen(
         label = "bootLogoScale"
     )
 
-    // Tip carousel: advance every 4s while working (paused on error so the
-    // user can read the failure instead).
-    var tipIndex by remember { mutableStateOf(0) }
-    LaunchedEffect(working) {
-        while (working) {
-            delay(4_000L)
-            tipIndex = (tipIndex + 1) % BOOT_TIPS.size
+    // Kick off the one-shot VRChat platform status check. Process-level guard:
+    // the second BootstrapScreen composition (ban check) must not refetch.
+    LaunchedEffect(Unit) {
+        if (BootVrcStatus.fetchStarted.compareAndSet(false, true)) {
+            fetchBootVrcStatus()
         }
     }
 
@@ -1091,50 +1178,59 @@ private fun BootstrapScreen(
 
                 Spacer(Modifier.height(28.dp))
 
-                if (working) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(28.dp),
-                        strokeWidth = 3.dp
-                    )
-                    Spacer(Modifier.height(12.dp))
-                }
-                Text(
-                    status,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = colors.onSurfaceVariant,
-                    textAlign = TextAlign.Center
-                )
-
-                if (error == null) {
-                    Spacer(Modifier.height(36.dp))
-                    // Rotating tip card.
-                    Surface(
-                        shape = MaterialTheme.shapes.large,
-                        color = colors.surfaceVariant.copy(alpha = 0.5f),
-                        modifier = Modifier.widthIn(max = 420.dp).fillMaxWidth()
+                // Boot checklist: the real phases, with live per-row states.
+                Surface(
+                    shape = MaterialTheme.shapes.large,
+                    color = colors.surfaceVariant.copy(alpha = 0.5f),
+                    modifier = Modifier.widthIn(max = 420.dp).fillMaxWidth()
+                ) {
+                    Column(
+                        Modifier.padding(horizontal = 18.dp, vertical = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        Column(Modifier.padding(horizontal = 18.dp, vertical = 14.dp)) {
-                            Text(
-                                "DID YOU KNOW",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = colors.primary
-                            )
-                            Spacer(Modifier.height(6.dp))
-                            Crossfade(
-                                targetState = tipIndex,
-                                animationSpec = tween(450),
-                                label = "bootTip"
-                            ) { idx ->
-                                Text(
-                                    BOOT_TIPS[idx],
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = colors.onSurface,
-                                    minLines = 2
-                                )
+                        BootCheckRow(
+                            label = "Device session",
+                            state = when {
+                                phase >= 2 -> 2
+                                error != null -> 3
+                                else -> 1
                             }
-                        }
+                        )
+                        BootCheckRow(
+                            label = "Account status",
+                            state = if (phase >= 2) 1 else 0
+                        )
+                        val vrcState by BootVrcStatus.state
+                        val vrcDetail by BootVrcStatus.detail
+                        BootCheckRow(
+                            label = "VRChat systems",
+                            state = when (vrcState) {
+                                1 -> 2
+                                2 -> 3
+                                3 -> 4
+                                else -> 1
+                            },
+                            detail = when (vrcState) {
+                                1 -> "All systems operational"
+                                2 -> vrcDetail
+                                3 -> "Couldn't check status"
+                                else -> ""
+                            }
+                        )
                     }
+                }
+
+                // Lifetime stat line (hidden until it's a number worth showing,
+                // so a fresh install never sees "0 chatbox updates").
+                val lifetimeSends = remember { ChatboxStats.totalSends() }
+                if (error == null && lifetimeSends >= 100) {
+                    Spacer(Modifier.height(20.dp))
+                    Text(
+                        "You've sent ${String.format(java.util.Locale.US, "%,d", lifetimeSends)} chatbox updates",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = colors.onSurfaceVariant.copy(alpha = 0.8f),
+                        textAlign = TextAlign.Center
+                    )
                 }
 
                 if (error != null) {
@@ -1194,7 +1290,9 @@ private fun CrashScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
-                        crashText.ifBlank { "(no crash text saved)" },
+                        // Sanitized on display only — the stored crash log keeps
+                        // the raw stack trace for real debugging via Logcat/file.
+                        sanitizeBackendRefs(crashText).ifBlank { "(no crash text saved)" },
                         fontFamily = FontFamily.Monospace,
                         style = MaterialTheme.typography.bodySmall
                     )

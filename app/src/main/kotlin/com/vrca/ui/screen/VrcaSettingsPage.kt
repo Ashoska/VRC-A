@@ -266,16 +266,17 @@ internal fun SettingsPage(
                         Modifier.padding(top = 10.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Text("Firebase (last issue)", style = MaterialTheme.typography.labelMedium)
+                        Text("Sync (last issue)", style = MaterialTheme.typography.labelMedium)
                         Text(
-                            text = lastFirebaseIssue ?: "(none captured)",
+                            text = lastFirebaseIssue?.let { com.vrca.app.sanitizeBackendRefs(it) }
+                                ?: "(none captured)",
                             fontFamily = FontFamily.Monospace,
                             style = MaterialTheme.typography.bodySmall
                         )
 
                         Text("Moderation listener (last error)", style = MaterialTheme.typography.labelMedium)
                         Text(
-                            text = moderationError?.ifBlank { "(none)" } ?: "(none)",
+                            text = moderationError?.let { com.vrca.app.sanitizeBackendRefs(it) }?.ifBlank { "(none)" } ?: "(none)",
                             fontFamily = FontFamily.Monospace,
                             style = MaterialTheme.typography.bodySmall
                         )

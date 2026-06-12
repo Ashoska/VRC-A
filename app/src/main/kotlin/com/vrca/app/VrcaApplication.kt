@@ -65,6 +65,9 @@ class VrcaApplication : Application(), ViewModelStoreOwner {
         // previous (possibly paused) track immediately instead of blanking.
         com.vrca.nowplaying.NowPlayingState.attach(applicationContext)
 
+        // Lifetime chatbox-send counter (boot screen stat).
+        ChatboxStats.attach(applicationContext)
+
         // Cap Firestore offline cache (default is 100 MB — far more than needed).
         FirebaseFirestore.getInstance().firestoreSettings =
             FirebaseFirestoreSettings.Builder()
