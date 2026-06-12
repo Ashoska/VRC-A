@@ -450,9 +450,8 @@ class VrcaViewModel(
         data["nowPlayingArtist"] = lastNowPlayingArtist.takeIf { it != "(blank)" }?.trim().orEmpty()
         data["activePackage"] = activePackage
 
-        // Profile pictures are intentionally NOT written to Firestore (cost): the
-        // admin panel resolves VRChat+ pictures on demand by vrchatUserId using the
-        // admin's own VRChat session (see AdminAvatar / VrchatImageLoader).
+        // Profile pictures are intentionally NOT written to Firestore (cost) and
+        // NOT shown in the admin panel (AdminAvatar renders name initials).
 
         // Multi-IP slots
         val activeSlot = runCatching {
@@ -640,9 +639,8 @@ class VrcaViewModel(
         put("cyclePreset3", cyclePresetMessages.getOrNull(2)?.trim().orEmpty())
         put("cyclePreset4", cyclePresetMessages.getOrNull(3)?.trim().orEmpty())
         put("cyclePreset5", cyclePresetMessages.getOrNull(4)?.trim().orEmpty())
-        // Profile pictures are deliberately NOT synced to Firestore (cost). The
-        // admin panel resolves VRChat+ pictures on demand by vrchatUserId via the
-        // admin's own VRChat session — see AdminAvatar / VrchatImageLoader.
+        // Profile pictures are deliberately NOT synced to Firestore (cost) and
+        // NOT shown in the admin panel (AdminAvatar renders name initials).
 
         // Volatile preview/nowPlaying + VRChat presence ride the hourly delta so
         // an UNWATCHED user's directory row stays roughly current (Firestore bills

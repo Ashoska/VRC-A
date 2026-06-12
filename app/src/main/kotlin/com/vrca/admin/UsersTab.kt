@@ -117,8 +117,9 @@ internal data class UserRow(
     // advances lastActiveAt past it, so it can never false-flag a running app.
     val offlineAt: Timestamp? = null,
     val versionName: String = ""
-    // Profile pictures are NOT stored in Firestore — AdminAvatar resolves the
-    // VRChat+ picture on demand by vrchatUserId via the admin's VRChat session.
+    // Profile pictures are NOT stored in Firestore and NOT displayed in the
+    // admin UI — AdminAvatar shows the name initial (the on-demand VRChat+
+    // fetch never worked reliably and was removed).
 )
 
 internal data class UserDetail(
@@ -566,15 +567,10 @@ internal fun UsersTab(
                         val primaryLabel = row.vrchatDisplayName.ifBlank {
                             row.displayName.ifBlank { shortId(row.docId) }
                         }
-                        // Prefer the live 10s detail poll for the pfp so it
-                        // appears/refreshes once watching kicks in; fall back to
-                        // the directory snapshot.
-                        val liveVrcId = (d?.vrchatUserId ?: "").ifBlank { row.vrchatUserId }
                         AdminAvatar(
                             name = primaryLabel,
                             online = isUserOnline(row, nowMs),
-                            size = 60,
-                            vrchatUserId = liveVrcId
+                            size = 60
                         )
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(
@@ -863,8 +859,7 @@ internal fun UsersTab(
                     val primaryName = u.vrchatDisplayName.ifBlank { u.displayName.ifBlank { shortId(u.docId) } }
                     AdminAvatar(
                         name = primaryName,
-                        online = appOnline,
-                        vrchatUserId = u.vrchatUserId
+                        online = appOnline
                     )
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                         val secondaryName = if (u.vrchatDisplayName.isNotBlank() && u.displayName.isNotBlank() && u.vrchatDisplayName != u.displayName) u.displayName else null

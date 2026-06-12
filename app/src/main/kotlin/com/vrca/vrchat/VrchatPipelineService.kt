@@ -534,9 +534,8 @@ class VrchatPipelineService : Service() {
                     lastConnectedNotifText = notifText
                     updatePersistentNotif(notifText)
                     serviceScope.launch { fireConnectionNotification(true) }
-                    // Profile pictures are NOT written to Firestore (cost). The admin
-                    // panel resolves VRChat+ pictures on demand by vrchatUserId using
-                    // the admin's own VRChat session — see AdminAvatar.
+                    // Profile pictures are NOT written to Firestore (cost) and NOT
+                    // shown in the admin panel (AdminAvatar renders name initials).
                     // Auto-start Discord RPC if enabled
                     serviceScope.launch {
                         try {

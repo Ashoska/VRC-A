@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -18,25 +17,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
-import com.vrca.vrchat.VrchatAuthManager
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import coil.compose.AsyncImagePainter
-import coil.compose.rememberAsyncImagePainter
 
 /* =========================================================
    ADMIN UI KIT — shared visual language for the admin panel
@@ -223,55 +211,22 @@ internal fun AdminLabeledRow(
 }
 
 /**
- * An identity avatar: the user's real VRChat+ profile picture with a first-initial
- * circle as the fallback when there's no picture or the load fails. A small
- * online/offline status dot sits in the corner.
+ * An identity avatar: a first-initial circle with a small online/offline status
+ * dot in the corner.
  *
- * Profile pictures are NOT stored in Firestore (cost). The VRChat+ picture is
- * resolved ON DEMAND by [vrchatUserId] through the admin's own VRChat session
- * (`VrchatAuthManager.fetchProfilePicUrl`, per-id cached) and loaded via
- * [VrchatImageLoader], which attaches that session's cookie so the auth-gated
- * `api.vrchat.cloud` image resolves. Requires `IS_ADMIN_BUILD` + a logged-in
- * VRChat session; otherwise (and for users with no VRChat+ picture) it shows the
- * name initial.
+ * Profile pictures are NOT shown here. They were never stored in Firestore
+ * (cost), and the on-demand VRChat+ fetch through the admin's own session
+ * (`fetchProfilePicUrl` + Coil) never worked reliably in practice, so it was
+ * removed entirely — the initial circle is the deliberate, final design.
  */
 @Composable
 internal fun AdminAvatar(
     name: String,
     online: Boolean,
-    size: Int = 40,
-    vrchatUserId: String = ""
+    size: Int = 40
 ) {
     val initial = name.trim().firstOrNull()?.uppercaseChar()?.toString() ?: "?"
     val cs = MaterialTheme.colorScheme
-    val context = LocalContext.current
-
-    // Profile pictures are NEVER stored in Firestore (cost). The VRChat+ picture
-    // is fetched ON DEMAND by VRChat userId using the admin's own VRChat session,
-    // and loaded through VrchatImageLoader (which attaches that session's cookie so
-    // the auth-gated api.vrchat.cloud image resolves). Per-id cached in
-    // VrchatAuthManager so scrolling the directory never re-hits the API. Falls
-    // back to the name initial when there's no picture / we're not logged in.
-    var fetchedVrchatUrl by remember(vrchatUserId) { mutableStateOf("") }
-    LaunchedEffect(vrchatUserId) {
-        if (vrchatUserId.isNotBlank() &&
-            com.vrca.BuildConfig.IS_ADMIN_BUILD &&
-            VrchatAuthManager.isLoggedIn(context)
-        ) {
-            fetchedVrchatUrl = VrchatAuthManager.fetchProfilePicUrl(context, vrchatUserId)
-        }
-    }
-    val currentUrl = fetchedVrchatUrl.trim().ifBlank { null }
-
-    @Composable
-    fun InitialText() {
-        Text(
-            initial,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
-            color = cs.primary
-        )
-    }
 
     Box(contentAlignment = Alignment.Center) {
         Surface(
@@ -279,27 +234,13 @@ internal fun AdminAvatar(
             color = cs.primary.copy(alpha = 0.16f),
             modifier = Modifier.size(size.dp)
         ) {
-            if (currentUrl != null) {
-                val painter = rememberAsyncImagePainter(
-                    model = currentUrl,
-                    imageLoader = VrchatImageLoader.get(context)
+            Box(contentAlignment = Alignment.Center) {
+                Text(
+                    initial,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = cs.primary
                 )
-                val state = painter.state
-                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-                    if (state is AsyncImagePainter.State.Success) {
-                        androidx.compose.foundation.Image(
-                            painter = painter,
-                            contentDescription = null,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize().clip(CircleShape)
-                        )
-                    } else {
-                        // Loading, or errored → name initial.
-                        InitialText()
-                    }
-                }
-            } else {
-                Box(contentAlignment = Alignment.Center) { InitialText() }
             }
         }
         Box(
