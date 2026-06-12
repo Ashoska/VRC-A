@@ -436,7 +436,6 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
     // also consult isLoggedIn for cold truth (covers process restarts).
     val vrcSignedIn = !vm.vrchatLoggedOut &&
         com.vrca.vrchat.VrchatAuthManager.isLoggedIn(ctx)
-    val vrcName = com.vrca.vrchat.VrchatAuthManager.getStoredDisplayName(ctx) ?: ""
 
     val discordSeeded by repo.discordSessionSeeded.collectAsStateInitially(false)
     val discordEnabled by repo.discordRpcEnabled.collectAsStateInitially(false)
@@ -464,12 +463,18 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
     }
 
     SectionCard(title = "Accounts") {
-        // VRChat row
+        // VRChat row — status line mirrors the Discord row's format so the
+        // two accounts read consistently ("Connected — Presence on/off").
+        val pipelineConnected by com.vrca.vrchat.VrchatPipelineState.isConnectedFlow.collectAsState()
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("VRChat", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    if (vrcSignedIn) vrcName.ifBlank { "Signed in" } else "Signed out — chatbox sending is blocked",
+                    when {
+                        !vrcSignedIn -> "Signed out — chatbox sending is blocked"
+                        pipelineConnected -> "Connected — Presence on"
+                        else -> "Connected — Presence connecting..."
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = if (vrcSignedIn) MaterialTheme.colorScheme.onSurfaceVariant
                             else MaterialTheme.colorScheme.error
@@ -512,7 +517,7 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
                 }
             }
             if (discordSeeded) {
-                TextButton(onClick = { confirmDiscordDisconnect = true }) { Text("Disconnect") }
+                TextButton(onClick = { confirmDiscordDisconnect = true }) { Text("Sign out") }
             } else {
                 TextButton(onClick = {
                     if (!discordRiskAccepted) showRiskConsent = true else showDiscordLogin = true
@@ -643,8 +648,8 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
     if (confirmDiscordDisconnect) {
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { confirmDiscordDisconnect = false },
-            title = { Text("Disconnect Discord?") },
-            text = { Text("Rich Presence stops and the on-device Discord session is cleared. Disconnecting may invalidate Discord sessions on other devices.") },
+            title = { Text("Sign out of Discord?") },
+            text = { Text("Rich Presence stops and the on-device Discord session is cleared. Signing out may invalidate Discord sessions on other devices.") },
             confirmButton = {
                 TextButton(onClick = {
                     confirmDiscordDisconnect = false
@@ -656,7 +661,7 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
                         svcIntent.action = com.vrca.discord.DiscordRpcService.ACTION_STOP
                         ctx.startService(svcIntent)
                     }
-                }) { Text("Disconnect") }
+                }) { Text("Sign out") }
             },
             dismissButton = {
                 TextButton(onClick = { confirmDiscordDisconnect = false }) { Text("Cancel") }
