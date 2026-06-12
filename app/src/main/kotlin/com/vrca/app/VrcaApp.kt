@@ -77,7 +77,10 @@ import android.content.IntentFilter
 import android.net.Uri
 import android.os.Environment
 import androidx.compose.foundation.layout.Box
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Divider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.mutableLongStateOf
@@ -1059,17 +1062,17 @@ private fun BootCheckRow(label: String, state: Int, detail: String = "") {
                     strokeWidth = 2.dp
                 )
                 2 -> Surface(shape = CircleShape, color = Color(0xFF2BCF5C), modifier = Modifier.size(18.dp)) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Text("\u2713", color = Color.Black, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(13.dp), tint = Color.Black)
                     }
                 }
                 3 -> Surface(shape = CircleShape, color = Color(0xFFFFB74D), modifier = Modifier.size(18.dp)) {
-                    Box(contentAlignment = Alignment.Center) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text("!", color = Color.Black, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                     }
                 }
                 4 -> Surface(shape = CircleShape, color = colors.onSurfaceVariant.copy(alpha = 0.35f), modifier = Modifier.size(18.dp)) {
-                    Box(contentAlignment = Alignment.Center) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text("?", color = colors.surface, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                     }
                 }
@@ -1150,13 +1153,15 @@ private fun BootstrapScreen(
                     shape = CircleShape,
                     color = colors.primary.copy(alpha = 0.10f),
                     modifier = Modifier
-                        .size(112.dp)
+                        .size(136.dp)
                         .scale(logoScale)
                 ) {
                     Image(
                         painter = painterResource(com.vrca.R.mipmap.ic_launcher),
                         contentDescription = null,
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(12.dp)
                     )
                 }
 
