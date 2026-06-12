@@ -1055,7 +1055,10 @@ private fun BootstrapScreen(
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Logo in a tonal circle.
+                // The REAL app icon (@mipmap/ic_launcher — the VRC-A character
+                // art, same as the manifest android:icon), clipped circular by
+                // the Surface shape. Do NOT use ic_launcher_foreground.xml —
+                // that vector is a leftover template gradient, not the logo.
                 Surface(
                     shape = CircleShape,
                     color = colors.primary.copy(alpha = 0.10f),
@@ -1064,7 +1067,7 @@ private fun BootstrapScreen(
                         .scale(logoScale)
                 ) {
                     Image(
-                        painter = painterResource(com.vrca.R.drawable.ic_launcher_foreground),
+                        painter = painterResource(com.vrca.R.mipmap.ic_launcher),
                         contentDescription = null,
                         modifier = Modifier.fillMaxSize()
                     )
