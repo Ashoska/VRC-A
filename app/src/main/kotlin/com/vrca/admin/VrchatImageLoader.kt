@@ -47,6 +47,17 @@ object VrchatImageLoader {
             .build()
         return ImageLoader.Builder(app)
             .okHttpClient(client)
+            // Coil's DEFAULT disk cache is 2% of FREE disk space (hundreds of MB
+            // on a modern phone) at cacheDir/image_cache — a silent contributor
+            // to the app's "Cache" size. Cap it explicitly: the public build only
+            // loads the user's own avatar + banner, so 10 MB is generous. The LRU
+            // journal trims any oversized pre-existing cache down to the cap.
+            .diskCache {
+                coil.disk.DiskCache.Builder()
+                    .directory(app.cacheDir.resolve("image_cache"))
+                    .maxSizeBytes(10L * 1024 * 1024)
+                    .build()
+            }
             .build()
     }
 }
