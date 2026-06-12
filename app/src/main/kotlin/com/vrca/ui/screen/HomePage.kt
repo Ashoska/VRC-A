@@ -41,6 +41,7 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.ui.zIndex
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -480,11 +481,14 @@ private fun PreviewAndTogglesCard(
                                     .height(IntrinsicSize.Min),
                                 contentAlignment = Alignment.Center
                             ) {
+                                // zIndex(-1f) forces the pill BEHIND the text —
+                                // it rendered on top of the preview text on-device.
                                 Surface(
                                     modifier = Modifier
                                         .align(Alignment.Center)
                                         .width(26.dp)
-                                        .fillMaxHeight(),
+                                        .fillMaxHeight()
+                                        .zIndex(-1f),
                                     tonalElevation = 3.dp,
                                     shape = CircleShape,
                                     color = MaterialTheme.colorScheme.surfaceVariant
@@ -556,6 +560,49 @@ private fun PreviewAndTogglesCard(
                         close()
                     }
                     drawPath(path, color = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.06f))
+                }
+            }
+        } else if (vm.minimalChatboxBg) {
+            // Collapsed "live chip" with the Invisible Chatbox Border ON: mirror
+            // the expanded simulation — text floating over a narrow vertical
+            // pill instead of the full bubble (the collapsed chip used to ignore
+            // the toggle).
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        previewExpanded = true
+                        UiPrefs.writePreviewExpanded(ctx, true)
+                    }
+                    .padding(12.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(IntrinsicSize.Min),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Surface(
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .width(26.dp)
+                            .fillMaxHeight()
+                            .zIndex(-1f),
+                        tonalElevation = 3.dp,
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.surfaceVariant
+                    ) {}
+                    Text(
+                        text = previewText,
+                        modifier = Modifier.fillMaxWidth(),
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
+                        textAlign = TextAlign.Center,
+                        softWrap = true,
+                        maxLines = 9,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
             }
         } else {

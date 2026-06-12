@@ -1,6 +1,7 @@
 package com.vrca.ui.screen
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -59,6 +60,41 @@ internal fun SettingsPage(
     var debugExpanded by rememberSaveable { mutableStateOf(false) }
     var showVrchatLogin by rememberSaveable { mutableStateOf(false) }
 
+    // Live permission statuses — re-checked whenever the user returns from a
+    // system settings page (same ON_RESUME pattern as the onboarding step).
+    var permRefreshTick by remember { mutableStateOf(0) }
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) permRefreshTick++
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+    }
+    val notifGranted = remember(permRefreshTick) {
+        android.os.Build.VERSION.SDK_INT < 33 ||
+            ctx.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+    // Exact-package match (NotificationManagerCompat) — a substring check on
+    // the flat settings string false-positives against the admin build's
+    // package (com.scrapw.chatbox.admin contains the public package name).
+    val listenerGranted = remember(permRefreshTick) {
+        androidx.core.app.NotificationManagerCompat
+            .getEnabledListenerPackages(ctx)
+            .contains(ctx.packageName)
+    }
+    val batteryExempt = remember(permRefreshTick) {
+        (ctx.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager)
+            .isIgnoringBatteryOptimizations(ctx.packageName)
+    }
+    val installAllowed = remember(permRefreshTick) {
+        android.os.Build.VERSION.SDK_INT < 26 || ctx.packageManager.canRequestPackageInstalls()
+    }
+    val overlayAllowed = remember(permRefreshTick) {
+        android.provider.Settings.canDrawOverlays(ctx)
+    }
+
     // Inline VRChat re-login (Accounts → Sign in). Full-screen takeover; on
     // success VrchatAuthManager.loggedInSignal lifts the OSC gate and VrcaApp
     // re-runs the Phase-2 ban check. pendingBanId=null — the re-login ban check
@@ -102,12 +138,6 @@ internal fun SettingsPage(
             )
             Spacer(Modifier.height(6.dp))
             SettingsRow(
-                icon = Icons.Filled.Power,
-                title = "Battery Optimization",
-                subtitle = "Stops Android pausing VRC-A when the screen is off. Strongly recommended.",
-                primary = "Request"
-            ) { ctx.startActivity(vm.batteryOptimizationIntent()) }
-            SettingsRow(
                 icon = Icons.Filled.Refresh,
                 title = "Replay setup tutorial",
                 subtitle = "Walk through OSC, IP, permissions and notifications again.",
@@ -122,13 +152,15 @@ internal fun SettingsPage(
             com.vrca.ui.settings.NotificationToggleSection(vm = vm)
         }
 
-        // -- Permissions (every permission the app uses lives here) --
+        // -- Permissions (every permission the app uses lives here, each with
+        //    its live granted status) --
         SectionCard(title = "Permissions") {
             SettingsRow(
                 icon = Icons.Filled.Notifications,
                 title = "Notifications",
                 subtitle = "Friend activity, invites and group alerts.",
-                primary = "Open"
+                primary = "Open",
+                granted = notifGranted
             ) {
                 runCatching {
                     ctx.startActivity(
@@ -142,14 +174,24 @@ internal fun SettingsPage(
                 icon = Icons.Filled.MusicNote,
                 title = "Notification Access",
                 subtitle = "Required for Now Playing detection.",
-                primary = "Open"
+                primary = "Open",
+                granted = listenerGranted
             ) { ctx.startActivity(vm.notificationAccessIntent()) }
+
+            SettingsRow(
+                icon = Icons.Filled.Power,
+                title = "Battery Optimization",
+                subtitle = "Stops Android pausing VRC-A when the screen is off. Strongly recommended.",
+                primary = "Open",
+                granted = batteryExempt
+            ) { ctx.startActivity(vm.batteryOptimizationIntent()) }
 
             SettingsRow(
                 icon = Icons.Filled.SystemUpdate,
                 title = "Install updates",
                 subtitle = "Lets VRC-A install its own update APKs when a new version is pushed.",
-                primary = "Open"
+                primary = "Open",
+                granted = installAllowed
             ) {
                 runCatching {
                     ctx.startActivity(
@@ -162,8 +204,9 @@ internal fun SettingsPage(
             SettingsRow(
                 icon = Icons.Filled.Bolt,
                 title = "Overlay Permission",
-                subtitle = "Only needed if you use overlay.",
-                primary = "Open"
+                subtitle = "Only needed if you use the floating overlay.",
+                primary = "Open",
+                granted = overlayAllowed
             ) { ctx.startActivity(vm.overlayPermissionIntent()) }
         }
 
@@ -321,6 +364,7 @@ private fun SettingsRow(
     title: String,
     subtitle: String,
     primary: String,
+    granted: Boolean? = null,
     onPrimary: () -> Unit
 ) {
     Row(
@@ -345,6 +389,26 @@ private fun SettingsRow(
         Column(Modifier.weight(1f)) {
             Text(title, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (granted != null) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        Modifier
+                            .size(8.dp)
+                            .background(
+                                color = if (granted) androidx.compose.ui.graphics.Color(0xFF2BCF5C)
+                                        else MaterialTheme.colorScheme.error,
+                                shape = androidx.compose.foundation.shape.CircleShape
+                            )
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        if (granted) "Granted" else "Not granted",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (granted) androidx.compose.ui.graphics.Color(0xFF2BCF5C)
+                                else MaterialTheme.colorScheme.error
+                    )
+                }
+            }
         }
 
         TextButton(onClick = onPrimary) {

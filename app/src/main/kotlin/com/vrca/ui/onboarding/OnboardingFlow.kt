@@ -472,8 +472,13 @@ private fun StepPermissions() {
                 PackageManager.PERMISSION_GRANTED
     }
     val listenerEnabled = remember(refreshTick) {
-        Settings.Secure.getString(ctx.contentResolver, "enabled_notification_listeners")
-            ?.contains(ctx.packageName) == true
+        // Exact-package match. The flat settings-string contains() check
+        // false-positived on the public build whenever the ADMIN build
+        // (com.scrapw.chatbox.admin — a superstring of the public package)
+        // had Notification Access enabled.
+        androidx.core.app.NotificationManagerCompat
+            .getEnabledListenerPackages(ctx)
+            .contains(ctx.packageName)
     }
     val batteryExempt = remember(refreshTick) {
         (ctx.getSystemService(Context.POWER_SERVICE) as PowerManager)
