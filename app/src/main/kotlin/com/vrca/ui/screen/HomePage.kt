@@ -109,7 +109,12 @@ internal fun HomePage(
     LaunchedEffect(Unit) { batteryOk = pm.isIgnoringBatteryOptimizations(ctx.packageName) }
 
     val notifOk = vm.listenerConnected
-    val ipOk = uiState.ipAddress.isNotBlank() && uiState.ipAddress != "127.0.0.1"
+    var ipOk by remember { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(Unit) {
+        vm.userPreferencesRepository.ipAddress.collect { ip ->
+            ipOk = ip.isNotBlank() && ip != "127.0.0.1"
+        }
+    }
 
     // 1s wall-clock tick while sending — drives the uptime label and the
     // "Next cycle in Ns" countdown. No ticking while idle.
@@ -195,7 +200,7 @@ internal fun HomePage(
                     "OSC sending is blocked until you sign in."
                 ) { onNavigate(AppPage.VrchatStatus) }
             )
-            if (!ipOk) add(
+            if (ipOk == false) add(
                 HealthItem(
                     "Headset IP not set",
                     "Set your Quest/PC IP in the Connection card."
@@ -263,7 +268,7 @@ internal fun HomePage(
                     )
 
                     "Connection" -> Column(Modifier.bringIntoViewRequester(connectionBring)) {
-                        ConnectionCard(vm = vm, ipAddress = uiState.ipAddress, ipOk = ipOk)
+                        ConnectionCard(vm = vm, ipAddress = uiState.ipAddress, ipOk = ipOk ?: true)
                     }
 
                     "ManualSend" -> CompactSectionCard(
