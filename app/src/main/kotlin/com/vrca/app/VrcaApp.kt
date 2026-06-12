@@ -44,9 +44,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -1156,12 +1160,28 @@ private fun BootstrapScreen(
                         .size(136.dp)
                         .scale(logoScale)
                 ) {
+                    // The square icon art ends in a hard horizontal edge inside
+                    // the circle (the padding keeps the "VRC-A" text clear of
+                    // the clip, but exposes the art's flat bottom). Fade the
+                    // last stretch out so the character blends into the tinted
+                    // circle instead of looking chopped off.
                     Image(
                         painter = painterResource(com.vrca.R.mipmap.ic_launcher),
                         contentDescription = null,
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(12.dp)
+                            .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+                            .drawWithContent {
+                                drawContent()
+                                drawRect(
+                                    brush = Brush.verticalGradient(
+                                        0.72f to Color.Black,
+                                        1f to Color.Transparent
+                                    ),
+                                    blendMode = BlendMode.DstIn
+                                )
+                            }
                     )
                 }
 
