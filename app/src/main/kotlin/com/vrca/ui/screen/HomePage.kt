@@ -268,7 +268,7 @@ internal fun HomePage(
                     "ManualSend" -> CompactSectionCard(
                         title = "Manual Send",
                         icon = Icons.Filled.Send,
-                        summary = "One-off message · doesn't affect Pinned/Cycle/Now Playing"
+                        summary = "Type a manual message"
                     ) {
                         OutlinedTextField(
                             value = vm.messageText.value,
@@ -570,8 +570,10 @@ private fun PreviewAndTogglesCard(
                 }
             }
         } else {
-            // Collapsed "live chip": the same bubble styling, compact — still
-            // answers "what is in my chatbox right now" without the 280dp sim.
+            // Collapsed "live chip": the same bubble styling without the avatar
+            // simulation. Shows the FULL chatbox content (same 9-line cap as the
+            // expanded bubble) — a 3-line cap cut content off, which read as the
+            // preview being broken.
             Surface(
                 tonalElevation = 3.dp,
                 shape = MaterialTheme.shapes.large,
@@ -592,7 +594,7 @@ private fun PreviewAndTogglesCard(
                     style = MaterialTheme.typography.bodySmall,
                     textAlign = TextAlign.Center,
                     softWrap = true,
-                    maxLines = 3,
+                    maxLines = 9,
                     overflow = TextOverflow.Ellipsis
                 )
             }
@@ -882,10 +884,10 @@ private fun ConnectionCard(
     LaunchedEffect(ipAddress) {
         if (!ipOk) return@LaunchedEffect
         while (true) {
-            reachable = withContext(Dispatchers.IO) {
-                try { java.net.InetAddress.getByName(ipAddress).isReachable(1500) }
-                catch (_: Throwable) { false }
-            }
+            // Robust ping (isReachable + system ping fallback) — the bare
+            // InetAddress.isReachable misses devices that ICMP-reply fine
+            // (no raw-socket permission), showing a false "No reply".
+            reachable = com.vrca.ui.onboarding.pingHost(ipAddress)
             delay(20_000L)
         }
     }

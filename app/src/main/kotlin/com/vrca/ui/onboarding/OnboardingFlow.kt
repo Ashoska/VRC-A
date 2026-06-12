@@ -39,7 +39,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -132,6 +131,32 @@ object OnboardingState {
 
 internal data class VrchatStatusWarning(val indicator: String, val description: String)
 
+/**
+ * Robust reachability ping. The bare `InetAddress.isReachable` frequently
+ * fails on Android (apps can't open raw ICMP sockets, and the TCP-port-7
+ * fallback is almost never open), reporting "no reply" for devices that
+ * answer pings fine. The system `ping` binary has the right capabilities on
+ * every Android build, so it is the authoritative fallback. Used by the
+ * tutorial's IP + test steps AND the Home Connection card.
+ */
+suspend fun pingHost(address: String, timeoutMs: Int = 2000): Boolean =
+    withContext(Dispatchers.IO) {
+        val viaApi = try {
+            java.net.InetAddress.getByName(address).isReachable(timeoutMs)
+        } catch (_: Throwable) {
+            false
+        }
+        if (viaApi) return@withContext true
+        try {
+            val proc = Runtime.getRuntime().exec(
+                arrayOf("/system/bin/ping", "-c", "1", "-W", "2", address)
+            )
+            proc.waitFor() == 0
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
 internal suspend fun fetchVrchatStatusWarning(): VrchatStatusWarning? = withContext(Dispatchers.IO) {
     try {
         val conn = java.net.URL("https://status.vrchat.com/api/v2/summary.json")
@@ -158,6 +183,7 @@ private const val STEP_COUNT = 8
 
 @Composable
 fun OnboardingFlow(
+    vm: com.vrca.ui.viewmodel.VrcaViewModel,
     tosVersion: Int,
     tosText: String,
     tosUrl: String,
@@ -210,7 +236,7 @@ fun OnboardingFlow(
                     2 -> StepPermissions()
                     3 -> StepIpEntry()
                     4 -> StepEnableOsc()
-                    5 -> StepNotificationTypes()
+                    5 -> StepNotificationTypes(vm)
                     6 -> StepDiscord()
                     7 -> StepTestMessage(
                         passed = testDone.value,
@@ -453,6 +479,12 @@ private fun StepPermissions() {
         (ctx.getSystemService(Context.POWER_SERVICE) as PowerManager)
             .isIgnoringBatteryOptimizations(ctx.packageName)
     }
+    val installAllowed = remember(refreshTick) {
+        Build.VERSION.SDK_INT < 26 || ctx.packageManager.canRequestPackageInstalls()
+    }
+    val overlayAllowed = remember(refreshTick) {
+        Settings.canDrawOverlays(ctx)
+    }
 
     val permLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -460,7 +492,7 @@ private fun StepPermissions() {
 
     StepContainer(
         title = "Permissions",
-        subtitle = "Three things keep VRC-A working reliably. Each one opens the exact system page."
+        subtitle = "These keep VRC-A working reliably. Each one opens the exact system page."
     ) {
         PermissionRow(
             title = "Notifications",
@@ -492,9 +524,33 @@ private fun StepPermissions() {
                 )
             }
         }
+        PermissionRow(
+            title = "Install updates",
+            why = "Lets VRC-A install its own update APKs when a new version is pushed.",
+            granted = installAllowed
+        ) {
+            runCatching {
+                ctx.startActivity(
+                    Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
+                        .setData(Uri.parse("package:${ctx.packageName}"))
+                )
+            }
+        }
+        PermissionRow(
+            title = "Display over other apps (optional)",
+            why = "Only needed if you use the floating chatbox overlay.",
+            granted = overlayAllowed
+        ) {
+            runCatching {
+                ctx.startActivity(
+                    Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION)
+                        .setData(Uri.parse("package:${ctx.packageName}"))
+                )
+            }
+        }
         if (Build.MANUFACTURER.equals("samsung", ignoreCase = true)) {
             TrustNote(
-                "Samsung: also add VRC-A to Settings → Battery → \"Never sleeping apps\" — " +
+                "Samsung: also add VRC-A to Settings → Battery → \"Never sleeping apps\". " +
                 "Samsung kills background apps aggressively even with the exemption."
             )
         }
@@ -565,10 +621,7 @@ private fun StepIpEntry() {
             repo.saveIpAddress(addr) // active runtime target
             saved = true
             checking = true
-            reachable = withContext(Dispatchers.IO) {
-                try { java.net.InetAddress.getByName(addr).isReachable(1500) }
-                catch (_: Throwable) { false }
-            }
+            reachable = pingHost(addr)
             checking = false
         }
     }
@@ -584,7 +637,7 @@ private fun StepIpEntry() {
                 NumberedInstruction(1, "Put the headset on and open Settings (the gear icon at the end of the dock)")
                 NumberedInstruction(2, "Select Wi-Fi, then tap the network with \"Connected\" under it")
                 NumberedInstruction(3, "Scroll down in the network details panel that opens")
-                NumberedInstruction(4, "Find \"IP address\" — four numbers with dots, like 192.168.1.23 — and type it below")
+                NumberedInstruction(4, "Find \"IP address\" (four numbers with dots, like 192.168.1.23) and type it below")
             }
         }
 
@@ -592,11 +645,11 @@ private fun StepIpEntry() {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text("Good to know", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    "• Ignore the long address with letters and colons (that's IPv6) — " +
-                    "you want the short dotted one.\n" +
+                    "• Ignore the long address with letters and colons (that's IPv6). " +
+                    "You want the short dotted one.\n" +
                     "• Phone and headset must be on the SAME Wi-Fi network.\n" +
-                    "• The IP can change when the router restarts or you switch networks — " +
-                    "you can update it any time in Home → Connection.\n" +
+                    "• The IP can change when the router restarts or you switch networks. " +
+                    "You can update it any time in Home → Connection.\n" +
                     "• On PC: press Win+R, type cmd, run ipconfig and read \"IPv4 Address\".",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -620,14 +673,14 @@ private fun StepIpEntry() {
             when {
                 checking -> CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
                 reachable == true -> KitStatusChip("Reachable", KitTone.Success)
-                reachable == false && saved -> KitStatusChip("Saved — couldn't confirm", KitTone.Warning)
+                reachable == false && saved -> KitStatusChip("Saved, no reply yet", KitTone.Warning)
                 saved -> KitStatusChip("Saved", KitTone.Success)
             }
         }
         if (reachable == false && saved) {
             TrustNote(
-                "Couldn't ping the device — that's often fine (headsets ignore pings). " +
-                "The address is saved; the final step sends a real test message."
+                "This address isn't answering yet. Double-check it: the final test " +
+                "step requires the device to respond before you can finish."
             )
         }
         TrustNote("While you're in the headset: the next step happens there too.")
@@ -679,75 +732,20 @@ private fun StepEnableOsc() {
    Step 6 — Notification types
    ------------------------------------------------------------------------- */
 
-private data class NotifSection(
-    val title: String,
-    val description: String,
-    val apply: suspend (com.vrca.data.UserPreferencesRepository, Boolean) -> Unit
-)
-
-private val notifSections = listOf(
-    NotifSection("Friend list", "Friend requests, new friends, removals.") { r, v ->
-        r.saveNotifFriendRequest(v); r.saveNotifNewFriend(v); r.saveNotifUnfriend(v)
-        r.saveNotifVrchatMessage(v)
-    },
-    NotifSection("Friends activity", "Online/offline, world moves, status, avatar, bio, rank.") { r, v ->
-        r.saveNotifFriendOnline(v); r.saveNotifFriendOffline(v); r.saveNotifFriendActive(v)
-        r.saveNotifFriendLocation(v); r.saveNotifFriendStatus(v); r.saveNotifFriendAvatar(v)
-        r.saveNotifFriendBio(v); r.saveNotifFriendDisplayName(v); r.saveNotifFriendRank(v)
-        r.saveNotifGiftReceived(v)
-    },
-    NotifSection("Invites", "World invites, invite requests, group invites.") { r, v ->
-        r.saveNotifInvite(v); r.saveNotifInviteRequest(v); r.saveNotifGroupInvite(v)
-    },
-    NotifSection("Groups", "Announcements, events, queue, roles, join requests.") { r, v ->
-        r.saveNotifGroupAnnouncement(v); r.saveNotifGroupEvent(v); r.saveNotifGroupQueue(v)
-        r.saveNotifGroupJoinRequest(v); r.saveNotifGroupRole(v); r.saveNotifGroupInstance(v)
-    },
-    NotifSection("App & connection", "App updates, server alerts, connection drops, sign-in alerts.") { r, v ->
-        r.saveNotifAppUpdate(v); r.saveNotifAnnouncements(v); r.saveNotifConnection(v)
-        r.saveNotifAuth(v); r.saveNotifVrchatAlert(v); r.saveNotifVoteToKick(v)
-    }
-)
-
 @Composable
-private fun StepNotificationTypes() {
-    val ctx = LocalContext.current
-    val repo = (ctx.applicationContext as VrcaApplication).userPreferencesRepository
-    val scope = rememberCoroutineScope()
-
-    // Section switches default ON. Only sections the user actually TOUCHES are
-    // written — untouched sections keep their per-key defaults, so this step
-    // can't silently flip keys whose defaults differ from the section value.
-    val states = remember { notifSections.map { mutableStateOf(true) } }
-    val touched = remember { notifSections.map { mutableStateOf(false) } }
-
+private fun StepNotificationTypes(vm: com.vrca.ui.viewmodel.VrcaViewModel) {
+    // The FULL per-type toggle UI (same component as Settings → Notifications),
+    // not just section master-switches — the user picks and chooses every
+    // individual type on first setup, expanding sections like usual. Each
+    // toggle persists straight to DataStore through the VM, so nothing extra
+    // needs to be written when the step is left.
     StepContainer(
         title = "Notifications",
-        subtitle = "Pick what you want to hear about. Every individual type can be fine-tuned later in Settings."
+        subtitle = "Pick exactly what you want to hear about. Expand a section to fine-tune every type. You can change any of these later in Settings."
     ) {
-        notifSections.forEachIndexed { i, section ->
-            ElevatedCard {
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(section.title, style = MaterialTheme.typography.titleSmall)
-                        Text(
-                            section.description,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = states[i].value,
-                        onCheckedChange = { v ->
-                            states[i].value = v
-                            touched[i].value = true
-                            scope.launch { section.apply(repo, v) }
-                        }
-                    )
-                }
+        ElevatedCard {
+            Column(Modifier.padding(14.dp)) {
+                com.vrca.ui.settings.NotificationToggleSection(vm = vm)
             }
         }
     }
@@ -785,10 +783,10 @@ private fun StepDiscord() {
 
     StepContainer(
         title = "Discord Rich Presence",
-        subtitle = "Optional: show your VRChat activity on your Discord profile. You can skip this and set it up later in the VRChat tab."
+        subtitle = "Optional: show your VRChat activity on your Discord profile. You can skip this and set it up later in Settings under Accounts."
     ) {
         if (connected) {
-            CompletedGateCard("Discord connected — Rich Presence enabled.")
+            CompletedGateCard("Discord connected. Rich Presence enabled.")
             return@StepContainer
         }
         ElevatedCard {
@@ -797,7 +795,7 @@ private fun StepDiscord() {
                     color = MaterialTheme.colorScheme.primary)
                 Text(
                     "• Uses a hidden Discord web session on this device\n" +
-                    "• This is not an approved Discord integration — Discord could " +
+                    "• This is not an approved Discord integration. Discord could " +
                     "terminate the session or flag the account\n" +
                     "• Disconnecting may invalidate Discord sessions on other devices\n" +
                     "• Your session stays on-device only and is never sent anywhere",
@@ -833,13 +831,9 @@ private fun StepTestMessage(
 ) {
     val ctx = LocalContext.current
     val repo = (ctx.applicationContext as VrcaApplication).userPreferencesRepository
-    val scope = rememberCoroutineScope()
 
     var running by rememberSaveable { mutableStateOf(false) }
-    var checking by remember { mutableStateOf(false) }
-    // null = not checked, true = ping answered (auto-pass), false = no reply
-    // (headsets often ignore pings → fall back to a manual "it showed up" confirm)
-    var reachable by remember { mutableStateOf<Boolean?>(null) }
+    var attempts by remember { mutableStateOf(0) }
     var targetIp by remember { mutableStateOf("") }
     var targetPort by remember { mutableStateOf(9000) }
 
@@ -869,9 +863,28 @@ private fun StepTestMessage(
         }
     }
 
+    // HARD GATE: the saved address must answer a ping before Finish unlocks.
+    // While the test runs, ping attempts repeat every 3s and the step passes
+    // the moment one succeeds. There is deliberately NO manual "it showed up"
+    // bypass: a wrong IP must be fixed, not waved through. pingHost falls back
+    // to the system ping binary, so devices the bare isReachable misses still
+    // pass.
+    LaunchedEffect(running, targetIp) {
+        if (!running || passed || targetIp.isBlank()) return@LaunchedEffect
+        attempts = 0
+        while (true) {
+            attempts++
+            if (pingHost(targetIp)) {
+                onPassed()
+                return@LaunchedEffect
+            }
+            delay(3000)
+        }
+    }
+
     StepContainer(
         title = "Test it!",
-        subtitle = "This step is required: send the test message and confirm it reaches your VRChat chatbox before finishing."
+        subtitle = "This step is required: your headset or PC must respond before you can finish the tutorial."
     ) {
         // Preview bubble — teaches preview == chatbox
         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -880,7 +893,7 @@ private fun StepTestMessage(
                 color = MaterialTheme.colorScheme.surfaceVariant
             ) {
                 Text(
-                    if (running) "VRC-A connected ✓" else "(test not running)",
+                    if (running || passed) "VRC-A connected ✓" else "(test not running)",
                     modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
                     style = MaterialTheme.typography.bodyLarge,
                     textAlign = TextAlign.Center
@@ -889,11 +902,11 @@ private fun StepTestMessage(
         }
 
         if (passed) {
-            CompletedGateCard("Test message confirmed — you're all set. Press Finish!")
+            CompletedGateCard("Device responded. You're all set, press Finish!")
         }
 
         if (targetIp.isBlank()) {
-            TrustNote("No IP saved yet — the test needs the address from the earlier step.")
+            TrustNote("No IP saved yet. The test needs the address from the earlier step.")
             OutlinedButton(onClick = onGoToIpStep, modifier = Modifier.fillMaxWidth()) {
                 Text("Go to the address step")
             }
@@ -906,75 +919,43 @@ private fun StepTestMessage(
             )
         }
 
-        Button(
-            onClick = {
-                if (running) {
-                    running = false
-                } else {
-                    running = true
-                    // Reachability check alongside the send loop: a ping reply
-                    // proves the IP is a live device → pass the gate. No reply
-                    // is NOT proof of failure (headsets often ignore pings), so
-                    // that path falls back to the manual confirm below.
-                    scope.launch {
-                        checking = true
-                        val ok = withContext(Dispatchers.IO) {
-                            try { java.net.InetAddress.getByName(targetIp).isReachable(1500) }
-                            catch (_: Throwable) { false }
-                        }
-                        reachable = ok
-                        checking = false
-                        if (ok) onPassed()
-                    }
-                }
-            },
-            enabled = targetIp.isNotBlank(),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text(if (running) "Stop test" else "Send test message")
-        }
-
-        if (checking) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                Text(
-                    "Checking the device is reachable...",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
-
-        // No ping reply → ask the user to confirm by eye. The headset may
-        // simply ignore pings while still receiving OSC fine.
-        if (running && !passed && !checking && reachable == false) {
-            ElevatedCard {
-                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Couldn't confirm automatically", style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        "The device didn't answer a ping — many headsets ignore them. " +
-                        "Put the headset on: is \"VRC-A connected ✓\" showing above your head?",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Button(onClick = { onPassed() }, modifier = Modifier.fillMaxWidth()) {
-                        Text("Yes — it showed up in VRChat")
-                    }
-                }
+        if (!passed) {
+            Button(
+                onClick = { running = !running },
+                enabled = targetIp.isNotBlank(),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(if (running) "Stop test" else "Send test message")
             }
         }
 
         if (running && !passed) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                Text(
+                    "Waiting for the device to answer" +
+                        (if (attempts > 1) " (attempt $attempts)" else "") + "...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             ElevatedCard {
-                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("Not showing in VRChat?", style = MaterialTheme.typography.titleSmall)
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("No answer yet?", style = MaterialTheme.typography.titleSmall)
                     Text(
-                        "• Is OSC enabled? (previous step)\n" +
                         "• Phone and headset on the same Wi-Fi?\n" +
-                        "• Is the IP address right? (address step)",
+                        "• Is the IP address right? Re-check it in the headset's Wi-Fi details\n" +
+                        "• Is the headset awake? A sleeping headset won't answer\n" +
+                        "• Is OSC enabled? (previous step)",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    OutlinedButton(onClick = onGoToIpStep, modifier = Modifier.fillMaxWidth()) {
+                        Text("Fix the address")
+                    }
                 }
             }
         }

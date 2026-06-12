@@ -20,8 +20,10 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Power
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -60,17 +62,15 @@ internal fun SettingsPage(
     // Inline VRChat re-login (Accounts → Sign in). Full-screen takeover; on
     // success VrchatAuthManager.loggedInSignal lifts the OSC gate and VrcaApp
     // re-runs the Phase-2 ban check. pendingBanId=null — the re-login ban check
-    // runs through the normal Phase-2 path keyed on reloginTick.
+    // runs through the normal Phase-2 path keyed on reloginTick. Cancel renders
+    // INSIDE the login screen (the old top-bar Row placement caused layout
+    // issues against the app bar).
     if (showVrchatLogin) {
-        Column(Modifier.fillMaxSize()) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                TextButton(onClick = { showVrchatLogin = false }) { Text("Cancel") }
-            }
-            Box(Modifier.weight(1f)) {
-                com.vrca.vrchat.VrchatLoginScreen(pendingBanId = null) { _, _ ->
-                    showVrchatLogin = false
-                }
-            }
+        com.vrca.vrchat.VrchatLoginScreen(
+            pendingBanId = null,
+            onCancel = { showVrchatLogin = false }
+        ) { _, _ ->
+            showVrchatLogin = false
         }
         return
     }
@@ -89,7 +89,7 @@ internal fun SettingsPage(
             ToggleRow(
                 label = "Time format",
                 checked = vm.time24h,
-                description = "Time components format."
+                description = "On = 24-hour clock (17:20). Off = 12-hour (5:20 PM)."
             ) { vm.setTime24hFlag(it) }
         }
 
@@ -122,14 +122,42 @@ internal fun SettingsPage(
             com.vrca.ui.settings.NotificationToggleSection(vm = vm)
         }
 
-        // -- Permissions --
+        // -- Permissions (every permission the app uses lives here) --
         SectionCard(title = "Permissions") {
+            SettingsRow(
+                icon = Icons.Filled.Notifications,
+                title = "Notifications",
+                subtitle = "Friend activity, invites and group alerts.",
+                primary = "Open"
+            ) {
+                runCatching {
+                    ctx.startActivity(
+                        android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                            .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, ctx.packageName)
+                    )
+                }
+            }
+
             SettingsRow(
                 icon = Icons.Filled.MusicNote,
                 title = "Notification Access",
                 subtitle = "Required for Now Playing detection.",
                 primary = "Open"
             ) { ctx.startActivity(vm.notificationAccessIntent()) }
+
+            SettingsRow(
+                icon = Icons.Filled.SystemUpdate,
+                title = "Install updates",
+                subtitle = "Lets VRC-A install its own update APKs when a new version is pushed.",
+                primary = "Open"
+            ) {
+                runCatching {
+                    ctx.startActivity(
+                        android.content.Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
+                            .setData(android.net.Uri.parse("package:${ctx.packageName}"))
+                    )
+                }
+            }
 
             SettingsRow(
                 icon = Icons.Filled.Bolt,

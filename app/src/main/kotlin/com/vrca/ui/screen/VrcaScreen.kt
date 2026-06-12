@@ -790,11 +790,30 @@ internal fun SectionCard(
                         .weight(1f)
                         .padding(end = 10.dp)
                 ) {
+                    // The title must always render WHOLE on ONE line and never
+                    // move ("VRChat Preview" was ellipsized when the wider
+                    // "Sending" chip squeezed it). On width overflow the font
+                    // shrinks a notch and relayouts until the full text fits.
+                    val baseTitleStyle = titleStyle ?: MaterialTheme.typography.titleMedium
+                    var fittedTitleStyle by remember(baseTitleStyle, title) {
+                        mutableStateOf(baseTitleStyle)
+                    }
                     Text(
                         text = title,
-                        style = titleStyle ?: MaterialTheme.typography.titleMedium,
+                        style = fittedTitleStyle,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                        onTextLayout = { result ->
+                            if (result.didOverflowWidth &&
+                                fittedTitleStyle.fontSize.isSp &&
+                                fittedTitleStyle.fontSize.value > 11f
+                            ) {
+                                fittedTitleStyle = fittedTitleStyle.copy(
+                                    fontSize = fittedTitleStyle.fontSize * 0.92f
+                                )
+                            }
+                        }
                     )
                     if (!subtitle.isNullOrBlank()) {
                         Text(

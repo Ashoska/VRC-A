@@ -239,136 +239,10 @@ fun VrcaApp() {
     }
 
     /* -------------------------
-       First-open onboarding tutorial (docs/ui-revamp.md).
-       Pre-seeded complete for existing installs (any prior ToS acceptance)
-       so current users never see it. Replayable from Settings.
-       ------------------------- */
-
-    var onboardingDone by remember {
-        mutableStateOf(
-            com.vrca.ui.onboarding.OnboardingPrefs.isComplete(ctx).also { done ->
-                // Pre-seed: an install that already accepted ANY ToS version is an
-                // existing user — mark complete so the tutorial never shows.
-                if (!done && TosPrefs.acceptedVersion(ctx) > 0) {
-                    com.vrca.ui.onboarding.OnboardingPrefs.markComplete(ctx)
-                }
-            } || TosPrefs.acceptedVersion(ctx) > 0
-        )
-    }
-    val onboardingReplay by com.vrca.ui.onboarding.OnboardingState.replayRequested
-
-    if (!onboardingDone || onboardingReplay) {
-        com.vrca.ui.onboarding.OnboardingFlow(
-            tosVersion = requiredTosVersion,
-            tosText = remoteTosText,
-            tosUrl = remoteTosUrl,
-            tosAlreadyAccepted = tosAccepted,
-            phase1BanId = phase1BanId,
-            replay = onboardingReplay,
-            onTosAccepted = {
-                TosPrefs.accept(ctx, requiredTosVersion)
-                tosAccepted = true
-                scope.launch {
-                    runCatching {
-                        val data = hashMapOf(
-                            "tosAcceptedVersion" to requiredTosVersion,
-                            "tosAcceptedAt" to Timestamp.now(),
-                            "updatedAt" to Timestamp.now()
-                        )
-                        if (deviceHash.isNotBlank()) {
-                            FirebaseFirestore.getInstance()
-                                .collection("users").document(deviceHash)
-                                .set(data, SetOptions.merge())
-                                .await()
-                        }
-                    }
-                }
-            },
-            onFinish = {
-                onboardingDone = true
-                com.vrca.ui.onboarding.OnboardingState.replayRequested.value = false
-            }
-        )
-        return
-    }
-
-    if (!tosAccepted) {
-        TosGate(
-            tosVersion = requiredTosVersion,
-            tosText = remoteTosText,
-            tosUrl = remoteTosUrl,
-            onOpenUrl = { url ->
-                runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
-            },
-            onAccept = {
-                TosPrefs.accept(ctx, requiredTosVersion)
-                tosAccepted = true
-
-                scope.launch {
-                    runCatching {
-                        val data = hashMapOf(
-                            "tosAcceptedVersion" to requiredTosVersion,
-                            "tosAcceptedAt" to Timestamp.now(),
-                            "updatedAt" to Timestamp.now()
-                        )
-                        if (deviceHash.isNotBlank()) {
-                            FirebaseFirestore.getInstance()
-                                .collection("users").document(deviceHash)
-                                .set(data, SetOptions.merge())
-                                .await()
-                        }
-                    }
-                }
-            }
-        )
-        return
-    }
-
-    /* -------------------------
-       VRChat login state (NO forced login screen — see below).
-       After a login: runs Phase 2 ban check, starts pipeline service.
-       ------------------------- */
-
-    var vrcLoginDone    by remember { mutableStateOf(VrchatAuthManager.isLoggedIn(ctx)) }
-    var isBannedPhase2  by remember { mutableStateOf(false) }
-    var banPhase2Reason by remember { mutableStateOf("") }
-    var phase2Checking  by remember { mutableStateOf(false) }
-    var reloginTick     by remember { mutableStateOf(0) }
-
-    // There is NO forced login screen anymore (the only hard login gate is the
-    // onboarding tutorial's login step on first run). Being signed out — via a
-    // Settings sign-out OR a cold start while logged out — just hard-blocks OSC
-    // through VrcaViewModel's auth gate; the app stays fully usable and the user
-    // signs back in from Settings → Accounts or the VRChat tab. Each successful
-    // re-login re-runs the Phase-2 ban check below (the new account could be a
-    // banned identity) and starts the pipeline.
-    LaunchedEffect(Unit) {
-        VrchatAuthManager.loggedInSignal.collect {
-            vrcLoginDone = true
-            reloginTick++
-        }
-    }
-
-    // If VRC login succeeded but Phase 2 hasn't run yet (first run after login).
-    // Also keyed on reloginTick so a Settings re-login (possibly a DIFFERENT
-    // VRChat account) re-runs the ban check + pipeline restart.
-    LaunchedEffect(vrcLoginDone, reloginTick) {
-        if (!vrcLoginDone || phase2Checking) return@LaunchedEffect
-        phase2Checking = true
-        runPhase2AndStartPipeline(
-            ctx, phase1BanId,
-            onBanned = { reason -> isBannedPhase2 = true; banPhase2Reason = reason },
-            onClean  = { phase2Checking = false }
-        )
-    }
-
-    if (isBannedPhase2) {
-        BannedScreen(reason = banPhase2Reason)
-        return
-    }
-
-    /* -------------------------
-       Update check (public build only)
+       Update check (public build only).
+       Runs BEFORE the onboarding gate so the forced-update dialog renders on
+       top of the tutorial too — a brand-new user should install the latest
+       version before setting anything up.
        ------------------------- */
 
     // Scope the runtime ViewModel to the Application (process lifetime), NOT this
@@ -584,6 +458,136 @@ fun VrcaApp() {
                 }
             }
         )
+    }
+
+    /* -------------------------
+       First-open onboarding tutorial (docs/ui-revamp.md).
+       Pre-seeded complete for existing installs (any prior ToS acceptance)
+       so current users never see it. Replayable from Settings.
+       ------------------------- */
+
+    var onboardingDone by remember {
+        mutableStateOf(
+            com.vrca.ui.onboarding.OnboardingPrefs.isComplete(ctx).also { done ->
+                // Pre-seed: an install that already accepted ANY ToS version is an
+                // existing user — mark complete so the tutorial never shows.
+                if (!done && TosPrefs.acceptedVersion(ctx) > 0) {
+                    com.vrca.ui.onboarding.OnboardingPrefs.markComplete(ctx)
+                }
+            } || TosPrefs.acceptedVersion(ctx) > 0
+        )
+    }
+    val onboardingReplay by com.vrca.ui.onboarding.OnboardingState.replayRequested
+
+    if (!onboardingDone || onboardingReplay) {
+        com.vrca.ui.onboarding.OnboardingFlow(
+            vm = vm,
+            tosVersion = requiredTosVersion,
+            tosText = remoteTosText,
+            tosUrl = remoteTosUrl,
+            tosAlreadyAccepted = tosAccepted,
+            phase1BanId = phase1BanId,
+            replay = onboardingReplay,
+            onTosAccepted = {
+                TosPrefs.accept(ctx, requiredTosVersion)
+                tosAccepted = true
+                scope.launch {
+                    runCatching {
+                        val data = hashMapOf(
+                            "tosAcceptedVersion" to requiredTosVersion,
+                            "tosAcceptedAt" to Timestamp.now(),
+                            "updatedAt" to Timestamp.now()
+                        )
+                        if (deviceHash.isNotBlank()) {
+                            FirebaseFirestore.getInstance()
+                                .collection("users").document(deviceHash)
+                                .set(data, SetOptions.merge())
+                                .await()
+                        }
+                    }
+                }
+            },
+            onFinish = {
+                onboardingDone = true
+                com.vrca.ui.onboarding.OnboardingState.replayRequested.value = false
+            }
+        )
+        return
+    }
+
+    if (!tosAccepted) {
+        TosGate(
+            tosVersion = requiredTosVersion,
+            tosText = remoteTosText,
+            tosUrl = remoteTosUrl,
+            onOpenUrl = { url ->
+                runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+            },
+            onAccept = {
+                TosPrefs.accept(ctx, requiredTosVersion)
+                tosAccepted = true
+
+                scope.launch {
+                    runCatching {
+                        val data = hashMapOf(
+                            "tosAcceptedVersion" to requiredTosVersion,
+                            "tosAcceptedAt" to Timestamp.now(),
+                            "updatedAt" to Timestamp.now()
+                        )
+                        if (deviceHash.isNotBlank()) {
+                            FirebaseFirestore.getInstance()
+                                .collection("users").document(deviceHash)
+                                .set(data, SetOptions.merge())
+                                .await()
+                        }
+                    }
+                }
+            }
+        )
+        return
+    }
+
+    /* -------------------------
+       VRChat login state (NO forced login screen — see below).
+       After a login: runs Phase 2 ban check, starts pipeline service.
+       ------------------------- */
+
+    var vrcLoginDone    by remember { mutableStateOf(VrchatAuthManager.isLoggedIn(ctx)) }
+    var isBannedPhase2  by remember { mutableStateOf(false) }
+    var banPhase2Reason by remember { mutableStateOf("") }
+    var phase2Checking  by remember { mutableStateOf(false) }
+    var reloginTick     by remember { mutableStateOf(0) }
+
+    // There is NO forced login screen anymore (the only hard login gate is the
+    // onboarding tutorial's login step on first run). Being signed out — via a
+    // Settings sign-out OR a cold start while logged out — just hard-blocks OSC
+    // through VrcaViewModel's auth gate; the app stays fully usable and the user
+    // signs back in from Settings → Accounts or the VRChat tab. Each successful
+    // re-login re-runs the Phase-2 ban check below (the new account could be a
+    // banned identity) and starts the pipeline.
+    LaunchedEffect(Unit) {
+        VrchatAuthManager.loggedInSignal.collect {
+            vrcLoginDone = true
+            reloginTick++
+        }
+    }
+
+    // If VRC login succeeded but Phase 2 hasn't run yet (first run after login).
+    // Also keyed on reloginTick so a Settings re-login (possibly a DIFFERENT
+    // VRChat account) re-runs the ban check + pipeline restart.
+    LaunchedEffect(vrcLoginDone, reloginTick) {
+        if (!vrcLoginDone || phase2Checking) return@LaunchedEffect
+        phase2Checking = true
+        runPhase2AndStartPipeline(
+            ctx, phase1BanId,
+            onBanned = { reason -> isBannedPhase2 = true; banPhase2Reason = reason },
+            onClean  = { phase2Checking = false }
+        )
+    }
+
+    if (isBannedPhase2) {
+        BannedScreen(reason = banPhase2Reason)
+        return
     }
 
     /* -------------------------

@@ -85,15 +85,13 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
     // nothing). Same pattern as Settings → Accounts.
     var showLogin by rememberSaveable { mutableStateOf(false) }
     if (showLogin) {
-        Column(Modifier.fillMaxSize()) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                TextButton(onClick = { showLogin = false }) { Text("Cancel") }
-            }
-            Box(Modifier.weight(1f)) {
-                com.vrca.vrchat.VrchatLoginScreen(pendingBanId = null) { _, _ ->
-                    showLogin = false
-                }
-            }
+        // Cancel renders inside the login screen itself (the old top-bar Row
+        // placement clashed with the app bar).
+        com.vrca.vrchat.VrchatLoginScreen(
+            pendingBanId = null,
+            onCancel = { showLogin = false }
+        ) { _, _ ->
+            showLogin = false
         }
         return
     }

@@ -37,6 +37,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun VrchatLoginScreen(
     pendingBanId: String?,
+    onCancel: (() -> Unit)? = null,
     onLoginSuccess: (userId: String, displayName: String) -> Unit
 ) {
     val ctx = LocalContext.current
@@ -143,7 +144,7 @@ fun VrchatLoginScreen(
                 ) {
                     Text(
                         "VRChat is having platform issues right now (${w.description}). " +
-                            "Login may fail — it's not you. You can retry later.",
+                            "Login may fail, it's not you. You can retry later.",
                         modifier = Modifier.padding(12.dp),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onErrorContainer
@@ -159,7 +160,7 @@ fun VrchatLoginScreen(
                     textAlign = TextAlign.Center
                 )
                 Text(
-                    "Your VRChat account powers status, notifications, and moderation identity. Credentials are only used to get a session cookie — never stored anywhere else.",
+                    "Your VRChat account powers status, notifications, and moderation identity. Credentials are only used to get a session cookie and are never stored anywhere else.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center
@@ -280,7 +281,7 @@ fun VrchatLoginScreen(
                 }
 
                 Text(
-                    "VRChat will remember this device — you won't be asked again.",
+                    "VRChat will remember this device, so you won't be asked again.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center
@@ -341,6 +342,16 @@ fun VrchatLoginScreen(
                     }
                 ) {
                     Text("<- Back to sign in")
+                }
+            }
+
+            // Cancel lives INSIDE the screen content (Settings / VRChat-tab
+            // re-login takeovers used to pin it to a bar above the screen,
+            // which clashed with the app bar). Hidden during onboarding, where
+            // the login step is a hard gate (onCancel = null).
+            if (onCancel != null) {
+                TextButton(onClick = onCancel, modifier = Modifier.fillMaxWidth()) {
+                    Text("Cancel")
                 }
             }
 

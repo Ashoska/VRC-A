@@ -1,7 +1,6 @@
 // app/src/main/kotlin/com/vrca/MainActivity.kt
 package com.vrca.app
 
-import android.Manifest
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.PackageManager
@@ -11,8 +10,6 @@ import android.provider.Settings
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.core.content.ContextCompat
 import com.vrca.BuildConfig
 import com.vrca.keepalive.KeepAliveService
 import com.vrca.keepalive.PipelineWatchdogWorker
@@ -43,13 +40,6 @@ fun Context.getActivity(): ComponentActivity? = when (this) {
  */
 class MainActivity : ComponentActivity() {
 
-    private val notifPermLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { _ ->
-        // Even if denied, still try to start (some devices allow FGS without notif permission).
-        KeepAliveService.start(applicationContext)
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -64,21 +54,13 @@ class MainActivity : ComponentActivity() {
         // starting KeepAliveService / scheduling the watchdog below.
         runCatching { AppShutdown.clearSwipedAway(applicationContext) }
 
-        // Keep-alive for screen-off reliability.
-        if (Build.VERSION.SDK_INT >= 33) {
-            val granted = ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.POST_NOTIFICATIONS
-            ) == PackageManager.PERMISSION_GRANTED
-
-            if (granted) {
-                KeepAliveService.start(applicationContext)
-            } else {
-                notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-            }
-        } else {
-            KeepAliveService.start(applicationContext)
-        }
+        // Keep-alive for screen-off reliability. POST_NOTIFICATIONS is
+        // deliberately NOT requested here — an unprompted system dialog on the
+        // very first open (before the user even saw the app) was confusing.
+        // The onboarding tutorial's Permissions step and Settings → Permissions
+        // own that prompt; the foreground service starts fine without it (its
+        // notification just stays hidden until the permission is granted).
+        KeepAliveService.start(applicationContext)
 
         // Periodic watchdog: re-arms the pipeline/keep-alive if an OEM kills the process.
         PipelineWatchdogWorker.ensureScheduled(applicationContext)
