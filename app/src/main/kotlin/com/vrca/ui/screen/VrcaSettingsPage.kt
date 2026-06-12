@@ -89,7 +89,7 @@ internal fun SettingsPage(
             ToggleRow(
                 label = "Time format",
                 checked = vm.time24h,
-                description = "On = 24-hour clock (17:20). Off = 12-hour (5:20 PM)."
+                description = "Change your time format to 12 or 24 hour mode."
             ) { vm.setTime24hFlag(it) }
         }
 

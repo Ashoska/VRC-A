@@ -805,7 +805,10 @@ internal fun SectionCard(
                         softWrap = false,
                         overflow = TextOverflow.Ellipsis,
                         onTextLayout = { result ->
-                            if (result.didOverflowWidth &&
+                            // With overflow=Ellipsis the truncated layout "fits",
+                            // so didOverflowWidth stays false — isLineEllipsized
+                            // is the signal that actually fires.
+                            if ((result.isLineEllipsized(0) || result.didOverflowWidth) &&
                                 fittedTitleStyle.fontSize.isSp &&
                                 fittedTitleStyle.fontSize.value > 11f
                             ) {

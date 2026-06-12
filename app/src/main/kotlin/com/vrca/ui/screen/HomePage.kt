@@ -417,20 +417,9 @@ private fun PreviewAndTogglesCard(
         titleStyle = MaterialTheme.typography.headlineSmall,
         subtitle = "What will appear in VRChat.",
         actions = {
-            // Invisible Chatbox Border quick-toggle — tiny, unlabeled by design;
-            // the preview's reaction IS the explanation.
-            IconButton(
-                onClick = { vm.setMinimalChatboxBgFlag(!vm.minimalChatboxBg) },
-                modifier = Modifier.size(36.dp)
-            ) {
-                Icon(
-                    if (vm.minimalChatboxBg) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
-                    contentDescription = null,
-                    modifier = Modifier.size(20.dp),
-                    tint = if (vm.minimalChatboxBg) MaterialTheme.colorScheme.primary
-                           else MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+            // The invisible-border eye toggle lives BELOW the preview (left of
+            // the character counter), not here — with it in this row the wider
+            // "Sending" chip squeezed the headline title into clipping.
             // No uptime in the chip — "Sending · 2h 14m" squeezed the
             // headline title into wrapping ("VRChat / Preview"). The Stop
             // button right below carries the uptime instead.
@@ -600,10 +589,30 @@ private fun PreviewAndTogglesCard(
             }
         }
 
-        // Character budget — how much of VRChat's 144-char chatbox limit the
-        // current combined output uses (142 with the invisible border, which
-        // reserves 2 chars for its control suffix). Amber near the cap, red over.
-        run {
+        // Eye toggle (left) + character budget (right) on one row under the
+        // preview. The eye is the Invisible Chatbox Border quick-toggle —
+        // tiny, unlabeled by design; the preview's reaction IS the
+        // explanation. The counter shows how much of VRChat's 144-char
+        // chatbox limit the current combined output uses (142 with the
+        // invisible border, which reserves 2 chars for its control suffix).
+        // Amber near the cap, red over.
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(
+                onClick = { vm.setMinimalChatboxBgFlag(!vm.minimalChatboxBg) },
+                modifier = Modifier.size(36.dp)
+            ) {
+                Icon(
+                    if (vm.minimalChatboxBg) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp),
+                    tint = if (vm.minimalChatboxBg) MaterialTheme.colorScheme.primary
+                           else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(Modifier.weight(1f))
             val used = vm.debugLastCombinedOsc.length
             val budget = if (vm.minimalChatboxBg) 142 else 144
             Text(
@@ -613,9 +622,7 @@ private fun PreviewAndTogglesCard(
                     used > budget -> MaterialTheme.colorScheme.error
                     used > budget - 30 -> androidx.compose.ui.graphics.Color(0xFFFFB300)
                     else -> MaterialTheme.colorScheme.onSurfaceVariant
-                },
-                textAlign = TextAlign.End,
-                modifier = Modifier.fillMaxWidth()
+                }
             )
         }
 
