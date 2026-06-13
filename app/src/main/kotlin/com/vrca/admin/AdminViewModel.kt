@@ -196,41 +196,40 @@ class AdminViewModel(
     // -------------------------
 
     fun warnUser(userId: String, reason: String) = runAction {
-        // Write warned=true + warnReason. These are in ownerOnlyUserKeys() so Firestore rules allow it.
-        // The public app reads `warned: Boolean` — do NOT write a "status" string; it's not in the rules.
-        val ref = db.collection(AdminSchema.COL_USERS).document(userId)
-        ref.set(
+        // Account-wide: warn every device on this VRChat account (warned/warnReason
+        // are in ownerOnlyUserKeys() so rules allow it). The public app reads
+        // `warned: Boolean` — do NOT write a "status" string; it's not in the rules.
+        AccountModeration.applyAccountWide(
+            db, userId,
             mapOf(
                 "warned" to true,
                 "warnReason" to reason,
                 "warnedAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
-            ),
-            com.google.firebase.firestore.SetOptions.merge()
-        ).await()
+            )
+        )
         audit("warn", userId, mapOf("reason" to reason))
     }
 
     fun banUser(userId: String, reason: String) = runAction {
-        // Write banned=true + banReason. These are in ownerOnlyUserKeys() so Firestore rules allow it.
-        // The public app reads `banned: Boolean` — do NOT write a "status" string; it's not in the rules.
-        val ref = db.collection(AdminSchema.COL_USERS).document(userId)
-        ref.set(
+        // Account-wide: ban every device on this VRChat account so an alt device
+        // can't dodge the ban. banned/banReason are in ownerOnlyUserKeys().
+        AccountModeration.applyAccountWide(
+            db, userId,
             mapOf(
                 "banned" to true,
                 "banReason" to reason,
                 "bannedAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
-            ),
-            com.google.firebase.firestore.SetOptions.merge()
-        ).await()
+            )
+        )
         audit("ban", userId, mapOf("reason" to reason))
     }
 
     fun clearPunishment(userId: String) = runAction {
-        // Clear both warned and banned flags. ownerOnlyUserKeys() allows writing these fields.
-        val ref = db.collection(AdminSchema.COL_USERS).document(userId)
-        ref.set(
+        // Account-wide: clear warned + banned on every device on this account.
+        AccountModeration.applyAccountWide(
+            db, userId,
             mapOf(
                 "warned" to false,
                 "banned" to false,
@@ -239,9 +238,8 @@ class AdminViewModel(
                 "warnedAt" to FieldValue.delete(),
                 "bannedAt" to FieldValue.delete(),
                 "updatedAt" to FieldValue.serverTimestamp()
-            ),
-            com.google.firebase.firestore.SetOptions.merge()
-        ).await()
+            )
+        )
         audit("clear_punishment", userId, emptyMap<String, Any?>())
     }
 
