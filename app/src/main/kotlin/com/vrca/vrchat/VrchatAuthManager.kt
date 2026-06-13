@@ -783,11 +783,22 @@ object VrchatAuthManager {
         val trustRank: String = ""
     )
 
-    suspend fun fetchFriends(context: Context): List<VrcFriend> = withContext(Dispatchers.IO) {
+    /**
+     * Fetch friends. [onlineOnly] requests ONLY VRChat's "Online" friends group
+     * (the `offline=false` list). That group is NOT just in-game players — it is
+     * everyone whose status isn't offline, i.e. it ALSO includes website- and
+     * mobile-active friends (status active / join me / ask me / busy). Only
+     * truly-offline friends (the `offline=true` list) are skipped. So a frequent
+     * foreground refresh stays a single light call for most users while still
+     * catching bio/name/rank edits from friends on the website or phone. The full
+     * sweep (default, both passes) additionally covers offline friends.
+     */
+    suspend fun fetchFriends(context: Context, onlineOnly: Boolean = false): List<VrcFriend> = withContext(Dispatchers.IO) {
         val cookieHeader = getCookieHeader(context) ?: return@withContext emptyList()
         val seen = mutableMapOf<String, VrcFriend>()
         val pageSize = 100
-        for (offline in listOf(false, true)) {
+        val passes = if (onlineOnly) listOf(false) else listOf(false, true)
+        for (offline in passes) {
             var offset = 0
             try {
                 while (true) {

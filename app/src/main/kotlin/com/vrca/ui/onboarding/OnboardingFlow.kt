@@ -65,6 +65,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import com.vrca.app.VrcaApplication
 import com.vrca.discord.DiscordLoginWebView
 import com.vrca.osc.VrcaOsc
+import com.vrca.ui.common.CompactSectionCard
 import com.vrca.ui.common.KitStatusChip
 import com.vrca.ui.common.KitTone
 import com.vrca.ui.common.StatusDot
@@ -553,11 +554,31 @@ private fun StepPermissions() {
                 )
             }
         }
-        if (Build.MANUFACTURER.equals("samsung", ignoreCase = true)) {
-            TrustNote(
-                "Samsung: also add VRC-A to Settings → Battery → \"Never sleeping apps\". " +
-                "Samsung kills background apps aggressively even with the exemption."
+        CompactSectionCard(
+            title = "Turn off background restrictions",
+            summary = "Stops the OS pausing notifications and music detection",
+            collapsible = true,
+            initiallyExpanded = false,
+            persistExpansion = false
+        ) {
+            Text(
+                "If notifications or music detection stop while VRC-A is in the " +
+                "background, the phone is restricting it. To fix:\n" +
+                "1. Press and hold the VRC-A icon on your home screen or app drawer.\n" +
+                "2. Tap \"App info\" (the i icon).\n" +
+                "3. Open the 3-dot menu (top right) and pick \"Allow background activity\", " +
+                "or open Battery and set it to \"Unrestricted\".\n" +
+                "4. Make sure VRC-A is NOT in any \"restricted\", \"sleeping\" or " +
+                "\"deep sleeping\" apps list.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            if (Build.MANUFACTURER.equals("samsung", ignoreCase = true)) {
+                TrustNote(
+                    "Samsung: also add VRC-A to Settings → Battery → \"Never sleeping apps\". " +
+                    "Samsung kills background apps aggressively even with the exemption."
+                )
+            }
         }
     }
 }
@@ -660,20 +681,25 @@ private fun StepIpEntry() {
             }
         }
 
-        ElevatedCard {
-            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("Good to know", style = MaterialTheme.typography.titleSmall)
-                Text(
-                    "• Ignore the long address with letters and colons (that's IPv6). " +
-                    "You want the short dotted one.\n" +
-                    "• Phone and headset must be on the SAME Wi-Fi network.\n" +
-                    "• The IP can change when the router restarts or you switch networks. " +
-                    "You can update it any time in Home → Connection.\n" +
-                    "• On PC: press Win+R, type cmd, run ipconfig and read \"IPv4 Address\".",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+        // Collapsed by default (no persistence) so the IP input below sits in
+        // view without scrolling — users were missing the field under this card.
+        CompactSectionCard(
+            title = "Good to know",
+            summary = "Tips: IPv6 vs IPv4, same Wi-Fi, finding it on PC",
+            collapsible = true,
+            initiallyExpanded = false,
+            persistExpansion = false
+        ) {
+            Text(
+                "• Ignore the long address with letters and colons (that's IPv6). " +
+                "You want the short dotted one.\n" +
+                "• Phone and headset must be on the SAME Wi-Fi network.\n" +
+                "• The IP can change when the router restarts or you switch networks. " +
+                "You can update it any time in Home → Connection.\n" +
+                "• On PC: press Win+R, type cmd, run ipconfig and read \"IPv4 Address\".",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
 
         OutlinedTextField(

@@ -62,6 +62,27 @@ internal fun NowPlayingPage(
 ) {
     val ctx = LocalContext.current
 
+    // Notification Access status — gated on the REAL granted permission
+    // (NotificationManagerCompat), NOT vm.listenerConnected. listenerConnected
+    // only flips true once the OS (re)binds the listener service and pushes a
+    // state update; after a process restart it sits false even though the
+    // permission IS granted, which made this warning falsely persist while music
+    // was clearly being detected. Re-checked on ON_RESUME (return from Settings).
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    var permRefreshTick by remember { mutableStateOf(0) }
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) permRefreshTick++
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+    }
+    val listenerGranted = remember(permRefreshTick) {
+        androidx.core.app.NotificationManagerCompat
+            .getEnabledListenerPackages(ctx)
+            .contains(ctx.packageName)
+    }
+
     // Drives the animated preset glyphs AND the live re-read of the rendered
     // chatbox lines (position counters advance via clock extrapolation, so
     // without a tick the time/bar would freeze between media-state pushes).
@@ -75,8 +96,8 @@ internal fun NowPlayingPage(
     }
 
     PageContainer {
-        // -- Notification Access: warning row only when missing --
-        if (!vm.listenerConnected) {
+        // -- Notification Access: warning row only when the permission is missing --
+        if (!listenerGranted) {
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
                 modifier = Modifier.fillMaxWidth()

@@ -108,7 +108,20 @@ internal fun HomePage(
     var batteryOk by remember { mutableStateOf(pm.isIgnoringBatteryOptimizations(ctx.packageName)) }
     LaunchedEffect(Unit) { batteryOk = pm.isIgnoringBatteryOptimizations(ctx.packageName) }
 
-    val notifOk = vm.listenerConnected
+    // Gate on the REAL granted permission (NotificationManagerCompat), not
+    // vm.listenerConnected — that flag stays false after a process restart until
+    // the OS rebinds the listener, falsely flagging the setup item as incomplete
+    // even though access is granted. Re-checked on re-entry (same as batteryOk).
+    var notifOk by remember {
+        mutableStateOf(
+            androidx.core.app.NotificationManagerCompat
+                .getEnabledListenerPackages(ctx).contains(ctx.packageName)
+        )
+    }
+    LaunchedEffect(Unit) {
+        notifOk = androidx.core.app.NotificationManagerCompat
+            .getEnabledListenerPackages(ctx).contains(ctx.packageName)
+    }
     var ipOk by remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(Unit) {
         vm.userPreferencesRepository.ipAddress.collect { ip ->
