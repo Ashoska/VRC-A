@@ -75,6 +75,26 @@ class VrcaApplication : Application(), ViewModelStoreOwner {
                 .build()
 
         cleanStaleUpdateApks()
+
+        // Track app foreground state (started-activity count) so background
+        // workers (e.g. the friends-profile refresh) can poll fast while the
+        // user is on-screen and back off when not. Dependency-free.
+        registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
+            private var startedActivities = 0
+            override fun onActivityStarted(activity: android.app.Activity) {
+                startedActivities++
+                com.vrca.vrchat.VrchatPipelineState.appForeground = startedActivities > 0
+            }
+            override fun onActivityStopped(activity: android.app.Activity) {
+                startedActivities = (startedActivities - 1).coerceAtLeast(0)
+                com.vrca.vrchat.VrchatPipelineState.appForeground = startedActivities > 0
+            }
+            override fun onActivityCreated(activity: android.app.Activity, savedInstanceState: android.os.Bundle?) {}
+            override fun onActivityResumed(activity: android.app.Activity) {}
+            override fun onActivityPaused(activity: android.app.Activity) {}
+            override fun onActivitySaveInstanceState(activity: android.app.Activity, outState: android.os.Bundle) {}
+            override fun onActivityDestroyed(activity: android.app.Activity) {}
+        })
     }
 
     /**

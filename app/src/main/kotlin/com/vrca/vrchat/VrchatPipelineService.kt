@@ -193,6 +193,7 @@ class VrchatPipelineService : Service() {
         startAppUpdateCheckLoop()
         startAuthRefreshLoop()
         startGroupAnnouncementPollLoop()
+        startFriendsProfileRefreshLoop()
 
         // Re-post the persistent foreground notification if it gets swiped.
         // Also performs a WebSocket health check every 5th iteration (~50s):
@@ -1378,6 +1379,143 @@ class VrchatPipelineService : Service() {
         friendsCacheLoaded = true
         persistFriendsCache()
         Log.i(TAG, "Loaded ${friendsCache.size} friends into cache")
+    }
+
+    // Fast cadence while the app is on-screen (light online-only sweep), and the
+    // steady full-sweep cadence (covers offline friends too).
+    private val FRIENDS_PROFILE_FG_MS = 25_000L
+    private val FRIENDS_PROFILE_REFRESH_MS = 3 * 60 * 1000L
+    private var lastFullFriendsSweepMs = 0L
+
+    /**
+     * Periodic friends-profile refresh + diff.
+     *
+     * VRChat does NOT reliably push bio / display-name / trust-rank edits over
+     * the pipeline `friend-update` event, so historically those "cache-compared"
+     * changes only surfaced on a reconnect/restart (the connect-flow re-diff at
+     * the top of [startPipeline]) — i.e. "the bio change only shows after I
+     * reopen the app". This loop re-fetches the friends list on a timer and runs
+     * the same diff so those changes appear on their own within a few minutes
+     * while the app is alive, no restart needed. (No prior version had this — it
+     * worked incidentally only because the app used to reconnect far more often.)
+     *
+     * It MERGES profile fields onto the existing cache entries and deliberately
+     * preserves the live presence fields (location / worldName / status) that the
+     * WebSocket events own — REST friend data lags those, so replacing them would
+     * make the friends-online count and "friend moved" notifications flap.
+     */
+    private fun startFriendsProfileRefreshLoop() {
+        serviceScope.launch {
+            // First sweep shortly after start so a change made just before
+            // opening surfaces quickly; then settle into the cadence below.
+            delay(30_000L)
+            while (true) {
+                val foreground = VrchatPipelineState.appForeground
+                // Always do a FULL sweep (covers offline friends) at least every
+                // FRIENDS_PROFILE_REFRESH_MS; in between, while on-screen, do the
+                // light online-only sweep so an online friend's bio/name/rank edit
+                // surfaces within ~25s without hammering the API.
+                val now = System.currentTimeMillis()
+                val doFull = !foreground || (now - lastFullFriendsSweepMs >= FRIENDS_PROFILE_REFRESH_MS)
+                try {
+                    refreshFriendsProfilesAndDiff(onlineOnly = !doFull)
+                    if (doFull) lastFullFriendsSweepMs = System.currentTimeMillis()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Friends profile refresh failed", e)
+                }
+                delay(if (foreground) FRIENDS_PROFILE_FG_MS else FRIENDS_PROFILE_REFRESH_MS)
+            }
+        }
+    }
+
+    private suspend fun refreshFriendsProfilesAndDiff(onlineOnly: Boolean) {
+        if (!VrchatAuthManager.isLoggedIn(this) || !friendsCacheLoaded || isInWarmup()) return
+        if (friendsCache.isEmpty()) return
+        val fresh = VrchatAuthManager.fetchFriends(this, onlineOnly = onlineOnly)
+        if (fresh.isEmpty()) return
+
+        var changed = false
+        for (f in fresh) {
+            val userId = f.userId
+            val prev = friendsCache[userId] ?: continue
+
+            // Name change
+            if (f.displayName != prev.displayName &&
+                prev.displayName.isNotBlank() && f.displayName.isNotBlank()
+            ) {
+                val nameGroupKey = "name_$userId"
+                fireEventNotification(
+                    id = nameGroupKey.hashCode(),
+                    title = "Friend renamed",
+                    text = "${prev.displayName} is now known as ${f.displayName}",
+                    profileUrl = "https://vrchat.com/home/user/$userId",
+                    prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_DISPLAY_NAME,
+                    channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
+                    groupKey = GROUP_KEY_FRIENDS,
+                    bigText = "Was: ${prev.displayName}\nNow: ${f.displayName}",
+                    alertBody = "${prev.displayName} → ${f.displayName}",
+                    alertBeforeText = prev.displayName,
+                    alertAfterText = f.displayName,
+                    alertGroupKey = nameGroupKey
+                )
+            }
+
+            // Bio change — edit, clear (→empty), or add (empty→). Both sides come
+            // from full fetches so the bio field is reliable; only empty→empty is
+            // ignored.
+            if (f.bio != prev.bio && (f.bio.isNotBlank() || prev.bio.isNotBlank())) {
+                val bioGroupKey = "bio_$userId"
+                val bioTitle = when {
+                    f.bio.isBlank() -> "${f.displayName} cleared their bio"
+                    prev.bio.isBlank() -> "${f.displayName} added a bio"
+                    else -> "${f.displayName} updated bio"
+                }
+                val beforeShown = prev.bio.ifBlank { "(empty)" }
+                val afterShown = f.bio.ifBlank { "(empty)" }
+                val bioAlertBody = "Before: $beforeShown\nAfter: $afterShown"
+                fireEventNotification(
+                    id = bioGroupKey.hashCode(),
+                    title = bioTitle,
+                    text = bioTitle,
+                    profileUrl = "https://vrchat.com/home/user/$userId",
+                    prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_BIO,
+                    channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
+                    groupKey = GROUP_KEY_FRIENDS,
+                    bigText = bioAlertBody,
+                    alertBody = bioAlertBody,
+                    alertBeforeText = beforeShown,
+                    alertAfterText = afterShown,
+                    alertGroupKey = bioGroupKey
+                )
+            }
+
+            // Trust rank change
+            if (f.trustRank.isNotBlank() && f.trustRank != prev.trustRank &&
+                prev.trustRank.isNotBlank()
+            ) {
+                fireEventNotification(
+                    id = "rank_$userId".hashCode(),
+                    title = "Friend trust rank changed",
+                    text = "${f.displayName} is now ${prettyTrustRank(f.trustRank)}",
+                    profileUrl = "https://vrchat.com/home/user/$userId",
+                    prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_RANK,
+                    channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
+                    groupKey = GROUP_KEY_FRIENDS
+                )
+            }
+
+            // Merge profile fields; preserve live presence (location/world/status)
+            // owned by the WebSocket events.
+            friendsCache[userId] = prev.copy(
+                displayName = f.displayName,
+                statusDescription = f.statusDescription,
+                avatarThumb = f.avatarThumb,
+                bio = f.bio,
+                trustRank = f.trustRank
+            )
+            changed = true
+        }
+        if (changed) persistFriendsCache()
     }
 
     private fun persistFriendsCache() {
@@ -3232,4 +3370,11 @@ object VrchatPipelineState {
     var friendsOnline: Pair<Int, Int>?
         get() = _friendsOnline.value
         set(value) { _friendsOnline.value = value }
+
+    /** True while any Activity is started (app on-screen). Set from
+     *  VrcaApplication's ActivityLifecycleCallbacks; read by the friends-profile
+     *  refresh loop so it polls fast while the user is actively in the app and
+     *  backs off when backgrounded. @Volatile — cross-thread read from the
+     *  service's IO coroutine. */
+    @Volatile var appForeground: Boolean = false
 }

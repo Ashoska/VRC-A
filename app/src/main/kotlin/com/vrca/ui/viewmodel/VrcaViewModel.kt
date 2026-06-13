@@ -2130,6 +2130,21 @@ class VrcaViewModel(
         // 40-field snapshots on every app restart.
         loadLastSyncedValues()
 
+        // Keep the OSC send target in sync with the saved IP (active slot) from
+        // DataStore. remoteVrcaOsc was constructed once with whatever was stored
+        // at VM-creation time; nothing else re-reads it, so an IP saved AFTER the
+        // VM was created — most importantly the address entered during the
+        // onboarding tutorial (the VM is created during onboarding) — never became
+        // the live target until the user manually tapped Apply in Home. This
+        // collector makes any saved/equipped/synced IP the runtime target
+        // automatically. Manual Apply also writes the same value to DataStore, so
+        // this re-emits the identical value (no conflict).
+        viewModelScope.launch {
+            userPreferencesRepository.ipAddress.collect { ip ->
+                if (ip.isNotBlank()) remoteVrcaOsc.ipAddress = ip
+            }
+        }
+
         // Public build: attach moderation listeners (also drives watcher detection
         // and remote-config snapshots). Admin build skips self-sync entirely.
         attachModerationListenersLoopOnce()
