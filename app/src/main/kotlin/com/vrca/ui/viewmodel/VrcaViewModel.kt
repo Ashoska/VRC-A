@@ -501,14 +501,14 @@ class VrcaViewModel(
         "activePackage" to activePackage,
         "combinedPreviewText" to combinedPreviewText.trim(),
         "cycleTrimWarning" to cycleTrimWarning.trim(),
-        // Feature toggles stream with the watched 10s loop so the admin's
-        // Pinned/Cycle/Music/Time button states reflect a user's toggle change in
-        // real time while watching. (They also persist via the hourly delta write —
-        // captureStateForSync carries them — so an unwatched toggle still surfaces.)
-        "afkEnabled" to afkEnabled,
-        "cycleEnabled" to cycleEnabled,
-        "spotifyEnabled" to spotifyEnabled,
-        "timeEnabled" to timeEnabled,
+        // NOTE: feature toggles are deliberately NOT streamed here. This 10s watched
+        // loop would otherwise write the user's CURRENT toggle values back to Firestore
+        // every 10s and OVERWRITE an admin's toggle edit before the moderation snapshot
+        // listener could apply it — the admin's Pinned/Cycle/Music/Time toggle never
+        // stuck while watching (which is exactly when admins edit). Toggles reach the
+        // admin via the hourly delta + the 30s edit debounce (captureStateForSync
+        // carries them); admin->user toggle edits flow through applyRemoteConfig
+        // unobstructed. This matches the known-good 6a033a6 buildLivePayload.
         "lastReportedTime" to if (timeEnabled) currentTimeString() else "",
         "lastTimeUpdateAt" to FieldValue.serverTimestamp(),
         "lastActiveAt" to FieldValue.serverTimestamp(),
@@ -1262,110 +1262,105 @@ class VrcaViewModel(
         com.vrca.sync.AdminWatchState.updateFromTimestampMs(watcherActiveAtMs)
 
         viewModelScope.launch {
-            // Two-layer comparison for each field:
-            //  1. remote != local  — is the value actually different from what we have?
-            //     If same, skip entirely (no change needed, prevents echo loops).
-            //  2. baseline == null || remote != baseline — is this a REAL admin edit, or
-            //     just an echo of our pending local write (heartbeat during active watching)?
-            //     When the user toggled locally but the write hasn't landed on Firestore yet,
-            //     the heartbeat snapshot echoes the OLD server value. baseline matches that
-            //     old value (we wrote it), so remote == baseline → skip (don't revert the
-            //     user's local toggle). When an admin ACTUALLY changed the field, remote !=
-            //     baseline → apply. Null baseline (first snapshot / empty prefs) always
-            //     passes through to the local comparison, so admin edits on cold-open are
-            //     never blocked by missing baseline data.
+            // Single-layer baseline comparison (restored from the known-good 6a033a6).
+            // Apply a field when the SERVER value changed since the last snapshot we saw
+            // (remote != lastSyncedValues[key]). An admin edit IS a server change, so it
+            // always applies; a self-write echo has remote == baseline (we just wrote it)
+            // and is skipped. We update lastSyncedValues to remote on EVERY snapshot so
+            // the next echo is suppressed.
             //
-            // Always update lastSyncedValues to remote so subsequent echoes are suppressed.
+            // The earlier "two-layer" form added an extra `remote != local` gate, which
+            // could skip a genuine admin edit and was the cause of admin edits only
+            // applying on app reopen (never in real time). We deliberately do NOT gate on
+            // local here.
+            //
+            // TOGGLES additionally require a NON-NULL baseline before applying. On a fresh
+            // process / OS-kill revival the very first snapshot can carry a stale server
+            // toggle while restoreFeatureSession has just resumed OSC with the toggle ON;
+            // applying a null-baseline `false` there would stop the restored sender. The
+            // cold-open path (applyOfflineToggleEdits, which has the revival guard) owns
+            // that first application; once a baseline exists, real-time admin toggle edits
+            // apply here normally.
 
             snap.getBoolean("afkEnabled")?.let { remote ->
-                if (remote != afkEnabled) {
-                    val baseline = lastSyncedValues["afkEnabled"]
-                    if (baseline == null || remote != baseline) {
-                        afkEnabled = remote
-                        savedState["afkEnabled"] = remote
-                        rebuildCombinedPreviewOnly()
-                        if (!remote) stopAfkSender(clearFromChatbox = true)
-                        startSelfSyncLoopIfNeeded()
-                    }
+                val baseline = lastSyncedValues["afkEnabled"] as? Boolean
+                if (baseline != null && remote != baseline) {
+                    afkEnabled = remote
+                    savedState["afkEnabled"] = remote
+                    rebuildCombinedPreviewOnly()
+                    if (!remote) stopAfkSender(clearFromChatbox = true)
+                    startSelfSyncLoopIfNeeded()
                 }
                 lastSyncedValues["afkEnabled"] = remote
             }
             snap.getBoolean("cycleEnabled")?.let { remote ->
-                if (remote != cycleEnabled) {
-                    val baseline = lastSyncedValues["cycleEnabled"]
-                    if (baseline == null || remote != baseline) {
-                        cycleEnabled = remote
-                        savedState["cycleEnabled"] = remote
-                        rebuildCombinedPreviewOnly()
-                        if (!remote) stopCycle(clearFromChatbox = true)
-                        if (remote) lastCyclePreviewAdvanceMs = 0L
-                        startSelfSyncLoopIfNeeded()
-                    }
+                val baseline = lastSyncedValues["cycleEnabled"] as? Boolean
+                if (baseline != null && remote != baseline) {
+                    cycleEnabled = remote
+                    savedState["cycleEnabled"] = remote
+                    rebuildCombinedPreviewOnly()
+                    if (!remote) stopCycle(clearFromChatbox = true)
+                    if (remote) lastCyclePreviewAdvanceMs = 0L
+                    startSelfSyncLoopIfNeeded()
                 }
                 lastSyncedValues["cycleEnabled"] = remote
             }
             snap.getBoolean("spotifyEnabled")?.let { remote ->
-                if (remote != spotifyEnabled) {
-                    val baseline = lastSyncedValues["spotifyEnabled"]
-                    if (baseline == null || remote != baseline) {
-                        spotifyEnabled = remote
-                        savedState["spotifyEnabled"] = remote
-                        rebuildCombinedPreviewOnly()
-                        if (!remote) stopNowPlayingSender(clearFromChatbox = true)
-                        startSelfSyncLoopIfNeeded()
-                    }
+                val baseline = lastSyncedValues["spotifyEnabled"] as? Boolean
+                if (baseline != null && remote != baseline) {
+                    spotifyEnabled = remote
+                    savedState["spotifyEnabled"] = remote
+                    rebuildCombinedPreviewOnly()
+                    if (!remote) stopNowPlayingSender(clearFromChatbox = true)
+                    startSelfSyncLoopIfNeeded()
                 }
                 lastSyncedValues["spotifyEnabled"] = remote
             }
             snap.getBoolean("timeEnabled")?.let { remote ->
-                if (remote != timeEnabled) {
-                    val baseline = lastSyncedValues["timeEnabled"]
-                    if (baseline == null || remote != baseline) {
-                        timeEnabled = remote
-                        savedState["timeEnabled"] = remote
-                        rebuildCombinedPreviewOnly()
-                        startSelfSyncLoopIfNeeded()
-                    }
+                val baseline = lastSyncedValues["timeEnabled"] as? Boolean
+                if (baseline != null && remote != baseline) {
+                    timeEnabled = remote
+                    savedState["timeEnabled"] = remote
+                    rebuildCombinedPreviewOnly()
+                    startSelfSyncLoopIfNeeded()
                 }
                 lastSyncedValues["timeEnabled"] = remote
             }
 
-            // Content fields: compare against LOCAL value first (does the ViewModel
-            // actually need updating?), then baseline for echo suppression. Directly
-            // set ViewModel fields so the change takes effect immediately — relying
-            // solely on async DataStore collector propagation was a source of races
-            // where the cold-open DataStore load overwrote the applied value.
+            // Content fields: single-layer baseline comparison (6a033a6). The baseline
+            // falls back to the current LOCAL value when there's no persisted baseline
+            // yet, so a first-snapshot admin edit still applies (remote != local) and an
+            // echo of our own write is suppressed (remote == baseline). We directly set
+            // the ViewModel field AND save to DataStore so the change takes effect
+            // immediately (the DataStore collector also rebuilds the preview).
             snap.getString("afkMessage")?.let { remote ->
                 val trimmed = remote.trim()
-                if (trimmed != afkMessage.trim()) {
-                    val baseline = lastSyncedValues["afkMessage"] as? String
-                    if (baseline == null || trimmed != baseline) {
-                        afkMessage = trimmed
-                        userPreferencesRepository.saveAfkMessage(trimmed)
-                    }
+                val baseline = (lastSyncedValues["afkMessage"] as? String) ?: afkMessage.trim()
+                if (trimmed != baseline) {
+                    afkMessage = trimmed
+                    userPreferencesRepository.saveAfkMessage(trimmed)
+                    rebuildCombinedPreviewOnly()
                 }
                 lastSyncedValues["afkMessage"] = trimmed
             }
             snap.getLong("cycleIntervalSeconds")?.let { remote ->
                 val intVal = remote.toInt().coerceAtLeast(2)
-                if (intVal != cycleIntervalSeconds) {
-                    val baseline = lastSyncedValues["cycleIntervalSeconds"] as? Int
-                    if (baseline == null || intVal != baseline) {
-                        cycleIntervalSeconds = intVal
-                        userPreferencesRepository.saveCycleInterval(intVal)
-                    }
+                val baseline = (lastSyncedValues["cycleIntervalSeconds"] as? Int) ?: cycleIntervalSeconds
+                if (intVal != baseline) {
+                    cycleIntervalSeconds = intVal
+                    userPreferencesRepository.saveCycleInterval(intVal)
+                    rebuildCombinedPreviewOnly()
                 }
                 lastSyncedValues["cycleIntervalSeconds"] = intVal
             }
             snap.getString("cycleLinesText")?.let { remote ->
                 val trimmed = remote.trim()
                 val local = cycleLines.joinToString("\n").trim()
-                if (trimmed != local) {
-                    val baseline = lastSyncedValues["cycleLinesText"] as? String
-                    if (baseline == null || trimmed != baseline) {
-                        setCycleLinesFromTextPreserve(trimmed)
-                        userPreferencesRepository.saveCycleMessages(trimmed)
-                    }
+                val baseline = (lastSyncedValues["cycleLinesText"] as? String) ?: local
+                if (trimmed != baseline) {
+                    setCycleLinesFromTextPreserve(trimmed)
+                    userPreferencesRepository.saveCycleMessages(trimmed)
+                    rebuildCombinedPreviewOnly()
                 }
                 lastSyncedValues["cycleLinesText"] = trimmed
             }
@@ -1378,12 +1373,10 @@ class VrcaViewModel(
                 val remoteMsg = snap.getString("afkPreset$i") ?: continue
                 val trimmed = remoteMsg.trim()
                 val local = afkPresetTexts.getOrNull(i - 1)?.trim().orEmpty()
-                if (trimmed != local) {
-                    val baseline = lastSyncedValues["afkPreset$i"] as? String
-                    if (baseline == null || trimmed != baseline) {
-                        afkPresetTexts[i - 1] = trimmed
-                        afkPresetSavers[i - 1](trimmed)
-                    }
+                val baseline = (lastSyncedValues["afkPreset$i"] as? String) ?: local
+                if (trimmed != baseline) {
+                    afkPresetTexts[i - 1] = trimmed
+                    afkPresetSavers[i - 1](trimmed)
                 }
                 lastSyncedValues["afkPreset$i"] = trimmed
             }
@@ -1398,24 +1391,20 @@ class VrcaViewModel(
                 val remoteMsg = snap.getString("cyclePreset$i") ?: continue
                 val trimmed = remoteMsg.trim()
                 val local = cyclePresetMessages.getOrNull(i - 1)?.trim().orEmpty()
-                if (trimmed != local) {
-                    val baseline = lastSyncedValues["cyclePreset$i"] as? String
-                    if (baseline == null || trimmed != baseline) {
-                        cyclePresetMessages[i - 1] = trimmed
-                        val interval = cyclePresetIntervals.getOrElse(i - 1) { 10 }
-                        presetSavers[i - 1](trimmed, interval, null)
-                    }
+                val baseline = (lastSyncedValues["cyclePreset$i"] as? String) ?: local
+                if (trimmed != baseline) {
+                    cyclePresetMessages[i - 1] = trimmed
+                    val interval = cyclePresetIntervals.getOrElse(i - 1) { 10 }
+                    presetSavers[i - 1](trimmed, interval, null)
                 }
                 lastSyncedValues["cyclePreset$i"] = trimmed
             }
             snap.getLong("spotifyPreset")?.let { remote ->
                 val intVal = remote.toInt().coerceIn(1, 5)
-                if (intVal != spotifyPreset) {
-                    val baseline = lastSyncedValues["spotifyPreset"] as? Int
-                    if (baseline == null || intVal != baseline) {
-                        spotifyPreset = intVal
-                        userPreferencesRepository.saveSpotifyPreset(intVal)
-                    }
+                val baseline = (lastSyncedValues["spotifyPreset"] as? Int) ?: spotifyPreset
+                if (intVal != baseline) {
+                    spotifyPreset = intVal
+                    userPreferencesRepository.saveSpotifyPreset(intVal)
                 }
                 lastSyncedValues["spotifyPreset"] = intVal
             }
