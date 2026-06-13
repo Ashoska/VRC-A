@@ -236,6 +236,31 @@ service cloud.firestore {
     }
 
     /* =========================
+       ACCOUNT SESSION LOCK (single-session take-over)
+       ========================= */
+
+    // Tiny lock doc keyed by VRChat user id, holding ONLY which device currently
+    // "owns" the account. Multiple devices logged into the same VRChat account
+    // use it to enforce one-active-device-at-a-time: the newest claimer wins, and
+    // the displaced device sees the change via its listener and stops sending.
+    match /accounts/{vrchatUserId} {
+      // get: signed-in (mirrors bannedIdentifiers). A device reads its OWN account
+      // lock by exact vrchatUserId; the vrchatId can't be ownership-verified in
+      // rules (no server-side vrchatId->auth mapping). list is owner-only so the
+      // collection can't be enumerated. Writes are constrained to EXACTLY the two
+      // lock fields with a valid deviceHash string, so a write can inject no
+      // arbitrary data; worst case is kicking a device, bounded by needing the
+      // target's high-entropy usr_ id.
+      allow get: if isOwner() || signedIn();
+      allow list: if isOwner();
+      allow create, update: if isOwner()
+        || (signedIn()
+            && request.resource.data.keys().hasOnly(['activeDevice', 'activeSince'])
+            && isValidDeviceHashString(request.resource.data.activeDevice));
+      allow delete: if isOwner();
+    }
+
+    /* =========================
        LEGACY DEVICE BANS (kept for migration)
        ========================= */
 

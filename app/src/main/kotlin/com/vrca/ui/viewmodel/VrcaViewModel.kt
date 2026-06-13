@@ -166,12 +166,18 @@ class VrcaViewModel(
         // Cross-device sync runs on VM creation; throttle so OS-kill relaunches don't
         // repeat the collection read every few minutes.
         private const val CROSS_DEVICE_SYNC_THROTTLE_MS = 30L * 60L * 1000L
+        // The sibling query that ALSO drives the single-session claim runs more often
+        // than the 30-min content pull (so a freshly-opened device takes over quickly),
+        // but is still throttled so an OS-kill relaunch storm doesn't re-read every time.
+        private const val PREF_LAST_ACCOUNT_QUERY_MS = "last_account_query_ms"
+        private const val ACCOUNT_QUERY_THROTTLE_MS = 60L * 1000L
         private const val PREF_LAST_SYNCED_JSON = "last_synced_values_json"
 
         // Collections (MUST MATCH YOUR RULES)
         private const val COL_USERS = "users"             // users/{deviceHash}
         private const val COL_USERS_BY_ID = "usersById"   // usersById/{uid}
         private const val COL_BANNED_DEVICES = "bannedDevices"
+        private const val COL_ACCOUNTS = "accounts"        // accounts/{vrchatUserId} session lock
 
         @MainThread
         fun isInstanceInitialized(): Boolean = ::instance.isInitialized
@@ -889,9 +895,12 @@ class VrcaViewModel(
      * phone is almost always >30 min from the last sync, so the feature is intact.
      */
     private suspend fun applyCrossDeviceSync() {
-        // Throttle: skip if we synced within the window. Cheap relaunch-storm guard.
-        val lastSync = prefs().getLong(PREF_LAST_CROSS_DEVICE_SYNC_MS, 0L)
-        if (System.currentTimeMillis() - lastSync < CROSS_DEVICE_SYNC_THROTTLE_MS) return
+        // Light relaunch-storm guard for the sibling QUERY (separate from the 30-min
+        // content-pull window): this query also drives the single-session claim, so it
+        // must run on a genuine reopen — not be suppressed for 30 min — but still be
+        // bounded so an OS-kill relaunch storm doesn't re-read every few seconds.
+        val lastQuery = prefs().getLong(PREF_LAST_ACCOUNT_QUERY_MS, 0L)
+        if (System.currentTimeMillis() - lastQuery < ACCOUNT_QUERY_THROTTLE_MS) return
 
         val myPresence = kotlinx.coroutines.withTimeoutOrNull(120_000L) {
             VrchatPipelineState.presenceFlow.first { it != null }
@@ -907,10 +916,27 @@ class VrcaViewModel(
                 .whereEqualTo("vrchatUserId", myVrchatId)
                 .get()
                 .await()
-            // Stamp the throttle on a successful query (whether or not we pull), so
-            // relaunches within the window don't re-read.
-            prefs().edit().putLong(PREF_LAST_CROSS_DEVICE_SYNC_MS, System.currentTimeMillis()).apply()
+            prefs().edit().putLong(PREF_LAST_ACCOUNT_QUERY_MS, System.currentTimeMillis()).apply()
             if (siblings == null || siblings.isEmpty) return@runCatching
+
+            // Is this account on more than one device? Only then do we touch the
+            // single-session lock (per the requirement: leave single-device users
+            // entirely untouched — no account doc is ever written for them).
+            val hasOtherDevice = siblings.documents.any { it.id != deviceHash }
+            if (hasOtherDevice) {
+                // Take over: claim the account for THIS device. The previously-active
+                // device sees the change via its accounts/{id} listener and stops.
+                claimAccount(myVrchatId, deviceHash)
+                // We're the active device now — clear any stale gate optimistically so
+                // we don't flash the "active on another device" screen while our claim
+                // propagates back through our own listener.
+                if (notActiveDevice) { notActiveDevice = false; refreshOscBlockGate() }
+            }
+
+            // Content pull keeps its own 30-min throttle (the expensive part) — pull the
+            // freshest sibling's presets/messages so a switched-to device has the latest.
+            val lastContent = prefs().getLong(PREF_LAST_CROSS_DEVICE_SYNC_MS, 0L)
+            if (System.currentTimeMillis() - lastContent < CROSS_DEVICE_SYNC_THROTTLE_MS) return@runCatching
 
             // The query returns our OWN doc too (same vrchatUserId), so read our
             // updatedAt straight from the results — no extra get() needed.
@@ -922,11 +948,95 @@ class VrcaViewModel(
                 if (doc.id == deviceHash) { myUpdatedAt = ts; continue }
                 if (ts > bestMs) { bestMs = ts; bestSnap = doc }
             }
+            prefs().edit().putLong(PREF_LAST_CROSS_DEVICE_SYNC_MS, System.currentTimeMillis()).apply()
             if (bestSnap == null || bestMs <= myUpdatedAt) return@runCatching
 
             applyContentFromSnapshot(bestSnap)
             Log.d("VrcaViewModel", "Cross-device sync: pulled content from ${bestSnap.id}")
             rebuildCombinedPreviewOnly()
+        }
+    }
+
+    /**
+     * Single-session lock helpers (multi-device, same VRChat account).
+     *
+     * Lock doc: accounts/{vrchatUserId} = { activeDevice, activeSince }. A device is
+     * "active" when the doc is absent OR names this device. The newest claimer wins
+     * (take-over); the displaced device learns instantly via [startAccountLockWatcher]
+     * and stops sending (OSC blocked at the same chokepoint as the logged-out gate).
+     * Only ever written when a second device on the same account is detected, so a
+     * single-device user never touches this collection.
+     */
+    private suspend fun claimAccount(vrchatUserId: String, deviceHash: String) {
+        if (vrchatUserId.isBlank() || !isValidDeviceHash(deviceHash)) return
+        runCatching {
+            db.collection(COL_ACCOUNTS).document(vrchatUserId)
+                .set(mapOf(
+                    "activeDevice" to deviceHash,
+                    "activeSince" to FieldValue.serverTimestamp()
+                ))
+                .await()
+        }.onFailure { Log.w("VrcaViewModel", "claimAccount failed: ${it.message}") }
+    }
+
+    /**
+     * Re-claim the account for THIS device (the "Use here" action on the
+     * "active on another device" screen). Writes the lock + lifts the local gate
+     * immediately; the other device's listener will then stand down.
+     */
+    fun reclaimActiveDevice() {
+        val vid = watchedAccountId
+        val hash = readDeviceHashFromPrefs()
+        if (vid.isBlank() || !isValidDeviceHash(hash)) return
+        viewModelScope.launch {
+            claimAccount(vid, hash)
+            if (notActiveDevice) { notActiveDevice = false; refreshOscBlockGate() }
+        }
+    }
+
+    private var accountLockReg: ListenerRegistration? = null
+    @Volatile private var watchedAccountId: String = ""
+
+    /**
+     * Watches accounts/{vrchatUserId} for the current VRChat login. Re-attaches when
+     * the logged-in account changes (login / account switch / logout). When the lock
+     * names another device, this device is NOT active: stop sending and raise
+     * [notActiveDevice] so the OSC chokepoint blocks and the UI can show "active on
+     * another device". The doc is absent for single-device accounts, so the listener
+     * just gets one not-exists read and stays silent — no periodic cost.
+     */
+    private fun startAccountLockWatcher() {
+        if (BuildConfig.IS_ADMIN_BUILD) return
+        viewModelScope.launch {
+            VrchatPipelineState.presenceFlow.collect { presence ->
+                val vid = presence?.userId?.trim().orEmpty()
+                if (vid == watchedAccountId) return@collect
+                accountLockReg?.remove(); accountLockReg = null
+                watchedAccountId = vid
+                if (vid.isBlank()) {
+                    // Signed out of VRChat → no account lock applies; clear our gate
+                    // contribution (the vrchatLoggedOut gate handles OSC separately).
+                    if (notActiveDevice) { notActiveDevice = false; refreshOscBlockGate() }
+                    return@collect
+                }
+                val myHash = readDeviceHashFromPrefs()
+                if (!isValidDeviceHash(myHash)) return@collect
+                accountLockReg = db.collection(COL_ACCOUNTS).document(vid)
+                    .addSnapshotListener { snap, e ->
+                        if (e != null) return@addSnapshotListener
+                        val exists = snap?.exists() == true
+                        val activeDevice = snap?.getString("activeDevice")?.trim().orEmpty()
+                        // Active when nobody has claimed (doc absent / blank) or the
+                        // claim names us. Anything else means another device took over.
+                        val iAmActive = !exists || activeDevice.isBlank() || activeDevice == myHash
+                        val nowNotActive = !iAmActive
+                        if (nowNotActive != notActiveDevice) {
+                            notActiveDevice = nowNotActive
+                            if (nowNotActive && oscSending) stopSending()
+                            refreshOscBlockGate()
+                        }
+                    }
+            }
         }
     }
 
@@ -1536,9 +1646,19 @@ class VrcaViewModel(
     )
         private set
 
+    /**
+     * True when this VRChat account is currently "active" on a DIFFERENT device
+     * (single-session take-over). The displaced device blocks OSC at the chokepoint
+     * (same as the logged-out gate) and the UI shows an "active on another device"
+     * screen with a "Use here" button ([reclaimActiveDevice]). Only ever true for
+     * multi-device accounts; single-device users never see it.
+     */
+    var notActiveDevice by mutableStateOf(false)
+        private set
+
     /** OSC is blocked when ANY gate reason is active. */
     private fun refreshOscBlockGate() {
-        val blocked = forceUpdatePending || vrchatLoggedOut
+        val blocked = forceUpdatePending || vrchatLoggedOut || notActiveDevice
         remoteVrcaOsc.blocked = blocked
         localVrcaOsc.blocked = blocked
     }
@@ -2016,6 +2136,10 @@ class VrcaViewModel(
 
         // VRChat sign-out hard-blocks OSC until re-login (Settings Accounts).
         startVrchatAuthGateWatcher()
+
+        // Single-session lock: when the same VRChat account is open on another
+        // device, this one stands down (OSC blocked) until it's re-claimed.
+        startAccountLockWatcher()
 
         // Live-mode loop: idle until an admin starts watching.
         startLiveSyncWatcher()

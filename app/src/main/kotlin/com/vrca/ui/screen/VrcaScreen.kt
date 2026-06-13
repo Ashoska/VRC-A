@@ -408,6 +408,15 @@ fun VrcaScreen(
         }
     }
 
+    // Single-session take-over: this VRChat account is currently active on another
+    // device. The displaced device stands fully down behind a "Use here" screen
+    // (OSC is already blocked at the chokepoint); tapping re-claims and the other
+    // device then stops. Public build only (admin never participates).
+    if (!BuildConfig.IS_ADMIN_BUILD && chatboxViewModel.notActiveDevice) {
+        AnotherDeviceActiveScreen(onUseHere = { chatboxViewModel.reclaimActiveDevice() })
+        return
+    }
+
     Scaffold(
             topBar = {
                 CenterAlignedTopAppBar(
@@ -578,6 +587,43 @@ private fun GlobalStatusBanner(
 /* =========================
    Ban screen
    ========================= */
+
+@Composable
+private fun AnotherDeviceActiveScreen(onUseHere: () -> Unit) {
+    Surface(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                "Active on another device",
+                style = MaterialTheme.typography.headlineSmall
+            )
+            Text(
+                "This VRChat account is currently running in VRC-A on another device. " +
+                "To avoid two devices driving your chatbox at once, only one can be active " +
+                "at a time.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
+            Button(onClick = onUseHere, modifier = Modifier.fillMaxWidth()) {
+                Text("Use here")
+            }
+            Text(
+                "Tapping \"Use here\" takes over on this device. The other one will stop " +
+                "sending automatically.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
+        }
+    }
+}
 
 @Composable
 private fun BannedScreen(
