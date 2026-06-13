@@ -417,16 +417,15 @@ internal fun ModerationTab(
 
                                 runCatching {
                                     val reason = editWarnReason.trim()
-                                    db.collection("users").document(t.docId)
-                                        .set(
-                                            mapOf(
-                                                "warned" to true,
-                                                "warnReason" to reason,
-                                                "updatedAt" to FieldValue.serverTimestamp()
-                                            ),
-                                            SetOptions.merge()
+                                    // Account-wide: warn every device on this VRChat account.
+                                    AccountModeration.applyAccountWide(
+                                        db, t.docId,
+                                        mapOf(
+                                            "warned" to true,
+                                            "warnReason" to reason,
+                                            "updatedAt" to FieldValue.serverTimestamp()
                                         )
-                                        .await()
+                                    )
                                     writeEvent(t, "warn", reason)
                                     loadHistoryNoIndex(t)
 
@@ -448,16 +447,15 @@ internal fun ModerationTab(
                                 setError(null)
 
                                 runCatching {
-                                    db.collection("users").document(t.docId)
-                                        .set(
-                                            mapOf(
-                                                "warned" to false,
-                                                "warnReason" to "",
-                                                "updatedAt" to FieldValue.serverTimestamp()
-                                            ),
-                                            SetOptions.merge()
+                                    // Account-wide: clear the warning on every device on this account.
+                                    AccountModeration.applyAccountWide(
+                                        db, t.docId,
+                                        mapOf(
+                                            "warned" to false,
+                                            "warnReason" to "",
+                                            "updatedAt" to FieldValue.serverTimestamp()
                                         )
-                                        .await()
+                                    )
                                     writeEvent(t, "remove_warn", "")
                                     loadHistoryNoIndex(t)
 
@@ -536,16 +534,16 @@ internal fun ModerationTab(
 
                                 runCatching {
                                     if (applyUidBan) {
-                                        db.collection("users").document(t.docId)
-                                            .set(
-                                                mapOf(
-                                                    "banned" to true,
-                                                    "banReason" to reason,
-                                                    "updatedAt" to FieldValue.serverTimestamp()
-                                                ),
-                                                SetOptions.merge()
+                                        // Account-wide: ban every device on this VRChat account
+                                        // so an alt device can't dodge the ban.
+                                        AccountModeration.applyAccountWide(
+                                            db, t.docId,
+                                            mapOf(
+                                                "banned" to true,
+                                                "banReason" to reason,
+                                                "updatedAt" to FieldValue.serverTimestamp()
                                             )
-                                            .await()
+                                        )
                                     }
 
                                     if (applyDeviceBan) {
@@ -590,16 +588,15 @@ internal fun ModerationTab(
 
                                 runCatching {
                                     if (applyUidBan) {
-                                        db.collection("users").document(t.docId)
-                                            .set(
-                                                mapOf(
-                                                    "banned" to false,
-                                                    "banReason" to "",
-                                                    "updatedAt" to FieldValue.serverTimestamp()
-                                                ),
-                                                SetOptions.merge()
+                                        // Account-wide: lift the ban on every device on this account.
+                                        AccountModeration.applyAccountWide(
+                                            db, t.docId,
+                                            mapOf(
+                                                "banned" to false,
+                                                "banReason" to "",
+                                                "updatedAt" to FieldValue.serverTimestamp()
                                             )
-                                            .await()
+                                        )
                                     }
 
                                     if (applyDeviceBan) {

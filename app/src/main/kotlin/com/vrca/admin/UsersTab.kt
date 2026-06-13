@@ -650,12 +650,12 @@ internal fun UsersTab(
                                 scope.launch {
                                     setGlobalLoading(true)
                                     runCatching {
-                                        db.collection("users").document(row.docId)
-                                            .set(
-                                                mapOf("killSignal" to com.google.firebase.firestore.FieldValue.serverTimestamp()),
-                                                com.google.firebase.firestore.SetOptions.merge()
-                                            )
-                                            .await()
+                                        // Account-wide: kill every device on this VRChat account
+                                        // (only the currently-open one acts on a fresh killSignal).
+                                        AccountModeration.applyAccountWide(
+                                            db, row.docId,
+                                            mapOf("killSignal" to com.google.firebase.firestore.FieldValue.serverTimestamp())
+                                        )
                                     }.onFailure { e ->
                                         setError(e.message ?: "Kill failed")
                                     }
