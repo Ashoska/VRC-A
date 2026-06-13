@@ -139,6 +139,10 @@ class DiscordRpcService : Service() {
     private var shimRetryCount = 0
     private var sessionRecoveryCount = 0
     private var consecutivePushFailures = 0
+    // Consecutive session-monitor checks that reported a dead/zombie/bad gateway.
+    // We require 2 in a row (~60s) before forcing a reload, so Discord's own client
+    // gets a chance to RESUME on its own first.
+    private var degradedHealthChecks = 0
     private var lastPushAttemptMs = 0L
     private var lastShimResult = ""
 
@@ -515,6 +519,7 @@ class DiscordRpcService : Service() {
 
     private fun startSessionMonitor() {
         sessionMonitorJob?.cancel()
+        degradedHealthChecks = 0
         sessionMonitorJob = scope.launch {
             while (true) {
                 delay(SESSION_CHECK_INTERVAL_MS)
@@ -523,16 +528,46 @@ class DiscordRpcService : Service() {
                 mainHandler.post {
                     val wv = webView ?: return@post
                     wv.evaluateJavascript(
-                        "(function(){ var ws = window._vrca_gatewayWs; return ws && ws.readyState === 1 ? 'alive' : 'dead'; })()"
+                        "(window.VRCA_gatewayHealth ? window.VRCA_gatewayHealth() : 'no_probe')"
                     ) { result ->
-                        val alive = result?.trim()?.replace("\"", "") == "alive"
-                        if (!alive && shimReady) {
-                            Log.w(TAG, "Session monitor: dispatcher reference lost — re-injecting shim")
-                            shimReady = false
-                            shimRetryCount = 0
-                            DiscordRpcState.status = DiscordRpcStatus.RECONNECTING
-                            DiscordRpcState.failureMessage = "Reconnecting to Discord..."
-                            injectShim()
+                        if (!shimReady) return@evaluateJavascript
+                        when (result?.trim()?.replace("\"", "") ?: "null") {
+                            "alive", "connecting", "no_probe" -> {
+                                // Healthy (or socket still opening / probe not ready yet).
+                                if (degradedHealthChecks != 0) degradedHealthChecks = 0
+                                if (DiscordRpcState.status == DiscordRpcStatus.RECONNECTING) {
+                                    DiscordRpcState.status = DiscordRpcStatus.CONNECTED
+                                    DiscordRpcState.failureMessage = null
+                                }
+                            }
+                            "no_gateway" -> {
+                                // Shim lost the gateway reference entirely — re-inject
+                                // (cheaper than a full reload, restores the hook).
+                                degradedHealthChecks = 0
+                                Log.w(TAG, "Session monitor: gateway reference lost — re-injecting shim")
+                                shimReady = false
+                                shimRetryCount = 0
+                                DiscordRpcState.status = DiscordRpcStatus.RECONNECTING
+                                DiscordRpcState.failureMessage = "Reconnecting to Discord..."
+                                injectShim()
+                            }
+                            "dead", "zombie", "bad" -> {
+                                // Socket open-but-broken (Discord outage / zombied
+                                // session). Give Discord's own client one cycle to
+                                // RESUME, then force a reload — which re-establishes a
+                                // fresh gateway and auto-re-authenticates from the
+                                // persistent token/cookie (no password, like a manual
+                                // sign-out/in).
+                                degradedHealthChecks++
+                                DiscordRpcState.status = DiscordRpcStatus.RECONNECTING
+                                DiscordRpcState.failureMessage = "Discord connection unstable — recovering..."
+                                if (degradedHealthChecks >= 2) {
+                                    degradedHealthChecks = 0
+                                    Log.w(TAG, "Session monitor: gateway unhealthy — reloading to recover")
+                                    onSessionExpired()
+                                }
+                            }
+                            else -> {}
                         }
                     }
                 }
@@ -762,6 +797,56 @@ private const val WS_HOOK_JS = """
     window._vrca_intended_status = 'online';
     window._vrca_asset_cache = {};
     window._vrca_token = null;
+    // Gateway health tracking. These let the native session monitor tell a
+    // genuinely-working gateway from one that is OPEN at the socket level but
+    // dead/zombied at the session level (Discord outage), which used to show a
+    // false "connected". heartbeat_interval + last heartbeat-ACK come from
+    // readable (uncompressed) inbound frames; lifecycle 'open'/'close' work
+    // regardless of compression.
+    window._vrca_hbInterval = 0;
+    window._vrca_lastAckMs = 0;
+    window._vrca_gatewayBad = false;
+    window._vrca_sessionReady = false;
+
+    // Attach passive observers to a captured gateway socket. We ONLY observe
+    // (and re-push our own activity); we never alter Discord's own frames here,
+    // so the "real web session" property is preserved. Idempotent per socket.
+    window._vrca_attachGatewayListeners = function(ws) {
+        if (!ws || ws._vrca_listened) return;
+        ws._vrca_listened = true;
+        try {
+            ws.addEventListener('message', function(ev) {
+                try {
+                    if (typeof ev.data !== 'string') return; // compressed/binary: skip
+                    var m = JSON.parse(ev.data);
+                    if (m.op === 11) { window._vrca_lastAckMs = Date.now(); }
+                    else if (m.op === 10) {
+                        window._vrca_lastAckMs = Date.now();
+                        if (m.d && m.d.heartbeat_interval) window._vrca_hbInterval = m.d.heartbeat_interval;
+                    }
+                    else if (m.op === 7 || m.op === 9) { window._vrca_gatewayBad = true; }
+                    else if (m.op === 0 && (m.t === 'READY' || m.t === 'RESUMED')) {
+                        window._vrca_sessionReady = true;
+                        window._vrca_gatewayBad = false;
+                        window._vrca_lastAckMs = Date.now();
+                        setTimeout(function(){ try { window._vrca_sendPresence && window._vrca_sendPresence(); } catch(e){} }, 1500);
+                    }
+                } catch(e) {}
+            });
+            ws.addEventListener('close', function() { window._vrca_gatewayBad = true; });
+            ws.addEventListener('open', function() {
+                window._vrca_lastAckMs = Date.now();
+                window._vrca_gatewayBad = false;
+                // A freshly (re)opened gateway loses our activity from the prior
+                // session. After IDENTIFY/READY settles, re-push it so the RPC
+                // re-lands automatically. Compression-independent (lifecycle event),
+                // so this is the primary auto-recovery for a Discord-initiated
+                // reconnect even when inbound frames can't be parsed.
+                setTimeout(function(){ try { window._vrca_sendPresence && window._vrca_sendPresence(); } catch(e){} }, 3000);
+                setTimeout(function(){ try { window._vrca_sendPresence && window._vrca_sendPresence(); } catch(e){} }, 8000);
+            });
+        } catch(e) {}
+    };
 
     var origSend = WebSocket.prototype.send;
     window._vrca_origSend = origSend;
@@ -771,6 +856,7 @@ private const val WS_HOOK_JS = """
             this.url.indexOf('discord') !== -1) {
             if (!window._vrca_gatewayWs || window._vrca_gatewayWs.readyState !== 1) {
                 window._vrca_gatewayWs = this;
+                window._vrca_attachGatewayListeners(this);
             }
             if (typeof data === 'string') {
                 try {
@@ -802,7 +888,13 @@ private const val WS_HOOK_JS = """
     window.WebSocket = function(url, protocols) {
         var ws = protocols ? new OrigWS(url, protocols) : new OrigWS(url);
         if (url && url.indexOf('gateway') !== -1 && url.indexOf('discord') !== -1) {
+            // A new gateway socket = a new session. Reset session-level health so a
+            // stale "ready" from the prior socket can't mask a reconnect in progress.
             window._vrca_gatewayWs = ws;
+            window._vrca_sessionReady = false;
+            window._vrca_gatewayBad = false;
+            window._vrca_lastAckMs = Date.now();
+            window._vrca_attachGatewayListeners(ws);
         }
         return ws;
     };
@@ -954,6 +1046,28 @@ private const val MODULE_FINDER_JS = """
             } catch(e) {
                 return 'err:' + e.message;
             }
+        };
+
+        // Health classification the native session monitor reads:
+        //   no_gateway  - shim lost the gateway reference (re-inject shim)
+        //   connecting  - socket still opening (wait)
+        //   dead        - socket closing/closed (reload to recover)
+        //   bad         - Discord sent Reconnect/Invalid-Session, or socket closed (reload)
+        //   zombie      - open but no heartbeat ACK for >2.5x the interval (reload)
+        //   alive       - healthy (or compressed inbound we can't inspect -> assume alive)
+        window.VRCA_gatewayHealth = function() {
+            try {
+                var gw = window._vrca_gatewayWs;
+                if (!gw) return 'no_gateway';
+                var rs = gw.readyState;
+                if (rs === 0) return 'connecting';
+                if (rs === 2 || rs === 3) return 'dead';
+                if (window._vrca_gatewayBad) return 'bad';
+                var hb = window._vrca_hbInterval;
+                var lastAck = window._vrca_lastAckMs;
+                if (hb > 0 && lastAck > 0 && (Date.now() - lastAck) > hb * 2.5) return 'zombie';
+                return 'alive';
+            } catch(e) { return 'alive'; }
         };
 
         return 'ok';

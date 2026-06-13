@@ -618,13 +618,27 @@ private fun StepIpEntry() {
         }
     }
 
+    suspend fun persistIp(addr: String) {
+        repo.saveIpSlotAddress(1, addr)
+        repo.saveIpAddress(addr) // active runtime target
+        saved = true
+    }
+
+    // Auto-save what's typed — no button press needed. Debounced 500ms after the
+    // last keystroke so we don't write on every character. The "Check" button is
+    // now purely an OPTIONAL reachability test, not the only way to save.
+    LaunchedEffect(ip) {
+        val addr = ip.trim()
+        if (addr.isBlank()) return@LaunchedEffect
+        delay(500)
+        if (addr == ip.trim()) persistIp(addr) // still current after the debounce
+    }
+
     fun saveAndCheck() {
         val addr = ip.trim()
         if (addr.isBlank()) return
         scope.launch {
-            repo.saveIpSlotAddress(1, addr)
-            repo.saveIpAddress(addr) // active runtime target
-            saved = true
+            persistIp(addr) // flush immediately (don't wait on the debounce)
             checking = true
             reachable = pingHost(addr)
             checking = false
@@ -667,13 +681,16 @@ private fun StepIpEntry() {
             onValueChange = { ip = it; saved = false; reachable = null },
             label = { Text("IP address") },
             placeholder = { Text("192.168.1.23") },
+            supportingText = { Text("Saves automatically as you type.") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
 
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Button(onClick = { saveAndCheck() }, enabled = ip.isNotBlank() && !checking) {
-                Text(if (saved) "Re-check" else "Save & check")
+            // Optional: just tests whether the address answers a ping. The IP is
+            // already saved automatically above, so this is not required.
+            OutlinedButton(onClick = { saveAndCheck() }, enabled = ip.isNotBlank() && !checking) {
+                Text("Check reachability")
             }
             when {
                 checking -> CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
