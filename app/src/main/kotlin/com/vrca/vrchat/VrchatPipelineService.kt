@@ -33,6 +33,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -121,6 +122,18 @@ class VrchatPipelineService : Service() {
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // Single-threaded dispatcher that serializes ALL friendsCache read-modify-write
+    // work (every WebSocket event handler + the REST profile-refresh diff). Pipeline
+    // messages used to each launch on the multi-threaded IO dispatcher, so two events
+    // touching the same friend ran concurrently — one's cache write clobbered the
+    // other's and a diff read a stale `prev`, silently DROPPING a notification. The
+    // classic symptoms: a fast back-to-back bio edit only firing once (or not at all),
+    // and a quick friend→unfriend where the unfriend read the cache before friend-add
+    // had written the entry (→ `?: return` drop). Serializing onto one thread makes
+    // each handler's read-modify-write atomic and preserves VRChat's send ordering
+    // (friend-add is processed before the friend-delete that followed it).
+    private val pipelineDispatcher =
+        java.util.concurrent.Executors.newSingleThreadExecutor().asCoroutineDispatcher()
     private var wsJob: Job? = null
     private var webSocket: WebSocket? = null
     private var reconnectAttempt = 0
@@ -319,6 +332,7 @@ class VrchatPipelineService : Service() {
         statusPageJob?.cancel()
         webSocket?.cancel()
         serviceScope.cancel()
+        pipelineDispatcher.close()
         VrchatPipelineState.isConnected = false
         VrchatPipelineState.presence = null
         VrchatPipelineState.statusPageState = null
@@ -423,7 +437,7 @@ class VrchatPipelineService : Service() {
                     previousIds - friendsCache.keys else emptySet()
 
                 if (previousIds.isNotEmpty()) {
-                    serviceScope.launch {
+                    serviceScope.launch(pipelineDispatcher) {
                         delay(60_000)
                         loadFriendsCache()
                         friendsFetchCount++
@@ -556,7 +570,9 @@ class VrchatPipelineService : Service() {
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
                     lastMessageReceivedMs = System.currentTimeMillis()
-                    serviceScope.launch { handlePipelineMessage(text) }
+                    // Serialize message processing onto the single-threaded pipeline
+                    // dispatcher so concurrent events can't clobber the friends cache.
+                    serviceScope.launch(pipelineDispatcher) { handlePipelineMessage(text) }
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -735,7 +751,7 @@ class VrchatPipelineService : Service() {
                 "friend-offline" -> {
                     val userId = content?.optString("userId") ?: return
                     pendingOffline[userId] = System.currentTimeMillis()
-                    serviceScope.launch {
+                    serviceScope.launch(pipelineDispatcher) {
                         delay(OFFLINE_COOLDOWN_MS)
                         if (pendingOffline.containsKey(userId)) {
                             pendingOffline.remove(userId)
@@ -1258,15 +1274,6 @@ class VrchatPipelineService : Service() {
         val newRank = extractTrustRank(user).ifBlank { previous.trustRank }
         val newLocation = user.optString("location", previous.location)
 
-        // Debug: record exactly what keys this friend-update payload carried,
-        // so Settings -> Debug can show whether VRChat ever sends `bio` live.
-        run {
-            val ts = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
-            val keys = user.keys().asSequence().sorted().joinToString(",")
-            val bioNote = if (bioPresent) "bio=\"${newBio.take(40)}\"" else "bio=absent"
-            VrchatPipelineState.logFriendUpdate("$ts $newDisplayName keys=[$keys] $bioNote")
-        }
-
         friendsCache[userId] = previous.copy(
             displayName = newDisplayName,
             status = newStatus,
@@ -1390,28 +1397,33 @@ class VrchatPipelineService : Service() {
         Log.i(TAG, "Loaded ${friendsCache.size} friends into cache")
     }
 
-    // Fast cadence while the app is on-screen, and the slower steady cadence when
+    // Fast cadence while the app is on-screen, slower steady cadence when
     // backgrounded. BOTH do a FULL sweep (online + offline passes): a friend who
     // edits their bio/name/rank from the WEBSITE or PHONE has VRChat status
     // "offline" in the friends API (web-login does NOT make you "online" there),
-    // so they appear ONLY in the offline=true list. An online-only fast sweep
-    // skipped them — they surfaced only on the slow full sweep, which read as "not
-    // live". Full sweeps on the fast cadence catch an edit from anywhere in ~30s.
-    private val FRIENDS_PROFILE_FG_MS = 30_000L
-    private val FRIENDS_PROFILE_REFRESH_MS = 3 * 60 * 1000L
+    // so they appear ONLY in the offline=true list. This loop is now a BACKUP — the
+    // live WebSocket `friend-update` event carries `bio`/`displayName`/`tags` and
+    // fires instantly via handleFriendUpdate for online friends — so its only job
+    // is the website/phone-edit-while-offline case the WS can't deliver. Kept tight
+    // (12s foreground) per user request; `fetchFriends` 429-handles (wait 5s + retry)
+    // so the heavier cadence self-throttles if VRChat rate-limits.
+    private val FRIENDS_PROFILE_FG_MS = 12_000L
+    private val FRIENDS_PROFILE_REFRESH_MS = 60_000L
 
     /**
-     * Periodic friends-profile refresh + diff.
+     * Periodic friends-profile refresh + diff (BACKUP path).
      *
-     * VRChat does NOT reliably push bio / display-name / trust-rank edits over
-     * the pipeline `friend-update` event, so without this loop those
-     * "cache-compared" changes only surfaced on a reconnect/restart (the
-     * connect-flow re-diff at the top of [startPipeline]) — i.e. "the bio change
-     * only shows after I reopen the app". This loop re-fetches the FULL friends
-     * list on a timer and runs the same diff so those changes appear on their own
-     * while the app is alive, no restart needed: ~30s while on-screen, 3 min when
-     * backgrounded. The sweep is full (online + offline passes) because an edit
-     * made from the website/phone has VRChat status "offline" in the friends API.
+     * The live WebSocket `friend-update` event reliably carries `bio` /
+     * `displayName` / `tags`, so [handleFriendUpdate] already fires bio/name/rank
+     * changes INSTANTLY for online friends. This loop exists only to catch the one
+     * case the WS can't: a friend editing their profile from the website/phone
+     * while their VRChat status is "offline" (VRChat sends no friend-update for
+     * offline friends). It re-fetches the FULL friends list and runs the same diff.
+     *
+     * Foreground-reactive: it sleeps in short slices so foregrounding the app
+     * (appForeground false -> true) cuts the long background sleep short and runs a
+     * fast sweep within ~2s — without this, reopening the app left the loop stuck on
+     * its current 60s background sleep before it sped up.
      *
      * It MERGES profile fields onto the existing cache entries and deliberately
      * preserves the live presence fields (location / worldName / status) that the
@@ -1420,48 +1432,37 @@ class VrchatPipelineService : Service() {
      */
     private fun startFriendsProfileRefreshLoop() {
         serviceScope.launch {
-            VrchatPipelineState.setProfileRefreshStatus("waiting 30s initial delay")
-            delay(30_000L)
+            delay(15_000L)
             while (true) {
-                val fg = VrchatPipelineState.appForeground
-                val ts = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
-                VrchatPipelineState.setProfileRefreshStatus("$ts fetching (fg=$fg)...")
                 try {
                     refreshFriendsProfilesAndDiff(onlineOnly = false)
-                    VrchatPipelineState.setProfileRefreshStatus("$ts done (fg=$fg), next in ${if (fg) FRIENDS_PROFILE_FG_MS/1000 else FRIENDS_PROFILE_REFRESH_MS/1000}s")
                 } catch (e: Exception) {
                     Log.w(TAG, "Friends profile refresh failed", e)
-                    VrchatPipelineState.setProfileRefreshStatus("$ts FAILED: ${e.message?.take(80)}")
                 }
-                delay(if (fg) FRIENDS_PROFILE_FG_MS else FRIENDS_PROFILE_REFRESH_MS)
+                // Sleep in 2s slices so foregrounding the app shortens a background
+                // wait immediately instead of waiting out the whole 60s.
+                val wasForeground = VrchatPipelineState.appForeground
+                val target = if (wasForeground) FRIENDS_PROFILE_FG_MS else FRIENDS_PROFILE_REFRESH_MS
+                var waited = 0L
+                while (waited < target) {
+                    delay(2_000L)
+                    waited += 2_000L
+                    if (!wasForeground && VrchatPipelineState.appForeground) break
+                }
             }
         }
     }
 
     private suspend fun refreshFriendsProfilesAndDiff(onlineOnly: Boolean) {
-        if (!VrchatAuthManager.isLoggedIn(this)) {
-            VrchatPipelineState.setProfileRefreshStatus("skip: not logged in")
-            return
-        }
-        if (!friendsCacheLoaded) {
-            VrchatPipelineState.setProfileRefreshStatus("skip: cache not loaded")
-            return
-        }
-        if (isInWarmup()) {
-            VrchatPipelineState.setProfileRefreshStatus("skip: warmup")
-            return
-        }
-        if (friendsCache.isEmpty()) {
-            VrchatPipelineState.setProfileRefreshStatus("skip: cache empty")
-            return
-        }
+        if (!VrchatAuthManager.isLoggedIn(this) || !friendsCacheLoaded || isInWarmup()) return
+        if (friendsCache.isEmpty()) return
         val fresh = VrchatAuthManager.fetchFriends(this, onlineOnly = onlineOnly)
-        if (fresh.isEmpty()) {
-            VrchatPipelineState.setProfileRefreshStatus("skip: API returned empty (auth expired?)")
-            return
-        }
-        VrchatPipelineState.setProfileRefreshStatus("diffing ${fresh.size} friends vs cache(${friendsCache.size})...")
+        if (fresh.isEmpty()) return
 
+        // Run the diff + cache write on the single-threaded pipeline dispatcher so it
+        // is serialized with the live WebSocket handlers and can't clobber (or be
+        // clobbered by) a concurrent friend-update / friend-location.
+        kotlinx.coroutines.withContext(pipelineDispatcher) {
         var changed = false
         for (f in fresh) {
             val userId = f.userId
@@ -1532,9 +1533,12 @@ class VrchatPipelineService : Service() {
                 )
             }
 
-            // Merge profile fields; preserve live presence (location/world/status)
-            // owned by the WebSocket events.
-            friendsCache[userId] = prev.copy(
+            // Merge profile fields onto the LATEST cache entry (a concurrent WS
+            // friend-location/update may have refreshed presence during a fire
+            // suspend) — preserve the live presence fields (location/world/status)
+            // the WebSocket events own.
+            val latest = friendsCache[userId] ?: prev
+            friendsCache[userId] = latest.copy(
                 displayName = f.displayName,
                 statusDescription = f.statusDescription,
                 avatarThumb = f.avatarThumb,
@@ -1544,6 +1548,7 @@ class VrchatPipelineService : Service() {
             changed = true
         }
         if (changed) persistFriendsCache()
+        } // withContext(pipelineDispatcher)
     }
 
     private fun persistFriendsCache() {
@@ -3405,19 +3410,4 @@ object VrchatPipelineState {
      *  backs off when backgrounded. @Volatile — cross-thread read from the
      *  service's IO coroutine. */
     @Volatile var appForeground: Boolean = false
-
-    // Debug-only ring buffer of raw `friend-update` payload summaries (newest
-    // first, capped at 20) so Settings -> Debug can show exactly what keys
-    // VRChat's pipeline WebSocket sends for each friend-update event — used to
-    // verify whether `bio` is ever present live vs only via the REST sweep.
-    private val _friendUpdateLog = MutableStateFlow<List<String>>(emptyList())
-    val friendUpdateLogFlow: StateFlow<List<String>> = _friendUpdateLog.asStateFlow()
-    fun logFriendUpdate(entry: String) {
-        _friendUpdateLog.value = (listOf(entry) + _friendUpdateLog.value).take(20)
-    }
-
-    // Debug: REST friends-profile refresh loop status
-    private val _profileRefreshStatus = MutableStateFlow("not started")
-    val profileRefreshStatusFlow: StateFlow<String> = _profileRefreshStatus.asStateFlow()
-    fun setProfileRefreshStatus(s: String) { _profileRefreshStatus.value = s }
 }

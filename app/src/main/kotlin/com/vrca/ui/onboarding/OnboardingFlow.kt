@@ -500,6 +500,34 @@ private fun StepPermissions() {
         title = "Permissions",
         subtitle = "These keep VRC-A working reliably. Each one opens the exact system page."
     ) {
+        CompactSectionCard(
+            title = "A permission won't turn on?",
+            summary = "Read this if a switch is greyed out or says \"Restricted setting\"",
+            collapsible = true,
+            initiallyExpanded = false,
+            persistExpansion = false
+        ) {
+            Text(
+                "Because VRC-A is installed from outside the Play Store, Android 13+ " +
+                "blocks some permissions (like Notification Access) until you unlock " +
+                "them. If a switch is greyed out, or you see \"Restricted setting\" / " +
+                "\"For your security, this setting is currently unavailable\":\n" +
+                "1. Press and hold the VRC-A icon on your home screen or app drawer.\n" +
+                "2. Tap \"App info\" (the i icon).\n" +
+                "3. Open the 3-dot menu (top right).\n" +
+                "4. Tap \"Allow restricted settings\".\n" +
+                "5. Go back to the permission and turn it on. It will work now.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (Build.MANUFACTURER.equals("samsung", ignoreCase = true)) {
+                TrustNote(
+                    "On Samsung the menu item may instead read \"Allow restricted " +
+                    "settings\" after you tap the 3-dot menu. If you don't see it, the " +
+                    "permission isn't restricted on your phone and you can toggle it directly."
+                )
+            }
+        }
         PermissionRow(
             title = "Notifications",
             why = "So friend activity, invites and group alerts can reach you.",
