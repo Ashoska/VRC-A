@@ -301,6 +301,20 @@ internal fun SettingsPage(
 
                         Text("Last sent to VRChat (ms): ${vm.lastSentToVrchatAtMs}",
                             style = MaterialTheme.typography.bodySmall)
+
+                        Text("Friend-update payloads (last 20)", style = MaterialTheme.typography.labelMedium)
+                        val friendUpdateLog by com.vrca.vrchat.VrchatPipelineState.friendUpdateLogFlow.collectAsState()
+                        if (friendUpdateLog.isEmpty()) {
+                            Text("(none yet)", style = MaterialTheme.typography.bodySmall)
+                        } else {
+                            SelectionContainer {
+                                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    friendUpdateLog.forEach {
+                                        Text(it, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
