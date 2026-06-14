@@ -1117,6 +1117,7 @@ private const val MODULE_FINDER_JS = """
                     afk: false
                 }
             }));
+            window._vrca_lastSentMs = Date.now();
         };
 
         window.VRCA_setActivity = function(jsonStr) {
@@ -1223,6 +1224,31 @@ private const val MODULE_FINDER_JS = """
                 return 'alive';
             } catch(e) { return 'alive'; }
         };
+
+        // JS-side presence re-assertion (the "works then disappears while still
+        // connected" fix). Presence was re-asserted ONLY by the native 10s timer
+        // via evaluateJavascript — but a backgrounded WebView has those native->JS
+        // calls throttled/queued by Chromium, while Discord's OWN internal
+        // setInterval heartbeat keeps the socket OPEN (so the app shows connected).
+        // The instant Discord dropped our activity (idle transition / session
+        // resume / its own status change) our native re-push couldn't run, so the
+        // RPC vanished permanently on a live socket. Running the re-push from a
+        // setInterval INSIDE the page couples it to the same JS engine that keeps
+        // the heartbeat alive: if the socket stays up, our re-assert stays running.
+        // Idempotent (same activity payload; Discord coalesces); guarded against
+        // duplicate intervals on shim re-injection.
+        if (window._vrca_pushInterval) { try { clearInterval(window._vrca_pushInterval); } catch(e) {} }
+        window._vrca_pushInterval = setInterval(function() {
+            try {
+                if (!window._vrca_activity) return;
+                // Skip if a native push already re-asserted within the last 7s, so
+                // this only fires when native evaluateJavascript pushes are being
+                // throttled (background) — avoids doubling OP 3 in the foreground.
+                var lastSent = window._vrca_lastSentMs || 0;
+                if (Date.now() - lastSent < 7000) return;
+                window._vrca_sendPresence();
+            } catch(e) {}
+        }, 10000);
 
         return 'ok';
     } catch(e) {
