@@ -920,6 +920,12 @@ private const val WS_HOOK_JS = """
     window._vrca_gatewayBad = false;
     window._vrca_sessionReady = false;
     window._vrca_lastSeq = null;
+    // Last time ANY inbound frame arrived (string OR binary). The message event
+    // fires regardless of zlib-stream compression, so this is a
+    // compression-independent liveness signal: a healthy Discord gateway sends
+    // heartbeat ACKs (~every 41s) plus event frames continuously, so a long
+    // silence means the socket is a zombie even though readyState is still 1.
+    window._vrca_lastFrameMs = 0;
 
     // Attach passive observers to a captured gateway socket. We ONLY observe
     // (and re-push our own activity); we never alter Discord's own frames here,
@@ -930,7 +936,9 @@ private const val WS_HOOK_JS = """
         try {
             ws.addEventListener('message', function(ev) {
                 try {
-                    if (typeof ev.data !== 'string') return; // compressed/binary: skip
+                    // Count EVERY inbound frame (compression-independent liveness).
+                    window._vrca_lastFrameMs = Date.now();
+                    if (typeof ev.data !== 'string') return; // compressed/binary: can't parse, but counted above
                     var m = JSON.parse(ev.data);
                     if (m.s != null) window._vrca_lastSeq = m.s;
                     if (m.op === 11) { window._vrca_lastAckMs = Date.now(); }
@@ -1125,7 +1133,20 @@ private const val MODULE_FINDER_JS = """
                         window._vrca_sendPresence();
                         return 'ok';
                     }
-                    window._vrca_activity = activity;
+                    // CRITICAL: send the activity NOW without the unresolved image
+                    // so the RPC shows immediately, then upgrade it once the image
+                    // resolves. Previously presence was sent ONLY inside the resolve
+                    // callback — so if external-assets resolution failed (token not
+                    // grabbed, fetch deferred under background throttling, or the
+                    // URL just won't resolve), the activity was NEVER sent even on a
+                    // perfectly healthy socket: the app showed "connected" while the
+                    // RPC was silently absent from Discord. Discord rejects a raw
+                    // https large_image, so we strip it for the immediate send and
+                    // add the resolved mp: path on the upgrade.
+                    var immediate = JSON.parse(JSON.stringify(activity));
+                    if (immediate.assets) { delete immediate.assets.large_image; }
+                    window._vrca_activity = immediate;
+                    window._vrca_sendPresence();
                     var retries = 0;
                     var tryResolve = function() {
                         VRCA_resolveAsset(imageUrl).then(function(resolved) {
@@ -1137,10 +1158,12 @@ private const val MODULE_FINDER_JS = """
                                 retries++;
                                 setTimeout(tryResolve, 2000);
                             }
+                            // On permanent failure we keep the image-less activity
+                            // (already sent + stored), so the RPC stays visible.
                         });
                     };
                     tryResolve();
-                    return 'resolving';
+                    return 'ok';
                 }
                 window._vrca_activity = activity;
                 window._vrca_sendPresence();
@@ -1190,6 +1213,13 @@ private const val MODULE_FINDER_JS = """
                 var hb = window._vrca_hbInterval;
                 var lastAck = window._vrca_lastAckMs;
                 if (hb > 0 && lastAck > 0 && (Date.now() - lastAck) > hb * 2.5) return 'zombie';
+                // Compression-independent zombie check: a healthy gateway delivers
+                // heartbeat ACKs + events continuously, so no inbound frame of ANY
+                // kind for 90s means the socket is dead-but-open (the case where
+                // zlib-stream compression hides the op11 ACKs from the check above,
+                // so it would otherwise falsely report 'alive').
+                var lastFrame = window._vrca_lastFrameMs;
+                if (lastFrame > 0 && (Date.now() - lastFrame) > 90000) return 'zombie';
                 return 'alive';
             } catch(e) { return 'alive'; }
         };
