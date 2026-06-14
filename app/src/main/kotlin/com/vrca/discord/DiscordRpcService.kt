@@ -143,6 +143,10 @@ class DiscordRpcService : Service() {
     // We require 2 in a row (~60s) before forcing a reload, so Discord's own client
     // gets a chance to RESUME on its own first.
     private var degradedHealthChecks = 0
+    // Counts consecutive monitor cycles reporting `no_gateway`. Re-injecting the shim
+    // recaptures a gateway only if Discord's JS still has a live one; if it keeps
+    // coming back missing (gateway genuinely gone / flapping), escalate to a reload.
+    private var noGatewayChecks = 0
     private var lastPushAttemptMs = 0L
     private var lastShimResult = ""
 
@@ -388,6 +392,21 @@ class DiscordRpcService : Service() {
     private fun injectShim() {
         if (shimRetryCount >= MAX_SHIM_RETRIES) {
             Log.w(TAG, "Shim injection failed after $MAX_SHIM_RETRIES attempts — last: $lastShimResult")
+            // A `no_gateway` result means the hook IS installed but Discord's gateway
+            // socket is gone, and re-running the module finder on the SAME page can't
+            // recapture it — only restarting Discord's own JS (a page reload) opens a
+            // fresh gateway. This was the user-reported dead end: the RPC silently
+            // dropped, the app showed "Discord setup failed: no_gateway(hook=true)",
+            // and only a manual sign-out/in (which reloads the page) brought it back.
+            // Escalate to the reload path (the automatic equivalent of that manual fix)
+            // instead of going terminal-FAILED. onSessionExpired() has its own recovery
+            // cap, so this can't loop forever — after the cap it asks to sign in again.
+            if (lastShimResult.contains("no_gateway")) {
+                Log.w(TAG, "Gateway never reappeared — reloading WebView to re-establish it")
+                shimRetryCount = 0
+                onSessionExpired()
+                return
+            }
             DiscordRpcState.status = DiscordRpcStatus.FAILED
             DiscordRpcState.failureMessage = "Discord setup failed: $lastShimResult"
             updateNotif("Discord RPC: connection setup failed — needs update")
@@ -535,21 +554,33 @@ class DiscordRpcService : Service() {
                             "alive", "connecting", "no_probe" -> {
                                 // Healthy (or socket still opening / probe not ready yet).
                                 if (degradedHealthChecks != 0) degradedHealthChecks = 0
+                                if (noGatewayChecks != 0) noGatewayChecks = 0
                                 if (DiscordRpcState.status == DiscordRpcStatus.RECONNECTING) {
                                     DiscordRpcState.status = DiscordRpcStatus.CONNECTED
                                     DiscordRpcState.failureMessage = null
                                 }
                             }
                             "no_gateway" -> {
-                                // Shim lost the gateway reference entirely — re-inject
-                                // (cheaper than a full reload, restores the hook).
                                 degradedHealthChecks = 0
-                                Log.w(TAG, "Session monitor: gateway reference lost — re-injecting shim")
-                                shimReady = false
-                                shimRetryCount = 0
-                                DiscordRpcState.status = DiscordRpcStatus.RECONNECTING
-                                DiscordRpcState.failureMessage = "Reconnecting to Discord..."
-                                injectShim()
+                                noGatewayChecks++
+                                if (noGatewayChecks >= 2) {
+                                    // Re-injecting the shim didn't bring the gateway
+                                    // back (or it keeps flapping away) — Discord's JS
+                                    // needs a fresh start. Reload the page, the auto
+                                    // equivalent of a manual sign-out/in.
+                                    noGatewayChecks = 0
+                                    Log.w(TAG, "Session monitor: gateway still missing after re-inject — reloading")
+                                    onSessionExpired()
+                                } else {
+                                    // First miss — try the cheap fix (re-inject restores
+                                    // the hook if Discord still has a live gateway).
+                                    Log.w(TAG, "Session monitor: gateway reference lost — re-injecting shim")
+                                    shimReady = false
+                                    shimRetryCount = 0
+                                    DiscordRpcState.status = DiscordRpcStatus.RECONNECTING
+                                    DiscordRpcState.failureMessage = "Reconnecting to Discord..."
+                                    injectShim()
+                                }
                             }
                             "dead", "zombie", "bad" -> {
                                 // Socket open-but-broken (Discord outage / zombied
