@@ -93,6 +93,22 @@ class DiscordRpcService : Service() {
         private const val ONLINE_GRACE_MS = 20L * 60 * 1000
         private const val SESSION_CHECK_INTERVAL_MS = 30_000L
         private const val MAX_CONSECUTIVE_PUSH_FAILURES = 5
+        // How many CONSECUTIVE 30s health checks a state must persist before we do a
+        // disruptive full WebView reload (onSessionExpired) — a reload drops the RPC
+        // for its reload+re-inject window, so we only pay it when the signal is real.
+        // `dead` is readyState CLOSING/CLOSED: compression-independent and reliable,
+        // so 2 checks (~60s, one cycle of RESUME grace) is enough. `zombie`/`bad` are
+        // derived from heartbeat-ACK / OP7/OP9 tracking that needs READABLE inbound
+        // frames — under Discord's zlib-stream compression those frames are binary and
+        // unparseable, so the probe can FALSE-positive; require more confirmations
+        // (~2 min) before reloading on them. A socket that's genuinely closed will
+        // degrade to `dead` and take the faster path anyway. `no_gateway` (shim lost
+        // the gateway ref) is usually transient — re-inject first, only reload if it
+        // persists. This replaces the prior flat "reload after 2 checks for everything"
+        // that turned transient blips into frequent, visible RPC drops.
+        private const val DEAD_RELOAD_THRESHOLD = 2
+        private const val DEGRADED_RELOAD_THRESHOLD = 4
+        private const val NO_GATEWAY_RELOAD_THRESHOLD = 3
 
         // WebView cache hygiene. The Discord gateway lives in a long-lived WebView
         // loading the full discord.com app. Chromium splits its storage in TWO
@@ -139,9 +155,14 @@ class DiscordRpcService : Service() {
     private var shimRetryCount = 0
     private var sessionRecoveryCount = 0
     private var consecutivePushFailures = 0
-    // Consecutive session-monitor checks that reported a dead/zombie/bad gateway.
-    // We require 2 in a row (~60s) before forcing a reload, so Discord's own client
-    // gets a chance to RESUME on its own first.
+    // Consecutive monitor checks reporting `dead` (readyState CLOSING/CLOSED — the
+    // reliable, compression-independent "truly closed" signal). Reloads after
+    // DEAD_RELOAD_THRESHOLD.
+    private var deadHealthChecks = 0
+    // Consecutive monitor checks reporting `zombie`/`bad` (heartbeat-ACK / OP7-9
+    // derived — can false-positive under zlib-stream compression). Reloads only after
+    // the higher DEGRADED_RELOAD_THRESHOLD so a transient/misclassified blip doesn't
+    // trigger a disruptive reload; a truly-closed socket degrades to `dead` first.
     private var degradedHealthChecks = 0
     // Counts consecutive monitor cycles reporting `no_gateway`. Re-injecting the shim
     // recaptures a gateway only if Discord's JS still has a live one; if it keeps
@@ -538,7 +559,9 @@ class DiscordRpcService : Service() {
 
     private fun startSessionMonitor() {
         sessionMonitorJob?.cancel()
+        deadHealthChecks = 0
         degradedHealthChecks = 0
+        noGatewayChecks = 0
         sessionMonitorJob = scope.launch {
             while (true) {
                 delay(SESSION_CHECK_INTERVAL_MS)
@@ -553,6 +576,7 @@ class DiscordRpcService : Service() {
                         when (result?.trim()?.replace("\"", "") ?: "null") {
                             "alive", "connecting", "no_probe" -> {
                                 // Healthy (or socket still opening / probe not ready yet).
+                                if (deadHealthChecks != 0) deadHealthChecks = 0
                                 if (degradedHealthChecks != 0) degradedHealthChecks = 0
                                 if (noGatewayChecks != 0) noGatewayChecks = 0
                                 if (DiscordRpcState.status == DiscordRpcStatus.RECONNECTING) {
@@ -561,9 +585,10 @@ class DiscordRpcService : Service() {
                                 }
                             }
                             "no_gateway" -> {
+                                deadHealthChecks = 0
                                 degradedHealthChecks = 0
                                 noGatewayChecks++
-                                if (noGatewayChecks >= 2) {
+                                if (noGatewayChecks >= NO_GATEWAY_RELOAD_THRESHOLD) {
                                     // Re-injecting the shim didn't bring the gateway
                                     // back (or it keeps flapping away) — Discord's JS
                                     // needs a fresh start. Reload the page, the auto
@@ -572,8 +597,9 @@ class DiscordRpcService : Service() {
                                     Log.w(TAG, "Session monitor: gateway still missing after re-inject — reloading")
                                     onSessionExpired()
                                 } else {
-                                    // First miss — try the cheap fix (re-inject restores
-                                    // the hook if Discord still has a live gateway).
+                                    // Earlier misses — try the cheap fix (re-inject
+                                    // restores the hook if Discord still has a live
+                                    // gateway) before paying for a disruptive reload.
                                     Log.w(TAG, "Session monitor: gateway reference lost — re-injecting shim")
                                     shimReady = false
                                     shimRetryCount = 0
@@ -582,19 +608,39 @@ class DiscordRpcService : Service() {
                                     injectShim()
                                 }
                             }
-                            "dead", "zombie", "bad" -> {
-                                // Socket open-but-broken (Discord outage / zombied
-                                // session). Give Discord's own client one cycle to
-                                // RESUME, then force a reload — which re-establishes a
-                                // fresh gateway and auto-re-authenticates from the
-                                // persistent token/cookie (no password, like a manual
-                                // sign-out/in).
+                            "dead" -> {
+                                // readyState CLOSING/CLOSED — the socket is genuinely
+                                // closed (compression-independent, reliable). Give
+                                // Discord's own client one cycle to RESUME, then reload
+                                // to re-establish a fresh gateway and auto-re-auth from
+                                // the persistent token/cookie (no password).
+                                degradedHealthChecks = 0
+                                noGatewayChecks = 0
+                                deadHealthChecks++
+                                DiscordRpcState.status = DiscordRpcStatus.RECONNECTING
+                                DiscordRpcState.failureMessage = "Discord connection lost — recovering..."
+                                if (deadHealthChecks >= DEAD_RELOAD_THRESHOLD) {
+                                    deadHealthChecks = 0
+                                    Log.w(TAG, "Session monitor: gateway closed — reloading to recover")
+                                    onSessionExpired()
+                                }
+                            }
+                            "zombie", "bad" -> {
+                                // Open-but-suspect (no heartbeat ACK / OP7-9 / close
+                                // flag). These are derived from READABLE inbound frames,
+                                // which Discord's zlib-stream compression makes
+                                // unparseable — so this can be a FALSE positive while the
+                                // session is actually fine. Require more consecutive
+                                // confirmations before a disruptive reload; if the socket
+                                // is truly closing it'll report `dead` and reload faster.
+                                deadHealthChecks = 0
+                                noGatewayChecks = 0
                                 degradedHealthChecks++
                                 DiscordRpcState.status = DiscordRpcStatus.RECONNECTING
                                 DiscordRpcState.failureMessage = "Discord connection unstable — recovering..."
-                                if (degradedHealthChecks >= 2) {
+                                if (degradedHealthChecks >= DEGRADED_RELOAD_THRESHOLD) {
                                     degradedHealthChecks = 0
-                                    Log.w(TAG, "Session monitor: gateway unhealthy — reloading to recover")
+                                    Log.w(TAG, "Session monitor: gateway unhealthy (${DEGRADED_RELOAD_THRESHOLD}x) — reloading to recover")
                                     onSessionExpired()
                                 }
                             }
