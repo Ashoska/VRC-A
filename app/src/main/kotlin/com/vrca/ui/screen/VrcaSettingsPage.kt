@@ -302,6 +302,10 @@ internal fun SettingsPage(
                         Text("Last sent to VRChat (ms): ${vm.lastSentToVrchatAtMs}",
                             style = MaterialTheme.typography.bodySmall)
 
+                        Text("Friends profile refresh loop", style = MaterialTheme.typography.labelMedium)
+                        val refreshStatus by com.vrca.vrchat.VrchatPipelineState.profileRefreshStatusFlow.collectAsState()
+                        Text(refreshStatus, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+
                         Text("Friend-update payloads (last 20)", style = MaterialTheme.typography.labelMedium)
                         val friendUpdateLog by com.vrca.vrchat.VrchatPipelineState.friendUpdateLogFlow.collectAsState()
                         if (friendUpdateLog.isEmpty()) {

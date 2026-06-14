@@ -1420,28 +1420,47 @@ class VrchatPipelineService : Service() {
      */
     private fun startFriendsProfileRefreshLoop() {
         serviceScope.launch {
-            // First sweep shortly after start so a change made just before
-            // opening surfaces quickly; then settle into the cadence below.
+            VrchatPipelineState.setProfileRefreshStatus("waiting 30s initial delay")
             delay(30_000L)
             while (true) {
-                // Always a FULL sweep so an edit made from the website/phone (whose
-                // author has status "offline" in the friends API) is caught on the
-                // fast foreground cadence, not only on the slow background sweep.
+                val fg = VrchatPipelineState.appForeground
+                val ts = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+                VrchatPipelineState.setProfileRefreshStatus("$ts fetching (fg=$fg)...")
                 try {
                     refreshFriendsProfilesAndDiff(onlineOnly = false)
+                    VrchatPipelineState.setProfileRefreshStatus("$ts done (fg=$fg), next in ${if (fg) FRIENDS_PROFILE_FG_MS/1000 else FRIENDS_PROFILE_REFRESH_MS/1000}s")
                 } catch (e: Exception) {
                     Log.w(TAG, "Friends profile refresh failed", e)
+                    VrchatPipelineState.setProfileRefreshStatus("$ts FAILED: ${e.message?.take(80)}")
                 }
-                delay(if (VrchatPipelineState.appForeground) FRIENDS_PROFILE_FG_MS else FRIENDS_PROFILE_REFRESH_MS)
+                delay(if (fg) FRIENDS_PROFILE_FG_MS else FRIENDS_PROFILE_REFRESH_MS)
             }
         }
     }
 
     private suspend fun refreshFriendsProfilesAndDiff(onlineOnly: Boolean) {
-        if (!VrchatAuthManager.isLoggedIn(this) || !friendsCacheLoaded || isInWarmup()) return
-        if (friendsCache.isEmpty()) return
+        if (!VrchatAuthManager.isLoggedIn(this)) {
+            VrchatPipelineState.setProfileRefreshStatus("skip: not logged in")
+            return
+        }
+        if (!friendsCacheLoaded) {
+            VrchatPipelineState.setProfileRefreshStatus("skip: cache not loaded")
+            return
+        }
+        if (isInWarmup()) {
+            VrchatPipelineState.setProfileRefreshStatus("skip: warmup")
+            return
+        }
+        if (friendsCache.isEmpty()) {
+            VrchatPipelineState.setProfileRefreshStatus("skip: cache empty")
+            return
+        }
         val fresh = VrchatAuthManager.fetchFriends(this, onlineOnly = onlineOnly)
-        if (fresh.isEmpty()) return
+        if (fresh.isEmpty()) {
+            VrchatPipelineState.setProfileRefreshStatus("skip: API returned empty (auth expired?)")
+            return
+        }
+        VrchatPipelineState.setProfileRefreshStatus("diffing ${fresh.size} friends vs cache(${friendsCache.size})...")
 
         var changed = false
         for (f in fresh) {
@@ -3396,4 +3415,9 @@ object VrchatPipelineState {
     fun logFriendUpdate(entry: String) {
         _friendUpdateLog.value = (listOf(entry) + _friendUpdateLog.value).take(20)
     }
+
+    // Debug: REST friends-profile refresh loop status
+    private val _profileRefreshStatus = MutableStateFlow("not started")
+    val profileRefreshStatusFlow: StateFlow<String> = _profileRefreshStatus.asStateFlow()
+    fun setProfileRefreshStatus(s: String) { _profileRefreshStatus.value = s }
 }
