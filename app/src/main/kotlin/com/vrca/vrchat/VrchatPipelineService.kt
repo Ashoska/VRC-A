@@ -1258,6 +1258,15 @@ class VrchatPipelineService : Service() {
         val newRank = extractTrustRank(user).ifBlank { previous.trustRank }
         val newLocation = user.optString("location", previous.location)
 
+        // Debug: record exactly what keys this friend-update payload carried,
+        // so Settings -> Debug can show whether VRChat ever sends `bio` live.
+        run {
+            val ts = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+            val keys = user.keys().asSequence().sorted().joinToString(",")
+            val bioNote = if (bioPresent) "bio=\"${newBio.take(40)}\"" else "bio=absent"
+            VrchatPipelineState.logFriendUpdate("$ts $newDisplayName keys=[$keys] $bioNote")
+        }
+
         friendsCache[userId] = previous.copy(
             displayName = newDisplayName,
             status = newStatus,
@@ -3377,4 +3386,14 @@ object VrchatPipelineState {
      *  backs off when backgrounded. @Volatile — cross-thread read from the
      *  service's IO coroutine. */
     @Volatile var appForeground: Boolean = false
+
+    // Debug-only ring buffer of raw `friend-update` payload summaries (newest
+    // first, capped at 20) so Settings -> Debug can show exactly what keys
+    // VRChat's pipeline WebSocket sends for each friend-update event — used to
+    // verify whether `bio` is ever present live vs only via the REST sweep.
+    private val _friendUpdateLog = MutableStateFlow<List<String>>(emptyList())
+    val friendUpdateLogFlow: StateFlow<List<String>> = _friendUpdateLog.asStateFlow()
+    fun logFriendUpdate(entry: String) {
+        _friendUpdateLog.value = (listOf(entry) + _friendUpdateLog.value).take(20)
+    }
 }
