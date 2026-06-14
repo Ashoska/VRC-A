@@ -768,6 +768,60 @@ object VrchatAuthManager {
         }
     }
 
+    /**
+     * Lightweight single-call self presence — `GET /users/{id}` only, no
+     * `/auth/user` and no `/instances/{loc}` follow-ups. Used as a FALLBACK when
+     * the heavy [fetchPresence] 3-call chain returns null because one of its calls
+     * timed out / 429'd (a partial failure) while the session is still alive. One
+     * request is far less likely to be throttled than three, so the user's
+     * location/state keep tracking reality instead of freezing — which is what made
+     * a genuinely in-game user show "not in a world" on the admin panel and "not in
+     * VRChat" on their Discord RPC. Returns null when even this single call fails
+     * (e.g. the cookie is fully IP-invalidated — that's the WS/session-recovery
+     * path). worldName/instance counts are left blank here; the caller merges them
+     * from the last-known presence when the location is unchanged, and the next
+     * successful heavy chain refills them on a world hop.
+     */
+    suspend fun fetchSelfPresenceLight(context: Context): VrcUserPresence? = withContext(Dispatchers.IO) {
+        val userId = getStoredUserId(context) ?: return@withContext null
+        val cookieHeader = getCookieHeader(context) ?: return@withContext null
+        try {
+            val (code, body, rawCookies) = get("$BASE/users/$userId", null, cookieHeader)
+            if (code != 200) {
+                Log.w(TAG, "fetchSelfPresenceLight: /users/$userId returned $code")
+                return@withContext null
+            }
+            captureRolledCookies(context, rawCookies)
+            val uj = JSONObject(body)
+            val location = uj.optString("location", "offline")
+            val state = uj.optString("state", "offline")
+            val status = uj.optString("status", "offline")
+            val isOnline = state == "online" ||
+                location.startsWith("wrld_") || location == "private" || location == "traveling"
+            VrcUserPresence(
+                userId = userId,
+                displayName = uj.optString("displayName"),
+                state = state,
+                status = status,
+                statusDescription = uj.optString("statusDescription", ""),
+                location = location,
+                platform = uj.optString("last_platform", ""),
+                worldName = "",
+                instancePlayerCount = 0,
+                instanceCapacity = 0,
+                currentAvatarThumbnailUrl = uj.optString("currentAvatarThumbnailImageUrl", ""),
+                isOnlineInVRChat = isOnline,
+                worldImageUrl = "",
+                profilePicUrl = uj.optString("userIcon", ""),
+                bannerUrl = uj.optString("profilePicOverride", ""),
+                trustRank = extractTrustRankFromTags(uj.optJSONArray("tags"))
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "fetchSelfPresenceLight failed", e)
+            null
+        }
+    }
+
     // ------------------------------------------------------------------
     // Friends list
     // ------------------------------------------------------------------
@@ -1054,21 +1108,34 @@ object VrchatAuthManager {
      * It is strictly additive: it only overwrites when a NON-blank refreshed cookie
      * is actually present in the response, and resets that cookie's stored-at clock.
      */
+    // Serializes cookie roll-forward writes. Every authenticated REST response now
+    // routes through captureRolledCookies, and the heavy fetchPresence chain + the
+    // friends sweep fire several of them CONCURRENTLY on Dispatchers.IO. Without a
+    // lock, two responses doing edit()/apply() at once race on the shared
+    // `auth`/`twoFactorAuth` store the pipeline WebSocket also reads — a stale-IP
+    // cookie could win nondeterministically. The lock makes each read-decide-write
+    // atomic and ordered. (Timestamp/roll-forward semantics are unchanged — every
+    // present cookie still refreshes its stored-at clock, which shouldRefreshCookies
+    // and the trusted-device window depend on.)
+    private val cookieWriteLock = Any()
+
     private fun captureRolledCookies(context: Context, rawCookies: List<String>) {
         if (rawCookies.isEmpty()) return
         val auth = rawCookies.mapNotNull { extractCookieValue(it, "auth") }.firstOrNull()
         val twoFa = rawCookies.mapNotNull { extractCookieValue(it, "twoFactorAuth") }.firstOrNull()
         if (auth == null && twoFa == null) return
-        val editor = getPrefs(context)?.edit() ?: return
-        val now = System.currentTimeMillis()
-        if (auth != null) {
-            editor.putString(KEY_AUTH_COOKIE, auth).putLong(KEY_COOKIE_STORED_AT, now)
+        synchronized(cookieWriteLock) {
+            val editor = getPrefs(context)?.edit() ?: return
+            val now = System.currentTimeMillis()
+            if (auth != null) {
+                editor.putString(KEY_AUTH_COOKIE, auth).putLong(KEY_COOKIE_STORED_AT, now)
+            }
+            if (twoFa != null) {
+                editor.putString(KEY_2FA_COOKIE, twoFa).putLong(KEY_2FA_COOKIE_STORED_AT, now)
+                Log.d(TAG, "Rolled twoFactorAuth cookie forward (trusted-device window extended)")
+            }
+            editor.commit()
         }
-        if (twoFa != null) {
-            editor.putString(KEY_2FA_COOKIE, twoFa).putLong(KEY_2FA_COOKIE_STORED_AT, now)
-            Log.d(TAG, "Rolled twoFactorAuth cookie forward (trusted-device window extended)")
-        }
-        editor.apply()
     }
 
     private fun saveSession(

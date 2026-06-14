@@ -593,6 +593,16 @@ class VrchatPipelineService : Service() {
     }
 
     private fun scheduleReconnect() {
+        // Dedup: a single socket failure fires BOTH onFailure and onClosed, and the
+        // ~50s health check can also call this — each previously launched its own
+        // reconnect coroutine, so multiple backoff timers ran and each opened a NEW
+        // WebSocket. The result was several overlapping pipeline sockets racing (every
+        // one of which can independently fail/close and spawn yet more), which itself
+        // reads as "the pipeline keeps disconnecting." If a reconnect is already
+        // pending (mid-backoff) or in progress, don't stack another. wsJob completes
+        // quickly once connectWebSocket() hands the socket off, so a genuine later
+        // failure still schedules a fresh retry.
+        if (wsJob?.isActive == true) return
         wsJob = serviceScope.launch {
             val backoffMs = (minOf(reconnectAttempt, 6) * 10_000L).coerceAtLeast(5_000L)
             reconnectAttempt++
@@ -1404,10 +1414,16 @@ class VrchatPipelineService : Service() {
     // so they appear ONLY in the offline=true list. This loop is now a BACKUP — the
     // live WebSocket `friend-update` event carries `bio`/`displayName`/`tags` and
     // fires instantly via handleFriendUpdate for online friends — so its only job
-    // is the website/phone-edit-while-offline case the WS can't deliver. Kept tight
-    // (12s foreground) per user request; `fetchFriends` 429-handles (wait 5s + retry)
-    // so the heavier cadence self-throttles if VRChat rate-limits.
-    private val FRIENDS_PROFILE_FG_MS = 12_000L
+    // is the website/phone-edit-while-offline case the WS can't deliver. Cadence was
+    // dialed back from 12s/60s to 30s/60s: each sweep is TWO 2-pass REST fetches and
+    // every authenticated call rolls the shared, IP-bound `auth` cookie the live
+    // pipeline WebSocket also uses, so an over-tight foreground cadence was churning
+    // that cookie / hitting 429s and making the WS (and Discord RPC that reads its
+    // presence) disconnect far more often. 30s still catches an offline-friend edit
+    // within ~30s while ~2.5x'ing the headroom. Notifications fire regardless of
+    // foreground state, so the slower background cadence only delays display refresh
+    // (which the user isn't looking at), not the notification itself.
+    private val FRIENDS_PROFILE_FG_MS = 30_000L
     private val FRIENDS_PROFILE_REFRESH_MS = 60_000L
 
     /**
@@ -2464,16 +2480,36 @@ class VrchatPipelineService : Service() {
         if (!forceLocalUpdate && deviceHash.isBlank()) return
         if (!forceLocalUpdate && !AdminWatchState.isWatched.value) return
 
-        val presence = VrchatAuthManager.fetchPresence(this)
+        var presence = VrchatAuthManager.fetchPresence(this)
         if (presence == null) {
             // The heavy 3-call chain (/auth/user -> /users/{id} -> /instances)
-            // failed (cookie IP-invalidation / rate limit). Keep the instance
-            // occupancy current anyway via a single lightweight GET
-            // /instances/{loc} on the last-known location — one request, what the
-            // website does on a tab refresh, far less likely to be throttled — so
-            // the player count tracks reality instead of freezing for minutes
-            // until the full chain next lands. Count-only patch; no Firestore
-            // write here (the heavy path owns the watched write).
+            // failed (cookie IP-invalidation / rate limit / a partial 429). Try ONE
+            // lightweight GET /users/{id} to recover the true location/state so a
+            // genuinely in-game user doesn't freeze as "not in a world" on the admin
+            // panel / "not in VRChat" on their Discord RPC. When the location is
+            // unchanged we keep the last-known worldName + instance counts (the light
+            // call doesn't fetch them); a world hop leaves worldName briefly blank
+            // until the next heavy chain refills it. If even this single call fails,
+            // the cookie is fully dead — fall through to the count-only patch.
+            presence = VrchatAuthManager.fetchSelfPresenceLight(this)?.let { light ->
+                val prev = VrchatPipelineState.presence
+                if (prev != null && prev.location == light.location) {
+                    light.copy(
+                        worldName = prev.worldName,
+                        worldImageUrl = prev.worldImageUrl,
+                        instancePlayerCount = prev.instancePlayerCount,
+                        instanceCapacity = prev.instanceCapacity
+                    )
+                } else light
+            }
+        }
+        if (presence == null) {
+            // Both the heavy chain and the light call failed. Keep the instance
+            // occupancy current anyway via a single lightweight GET /instances/{loc}
+            // on the last-known location — one request, what the website does on a
+            // tab refresh — so the player count tracks reality instead of freezing.
+            // Count-only patch; no Firestore write here (the heavy path owns the
+            // watched write).
             val loc = VrchatPipelineState.presence?.location
             if (!loc.isNullOrBlank() && loc.startsWith("wrld_")) {
                 VrchatAuthManager.fetchInstanceCount(this, loc)?.let { ic ->
