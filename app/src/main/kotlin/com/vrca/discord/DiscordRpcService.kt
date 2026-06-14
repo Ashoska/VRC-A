@@ -15,7 +15,6 @@ import android.util.Log
 import android.view.View
 import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
-import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import java.io.File
@@ -121,35 +120,18 @@ class DiscordRpcService : Service() {
         // exhaust MAX_SESSION_RECOVERIES.
         private const val HEALTHY_RESET_MS = 300_000L
 
-        // WebView cache hygiene. The Discord gateway lives in a long-lived WebView
-        // loading the full discord.com app. Chromium splits its storage in TWO
-        // places: dataDir/app_webview (profile data — cookies, localStorage,
-        // IndexedDB, service workers; counted as app DATA) and cacheDir/WebView
-        // (the HTTP cache + compiled-JS Code Cache; counted as app CACHE — this
-        // is what the user-visible "Cache" number in App Info / Settings shows,
-        // and it's where the runaway growth actually lives). The original cap
-        // measured ONLY app_webview, which stays small, so the cap never fired
-        // while cacheDir/WebView ballooned past 140 MB — the "insane cache that
-        // keeps growing" bug. The check now measures BOTH dirs combined.
-        //
-        // When the combined footprint crosses the cap we wipe DOM storage /
-        // IndexedDB + the HTTP cache, best-effort delete what clearCache can't
-        // reach (Chromium's Code Cache lives in cacheDir/WebView and is NOT
-        // cleared by clearCache — and cacheDir is fair game, the OS itself may
-        // wipe it anytime), and reload. The session survives because the auth
-        // COOKIE (CookieManager) is left intact — Discord re-bootstraps the
-        // localStorage token from it on reload; if that ever fails it lands on
-        // /login and the existing onSessionExpired() recovery kicks in.
-        //
-        // The cap is deliberately ABOVE Discord's natural working set (~30-50 MB
-        // of assets after one full load) — capping below it would clear+reload
-        // every check, re-downloading the bundles each time (churn + data usage).
-        // First check runs minutes after start (not a full hour) because OEM
-        // service restarts used to reset the hourly timer so often that the
-        // check could literally never run.
+        // WebView cache hygiene. Chromium's cacheDir/WebView (HTTP cache + Code
+        // Cache) is what the user-visible "Cache" number shows and where runaway
+        // growth lives. app_webview (profile data — cookies, localStorage, IndexedDB)
+        // is tiny and MUST NOT be cleared: Discord's localStorage.token is the
+        // gateway auth — wiping it kills the session even though the CookieManager
+        // cookie survives, because Discord's JS client uses the token (not the
+        // cookie) for the gateway Identify and API calls. The cap measures ONLY
+        // cacheDir/WebView; when over cap we clear the HTTP cache + best-effort
+        // delete Code Cache, then reload so Chromium re-fetches the assets it needs.
         private const val CACHE_FIRST_CHECK_DELAY_MS = 3L * 60 * 1000   // 3 min
         private const val CACHE_CHECK_INTERVAL_MS = 30L * 60 * 1000     // 30 min
-        private const val WEBVIEW_CACHE_CAP_BYTES = 64L * 1024 * 1024   // 64 MB combined
+        private const val WEBVIEW_CACHE_CAP_BYTES = 64L * 1024 * 1024   // 64 MB cacheDir only
 
         var isRunning = false
             private set
@@ -514,14 +496,10 @@ class DiscordRpcService : Service() {
     }
 
     /**
-     * WebView cache cap (see the constants block for the full story). Measures
-     * the COMBINED Chromium footprint — `dataDir/app_webview` (profile data) +
-     * `cacheDir/WebView` (HTTP cache + Code Cache, the user-visible "Cache"
-     * growth) — and when it crosses [WEBVIEW_CACHE_CAP_BYTES]: wipes web storage
-     * + the HTTP cache, best-effort deletes the leftover `cacheDir/WebView`
-     * contents that `clearCache` doesn't reach (Code Cache), then reloads. The
-     * Discord session survives because the auth cookie (CookieManager) is left
-     * untouched and Discord re-bootstraps from it.
+     * WebView cache cap. Measures ONLY `cacheDir/WebView` (HTTP cache + Code
+     * Cache — the user-visible "Cache" growth). `app_webview` (profile data) is
+     * deliberately excluded: it holds `localStorage` (including Discord's auth
+     * token) and is tiny. Wiping it kills the Discord session.
      */
     private fun startCacheMaintenance() {
         cacheMaintenanceJob?.cancel()
@@ -529,32 +507,22 @@ class DiscordRpcService : Service() {
             delay(CACHE_FIRST_CHECK_DELAY_MS)
             while (true) {
                 try {
-                    val profileDir = File(applicationInfo.dataDir, "app_webview")
                     val cacheWebViewDir = File(cacheDir, "WebView")
-                    val size = dirSizeBytes(profileDir) + dirSizeBytes(cacheWebViewDir)
+                    val size = dirSizeBytes(cacheWebViewDir)
                     if (size > WEBVIEW_CACHE_CAP_BYTES) {
-                        Log.i(TAG, "WebView footprint ${size / (1024 * 1024)}MB over cap — clearing (cookie/session preserved)")
+                        Log.i(TAG, "WebView cache ${size / (1024 * 1024)}MB over cap — clearing HTTP/Code cache (session preserved)")
                         mainHandler.post {
                             try {
-                                WebStorage.getInstance().deleteAllData()
                                 webView?.clearCache(true)
                             } catch (e: Throwable) {
                                 Log.w(TAG, "WebView cache clear failed", e)
                             }
-                            // Code Cache (compiled JS) is NOT cleared by
-                            // clearCache(true); delete it directly. Deleting
-                            // from cacheDir while Chromium runs is safe — the
-                            // OS may wipe cacheDir at any time and Chromium
-                            // rebuilds missing cache entries.
                             scope.launch {
                                 try {
                                     cacheWebViewDir.listFiles()?.forEach { it.deleteRecursively() }
                                 } catch (e: Throwable) {
                                     Log.w(TAG, "WebView cacheDir sweep failed", e)
                                 }
-                                // Reload so Discord re-bootstraps its token from
-                                // the preserved auth cookie; onSessionExpired()
-                                // catches the rare case where it can't.
                                 mainHandler.post {
                                     try {
                                         webView?.reload()
