@@ -1381,23 +1381,28 @@ class VrchatPipelineService : Service() {
         Log.i(TAG, "Loaded ${friendsCache.size} friends into cache")
     }
 
-    // Fast cadence while the app is on-screen (light online-only sweep), and the
-    // steady full-sweep cadence (covers offline friends too).
-    private val FRIENDS_PROFILE_FG_MS = 25_000L
+    // Fast cadence while the app is on-screen, and the slower steady cadence when
+    // backgrounded. BOTH do a FULL sweep (online + offline passes): a friend who
+    // edits their bio/name/rank from the WEBSITE or PHONE has VRChat status
+    // "offline" in the friends API (web-login does NOT make you "online" there),
+    // so they appear ONLY in the offline=true list. An online-only fast sweep
+    // skipped them — they surfaced only on the slow full sweep, which read as "not
+    // live". Full sweeps on the fast cadence catch an edit from anywhere in ~30s.
+    private val FRIENDS_PROFILE_FG_MS = 30_000L
     private val FRIENDS_PROFILE_REFRESH_MS = 3 * 60 * 1000L
-    private var lastFullFriendsSweepMs = 0L
 
     /**
      * Periodic friends-profile refresh + diff.
      *
      * VRChat does NOT reliably push bio / display-name / trust-rank edits over
-     * the pipeline `friend-update` event, so historically those "cache-compared"
-     * changes only surfaced on a reconnect/restart (the connect-flow re-diff at
-     * the top of [startPipeline]) — i.e. "the bio change only shows after I
-     * reopen the app". This loop re-fetches the friends list on a timer and runs
-     * the same diff so those changes appear on their own within a few minutes
-     * while the app is alive, no restart needed. (No prior version had this — it
-     * worked incidentally only because the app used to reconnect far more often.)
+     * the pipeline `friend-update` event, so without this loop those
+     * "cache-compared" changes only surfaced on a reconnect/restart (the
+     * connect-flow re-diff at the top of [startPipeline]) — i.e. "the bio change
+     * only shows after I reopen the app". This loop re-fetches the FULL friends
+     * list on a timer and runs the same diff so those changes appear on their own
+     * while the app is alive, no restart needed: ~30s while on-screen, 3 min when
+     * backgrounded. The sweep is full (online + offline passes) because an edit
+     * made from the website/phone has VRChat status "offline" in the friends API.
      *
      * It MERGES profile fields onto the existing cache entries and deliberately
      * preserves the live presence fields (location / worldName / status) that the
@@ -1410,20 +1415,15 @@ class VrchatPipelineService : Service() {
             // opening surfaces quickly; then settle into the cadence below.
             delay(30_000L)
             while (true) {
-                val foreground = VrchatPipelineState.appForeground
-                // Always do a FULL sweep (covers offline friends) at least every
-                // FRIENDS_PROFILE_REFRESH_MS; in between, while on-screen, do the
-                // light online-only sweep so an online friend's bio/name/rank edit
-                // surfaces within ~25s without hammering the API.
-                val now = System.currentTimeMillis()
-                val doFull = !foreground || (now - lastFullFriendsSweepMs >= FRIENDS_PROFILE_REFRESH_MS)
+                // Always a FULL sweep so an edit made from the website/phone (whose
+                // author has status "offline" in the friends API) is caught on the
+                // fast foreground cadence, not only on the slow background sweep.
                 try {
-                    refreshFriendsProfilesAndDiff(onlineOnly = !doFull)
-                    if (doFull) lastFullFriendsSweepMs = System.currentTimeMillis()
+                    refreshFriendsProfilesAndDiff(onlineOnly = false)
                 } catch (e: Exception) {
                     Log.w(TAG, "Friends profile refresh failed", e)
                 }
-                delay(if (foreground) FRIENDS_PROFILE_FG_MS else FRIENDS_PROFILE_REFRESH_MS)
+                delay(if (VrchatPipelineState.appForeground) FRIENDS_PROFILE_FG_MS else FRIENDS_PROFILE_REFRESH_MS)
             }
         }
     }
