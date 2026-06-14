@@ -109,6 +109,17 @@ class DiscordRpcService : Service() {
         private const val DEAD_RELOAD_THRESHOLD = 2
         private const val DEGRADED_RELOAD_THRESHOLD = 4
         private const val NO_GATEWAY_RELOAD_THRESHOLD = 3
+        // JS engine freeze detection. If no evaluateJavascript callback fires
+        // within this window, the Chromium JS engine is likely completely frozen
+        // by background throttling (despite resumeTimers / visibility overrides).
+        // Set below Discord's heartbeat_interval × 2 (~80s server close timeout)
+        // but above 2 health-check cycles (60s) so a single slow callback
+        // doesn't false-trigger.
+        private const val JS_FREEZE_RELOAD_MS = 120_000L
+        // After sustained healthy health checks for this long, reset the session
+        // recovery counter so intermittent drops over a multi-hour session don't
+        // exhaust MAX_SESSION_RECOVERIES.
+        private const val HEALTHY_RESET_MS = 300_000L
 
         // WebView cache hygiene. The Discord gateway lives in a long-lived WebView
         // loading the full discord.com app. Chromium splits its storage in TWO
@@ -170,6 +181,8 @@ class DiscordRpcService : Service() {
     private var noGatewayChecks = 0
     private var lastPushAttemptMs = 0L
     private var lastShimResult = ""
+    @Volatile private var lastJsResponseMs = 0L
+    @Volatile private var healthySinceMs = 0L
 
     private var onlineStartEpochMs = 0L
     private var offlineStartEpochMs = 0L
@@ -371,6 +384,7 @@ class DiscordRpcService : Service() {
             wv.resumeTimers()
             wv.dispatchWindowVisibilityChanged(View.VISIBLE)
             isRunning = true
+            lastJsResponseMs = System.currentTimeMillis()
             startCacheMaintenance()
             updateNotif("Discord RPC connecting...")
         }
@@ -436,6 +450,7 @@ class DiscordRpcService : Service() {
 
         val wv = webView ?: return
         wv.evaluateJavascript(MODULE_FINDER_JS) { result ->
+            lastJsResponseMs = System.currentTimeMillis()
             val cleaned = result?.trim()?.replace("\"", "") ?: "null"
             lastShimResult = cleaned
             if (cleaned == "ok") {
@@ -562,9 +577,36 @@ class DiscordRpcService : Service() {
         deadHealthChecks = 0
         degradedHealthChecks = 0
         noGatewayChecks = 0
+        lastJsResponseMs = System.currentTimeMillis()
+        healthySinceMs = 0L
         sessionMonitorJob = scope.launch {
             while (true) {
                 delay(SESSION_CHECK_INTERVAL_MS)
+
+                // Re-assert JS timer and visibility state every cycle. Chromium
+                // can throttle/freeze a detached WebView's JS when backgrounded
+                // despite the onWindowVisibilityChanged override; periodic
+                // resumeTimers + visibility dispatch combats that.
+                mainHandler.post {
+                    webView?.let { w ->
+                        w.resumeTimers()
+                        w.dispatchWindowVisibilityChanged(View.VISIBLE)
+                    }
+                }
+
+                // Detect frozen JS engine: if no evaluateJavascript callback has
+                // fired for 2+ minutes, the engine is completely frozen and the
+                // Discord gateway is dead or dying. Force a reload to recover.
+                if (lastJsResponseMs > 0) {
+                    val jsSilence = System.currentTimeMillis() - lastJsResponseMs
+                    if (jsSilence > JS_FREEZE_RELOAD_MS) {
+                        Log.w(TAG, "JS engine unresponsive for ${jsSilence / 1000}s — forcing reload")
+                        lastJsResponseMs = System.currentTimeMillis()
+                        mainHandler.post { onSessionExpired() }
+                        continue
+                    }
+                }
+
                 if (!shimReady) continue
 
                 mainHandler.post {
@@ -572,10 +614,10 @@ class DiscordRpcService : Service() {
                     wv.evaluateJavascript(
                         "(window.VRCA_gatewayHealth ? window.VRCA_gatewayHealth() : 'no_probe')"
                     ) { result ->
+                        lastJsResponseMs = System.currentTimeMillis()
                         if (!shimReady) return@evaluateJavascript
                         when (result?.trim()?.replace("\"", "") ?: "null") {
                             "alive", "connecting", "no_probe" -> {
-                                // Healthy (or socket still opening / probe not ready yet).
                                 if (deadHealthChecks != 0) deadHealthChecks = 0
                                 if (degradedHealthChecks != 0) degradedHealthChecks = 0
                                 if (noGatewayChecks != 0) noGatewayChecks = 0
@@ -583,23 +625,24 @@ class DiscordRpcService : Service() {
                                     DiscordRpcState.status = DiscordRpcStatus.CONNECTED
                                     DiscordRpcState.failureMessage = null
                                 }
+                                val nowMs = System.currentTimeMillis()
+                                if (healthySinceMs == 0L) healthySinceMs = nowMs
+                                if (sessionRecoveryCount > 0 &&
+                                    (nowMs - healthySinceMs) > HEALTHY_RESET_MS) {
+                                    Log.i(TAG, "Gateway healthy for ${(nowMs - healthySinceMs) / 1000}s — resetting recovery counter")
+                                    sessionRecoveryCount = 0
+                                }
                             }
                             "no_gateway" -> {
+                                healthySinceMs = 0L
                                 deadHealthChecks = 0
                                 degradedHealthChecks = 0
                                 noGatewayChecks++
                                 if (noGatewayChecks >= NO_GATEWAY_RELOAD_THRESHOLD) {
-                                    // Re-injecting the shim didn't bring the gateway
-                                    // back (or it keeps flapping away) — Discord's JS
-                                    // needs a fresh start. Reload the page, the auto
-                                    // equivalent of a manual sign-out/in.
                                     noGatewayChecks = 0
                                     Log.w(TAG, "Session monitor: gateway still missing after re-inject — reloading")
                                     onSessionExpired()
                                 } else {
-                                    // Earlier misses — try the cheap fix (re-inject
-                                    // restores the hook if Discord still has a live
-                                    // gateway) before paying for a disruptive reload.
                                     Log.w(TAG, "Session monitor: gateway reference lost — re-injecting shim")
                                     shimReady = false
                                     shimRetryCount = 0
@@ -609,11 +652,7 @@ class DiscordRpcService : Service() {
                                 }
                             }
                             "dead" -> {
-                                // readyState CLOSING/CLOSED — the socket is genuinely
-                                // closed (compression-independent, reliable). Give
-                                // Discord's own client one cycle to RESUME, then reload
-                                // to re-establish a fresh gateway and auto-re-auth from
-                                // the persistent token/cookie (no password).
+                                healthySinceMs = 0L
                                 degradedHealthChecks = 0
                                 noGatewayChecks = 0
                                 deadHealthChecks++
@@ -626,13 +665,7 @@ class DiscordRpcService : Service() {
                                 }
                             }
                             "zombie", "bad" -> {
-                                // Open-but-suspect (no heartbeat ACK / OP7-9 / close
-                                // flag). These are derived from READABLE inbound frames,
-                                // which Discord's zlib-stream compression makes
-                                // unparseable — so this can be a FALSE positive while the
-                                // session is actually fine. Require more consecutive
-                                // confirmations before a disruptive reload; if the socket
-                                // is truly closing it'll report `dead` and reload faster.
+                                healthySinceMs = 0L
                                 deadHealthChecks = 0
                                 noGatewayChecks = 0
                                 degradedHealthChecks++
@@ -667,7 +700,9 @@ class DiscordRpcService : Service() {
             .replace("\n", "\\n")
             .replace("\r", "\\r")
         mainHandler.post {
+            wv.resumeTimers()
             wv.evaluateJavascript("window.VRCA_setActivity('$escaped')") { result ->
+                lastJsResponseMs = System.currentTimeMillis()
                 val cleaned = result?.trim()?.replace("\"", "") ?: "null"
                 if (cleaned == "ok" || cleaned == "resolving") {
                     consecutivePushFailures = 0
@@ -884,6 +919,7 @@ private const val WS_HOOK_JS = """
     window._vrca_lastAckMs = 0;
     window._vrca_gatewayBad = false;
     window._vrca_sessionReady = false;
+    window._vrca_lastSeq = null;
 
     // Attach passive observers to a captured gateway socket. We ONLY observe
     // (and re-push our own activity); we never alter Discord's own frames here,
@@ -896,6 +932,7 @@ private const val WS_HOOK_JS = """
                 try {
                     if (typeof ev.data !== 'string') return; // compressed/binary: skip
                     var m = JSON.parse(ev.data);
+                    if (m.s != null) window._vrca_lastSeq = m.s;
                     if (m.op === 11) { window._vrca_lastAckMs = Date.now(); }
                     else if (m.op === 10) {
                         window._vrca_lastAckMs = Date.now();
@@ -1049,10 +1086,20 @@ private const val MODULE_FINDER_JS = """
         window._vrca_sendPresence = function() {
             var gw = window._vrca_gatewayWs;
             if (!gw || gw.readyState !== 1) return;
-            var activity = window._vrca_activity;
-            if (!activity) return;
             var origSend = window._vrca_origSend;
             if (!origSend) return;
+            // If the Discord heartbeat has stalled (JS timers throttled by
+            // Chromium background policy), send OP 1 manually to keep the
+            // server from closing the gateway (~80s timeout). The native side
+            // calls this every 10s via VRCA_setActivity, so the heartbeat
+            // stays alive even when Discord's own setInterval is frozen.
+            var hb = window._vrca_hbInterval;
+            var lastAck = window._vrca_lastAckMs;
+            if (hb > 0 && lastAck > 0 && (Date.now() - lastAck) > hb * 1.5) {
+                try { origSend.call(gw, JSON.stringify({ op: 1, d: window._vrca_lastSeq })); } catch(e) {}
+            }
+            var activity = window._vrca_activity;
+            if (!activity) return;
             origSend.call(gw, JSON.stringify({
                 op: 3,
                 d: {
