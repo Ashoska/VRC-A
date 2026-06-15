@@ -1008,11 +1008,11 @@ private fun AlertActionButtons(event: InAppAlertEvent) {
                 onClick = {
                     sending = true
                     scope.launch {
-                        val ok = NotificationActionReceiver.perform(ctx, actionType, actionData)
+                        val result = NotificationActionReceiver.perform(ctx, actionType, actionData)
                         Toast.makeText(
                             ctx,
-                            NotificationActionReceiver.feedback(actionType, ok),
-                            Toast.LENGTH_SHORT
+                            NotificationActionReceiver.feedback(actionType, result),
+                            Toast.LENGTH_LONG
                         ).show()
                         sending = false
                     }

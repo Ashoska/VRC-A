@@ -691,11 +691,12 @@ internal fun UsersTab(
                             onClick = {
                                 scope.launch {
                                     inviting = true; inviteResult = null
-                                    val ok = VrchatAuthManager.inviteSelfToInstance(ctx, inviteLoc)
-                                    inviteResult = if (ok)
+                                    val res = VrchatAuthManager.inviteSelfToInstance(ctx, inviteLoc)
+                                    inviteResult = if (res.ok)
                                         "Invite sent — check your VRChat notifications"
                                     else
-                                        "Invite failed (instance not joinable or VRChat rejected it)"
+                                        "Invite failed" + (res.error?.let { ": $it" }
+                                            ?: " (instance not joinable or VRChat rejected it)")
                                     inviting = false
                                 }
                             },

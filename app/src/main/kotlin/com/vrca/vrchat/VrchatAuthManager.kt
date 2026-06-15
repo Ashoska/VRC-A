@@ -222,32 +222,57 @@ object VrchatAuthManager {
         }
 
     /**
+     * Result of an invite call. [ok] is HTTP 200; [error] carries VRChat's own
+     * human-readable reason on failure (e.g. "That instance is not accessible",
+     * "instance is full"), parsed from the response body, so the UI can tell the
+     * user WHY a re-invite failed (instance closed / full / not accessible)
+     * instead of a generic failure.
+     */
+    data class InviteResult(val ok: Boolean, val error: String? = null)
+
+    /** Extracts VRChat's `error.message` (or a bare `message`) from a response body. */
+    private fun parseVrcError(body: String, code: Int): String? {
+        val parsed = try {
+            val obj = JSONObject(body)
+            obj.optJSONObject("error")?.optString("message")?.ifBlank { null }
+                ?: obj.optString("message").ifBlank { null }
+        } catch (_: Exception) { null }
+        // Trim VRChat's frequent wrapping quotes/whitespace.
+        val cleaned = parsed?.trim()?.trim('"')?.trim()?.ifBlank { null }
+        return cleaned ?: when (code) {
+            404 -> "That instance has closed or no longer exists"
+            403 -> "That instance is not accessible"
+            else -> null
+        }
+    }
+
+    /**
      * Sends an invite to the caller's OWN logged-in VRChat account for [location]
      * (the raw `{worldId}:{instanceId}` string). Mirrors the website's "Invite Me"
      * button (`POST /invite/myself/to/{location}`) — works for invite-only /
      * friends+ / group instances. The instance's occupant is NOT notified; the
-     * invite lands only on the caller's account. Admin-only use. Returns true on
-     * HTTP 200.
+     * invite lands only on the caller's account. Returns [InviteResult].
      */
-    suspend fun inviteSelfToInstance(context: Context, location: String): Boolean =
+    suspend fun inviteSelfToInstance(context: Context, location: String): InviteResult =
         withContext(Dispatchers.IO) {
             val loc = location.trim()
             if (loc.isBlank() || !loc.startsWith("wrld_") ||
                 loc == "offline" || loc == "private" || loc == "traveling"
-            ) return@withContext false
-            val cookieHeader = getCookieHeader(context) ?: return@withContext false
+            ) return@withContext InviteResult(false, "That instance can't be joined")
+            val cookieHeader = getCookieHeader(context)
+                ?: return@withContext InviteResult(false, "Not signed in to VRChat")
             try {
-                val (code, _, rawCookies) = post("$BASE/invite/myself/to/$loc", "", cookieHeader)
+                val (code, respBody, rawCookies) = post("$BASE/invite/myself/to/$loc", "", cookieHeader)
                 if (code == 200) {
                     captureRolledCookies(context, rawCookies)
-                    true
+                    InviteResult(true)
                 } else {
-                    Log.w(TAG, "inviteSelfToInstance returned $code for $loc")
-                    false
+                    Log.w(TAG, "inviteSelfToInstance returned $code for $loc body=${respBody.take(200)}")
+                    InviteResult(false, parseVrcError(respBody, code))
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "inviteSelfToInstance failed", e)
-                false
+                InviteResult(false, "Network error")
             }
         }
 
@@ -255,29 +280,30 @@ object VrchatAuthManager {
      * Invites [userId] to [location] (the raw `{worldId}:{instanceId}` string) —
      * used to fulfil an incoming "invite request" by inviting the requester to the
      * user's CURRENT instance. `POST /invite/{userId}` with `{instanceId}`. Returns
-     * true on HTTP 200.
+     * [InviteResult].
      */
-    suspend fun inviteUserToInstance(context: Context, userId: String, location: String): Boolean =
+    suspend fun inviteUserToInstance(context: Context, userId: String, location: String): InviteResult =
         withContext(Dispatchers.IO) {
             val uid = userId.trim()
             val loc = location.trim()
             if (uid.isBlank() || loc.isBlank() || !loc.startsWith("wrld_") ||
                 loc == "offline" || loc == "private" || loc == "traveling"
-            ) return@withContext false
-            val cookieHeader = getCookieHeader(context) ?: return@withContext false
+            ) return@withContext InviteResult(false, "You're not in a joinable instance")
+            val cookieHeader = getCookieHeader(context)
+                ?: return@withContext InviteResult(false, "Not signed in to VRChat")
             try {
                 val body = JSONObject().put("instanceId", loc).toString()
-                val (code, _, rawCookies) = post("$BASE/invite/$uid", body, cookieHeader)
+                val (code, respBody, rawCookies) = post("$BASE/invite/$uid", body, cookieHeader)
                 if (code == 200) {
                     captureRolledCookies(context, rawCookies)
-                    true
+                    InviteResult(true)
                 } else {
-                    Log.w(TAG, "inviteUserToInstance returned $code for $uid -> $loc")
-                    false
+                    Log.w(TAG, "inviteUserToInstance returned $code for $uid -> $loc body=${respBody.take(200)}")
+                    InviteResult(false, parseVrcError(respBody, code))
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "inviteUserToInstance failed", e)
-                false
+                InviteResult(false, "Network error")
             }
         }
 

@@ -29,11 +29,11 @@ class NotificationActionReceiver : BroadcastReceiver() {
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val ok = perform(appCtx, actionType, actionData)
+                val result = perform(appCtx, actionType, actionData)
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(appCtx, feedback(actionType, ok), Toast.LENGTH_SHORT).show()
+                    Toast.makeText(appCtx, feedback(actionType, result), Toast.LENGTH_LONG).show()
                 }
-                if (ok && notifId != -1) {
+                if (result.ok && notifId != -1) {
                     (appCtx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
                         .cancel(notifId)
                 }
@@ -71,23 +71,34 @@ class NotificationActionReceiver : BroadcastReceiver() {
          * Runs the VRChat call for [actionType]. Shared by the notification
          * receiver and the in-app alert buttons. Returns true on success.
          */
-        suspend fun perform(context: Context, actionType: String, actionData: String): Boolean =
-            when (actionType) {
-                ACTION_INVITE_ME -> VrchatAuthManager.inviteSelfToInstance(context, actionData)
-                ACTION_INVITE_USER -> {
-                    val location = VrchatPipelineState.presence?.location.orEmpty()
-                    if (location.isBlank() || !location.startsWith("wrld_")) false
-                    else VrchatAuthManager.inviteUserToInstance(context, actionData, location)
-                }
-                else -> false
+        suspend fun perform(
+            context: Context,
+            actionType: String,
+            actionData: String
+        ): VrchatAuthManager.InviteResult = when (actionType) {
+            ACTION_INVITE_ME -> VrchatAuthManager.inviteSelfToInstance(context, actionData)
+            ACTION_INVITE_USER -> {
+                val location = VrchatPipelineState.presence?.location.orEmpty()
+                if (location.isBlank() || !location.startsWith("wrld_"))
+                    VrchatAuthManager.InviteResult(false, "You're not in a joinable instance right now")
+                else VrchatAuthManager.inviteUserToInstance(context, actionData, location)
             }
+            else -> VrchatAuthManager.InviteResult(false, "Unsupported action")
+        }
 
-        fun feedback(actionType: String, ok: Boolean): String = when (actionType) {
-            ACTION_INVITE_ME ->
-                if (ok) "Invite sent — check your VRChat notifications" else "Could not send the invite"
-            ACTION_INVITE_USER ->
-                if (ok) "Invite sent to their account" else "Could not invite them (are you in a joinable instance?)"
-            else -> if (ok) "Done" else "Action failed"
+        /** Toast text — VRChat's own reason on failure (instance closed/full/not accessible). */
+        fun feedback(actionType: String, result: VrchatAuthManager.InviteResult): String {
+            if (result.ok) return when (actionType) {
+                ACTION_INVITE_ME -> "Invite sent — check your VRChat notifications"
+                ACTION_INVITE_USER -> "Invite sent to their account"
+                else -> "Done"
+            }
+            val reason = result.error?.let { ": $it" } ?: ""
+            return when (actionType) {
+                ACTION_INVITE_ME -> "Could not send the invite$reason"
+                ACTION_INVITE_USER -> "Could not invite them$reason"
+                else -> "Action failed$reason"
+            }
         }
     }
 }
