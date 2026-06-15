@@ -1193,12 +1193,34 @@ class VrcaViewModel(
             val sinceLast = System.currentTimeMillis() - readLastSelfSyncMs()
             val firstDelay = (HOURLY_HEARTBEAT_MS - sinceLast).coerceIn(60_000L, HOURLY_HEARTBEAT_MS)
             delay(firstDelay)
+            refreshInstanceCountBeforeSync()
             performSelfSync()
             while (true) {
                 delay(HOURLY_HEARTBEAT_MS)
+                refreshInstanceCountBeforeSync()
                 performSelfSync()
             }
         }
+    }
+
+    private suspend fun refreshInstanceCountBeforeSync() {
+        try {
+            val loc = VrchatPipelineState.presence?.location
+            if (!loc.isNullOrBlank() && loc.startsWith("wrld_")) {
+                com.vrca.vrchat.VrchatAuthManager.fetchInstanceCount(app, loc)?.let { ic ->
+                    VrchatPipelineState.presence?.let { p ->
+                        if (p.location == loc &&
+                            (p.instancePlayerCount != ic.players || p.instanceCapacity != ic.capacity)
+                        ) {
+                            VrchatPipelineState.presence = p.copy(
+                                instancePlayerCount = ic.players,
+                                instanceCapacity = ic.capacity
+                            )
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) {}
     }
 
     // =========================
