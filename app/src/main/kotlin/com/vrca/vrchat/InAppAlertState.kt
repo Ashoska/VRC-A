@@ -13,7 +13,12 @@ data class InAppAlertEvent(
     val afterText: String? = null,
     val timestampMs: Long,
     val eventTitle: String? = null,
-    val url: String? = null
+    val url: String? = null,
+    // Optional in-app action button (e.g. re-invite). actionType is one of
+    // "invite_me" (actionData = instance location) or "invite_user"
+    // (actionData = the requester's userId; the instance is read live at tap).
+    val actionType: String? = null,
+    val actionData: String? = null
 )
 
 data class InAppAlertGroup(
@@ -152,6 +157,8 @@ object InAppAlertState {
                     put("ts", e.timestampMs)
                     put("eventTitle", e.eventTitle ?: "")
                     put("url", e.url ?: "")
+                    put("actionType", e.actionType ?: "")
+                    put("actionData", e.actionData ?: "")
                 })
             }
             arr.put(JSONObject().apply {
@@ -183,7 +190,9 @@ object InAppAlertState {
                     afterText = eObj.optString("after").ifBlank { null },
                     timestampMs = eObj.optLong("ts"),
                     eventTitle = eObj.optString("eventTitle").ifBlank { null },
-                    url = eObj.optString("url").ifBlank { null }
+                    url = eObj.optString("url").ifBlank { null },
+                    actionType = eObj.optString("actionType").ifBlank { null },
+                    actionData = eObj.optString("actionData").ifBlank { null }
                 )
             }
             list += InAppAlertGroup(

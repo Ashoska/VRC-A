@@ -252,6 +252,36 @@ object VrchatAuthManager {
         }
 
     /**
+     * Invites [userId] to [location] (the raw `{worldId}:{instanceId}` string) —
+     * used to fulfil an incoming "invite request" by inviting the requester to the
+     * user's CURRENT instance. `POST /invite/{userId}` with `{instanceId}`. Returns
+     * true on HTTP 200.
+     */
+    suspend fun inviteUserToInstance(context: Context, userId: String, location: String): Boolean =
+        withContext(Dispatchers.IO) {
+            val uid = userId.trim()
+            val loc = location.trim()
+            if (uid.isBlank() || loc.isBlank() || !loc.startsWith("wrld_") ||
+                loc == "offline" || loc == "private" || loc == "traveling"
+            ) return@withContext false
+            val cookieHeader = getCookieHeader(context) ?: return@withContext false
+            try {
+                val body = JSONObject().put("instanceId", loc).toString()
+                val (code, _, rawCookies) = post("$BASE/invite/$uid", body, cookieHeader)
+                if (code == 200) {
+                    captureRolledCookies(context, rawCookies)
+                    true
+                } else {
+                    Log.w(TAG, "inviteUserToInstance returned $code for $uid -> $loc")
+                    false
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "inviteUserToInstance failed", e)
+                false
+            }
+        }
+
+    /**
      * Headers required to LOAD an auth-gated VRChat image (`api.vrchat.cloud`
      * file/image URLs require the session cookie + a User-Agent). Returned to the
      * Coil image loader so the admin's session can render other users' VRChat+

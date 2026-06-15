@@ -2,6 +2,7 @@ package com.vrca.ui.screen
 
 import android.content.Intent
 import android.net.Uri
+import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -23,10 +24,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -39,14 +42,18 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Login
 import androidx.compose.material.icons.automirrored.filled.Logout
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
@@ -70,9 +77,12 @@ import androidx.compose.ui.unit.dp
 import com.vrca.discord.DiscordRpcState
 import com.vrca.discord.DiscordRpcStatus
 import com.vrca.ui.viewmodel.VrcaViewModel
+import com.vrca.vrchat.InAppAlertEvent
 import com.vrca.vrchat.InAppAlertGroup
 import com.vrca.vrchat.InAppAlertState
+import com.vrca.vrchat.NotificationActionReceiver
 import com.vrca.vrchat.VrchatAuthManager
+import kotlinx.coroutines.launch
 import com.vrca.vrchat.VrchatPipelineService
 import com.vrca.vrchat.VrchatPipelineState
 
@@ -503,11 +513,14 @@ private fun SelfAvatar(name: String, picUrl: String, statusColor: Color, size: I
 // Alert filter chips (docs/ui-revamp.md): Groups = group announcements/events,
 // Bio = bio diffs, Friends = every other per-user alert. Keyed on the alert
 // group id prefixes set by fireEventNotification's alertGroupKey.
+private fun isGroupAlert(groupId: String): Boolean =
+    groupId.startsWith("announcement_") || groupId.startsWith("event_") ||
+        groupId.startsWith("group")
+
 private fun alertMatchesFilter(groupId: String, filter: String): Boolean = when (filter) {
-    "Groups" -> groupId.startsWith("announcement_") || groupId.startsWith("event_")
+    "Groups" -> isGroupAlert(groupId)
     "Bio" -> groupId.startsWith("bio_")
-    "Friends" -> !groupId.startsWith("announcement_") && !groupId.startsWith("event_") &&
-        !groupId.startsWith("bio_")
+    "Friends" -> !isGroupAlert(groupId) && !groupId.startsWith("bio_")
     else -> true
 }
 
@@ -903,6 +916,10 @@ private fun AlertGroupCard(group: InAppAlertGroup, onDismiss: () -> Unit) {
                                         afterDiff,
                                         style = MaterialTheme.typography.bodySmall
                                     )
+                                    if (event.url != null || event.actionType != null) {
+                                        Spacer(Modifier.height(10.dp))
+                                        AlertActionButtons(event)
+                                    }
                                 }
                             }
                         } else if (event.body.isNotBlank()) {
@@ -931,62 +948,110 @@ private fun AlertGroupCard(group: InAppAlertGroup, onDismiss: () -> Unit) {
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.outline
                                     )
-                                    // Per-event open link so individual announcements
-                                    // / events from the same group can be opened
-                                    // separately, even when fused into one card.
-                                    if (event.url != null) {
+                                    // Per-event open/invite actions so individual
+                                    // announcements / events / invites from the same
+                                    // group can be acted on separately.
+                                    if (event.url != null || event.actionType != null) {
                                         Spacer(Modifier.height(8.dp))
-                                        OutlinedButton(
-                                            onClick = {
-                                                ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(event.url)))
-                                            },
-                                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary),
-                                            modifier = Modifier.fillMaxWidth().height(38.dp)
-                                        ) {
-                                            Icon(
-                                                Icons.Filled.OpenInNew,
-                                                contentDescription = null,
-                                                modifier = Modifier.size(15.dp),
-                                                tint = MaterialTheme.colorScheme.primary
-                                            )
-                                            Spacer(Modifier.width(6.dp))
-                                            Text(
-                                                "Open in VRChat",
-                                                style = MaterialTheme.typography.labelMedium,
-                                                color = MaterialTheme.colorScheme.primary
-                                            )
-                                        }
+                                        AlertActionButtons(event)
                                     }
                                 }
                             }
                         }
                     }
                     // Group-level open button only when no event carries its own
-                    // URL (e.g. single-event alerts or before/after change diffs).
-                    if (group.url != null && group.events.none { it.url != null }) {
-                        OutlinedButton(
-                            onClick = {
-                                ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(group.url)))
-                            },
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary),
-                            modifier = Modifier.fillMaxWidth().height(40.dp)
-                        ) {
-                            Icon(
-                                Icons.Filled.OpenInNew,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp),
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text(
-                                "Open in VRChat",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                        }
+                    // URL or action (e.g. single-event alerts with only a group url).
+                    if (group.url != null && group.events.none { it.url != null || it.actionType != null }) {
+                        CompactAlertButton(
+                            label = "Open in VRChat",
+                            icon = Icons.Filled.OpenInNew,
+                            prominent = false,
+                            enabled = true,
+                            onClick = { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(group.url))) }
+                        )
                     }
                 }
             }
         }
+    }
+}
+
+/**
+ * Per-event action row inside an in-app alert card: an optional "Invite me" /
+ * "Invite them" button (re-invite actions) and/or an "Open in VRChat" link.
+ * Compact, tonal styling to match the revamped app vibe.
+ */
+@Composable
+private fun AlertActionButtons(event: InAppAlertEvent) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var sending by remember { mutableStateOf(false) }
+    Column(
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        val actionType = event.actionType
+        val actionData = event.actionData
+        if (actionType != null && actionData != null) {
+            val label = when (actionType) {
+                NotificationActionReceiver.ACTION_INVITE_ME -> "Invite me to this world"
+                NotificationActionReceiver.ACTION_INVITE_USER -> "Invite them to your instance"
+                else -> "Resend invite"
+            }
+            val icon = if (actionType == NotificationActionReceiver.ACTION_INVITE_ME)
+                Icons.AutoMirrored.Filled.Login else Icons.Filled.Add
+            CompactAlertButton(
+                label = if (sending) "Sending..." else label,
+                icon = icon,
+                prominent = true,
+                enabled = !sending,
+                onClick = {
+                    sending = true
+                    scope.launch {
+                        val ok = NotificationActionReceiver.perform(ctx, actionType, actionData)
+                        Toast.makeText(
+                            ctx,
+                            NotificationActionReceiver.feedback(actionType, ok),
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        sending = false
+                    }
+                }
+            )
+        }
+        if (event.url != null) {
+            CompactAlertButton(
+                label = "Open in VRChat",
+                icon = Icons.Filled.OpenInNew,
+                prominent = false,
+                enabled = true,
+                onClick = { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(event.url))) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun CompactAlertButton(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    prominent: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    FilledTonalButton(
+        onClick = onClick,
+        enabled = enabled,
+        shape = MaterialTheme.shapes.small,
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
+        colors = if (prominent) ButtonDefaults.filledTonalButtonColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer,
+            contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+        ) else ButtonDefaults.filledTonalButtonColors(),
+        modifier = Modifier.fillMaxWidth().height(38.dp)
+    ) {
+        Icon(icon, contentDescription = null, modifier = Modifier.size(16.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(label, style = MaterialTheme.typography.labelMedium)
     }
 }
