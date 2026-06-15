@@ -3250,7 +3250,10 @@ class VrchatPipelineService : Service() {
         nm.notify(summaryId, summary)
     }
 
-    private fun fireNotLoggedInNotification() {
+    private suspend fun fireNotLoggedInNotification() {
+        val prefs = dataStore.data.first()
+        val enabled = prefs[booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_AUTH)] ?: true
+        if (!enabled) return
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val tapIntent = PendingIntent.getActivity(
             this, 9999,
