@@ -673,6 +673,47 @@ internal fun UsersTab(
                         }
                     }
 
+                    // Remote sign-out: account-wide so every device on this VRChat
+                    // account logs out. VRChat sign-out ALSO deletes the single-session
+                    // lock (accounts/{vrchatUserId}) so the user can sign in on a new
+                    // device — the escape hatch for the hard-deny login.
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedButton(
+                            onClick = {
+                                scope.launch {
+                                    setGlobalLoading(true)
+                                    runCatching {
+                                        AccountModeration.applyAccountWide(
+                                            db, row.docId,
+                                            mapOf("logoutVrchatAt" to com.google.firebase.firestore.FieldValue.serverTimestamp())
+                                        )
+                                        if (row.vrchatUserId.isNotBlank()) {
+                                            db.collection("accounts").document(row.vrchatUserId).delete().await()
+                                        }
+                                    }.onFailure { e -> setError(e.message ?: "VRChat sign-out failed") }
+                                    setGlobalLoading(false)
+                                }
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Log out VRChat") }
+
+                        OutlinedButton(
+                            onClick = {
+                                scope.launch {
+                                    setGlobalLoading(true)
+                                    runCatching {
+                                        AccountModeration.applyAccountWide(
+                                            db, row.docId,
+                                            mapOf("logoutDiscordAt" to com.google.firebase.firestore.FieldValue.serverTimestamp())
+                                        )
+                                    }.onFailure { e -> setError(e.message ?: "Discord sign-out failed") }
+                                    setGlobalLoading(false)
+                                }
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Log out Discord") }
+                    }
+
                     // Invite the ADMIN'S OWN logged-in VRChat account into this
                     // user's current instance (website "Invite Me" behavior via
                     // POST /invite/myself/to/{location}). Works for invite-only /

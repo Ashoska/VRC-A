@@ -30,6 +30,7 @@ service cloud.firestore {
         "banned", "banReason",
         "watcherActiveAt",
         "killSignal",
+        "logoutVrchatAt", "logoutDiscordAt",
         "targetedUpdateUrl", "targetedUpdateNotes"
       ];
     }
@@ -257,7 +258,11 @@ service cloud.firestore {
         || (signedIn()
             && request.resource.data.keys().hasOnly(['activeDevice', 'activeSince'])
             && isValidDeviceHashString(request.resource.data.activeDevice));
-      allow delete: if isOwner();
+      // delete releases the single-session lock — allowed for the owner (admin
+      // remote-logout) AND any signed-in client (a device freeing its own lock on
+      // sign-out). Same bounded threat as create/update: a griefer needs the target's
+      // high-entropy usr_ id, and a delete only frees the account for its real owner.
+      allow delete: if isOwner() || signedIn();
     }
 
     /* =========================

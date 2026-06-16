@@ -197,6 +197,51 @@ object AppShutdown {
         }.start()
     }
 
+    /**
+     * Admin "Kill App" — fully stops the process and keeps it dead, costing ZERO
+     * Firestore reads/writes. Mirrors [onTaskSwiped]'s guard-setting so the
+     * START_STICKY services and the WorkManager watchdog DON'T resurrect the process
+     * (the prior implementation called only `Process.killProcess`, which the sticky
+     * services + watchdog promptly bounced back — "closing", not "stopping").
+     *
+     * Deliberately does NOT do the going-offline Firestore write and does NOT clear
+     * the ViewModelStore (which would run `onCleared()` → a GlobalScope offline write):
+     * the admin is already watching this user, so their ~25s watched-stale detection
+     * flips them offline with no write from the dying app. A real user reopen clears
+     * the swipe flag (MainActivity) so the app works normally again — a kill is a
+     * force-quit, not a ban.
+     */
+    fun killNowNoWrite(context: Context) {
+        if (!shuttingDown.compareAndSet(false, true)) return
+        val app = context.applicationContext
+
+        // Same guards as a swipe: abort START_STICKY restarts (null intent) and stop
+        // the ~15-min watchdog from reviving the process.
+        try {
+            app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putLong(KEY_MANUAL_KILL_AT, System.currentTimeMillis())
+                .putBoolean(KEY_SWIPED_AWAY, true)
+                .commit()
+        } catch (_: Throwable) {}
+        try { com.vrca.keepalive.PipelineWatchdogWorker.cancel(app) } catch (_: Throwable) {}
+
+        // Start clean on the next reopen (matches swipe semantics).
+        FeatureSessionStore.disarm(app)
+        clearToggleBaselines(app)
+
+        stopOtherServices(app)
+
+        Thread {
+            // Floor the shutdown so the queued service stops are processed before the
+            // hard kill (prevents abrupt FGS death leaving a stale notification).
+            try { Thread.sleep(MIN_SHUTDOWN_DELAY_MS) } catch (_: Throwable) {}
+            cancelPersistentNotification(app)
+            android.os.Process.killProcess(android.os.Process.myPid())
+            exitProcess(0)
+        }.start()
+    }
+
     private fun stopOtherServices(app: Context) {
         try {
             if (DiscordRpcService.isRunning) {
