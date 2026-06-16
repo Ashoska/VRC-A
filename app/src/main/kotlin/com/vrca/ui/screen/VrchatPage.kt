@@ -1381,7 +1381,7 @@ private fun InstanceRow(target: InstanceTarget, info: VrchatAuthManager.Instance
     )
     Surface(
         color = MaterialTheme.colorScheme.surface,
-        shape = MaterialTheme.shapes.small,
+        shape = MaterialTheme.shapes.medium,
         modifier = Modifier.fillMaxWidth()
     ) {
         Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1393,50 +1393,48 @@ private fun InstanceRow(target: InstanceTarget, info: VrchatAuthManager.Instance
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
-                        .size(width = 72.dp, height = 54.dp)
+                        .size(width = 64.dp, height = 48.dp)
                         .clip(MaterialTheme.shapes.medium)
                 )
             } else {
                 Surface(
                     shape = MaterialTheme.shapes.medium,
                     color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
-                    modifier = Modifier.size(width = 72.dp, height = 54.dp)
+                    modifier = Modifier.size(width = 64.dp, height = 48.dp)
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Icon(
                             Icons.Filled.Public, null,
                             tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(24.dp)
+                            modifier = Modifier.size(22.dp)
                         )
                     }
                 }
             }
             Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
+            Column(
+                Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
                 val worldName = info?.worldName?.takeIf { it.isNotBlank() }
                     ?: target.label.ifBlank { "Instance" }
-                if (worldId != null) {
-                    Text(
-                        worldName,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.primary,
-                        maxLines = 2, overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.clickable {
-                            ctx.startActivity(
-                                Intent(Intent.ACTION_VIEW,
-                                    Uri.parse("https://vrchat.com/home/world/$worldId"))
-                            )
-                        }
-                    )
-                } else {
-                    Text(
-                        worldName,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 2, overflow = TextOverflow.Ellipsis
-                    )
-                }
-                Spacer(Modifier.height(2.dp))
+                // Name on ONE line (tap to open the world page); the metadata sits
+                // below it so neither competes for width.
+                Text(
+                    worldName,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = if (worldId != null) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = if (worldId != null) Modifier.clickable {
+                        ctx.startActivity(
+                            Intent(Intent.ACTION_VIEW,
+                                Uri.parse("https://vrchat.com/home/world/$worldId"))
+                        )
+                    } else Modifier
+                )
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -1449,90 +1447,97 @@ private fun InstanceRow(target: InstanceTarget, info: VrchatAuthManager.Instance
                             "Invite", "Invite+" -> Color(0xFFFFB300)
                             else -> MaterialTheme.colorScheme.outline
                         }
-                        if (typeInfo.navigableUrl != null) {
-                            Surface(
-                                onClick = {
+                        val chipModifier = if (typeInfo.navigableUrl != null)
+                            Modifier
+                                .clip(MaterialTheme.shapes.extraSmall)
+                                .clickable {
                                     ctx.startActivity(
                                         Intent(Intent.ACTION_VIEW, Uri.parse(typeInfo.navigableUrl))
                                     )
-                                },
-                                shape = MaterialTheme.shapes.extraSmall,
-                                color = typeColor.copy(alpha = 0.18f),
-                                modifier = Modifier.height(18.dp)
-                            ) {
-                                Box(Modifier.padding(horizontal = 6.dp), contentAlignment = Alignment.Center) {
-                                    Text(
-                                        typeInfo.label,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = typeColor
-                                    )
                                 }
-                            }
-                        } else {
-                            Surface(
-                                shape = MaterialTheme.shapes.extraSmall,
-                                color = typeColor.copy(alpha = 0.18f),
-                                modifier = Modifier.height(18.dp)
-                            ) {
-                                Box(Modifier.padding(horizontal = 6.dp), contentAlignment = Alignment.Center) {
-                                    Text(
-                                        typeInfo.label,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = typeColor
-                                    )
-                                }
-                            }
+                        else Modifier.clip(MaterialTheme.shapes.extraSmall)
+                        Box(
+                            chipModifier
+                                .background(typeColor.copy(alpha = 0.18f))
+                                .padding(horizontal = 7.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                typeInfo.label,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = typeColor,
+                                maxLines = 1
+                            )
                         }
                     }
                     val (statusText, statusColor) = when {
                         isOpen && (info?.players ?: 0) == 0 ->
-                            "Empty (0 players)" to Color(0xFFEF5350)
+                            "Empty" to Color(0xFFEF5350)
                         isOpen ->
                             "${info?.players ?: 0}/${info?.capacity ?: 0} players" to Color(0xFF4CAF50)
                         status == VrchatAuthManager.InstanceStatus.CLOSED ->
                             "Closed" to Color(0xFFEF5350)
                         status == VrchatAuthManager.InstanceStatus.INACCESSIBLE ->
-                            "Not accessible" to Color(0xFFFFB300)
+                            "Locked" to Color(0xFFFFB300)
                         else ->
-                            "Unknown" to MaterialTheme.colorScheme.outline
+                            "Checking" to MaterialTheme.colorScheme.outline
                     }
-                    Text(statusText, style = MaterialTheme.typography.labelSmall, color = statusColor)
+                    Text(
+                        statusText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = statusColor,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
                 }
                 if (!target.timeLabel.isNullOrBlank()) {
                     Text(
                         target.timeLabel,
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.outline
+                        color = MaterialTheme.colorScheme.outline,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
-            Spacer(Modifier.width(8.dp))
-            if (sending) {
-                CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-            } else {
-                FilledTonalButton(
-                    onClick = {
-                        sending = true
-                        scope.launch {
-                            val r = VrchatAuthManager.inviteSelfToInstance(ctx, target.location)
-                            Toast.makeText(
-                                ctx,
-                                NotificationActionReceiver.feedback(
-                                    NotificationActionReceiver.ACTION_INVITE_ME, r
-                                ),
-                                Toast.LENGTH_LONG
-                            ).show()
-                            sending = false
-                        }
-                    },
-                    enabled = canJoin,
-                    shape = MaterialTheme.shapes.small,
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
-                    modifier = Modifier.height(34.dp)
-                ) {
-                    Icon(Icons.AutoMirrored.Filled.Login, null, Modifier.size(15.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("Invite", style = MaterialTheme.typography.labelMedium)
+            Spacer(Modifier.width(10.dp))
+            // Icon-only invite affordance (matches the card's circular symbols).
+            // Muted + disabled when the instance is dead/empty/inaccessible.
+            val inviteEnabled = canJoin && !sending
+            Surface(
+                onClick = {
+                    sending = true
+                    scope.launch {
+                        val r = VrchatAuthManager.inviteSelfToInstance(ctx, target.location)
+                        Toast.makeText(
+                            ctx,
+                            NotificationActionReceiver.feedback(
+                                NotificationActionReceiver.ACTION_INVITE_ME, r
+                            ),
+                            Toast.LENGTH_LONG
+                        ).show()
+                        sending = false
+                    }
+                },
+                enabled = inviteEnabled,
+                shape = CircleShape,
+                color = if (canJoin) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f),
+                modifier = Modifier.size(38.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    if (sending) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    } else {
+                        Icon(
+                            Icons.AutoMirrored.Filled.Login,
+                            contentDescription = "Invite me",
+                            modifier = Modifier.size(19.dp),
+                            tint = if (canJoin) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.outline
+                        )
+                    }
                 }
             }
         }
