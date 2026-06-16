@@ -15,7 +15,6 @@ import android.util.Log
 import android.view.View
 import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
-import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import java.io.File
@@ -109,36 +108,30 @@ class DiscordRpcService : Service() {
         private const val DEAD_RELOAD_THRESHOLD = 2
         private const val DEGRADED_RELOAD_THRESHOLD = 4
         private const val NO_GATEWAY_RELOAD_THRESHOLD = 3
+        // JS engine freeze detection. If no evaluateJavascript callback fires
+        // within this window, the Chromium JS engine is likely completely frozen
+        // by background throttling (despite resumeTimers / visibility overrides).
+        // Set below Discord's heartbeat_interval × 2 (~80s server close timeout)
+        // but above 2 health-check cycles (60s) so a single slow callback
+        // doesn't false-trigger.
+        private const val JS_FREEZE_RELOAD_MS = 120_000L
+        // After sustained healthy health checks for this long, reset the session
+        // recovery counter so intermittent drops over a multi-hour session don't
+        // exhaust MAX_SESSION_RECOVERIES.
+        private const val HEALTHY_RESET_MS = 300_000L
 
-        // WebView cache hygiene. The Discord gateway lives in a long-lived WebView
-        // loading the full discord.com app. Chromium splits its storage in TWO
-        // places: dataDir/app_webview (profile data — cookies, localStorage,
-        // IndexedDB, service workers; counted as app DATA) and cacheDir/WebView
-        // (the HTTP cache + compiled-JS Code Cache; counted as app CACHE — this
-        // is what the user-visible "Cache" number in App Info / Settings shows,
-        // and it's where the runaway growth actually lives). The original cap
-        // measured ONLY app_webview, which stays small, so the cap never fired
-        // while cacheDir/WebView ballooned past 140 MB — the "insane cache that
-        // keeps growing" bug. The check now measures BOTH dirs combined.
-        //
-        // When the combined footprint crosses the cap we wipe DOM storage /
-        // IndexedDB + the HTTP cache, best-effort delete what clearCache can't
-        // reach (Chromium's Code Cache lives in cacheDir/WebView and is NOT
-        // cleared by clearCache — and cacheDir is fair game, the OS itself may
-        // wipe it anytime), and reload. The session survives because the auth
-        // COOKIE (CookieManager) is left intact — Discord re-bootstraps the
-        // localStorage token from it on reload; if that ever fails it lands on
-        // /login and the existing onSessionExpired() recovery kicks in.
-        //
-        // The cap is deliberately ABOVE Discord's natural working set (~30-50 MB
-        // of assets after one full load) — capping below it would clear+reload
-        // every check, re-downloading the bundles each time (churn + data usage).
-        // First check runs minutes after start (not a full hour) because OEM
-        // service restarts used to reset the hourly timer so often that the
-        // check could literally never run.
+        // WebView cache hygiene. Chromium's cacheDir/WebView (HTTP cache + Code
+        // Cache) is what the user-visible "Cache" number shows and where runaway
+        // growth lives. app_webview (profile data — cookies, localStorage, IndexedDB)
+        // is tiny and MUST NOT be cleared: Discord's localStorage.token is the
+        // gateway auth — wiping it kills the session even though the CookieManager
+        // cookie survives, because Discord's JS client uses the token (not the
+        // cookie) for the gateway Identify and API calls. The cap measures ONLY
+        // cacheDir/WebView; when over cap we clear the HTTP cache + best-effort
+        // delete Code Cache, then reload so Chromium re-fetches the assets it needs.
         private const val CACHE_FIRST_CHECK_DELAY_MS = 3L * 60 * 1000   // 3 min
         private const val CACHE_CHECK_INTERVAL_MS = 30L * 60 * 1000     // 30 min
-        private const val WEBVIEW_CACHE_CAP_BYTES = 64L * 1024 * 1024   // 64 MB combined
+        private const val WEBVIEW_CACHE_CAP_BYTES = 64L * 1024 * 1024   // 64 MB cacheDir only
 
         var isRunning = false
             private set
@@ -170,6 +163,8 @@ class DiscordRpcService : Service() {
     private var noGatewayChecks = 0
     private var lastPushAttemptMs = 0L
     private var lastShimResult = ""
+    @Volatile private var lastJsResponseMs = 0L
+    @Volatile private var healthySinceMs = 0L
 
     private var onlineStartEpochMs = 0L
     private var offlineStartEpochMs = 0L
@@ -371,6 +366,7 @@ class DiscordRpcService : Service() {
             wv.resumeTimers()
             wv.dispatchWindowVisibilityChanged(View.VISIBLE)
             isRunning = true
+            lastJsResponseMs = System.currentTimeMillis()
             startCacheMaintenance()
             updateNotif("Discord RPC connecting...")
         }
@@ -436,6 +432,7 @@ class DiscordRpcService : Service() {
 
         val wv = webView ?: return
         wv.evaluateJavascript(MODULE_FINDER_JS) { result ->
+            lastJsResponseMs = System.currentTimeMillis()
             val cleaned = result?.trim()?.replace("\"", "") ?: "null"
             lastShimResult = cleaned
             if (cleaned == "ok") {
@@ -499,14 +496,10 @@ class DiscordRpcService : Service() {
     }
 
     /**
-     * WebView cache cap (see the constants block for the full story). Measures
-     * the COMBINED Chromium footprint — `dataDir/app_webview` (profile data) +
-     * `cacheDir/WebView` (HTTP cache + Code Cache, the user-visible "Cache"
-     * growth) — and when it crosses [WEBVIEW_CACHE_CAP_BYTES]: wipes web storage
-     * + the HTTP cache, best-effort deletes the leftover `cacheDir/WebView`
-     * contents that `clearCache` doesn't reach (Code Cache), then reloads. The
-     * Discord session survives because the auth cookie (CookieManager) is left
-     * untouched and Discord re-bootstraps from it.
+     * WebView cache cap. Measures ONLY `cacheDir/WebView` (HTTP cache + Code
+     * Cache — the user-visible "Cache" growth). `app_webview` (profile data) is
+     * deliberately excluded: it holds `localStorage` (including Discord's auth
+     * token) and is tiny. Wiping it kills the Discord session.
      */
     private fun startCacheMaintenance() {
         cacheMaintenanceJob?.cancel()
@@ -514,32 +507,22 @@ class DiscordRpcService : Service() {
             delay(CACHE_FIRST_CHECK_DELAY_MS)
             while (true) {
                 try {
-                    val profileDir = File(applicationInfo.dataDir, "app_webview")
                     val cacheWebViewDir = File(cacheDir, "WebView")
-                    val size = dirSizeBytes(profileDir) + dirSizeBytes(cacheWebViewDir)
+                    val size = dirSizeBytes(cacheWebViewDir)
                     if (size > WEBVIEW_CACHE_CAP_BYTES) {
-                        Log.i(TAG, "WebView footprint ${size / (1024 * 1024)}MB over cap — clearing (cookie/session preserved)")
+                        Log.i(TAG, "WebView cache ${size / (1024 * 1024)}MB over cap — clearing HTTP/Code cache (session preserved)")
                         mainHandler.post {
                             try {
-                                WebStorage.getInstance().deleteAllData()
                                 webView?.clearCache(true)
                             } catch (e: Throwable) {
                                 Log.w(TAG, "WebView cache clear failed", e)
                             }
-                            // Code Cache (compiled JS) is NOT cleared by
-                            // clearCache(true); delete it directly. Deleting
-                            // from cacheDir while Chromium runs is safe — the
-                            // OS may wipe cacheDir at any time and Chromium
-                            // rebuilds missing cache entries.
                             scope.launch {
                                 try {
                                     cacheWebViewDir.listFiles()?.forEach { it.deleteRecursively() }
                                 } catch (e: Throwable) {
                                     Log.w(TAG, "WebView cacheDir sweep failed", e)
                                 }
-                                // Reload so Discord re-bootstraps its token from
-                                // the preserved auth cookie; onSessionExpired()
-                                // catches the rare case where it can't.
                                 mainHandler.post {
                                     try {
                                         webView?.reload()
@@ -562,9 +545,36 @@ class DiscordRpcService : Service() {
         deadHealthChecks = 0
         degradedHealthChecks = 0
         noGatewayChecks = 0
+        lastJsResponseMs = System.currentTimeMillis()
+        healthySinceMs = 0L
         sessionMonitorJob = scope.launch {
             while (true) {
                 delay(SESSION_CHECK_INTERVAL_MS)
+
+                // Re-assert JS timer and visibility state every cycle. Chromium
+                // can throttle/freeze a detached WebView's JS when backgrounded
+                // despite the onWindowVisibilityChanged override; periodic
+                // resumeTimers + visibility dispatch combats that.
+                mainHandler.post {
+                    webView?.let { w ->
+                        w.resumeTimers()
+                        w.dispatchWindowVisibilityChanged(View.VISIBLE)
+                    }
+                }
+
+                // Detect frozen JS engine: if no evaluateJavascript callback has
+                // fired for 2+ minutes, the engine is completely frozen and the
+                // Discord gateway is dead or dying. Force a reload to recover.
+                if (lastJsResponseMs > 0) {
+                    val jsSilence = System.currentTimeMillis() - lastJsResponseMs
+                    if (jsSilence > JS_FREEZE_RELOAD_MS) {
+                        Log.w(TAG, "JS engine unresponsive for ${jsSilence / 1000}s — forcing reload")
+                        lastJsResponseMs = System.currentTimeMillis()
+                        mainHandler.post { onSessionExpired() }
+                        continue
+                    }
+                }
+
                 if (!shimReady) continue
 
                 mainHandler.post {
@@ -572,10 +582,10 @@ class DiscordRpcService : Service() {
                     wv.evaluateJavascript(
                         "(window.VRCA_gatewayHealth ? window.VRCA_gatewayHealth() : 'no_probe')"
                     ) { result ->
+                        lastJsResponseMs = System.currentTimeMillis()
                         if (!shimReady) return@evaluateJavascript
                         when (result?.trim()?.replace("\"", "") ?: "null") {
                             "alive", "connecting", "no_probe" -> {
-                                // Healthy (or socket still opening / probe not ready yet).
                                 if (deadHealthChecks != 0) deadHealthChecks = 0
                                 if (degradedHealthChecks != 0) degradedHealthChecks = 0
                                 if (noGatewayChecks != 0) noGatewayChecks = 0
@@ -583,23 +593,24 @@ class DiscordRpcService : Service() {
                                     DiscordRpcState.status = DiscordRpcStatus.CONNECTED
                                     DiscordRpcState.failureMessage = null
                                 }
+                                val nowMs = System.currentTimeMillis()
+                                if (healthySinceMs == 0L) healthySinceMs = nowMs
+                                if (sessionRecoveryCount > 0 &&
+                                    (nowMs - healthySinceMs) > HEALTHY_RESET_MS) {
+                                    Log.i(TAG, "Gateway healthy for ${(nowMs - healthySinceMs) / 1000}s — resetting recovery counter")
+                                    sessionRecoveryCount = 0
+                                }
                             }
                             "no_gateway" -> {
+                                healthySinceMs = 0L
                                 deadHealthChecks = 0
                                 degradedHealthChecks = 0
                                 noGatewayChecks++
                                 if (noGatewayChecks >= NO_GATEWAY_RELOAD_THRESHOLD) {
-                                    // Re-injecting the shim didn't bring the gateway
-                                    // back (or it keeps flapping away) — Discord's JS
-                                    // needs a fresh start. Reload the page, the auto
-                                    // equivalent of a manual sign-out/in.
                                     noGatewayChecks = 0
                                     Log.w(TAG, "Session monitor: gateway still missing after re-inject — reloading")
                                     onSessionExpired()
                                 } else {
-                                    // Earlier misses — try the cheap fix (re-inject
-                                    // restores the hook if Discord still has a live
-                                    // gateway) before paying for a disruptive reload.
                                     Log.w(TAG, "Session monitor: gateway reference lost — re-injecting shim")
                                     shimReady = false
                                     shimRetryCount = 0
@@ -609,11 +620,7 @@ class DiscordRpcService : Service() {
                                 }
                             }
                             "dead" -> {
-                                // readyState CLOSING/CLOSED — the socket is genuinely
-                                // closed (compression-independent, reliable). Give
-                                // Discord's own client one cycle to RESUME, then reload
-                                // to re-establish a fresh gateway and auto-re-auth from
-                                // the persistent token/cookie (no password).
+                                healthySinceMs = 0L
                                 degradedHealthChecks = 0
                                 noGatewayChecks = 0
                                 deadHealthChecks++
@@ -626,13 +633,7 @@ class DiscordRpcService : Service() {
                                 }
                             }
                             "zombie", "bad" -> {
-                                // Open-but-suspect (no heartbeat ACK / OP7-9 / close
-                                // flag). These are derived from READABLE inbound frames,
-                                // which Discord's zlib-stream compression makes
-                                // unparseable — so this can be a FALSE positive while the
-                                // session is actually fine. Require more consecutive
-                                // confirmations before a disruptive reload; if the socket
-                                // is truly closing it'll report `dead` and reload faster.
+                                healthySinceMs = 0L
                                 deadHealthChecks = 0
                                 noGatewayChecks = 0
                                 degradedHealthChecks++
@@ -667,7 +668,9 @@ class DiscordRpcService : Service() {
             .replace("\n", "\\n")
             .replace("\r", "\\r")
         mainHandler.post {
+            wv.resumeTimers()
             wv.evaluateJavascript("window.VRCA_setActivity('$escaped')") { result ->
+                lastJsResponseMs = System.currentTimeMillis()
                 val cleaned = result?.trim()?.replace("\"", "") ?: "null"
                 if (cleaned == "ok" || cleaned == "resolving") {
                     consecutivePushFailures = 0
@@ -884,6 +887,13 @@ private const val WS_HOOK_JS = """
     window._vrca_lastAckMs = 0;
     window._vrca_gatewayBad = false;
     window._vrca_sessionReady = false;
+    window._vrca_lastSeq = null;
+    // Last time ANY inbound frame arrived (string OR binary). The message event
+    // fires regardless of zlib-stream compression, so this is a
+    // compression-independent liveness signal: a healthy Discord gateway sends
+    // heartbeat ACKs (~every 41s) plus event frames continuously, so a long
+    // silence means the socket is a zombie even though readyState is still 1.
+    window._vrca_lastFrameMs = 0;
 
     // Attach passive observers to a captured gateway socket. We ONLY observe
     // (and re-push our own activity); we never alter Discord's own frames here,
@@ -894,8 +904,11 @@ private const val WS_HOOK_JS = """
         try {
             ws.addEventListener('message', function(ev) {
                 try {
-                    if (typeof ev.data !== 'string') return; // compressed/binary: skip
+                    // Count EVERY inbound frame (compression-independent liveness).
+                    window._vrca_lastFrameMs = Date.now();
+                    if (typeof ev.data !== 'string') return; // compressed/binary: can't parse, but counted above
                     var m = JSON.parse(ev.data);
+                    if (m.s != null) window._vrca_lastSeq = m.s;
                     if (m.op === 11) { window._vrca_lastAckMs = Date.now(); }
                     else if (m.op === 10) {
                         window._vrca_lastAckMs = Date.now();
@@ -1049,10 +1062,20 @@ private const val MODULE_FINDER_JS = """
         window._vrca_sendPresence = function() {
             var gw = window._vrca_gatewayWs;
             if (!gw || gw.readyState !== 1) return;
-            var activity = window._vrca_activity;
-            if (!activity) return;
             var origSend = window._vrca_origSend;
             if (!origSend) return;
+            // If the Discord heartbeat has stalled (JS timers throttled by
+            // Chromium background policy), send OP 1 manually to keep the
+            // server from closing the gateway (~80s timeout). The native side
+            // calls this every 10s via VRCA_setActivity, so the heartbeat
+            // stays alive even when Discord's own setInterval is frozen.
+            var hb = window._vrca_hbInterval;
+            var lastAck = window._vrca_lastAckMs;
+            if (hb > 0 && lastAck > 0 && (Date.now() - lastAck) > hb * 1.5) {
+                try { origSend.call(gw, JSON.stringify({ op: 1, d: window._vrca_lastSeq })); } catch(e) {}
+            }
+            var activity = window._vrca_activity;
+            if (!activity) return;
             origSend.call(gw, JSON.stringify({
                 op: 3,
                 d: {
@@ -1062,6 +1085,7 @@ private const val MODULE_FINDER_JS = """
                     afk: false
                 }
             }));
+            window._vrca_lastSentMs = Date.now();
         };
 
         window.VRCA_setActivity = function(jsonStr) {
@@ -1078,7 +1102,20 @@ private const val MODULE_FINDER_JS = """
                         window._vrca_sendPresence();
                         return 'ok';
                     }
-                    window._vrca_activity = activity;
+                    // CRITICAL: send the activity NOW without the unresolved image
+                    // so the RPC shows immediately, then upgrade it once the image
+                    // resolves. Previously presence was sent ONLY inside the resolve
+                    // callback — so if external-assets resolution failed (token not
+                    // grabbed, fetch deferred under background throttling, or the
+                    // URL just won't resolve), the activity was NEVER sent even on a
+                    // perfectly healthy socket: the app showed "connected" while the
+                    // RPC was silently absent from Discord. Discord rejects a raw
+                    // https large_image, so we strip it for the immediate send and
+                    // add the resolved mp: path on the upgrade.
+                    var immediate = JSON.parse(JSON.stringify(activity));
+                    if (immediate.assets) { delete immediate.assets.large_image; }
+                    window._vrca_activity = immediate;
+                    window._vrca_sendPresence();
                     var retries = 0;
                     var tryResolve = function() {
                         VRCA_resolveAsset(imageUrl).then(function(resolved) {
@@ -1090,10 +1127,12 @@ private const val MODULE_FINDER_JS = """
                                 retries++;
                                 setTimeout(tryResolve, 2000);
                             }
+                            // On permanent failure we keep the image-less activity
+                            // (already sent + stored), so the RPC stays visible.
                         });
                     };
                     tryResolve();
-                    return 'resolving';
+                    return 'ok';
                 }
                 window._vrca_activity = activity;
                 window._vrca_sendPresence();
@@ -1143,9 +1182,41 @@ private const val MODULE_FINDER_JS = """
                 var hb = window._vrca_hbInterval;
                 var lastAck = window._vrca_lastAckMs;
                 if (hb > 0 && lastAck > 0 && (Date.now() - lastAck) > hb * 2.5) return 'zombie';
+                // Compression-independent zombie check: a healthy gateway delivers
+                // heartbeat ACKs + events continuously, so no inbound frame of ANY
+                // kind for 90s means the socket is dead-but-open (the case where
+                // zlib-stream compression hides the op11 ACKs from the check above,
+                // so it would otherwise falsely report 'alive').
+                var lastFrame = window._vrca_lastFrameMs;
+                if (lastFrame > 0 && (Date.now() - lastFrame) > 90000) return 'zombie';
                 return 'alive';
             } catch(e) { return 'alive'; }
         };
+
+        // JS-side presence re-assertion (the "works then disappears while still
+        // connected" fix). Presence was re-asserted ONLY by the native 10s timer
+        // via evaluateJavascript — but a backgrounded WebView has those native->JS
+        // calls throttled/queued by Chromium, while Discord's OWN internal
+        // setInterval heartbeat keeps the socket OPEN (so the app shows connected).
+        // The instant Discord dropped our activity (idle transition / session
+        // resume / its own status change) our native re-push couldn't run, so the
+        // RPC vanished permanently on a live socket. Running the re-push from a
+        // setInterval INSIDE the page couples it to the same JS engine that keeps
+        // the heartbeat alive: if the socket stays up, our re-assert stays running.
+        // Idempotent (same activity payload; Discord coalesces); guarded against
+        // duplicate intervals on shim re-injection.
+        if (window._vrca_pushInterval) { try { clearInterval(window._vrca_pushInterval); } catch(e) {} }
+        window._vrca_pushInterval = setInterval(function() {
+            try {
+                if (!window._vrca_activity) return;
+                // Skip if a native push already re-asserted within the last 7s, so
+                // this only fires when native evaluateJavascript pushes are being
+                // throttled (background) — avoids doubling OP 3 in the foreground.
+                var lastSent = window._vrca_lastSentMs || 0;
+                if (Date.now() - lastSent < 7000) return;
+                window._vrca_sendPresence();
+            } catch(e) {}
+        }, 10000);
 
         return 'ok';
     } catch(e) {

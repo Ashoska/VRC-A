@@ -70,6 +70,10 @@
             </intent-filter>
         </receiver>
 
+        <receiver
+            android:name=".vrchat.NotificationActionReceiver"
+            android:exported="false" />
+
         <activity
             android:name=".app.MainActivity"
             android:exported="true"

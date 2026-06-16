@@ -222,32 +222,147 @@ object VrchatAuthManager {
         }
 
     /**
+     * Richer instance snapshot for the invite/history instance-list UI: world name +
+     * thumbnail, live occupancy, and a joinability [status] derived from VRChat's HTTP
+     * response (open / closed-dead / not accessible). Fetched once when a menu opens.
+     */
+    data class InstanceInfo(
+        val location: String,
+        val worldName: String,
+        val worldImageUrl: String,
+        val players: Int,
+        val capacity: Int,
+        val status: InstanceStatus
+    )
+
+    enum class InstanceStatus { OPEN, CLOSED, INACCESSIBLE, UNKNOWN }
+
+    /**
+     * Single `GET /instances/{location}` that returns world name/image + occupancy +
+     * a joinability status. 200 = OPEN, 404 = CLOSED (dead), 403 = INACCESSIBLE
+     * (invite/invite+ you can't self-serve). Uses the caller's own VRChat session.
+     */
+    suspend fun fetchInstanceInfo(context: Context, location: String): InstanceInfo =
+        withContext(Dispatchers.IO) {
+            val loc = location.trim()
+            val unknown = InstanceInfo(loc, "", "", 0, 0, InstanceStatus.UNKNOWN)
+            if (loc.isBlank() || !loc.startsWith("wrld_") ||
+                loc == "offline" || loc == "private" || loc == "traveling"
+            ) return@withContext unknown.copy(status = InstanceStatus.CLOSED)
+            val cookieHeader = getCookieHeader(context) ?: return@withContext unknown
+            try {
+                val (code, body, rawCookies) = get("$BASE/instances/$loc", null, cookieHeader)
+                when (code) {
+                    200 -> {
+                        captureRolledCookies(context, rawCookies)
+                        val inst = JSONObject(body)
+                        val w = inst.optJSONObject("world")
+                        val img = (w?.optString("thumbnailImageUrl", "").orEmpty())
+                            .ifBlank { w?.optString("imageUrl", "").orEmpty() }
+                        InstanceInfo(
+                            location = loc,
+                            worldName = w?.optString("name", "").orEmpty(),
+                            worldImageUrl = img,
+                            players = extractInstanceUserCount(inst),
+                            capacity = inst.optInt("capacity", 0),
+                            // 200 with zero occupants still means the instance object
+                            // exists (joinable); a truly dead instance 404s.
+                            status = InstanceStatus.OPEN
+                        )
+                    }
+                    404 -> unknown.copy(status = InstanceStatus.CLOSED)
+                    403 -> unknown.copy(status = InstanceStatus.INACCESSIBLE)
+                    else -> unknown
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "fetchInstanceInfo failed", e)
+                unknown
+            }
+        }
+
+    /**
+     * Result of an invite call. [ok] is HTTP 200; [error] carries VRChat's own
+     * human-readable reason on failure (e.g. "That instance is not accessible",
+     * "instance is full"), parsed from the response body, so the UI can tell the
+     * user WHY a re-invite failed (instance closed / full / not accessible)
+     * instead of a generic failure.
+     */
+    data class InviteResult(val ok: Boolean, val error: String? = null)
+
+    /** Extracts VRChat's `error.message` (or a bare `message`) from a response body. */
+    private fun parseVrcError(body: String, code: Int): String? {
+        val parsed = try {
+            val obj = JSONObject(body)
+            obj.optJSONObject("error")?.optString("message")?.ifBlank { null }
+                ?: obj.optString("message").ifBlank { null }
+        } catch (_: Exception) { null }
+        // Trim VRChat's frequent wrapping quotes/whitespace.
+        val cleaned = parsed?.trim()?.trim('"')?.trim()?.ifBlank { null }
+        return cleaned ?: when (code) {
+            404 -> "That instance has closed or no longer exists"
+            403 -> "That instance is not accessible"
+            else -> null
+        }
+    }
+
+    /**
      * Sends an invite to the caller's OWN logged-in VRChat account for [location]
      * (the raw `{worldId}:{instanceId}` string). Mirrors the website's "Invite Me"
      * button (`POST /invite/myself/to/{location}`) — works for invite-only /
      * friends+ / group instances. The instance's occupant is NOT notified; the
-     * invite lands only on the caller's account. Admin-only use. Returns true on
-     * HTTP 200.
+     * invite lands only on the caller's account. Returns [InviteResult].
      */
-    suspend fun inviteSelfToInstance(context: Context, location: String): Boolean =
+    suspend fun inviteSelfToInstance(context: Context, location: String): InviteResult =
         withContext(Dispatchers.IO) {
             val loc = location.trim()
             if (loc.isBlank() || !loc.startsWith("wrld_") ||
                 loc == "offline" || loc == "private" || loc == "traveling"
-            ) return@withContext false
-            val cookieHeader = getCookieHeader(context) ?: return@withContext false
+            ) return@withContext InviteResult(false, "That instance can't be joined")
+            val cookieHeader = getCookieHeader(context)
+                ?: return@withContext InviteResult(false, "Not signed in to VRChat")
             try {
-                val (code, _, rawCookies) = post("$BASE/invite/myself/to/$loc", "", cookieHeader)
+                val (code, respBody, rawCookies) = post("$BASE/invite/myself/to/$loc", "", cookieHeader)
                 if (code == 200) {
                     captureRolledCookies(context, rawCookies)
-                    true
+                    InviteResult(true)
                 } else {
-                    Log.w(TAG, "inviteSelfToInstance returned $code for $loc")
-                    false
+                    Log.w(TAG, "inviteSelfToInstance returned $code for $loc body=${respBody.take(200)}")
+                    InviteResult(false, parseVrcError(respBody, code))
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "inviteSelfToInstance failed", e)
-                false
+                InviteResult(false, "Network error")
+            }
+        }
+
+    /**
+     * Invites [userId] to [location] (the raw `{worldId}:{instanceId}` string) —
+     * used to fulfil an incoming "invite request" by inviting the requester to the
+     * user's CURRENT instance. `POST /invite/{userId}` with `{instanceId}`. Returns
+     * [InviteResult].
+     */
+    suspend fun inviteUserToInstance(context: Context, userId: String, location: String): InviteResult =
+        withContext(Dispatchers.IO) {
+            val uid = userId.trim()
+            val loc = location.trim()
+            if (uid.isBlank() || loc.isBlank() || !loc.startsWith("wrld_") ||
+                loc == "offline" || loc == "private" || loc == "traveling"
+            ) return@withContext InviteResult(false, "You're not in a joinable instance")
+            val cookieHeader = getCookieHeader(context)
+                ?: return@withContext InviteResult(false, "Not signed in to VRChat")
+            try {
+                val body = JSONObject().put("instanceId", loc).toString()
+                val (code, respBody, rawCookies) = post("$BASE/invite/$uid", body, cookieHeader)
+                if (code == 200) {
+                    captureRolledCookies(context, rawCookies)
+                    InviteResult(true)
+                } else {
+                    Log.w(TAG, "inviteUserToInstance returned $code for $uid -> $loc body=${respBody.take(200)}")
+                    InviteResult(false, parseVrcError(respBody, code))
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "inviteUserToInstance failed", e)
+                InviteResult(false, "Network error")
             }
         }
 
@@ -689,7 +804,18 @@ object VrchatAuthManager {
                         val uStatus = uj.optString("status", "")
                         Log.d(TAG, "fetchPresence /users/$userId: state=$uState status=$uStatus location=$uLocation")
                         if (uState.isNotBlank()) state = uState
-                        if (uLocation.isNotBlank()) location = uLocation
+                        // /users/{id} redacts invite/invite+ instances to "private"
+                        // even for your OWN account, dropping the ~nonce(...) access
+                        // token the admin self-invite needs. When it comes back
+                        // "private" but /auth/user already gave us a full joinable
+                        // location, KEEP the full one. Any other value (a real wrld_
+                        // location, or "offline"/"traveling" when you've actually left)
+                        // still overrides, so stale-presence correction is unaffected.
+                        if (uLocation.isNotBlank() &&
+                            !(uLocation == "private" && location.startsWith("wrld_"))
+                        ) {
+                            location = uLocation
+                        }
                         if (uStatus.isNotBlank()) status = uStatus
                         uj.optString("statusDescription", "").let { if (it.isNotBlank()) statusDescription = it }
                         uj.optString("last_platform", "").let { if (it.isNotBlank()) platform = it }

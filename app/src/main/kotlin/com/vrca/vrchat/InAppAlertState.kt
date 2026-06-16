@@ -13,7 +13,12 @@ data class InAppAlertEvent(
     val afterText: String? = null,
     val timestampMs: Long,
     val eventTitle: String? = null,
-    val url: String? = null
+    val url: String? = null,
+    // Optional in-app action button (e.g. re-invite). actionType is one of
+    // "invite_me" (actionData = instance location) or "invite_user"
+    // (actionData = the requester's userId; the instance is read live at tap).
+    val actionType: String? = null,
+    val actionData: String? = null
 )
 
 data class InAppAlertGroup(
@@ -79,20 +84,40 @@ object InAppAlertState {
         if (migrated.isNotEmpty()) persist(ctx)
     }
 
+    /**
+     * Adds [event] to the group [groupKey]. When [singleEvent] is true the group
+     * keeps ONLY the latest event (the new one replaces whatever was there) instead
+     * of accumulating a history — used for invite requests, where you only need to
+     * see that a person is asking for an invite, not every individual request.
+     */
     fun addGroupedEvent(
         ctx: Context,
         groupKey: String,
         title: String,
         url: String?,
-        event: InAppAlertEvent
+        event: InAppAlertEvent,
+        singleEvent: Boolean = false,
+        dedupByActionData: Boolean = false
     ) {
         val current = _groups.value.toMutableList()
         val idx = current.indexOfFirst { it.groupId == groupKey }
         if (idx >= 0) {
             val existing = current[idx]
-            val updatedEvents = existing.events.toMutableList()
-            updatedEvents.add(event)
-            while (updatedEvents.size > MAX_EVENTS_PER_GROUP) updatedEvents.removeFirst()
+            val updatedEvents = if (singleEvent) {
+                mutableListOf(event)
+            } else {
+                existing.events.toMutableList().also {
+                    // Collapse repeat events that point at the SAME target (e.g. the
+                    // same person re-inviting to the SAME instance 3x) into one entry
+                    // — drop the older duplicate, keep this fresher one. Different
+                    // instances (different actionData) stay as separate entries.
+                    if (dedupByActionData && !event.actionData.isNullOrBlank()) {
+                        it.removeAll { e -> e.actionData == event.actionData }
+                    }
+                    it.add(event)
+                    while (it.size > MAX_EVENTS_PER_GROUP) it.removeFirst()
+                }
+            }
             current[idx] = existing.copy(
                 events = updatedEvents,
                 lastUpdatedMs = event.timestampMs
@@ -152,6 +177,8 @@ object InAppAlertState {
                     put("ts", e.timestampMs)
                     put("eventTitle", e.eventTitle ?: "")
                     put("url", e.url ?: "")
+                    put("actionType", e.actionType ?: "")
+                    put("actionData", e.actionData ?: "")
                 })
             }
             arr.put(JSONObject().apply {
@@ -183,7 +210,9 @@ object InAppAlertState {
                     afterText = eObj.optString("after").ifBlank { null },
                     timestampMs = eObj.optLong("ts"),
                     eventTitle = eObj.optString("eventTitle").ifBlank { null },
-                    url = eObj.optString("url").ifBlank { null }
+                    url = eObj.optString("url").ifBlank { null },
+                    actionType = eObj.optString("actionType").ifBlank { null },
+                    actionData = eObj.optString("actionData").ifBlank { null }
                 )
             }
             list += InAppAlertGroup(

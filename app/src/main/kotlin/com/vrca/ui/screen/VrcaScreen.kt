@@ -412,8 +412,8 @@ fun VrcaScreen(
     // device. The displaced device stands fully down behind a "Use here" screen
     // (OSC is already blocked at the chokepoint); tapping re-claims and the other
     // device then stops. Public build only (admin never participates).
-    if (!BuildConfig.IS_ADMIN_BUILD && chatboxViewModel.notActiveDevice) {
-        AnotherDeviceActiveScreen(onUseHere = { chatboxViewModel.reclaimActiveDevice() })
+    if (!BuildConfig.IS_ADMIN_BUILD && chatboxViewModel.accountDenied) {
+        AccountDeniedScreen(supportUrl = discordInvite.value)
         return
     }
 
@@ -589,7 +589,8 @@ private fun GlobalStatusBanner(
    ========================= */
 
 @Composable
-private fun AnotherDeviceActiveScreen(onUseHere: () -> Unit) {
+private fun AccountDeniedScreen(supportUrl: String) {
+    val ctx = LocalContext.current
     Surface(modifier = Modifier.fillMaxSize()) {
         Column(
             modifier = Modifier
@@ -600,27 +601,41 @@ private fun AnotherDeviceActiveScreen(onUseHere: () -> Unit) {
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
-                "Active on another device",
-                style = MaterialTheme.typography.headlineSmall
+                "Account already registered",
+                style = MaterialTheme.typography.headlineSmall,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
             )
             Text(
-                "This VRChat account is currently running in VRC-A on another device. " +
-                "To avoid two devices driving your chatbox at once, only one can be active " +
-                "at a time.",
+                "This VRChat account is already set up with VRC-A on another device. " +
+                "For your security only one device can use an account at a time, so this " +
+                "one is on hold for now.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center
             )
-            Button(onClick = onUseHere, modifier = Modifier.fillMaxWidth()) {
-                Text("Use here")
-            }
             Text(
-                "Tapping \"Use here\" takes over on this device. The other one will stop " +
-                "sending automatically.",
-                style = MaterialTheme.typography.bodySmall,
+                "To move VRC-A to this device, sign out on your old device, or join our " +
+                "support server and we'll release your previous session. It unlocks here " +
+                "automatically once that's done, no need to reinstall.",
+                style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center
             )
+            if (supportUrl.isNotBlank()) {
+                Button(
+                    onClick = {
+                        runCatching {
+                            ctx.startActivity(
+                                Intent(Intent.ACTION_VIEW, Uri.parse(supportUrl))
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            )
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Join the support server")
+                }
+            }
         }
     }
 }
