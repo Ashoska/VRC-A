@@ -938,18 +938,26 @@ class VrchatPipelineService : Service() {
                     groupKey = GROUP_KEY_INVITES,
                     dedupId = notifId.ifBlank { null },
                     alertBody = "$senderName invited you to $worldName",
-                    alertGroupKey = "invite_${notifId.ifBlank { senderUserId }}",
+                    // World invites fuse PER-INVITER (like bios) into one accumulating
+                    // in-app card + Android notification (stop per-invite spam), keeping
+                    // the full history — each event retains its own instance location +
+                    // world name. Repeat invites to the SAME instance dedup to one entry;
+                    // different instances stay separate, so the card's invite symbol
+                    // opens an instance picker when that person sent several.
+                    alertGroupKey = "worldinvite_${senderUserId.ifBlank { notifId }}",
+                    alertEventTitle = worldName.ifBlank { null },
                     alertActionType = if (canInvite) NotificationActionReceiver.ACTION_INVITE_ME else null,
                     alertActionData = if (canInvite) location else null,
                     tapActionType = if (canInvite) NotificationActionReceiver.ACTION_INVITE_ME else null,
-                    tapActionData = if (canInvite) location else null
+                    tapActionData = if (canInvite) location else null,
+                    alertDedupByActionData = true
                 )
             }
             notifType == "requestInvite" -> {
                 // Fulfil the request by inviting the requester to the user's
                 // current instance — on notification tap and via the in-app button.
                 fireEventNotification(
-                    id = "invreq_${notifId.ifBlank { senderUserId }}".hashCode(),
+                    id = "invreq_${senderUserId.ifBlank { notifId }}".hashCode(),
                     title = "Invite request",
                     text = "$senderName is asking for an invite to your instance",
                     profileUrl = if (senderUserId.isNotBlank()) null else "https://vrchat.com/home/notifications",
@@ -958,11 +966,12 @@ class VrchatPipelineService : Service() {
                     groupKey = GROUP_KEY_INVITES,
                     dedupId = notifId.ifBlank { null },
                     alertBody = "$senderName is asking for an invite to your instance",
-                    alertGroupKey = "invreq_${notifId.ifBlank { senderUserId }}",
+                    alertGroupKey = "invreq_${senderUserId.ifBlank { notifId }}",
                     alertActionType = if (senderUserId.isNotBlank()) NotificationActionReceiver.ACTION_INVITE_USER else null,
                     alertActionData = senderUserId.ifBlank { null },
                     tapActionType = if (senderUserId.isNotBlank()) NotificationActionReceiver.ACTION_INVITE_USER else null,
-                    tapActionData = senderUserId.ifBlank { null }
+                    tapActionData = senderUserId.ifBlank { null },
+                    alertSingleEvent = true
                 )
             }
             notifType == "votetokick" -> {
@@ -1437,12 +1446,12 @@ class VrchatPipelineService : Service() {
             fireEventNotification(
                 id = "rank_$userId".hashCode(),
                 title = "Friend trust rank changed",
-                text = "$newDisplayName is now ${prettyTrustRank(newRank)}",
+                text = "$newDisplayName is now a ${prettyTrustRank(newRank)}",
                 profileUrl = "https://vrchat.com/home/user/$userId",
                 prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_RANK,
                 channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
                 groupKey = GROUP_KEY_FRIENDS,
-                alertBody = "$newDisplayName is now ${prettyTrustRank(newRank)}",
+                alertBody = "$newDisplayName is now a ${prettyTrustRank(newRank)}",
                 alertGroupKey = "rank_$userId"
             )
         }
@@ -1605,12 +1614,12 @@ class VrchatPipelineService : Service() {
                 fireEventNotification(
                     id = "rank_$userId".hashCode(),
                     title = "Friend trust rank changed",
-                    text = "${f.displayName} is now ${prettyTrustRank(f.trustRank)}",
+                    text = "${f.displayName} is now a ${prettyTrustRank(f.trustRank)}",
                     profileUrl = "https://vrchat.com/home/user/$userId",
                     prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_RANK,
                     channelId = NOTIF_CHANNEL_FRIENDS_ACTIVITY,
                     groupKey = GROUP_KEY_FRIENDS,
-                    alertBody = "${f.displayName} is now ${prettyTrustRank(f.trustRank)}",
+                    alertBody = "${f.displayName} is now a ${prettyTrustRank(f.trustRank)}",
                     alertGroupKey = "rank_$userId"
                 )
             }
@@ -2131,15 +2140,19 @@ class VrchatPipelineService : Service() {
                                 groupKey = GROUP_KEY_INVITES,
                                 dedupId = notifId.ifBlank { null },
                                 alertBody = "$senderName invited you to $worldName",
-                                alertGroupKey = "invite_${notifId.ifBlank { senderUserId }}",
+                                // Fuse world invites PER-INVITER (full history, same-
+                                // instance dedup; the card's invite symbol picks).
+                                alertGroupKey = "worldinvite_${senderUserId.ifBlank { notifId }}",
+                                alertEventTitle = worldName.ifBlank { null },
                                 alertActionType = if (canInvite) NotificationActionReceiver.ACTION_INVITE_ME else null,
                                 alertActionData = if (canInvite) location else null,
                                 tapActionType = if (canInvite) NotificationActionReceiver.ACTION_INVITE_ME else null,
-                                tapActionData = if (canInvite) location else null
+                                tapActionData = if (canInvite) location else null,
+                                alertDedupByActionData = true
                             )
                         }
                         "requestInvite" -> fireEventNotification(
-                            id = "invreq_${notifId.ifBlank { senderUserId }}".hashCode(),
+                            id = "invreq_${senderUserId.ifBlank { notifId }}".hashCode(),
                             title = "Invite request",
                             text = "$senderName is asking for an invite to your instance",
                             profileUrl = if (senderUserId.isNotBlank()) null else "https://vrchat.com/home/notifications",
@@ -2148,11 +2161,12 @@ class VrchatPipelineService : Service() {
                             groupKey = GROUP_KEY_INVITES,
                             dedupId = notifId.ifBlank { null },
                             alertBody = "$senderName is asking for an invite to your instance",
-                            alertGroupKey = "invreq_${notifId.ifBlank { senderUserId }}",
+                            alertGroupKey = "invreq_${senderUserId.ifBlank { notifId }}",
                             alertActionType = if (senderUserId.isNotBlank()) NotificationActionReceiver.ACTION_INVITE_USER else null,
                             alertActionData = senderUserId.ifBlank { null },
                             tapActionType = if (senderUserId.isNotBlank()) NotificationActionReceiver.ACTION_INVITE_USER else null,
-                            tapActionData = senderUserId.ifBlank { null }
+                            tapActionData = senderUserId.ifBlank { null },
+                            alertSingleEvent = true
                         )
                         "votetokick" -> fireEventNotification(
                             id = "vtk_$notifId".hashCode(),
@@ -2512,6 +2526,16 @@ class VrchatPipelineService : Service() {
         VrchatPipelineState.presence = patched
         pushSelfPresenceToFirestoreIfWatched()
 
+        // Record this instance (full location WITH the ~nonce access token) into the
+        // local 24h history so the user can re-invite themselves to it later from the
+        // VRChat tab, with join/left times. Stays on-device only; pruned after 24h.
+        if (location.startsWith("wrld_")) {
+            InstanceHistoryStore.record(this, location, patched.worldName)
+        } else if (location.equals("offline", true)) {
+            // Left VRChat without hopping — close out the current instance's "left" time.
+            InstanceHistoryStore.markCurrentLeft(this)
+        }
+
         // Refresh the instance occupancy the instant we world-hop, via a single
         // lightweight GET /instances/{loc} (what the website does on a tab
         // refresh). The WS location event carries no player count, so without
@@ -2630,6 +2654,20 @@ class VrchatPipelineService : Service() {
                 }
             }
             return
+        }
+        // Keep the full, joinable location (with the ~nonce access token) that the
+        // WebSocket self user-location event captured if the REST fetch came back
+        // with the redacted "private" — VRChat hides invite/invite+ locations from
+        // /users/{id} even for your own account, and that nonce is what lets the
+        // admin self-invite into those instances. "private" means still-in-instance
+        // (redacted), so this can't resurrect a left instance — a real departure
+        // reports "offline", which is allowed through.
+        val priorLoc = VrchatPipelineState.presence?.location
+        if (presence.location == "private" && priorLoc != null && priorLoc.startsWith("wrld_")) {
+            presence = presence.copy(
+                location = priorLoc,
+                worldName = presence.worldName.ifBlank { VrchatPipelineState.presence?.worldName.orEmpty() }
+            )
         }
         VrchatPipelineState.presence = presence
 
@@ -3216,7 +3254,15 @@ class VrchatPipelineService : Service() {
         alertActionType: String? = null,
         alertActionData: String? = null,
         tapActionType: String? = null,
-        tapActionData: String? = null
+        tapActionData: String? = null,
+        // When true the in-app group keeps ONLY the latest event (no history) and
+        // the Android notification shows no "(N)" count — used for invite requests,
+        // which fuse per-person instead of listing every individual request.
+        alertSingleEvent: Boolean = false,
+        // When true, a new event whose actionData matches an existing event in the
+        // group REPLACES it (dedup by target) — e.g. repeated world invites to the
+        // SAME instance collapse to one entry instead of stacking duplicates.
+        alertDedupByActionData: Boolean = false
     ) {
         // Check the toggle BEFORE touching seenNotifIds. Adding the dedup id
         // first risks permanently poisoning it: if `enabled` reads false for a
@@ -3276,8 +3322,10 @@ class VrchatPipelineService : Service() {
             )
         }
 
-        // For grouped alerts, show event count in the Android notification title
-        val displayTitle = if (alertGroupKey != null) {
+        // For grouped alerts, show event count in the Android notification title.
+        // Single-event groups (e.g. invite requests) fuse per-person and never show
+        // a count — each new event replaces the last, so a tally would be misleading.
+        val displayTitle = if (alertGroupKey != null && !alertSingleEvent) {
             val existingGroup = InAppAlertState.groups.value.firstOrNull { it.groupId == alertGroupKey }
             val count = (existingGroup?.events?.size ?: 0) + 1 // +1 for the event about to be added
             if (count > 1) "$title ($count)" else title
@@ -3329,7 +3377,9 @@ class VrchatPipelineService : Service() {
                         url = profileUrl,
                         actionType = alertActionType,
                         actionData = alertActionData
-                    )
+                    ),
+                    singleEvent = alertSingleEvent,
+                    dedupByActionData = alertDedupByActionData
                 )
             } else {
                 InAppAlertState.addAlert(

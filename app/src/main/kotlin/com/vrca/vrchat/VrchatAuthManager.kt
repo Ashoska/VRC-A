@@ -222,6 +222,65 @@ object VrchatAuthManager {
         }
 
     /**
+     * Richer instance snapshot for the invite/history instance-list UI: world name +
+     * thumbnail, live occupancy, and a joinability [status] derived from VRChat's HTTP
+     * response (open / closed-dead / not accessible). Fetched once when a menu opens.
+     */
+    data class InstanceInfo(
+        val location: String,
+        val worldName: String,
+        val worldImageUrl: String,
+        val players: Int,
+        val capacity: Int,
+        val status: InstanceStatus
+    )
+
+    enum class InstanceStatus { OPEN, CLOSED, INACCESSIBLE, UNKNOWN }
+
+    /**
+     * Single `GET /instances/{location}` that returns world name/image + occupancy +
+     * a joinability status. 200 = OPEN, 404 = CLOSED (dead), 403 = INACCESSIBLE
+     * (invite/invite+ you can't self-serve). Uses the caller's own VRChat session.
+     */
+    suspend fun fetchInstanceInfo(context: Context, location: String): InstanceInfo =
+        withContext(Dispatchers.IO) {
+            val loc = location.trim()
+            val unknown = InstanceInfo(loc, "", "", 0, 0, InstanceStatus.UNKNOWN)
+            if (loc.isBlank() || !loc.startsWith("wrld_") ||
+                loc == "offline" || loc == "private" || loc == "traveling"
+            ) return@withContext unknown.copy(status = InstanceStatus.CLOSED)
+            val cookieHeader = getCookieHeader(context) ?: return@withContext unknown
+            try {
+                val (code, body, rawCookies) = get("$BASE/instances/$loc", null, cookieHeader)
+                when (code) {
+                    200 -> {
+                        captureRolledCookies(context, rawCookies)
+                        val inst = JSONObject(body)
+                        val w = inst.optJSONObject("world")
+                        val img = (w?.optString("thumbnailImageUrl", "").orEmpty())
+                            .ifBlank { w?.optString("imageUrl", "").orEmpty() }
+                        InstanceInfo(
+                            location = loc,
+                            worldName = w?.optString("name", "").orEmpty(),
+                            worldImageUrl = img,
+                            players = extractInstanceUserCount(inst),
+                            capacity = inst.optInt("capacity", 0),
+                            // 200 with zero occupants still means the instance object
+                            // exists (joinable); a truly dead instance 404s.
+                            status = InstanceStatus.OPEN
+                        )
+                    }
+                    404 -> unknown.copy(status = InstanceStatus.CLOSED)
+                    403 -> unknown.copy(status = InstanceStatus.INACCESSIBLE)
+                    else -> unknown
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "fetchInstanceInfo failed", e)
+                unknown
+            }
+        }
+
+    /**
      * Result of an invite call. [ok] is HTTP 200; [error] carries VRChat's own
      * human-readable reason on failure (e.g. "That instance is not accessible",
      * "instance is full"), parsed from the response body, so the UI can tell the
@@ -745,7 +804,18 @@ object VrchatAuthManager {
                         val uStatus = uj.optString("status", "")
                         Log.d(TAG, "fetchPresence /users/$userId: state=$uState status=$uStatus location=$uLocation")
                         if (uState.isNotBlank()) state = uState
-                        if (uLocation.isNotBlank()) location = uLocation
+                        // /users/{id} redacts invite/invite+ instances to "private"
+                        // even for your OWN account, dropping the ~nonce(...) access
+                        // token the admin self-invite needs. When it comes back
+                        // "private" but /auth/user already gave us a full joinable
+                        // location, KEEP the full one. Any other value (a real wrld_
+                        // location, or "offline"/"traveling" when you've actually left)
+                        // still overrides, so stale-presence correction is unaffected.
+                        if (uLocation.isNotBlank() &&
+                            !(uLocation == "private" && location.startsWith("wrld_"))
+                        ) {
+                            location = uLocation
+                        }
                         if (uStatus.isNotBlank()) status = uStatus
                         uj.optString("statusDescription", "").let { if (it.isNotBlank()) statusDescription = it }
                         uj.optString("last_platform", "").let { if (it.isNotBlank()) platform = it }
