@@ -49,7 +49,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.width
+import androidx.compose.ui.window.Dialog
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Login
 import androidx.compose.material.icons.automirrored.filled.Logout
@@ -59,7 +61,7 @@ import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.OpenInNew
-import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.foundation.verticalScroll
@@ -314,51 +316,51 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
                         }
                     }
 
-                    // Friends online — free, from the local friends cache.
-                    friendsOnline?.let { (online, total) ->
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
+                    // Friends online (free, from the local friends cache) sits on the
+                    // SAME row as the 24h Instance History re-invite picker chip.
+                    Spacer(Modifier.height(2.dp))
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        friendsOnline?.let { (online, total) ->
                             Icon(
                                 Icons.Filled.Group,
                                 contentDescription = null,
                                 modifier = Modifier.size(16.dp),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                            Spacer(Modifier.width(6.dp))
                             Text(
                                 "$online of $total friends online",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                    }
-
-                    // Re-invite yourself to any instance you've been in over the last
-                    // 24h (with join/left times). Compact chip matching the card vibe.
-                    Spacer(Modifier.height(2.dp))
-                    Surface(
-                        onClick = { showInstanceHistory = true },
-                        shape = MaterialTheme.shapes.small,
-                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.20f),
-                        modifier = Modifier.height(30.dp)
-                    ) {
-                        Row(
-                            Modifier.padding(horizontal = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        Spacer(Modifier.weight(1f))
+                        Surface(
+                            onClick = { showInstanceHistory = true },
+                            shape = MaterialTheme.shapes.small,
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.20f),
+                            modifier = Modifier.height(30.dp)
                         ) {
-                            Icon(
-                                Icons.Filled.History,
-                                contentDescription = null,
-                                modifier = Modifier.size(15.dp),
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                            Text(
-                                "Instance History",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.primary
-                            )
+                            Row(
+                                Modifier.padding(horizontal = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                            ) {
+                                Icon(
+                                    Icons.Filled.History,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(15.dp),
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    "Instance History",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
                         }
                     }
 
@@ -911,62 +913,46 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
                             shape = MaterialTheme.shapes.small
                         )
                 )
-                // Title + chevron together form the expand tap target.
-                Row(
+                // Title block is the expand tap target.
+                Column(
                     Modifier
                         .weight(1f)
-                        .clickable { expanded = !expanded },
-                    verticalAlignment = Alignment.CenterVertically
+                        .clickable { expanded = !expanded }
                 ) {
-                    Column(Modifier.weight(1f)) {
+                    Text(
+                        displayTitle,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    if (!expanded && previewText.isNotBlank()) {
                         Text(
-                            displayTitle,
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.onSurface
+                            previewText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
-                        if (!expanded && previewText.isNotBlank()) {
-                            Text(
-                                previewText,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        latest?.let {
-                            Text(
-                                formatRelativeTime(it.timestampMs, nowMs),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.outline
-                            )
-                        }
                     }
-                    Spacer(Modifier.width(8.dp))
-                    Surface(
-                        shape = CircleShape,
-                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
-                        modifier = Modifier.size(34.dp)
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                                contentDescription = if (expanded) "Collapse" else "Expand",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(22.dp)
-                            )
-                        }
+                    latest?.let {
+                        Text(
+                            formatRelativeTime(it.timestampMs, nowMs),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.outline
+                        )
                     }
                 }
-                // Compact action symbols (invite / open) sit between expand and
-                // dismiss, matching their circular style.
+                // Action symbols (invite / open) sit to the LEFT of the collapse
+                // chevron. Each gets a clearly-distinct color so they don't blur
+                // together: invite = secondary, open = tertiary, collapse = primary
+                // tint, dismiss = error tint.
                 if (inviteMeTargets.isNotEmpty() || inviteUserData != null) {
                     Spacer(Modifier.width(6.dp))
                     val isInviteMe = inviteMeTargets.isNotEmpty()
                     HeaderActionSymbol(
-                        icon = if (isInviteMe) Icons.AutoMirrored.Filled.Login else Icons.Filled.PersonAdd,
+                        icon = if (isInviteMe) Icons.AutoMirrored.Filled.Login else Icons.AutoMirrored.Filled.Send,
                         contentDescription = if (isInviteMe) "Invite me to that instance" else "Invite them to your instance",
-                        container = MaterialTheme.colorScheme.primaryContainer,
-                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                        container = MaterialTheme.colorScheme.secondaryContainer,
+                        tint = MaterialTheme.colorScheme.onSecondaryContainer,
                         loading = actionSending
                     ) {
                         when {
@@ -983,14 +969,31 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
                     HeaderActionSymbol(
                         icon = Icons.Filled.OpenInNew,
                         contentDescription = "Open in VRChat",
-                        container = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
-                        tint = MaterialTheme.colorScheme.primary
+                        container = MaterialTheme.colorScheme.tertiaryContainer,
+                        tint = MaterialTheme.colorScheme.onTertiaryContainer
                     ) {
                         ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(headerOpenUrl)))
                     }
                 }
-                // Clear gap so users don't hit dismiss when reaching for expand.
-                Spacer(Modifier.width(8.dp))
+                // Collapse chevron — to the RIGHT of the action symbols.
+                Spacer(Modifier.width(6.dp))
+                Surface(
+                    onClick = { expanded = !expanded },
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+                    modifier = Modifier.size(34.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                            contentDescription = if (expanded) "Collapse" else "Expand",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+                // Dismiss.
+                Spacer(Modifier.width(6.dp))
                 Surface(
                     onClick = onDismiss,
                     shape = CircleShape,
@@ -1184,33 +1187,80 @@ private fun InstanceListDialog(
         infos = result
         loading = false
     }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
-        title = { Text(title, style = MaterialTheme.typography.titleMedium) },
-        text = {
-            if (loading) {
+    Dialog(onDismissRequest = onDismiss) {
+        ElevatedCard(
+            shape = MaterialTheme.shapes.large,
+            colors = CardDefaults.elevatedCardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant
+            ),
+            elevation = CardDefaults.elevatedCardElevation(defaultElevation = 6.dp),
+            modifier = Modifier.fillMaxWidth().heightIn(max = 560.dp)
+        ) {
+            Column(Modifier.padding(18.dp)) {
+                // Header: world icon + title, dismiss on the right.
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                    Spacer(Modifier.width(10.dp))
-                    Text("Checking instances...", style = MaterialTheme.typography.bodyMedium)
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                Icons.Filled.Public,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        title,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Surface(
+                        onClick = onDismiss,
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.error.copy(alpha = 0.14f),
+                        modifier = Modifier.size(34.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                Icons.Filled.Close,
+                                contentDescription = "Close",
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
                 }
-            } else if (targets.isEmpty()) {
-                Text(
-                    "Nothing to show yet.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            } else {
-                Column(
-                    Modifier.verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    for (t in targets) InstanceRow(t, infos[t.location])
+                Spacer(Modifier.height(14.dp))
+                when {
+                    loading -> Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(10.dp))
+                        Text("Checking instances...", style = MaterialTheme.typography.bodyMedium)
+                    }
+                    targets.isEmpty() -> Text(
+                        "Nothing to show yet.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    else -> Column(
+                        Modifier.verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        for (t in targets) InstanceRow(t, infos[t.location])
+                    }
                 }
             }
         }
-    )
+    }
 }
 
 @Composable
@@ -1226,7 +1276,9 @@ private fun InstanceRow(target: InstanceTarget, info: VrchatAuthManager.Instance
         shape = MaterialTheme.shapes.small,
         modifier = Modifier.fillMaxWidth()
     ) {
-        Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            // VRChat world thumbnails are wide (≈4:3); a square crop chopped the
+            // sides, so use a 4:3 box so the image reads like the real thumbnail.
             val img = info?.worldImageUrl.orEmpty()
             if (img.isNotBlank()) {
                 coil.compose.AsyncImage(
@@ -1234,30 +1286,32 @@ private fun InstanceRow(target: InstanceTarget, info: VrchatAuthManager.Instance
                     imageLoader = com.vrca.admin.VrchatImageLoader.get(ctx),
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
-                    modifier = Modifier.size(46.dp).clip(MaterialTheme.shapes.small)
+                    modifier = Modifier
+                        .size(width = 72.dp, height = 54.dp)
+                        .clip(MaterialTheme.shapes.medium)
                 )
             } else {
                 Surface(
-                    shape = MaterialTheme.shapes.small,
+                    shape = MaterialTheme.shapes.medium,
                     color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
-                    modifier = Modifier.size(46.dp)
+                    modifier = Modifier.size(width = 72.dp, height = 54.dp)
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Icon(
                             Icons.Filled.Public, null,
                             tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(22.dp)
+                            modifier = Modifier.size(24.dp)
                         )
                     }
                 }
             }
-            Spacer(Modifier.width(10.dp))
+            Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(
                     info?.worldName?.takeIf { it.isNotBlank() } ?: target.label.ifBlank { "Instance" },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis
+                    maxLines = 2, overflow = TextOverflow.Ellipsis
                 )
                 Spacer(Modifier.height(2.dp))
                 val (statusText, statusColor) = when (status) {
