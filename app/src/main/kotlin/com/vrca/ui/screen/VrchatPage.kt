@@ -32,7 +32,6 @@ import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -47,7 +46,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.width
@@ -66,6 +64,10 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.filled.ClearAll
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
@@ -446,8 +448,6 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
     }
 }
 
-private const val VISIBLE_ALERT_LIMIT = 3
-
 /**
  * Process-level expand state for the "Notifications (N)" alert section.
  * Default EXPANDED; the user's choice persists across tab switches for the
@@ -593,8 +593,8 @@ private fun InAppAlertCards() {
     // Shared, process-scoped: expanded by default, survives tab switches,
     // resets only on a genuine app reopen (see AlertSectionState).
     var sectionExpanded by AlertSectionState.expanded
-    var showAll by remember { mutableStateOf(false) }
     var filter by rememberSaveable { mutableStateOf("All") }
+    var showDismissAllConfirm by remember { mutableStateOf(false) }
 
     // Drive the relative timestamps ("just now" / "5m ago") so they advance on
     // their own — without a ticker Compose computes formatRelativeTime once and
@@ -611,6 +611,26 @@ private fun InAppAlertCards() {
         }
     }
 
+    // "Are you sure?" before nuking every alert.
+    if (showDismissAllConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDismissAllConfirm = false },
+            title = { Text("Dismiss all notifications?") },
+            text = { Text("This clears every in-app alert. This can't be undone.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showDismissAllConfirm = false
+                    val nm = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+                    // Clear in-app groups AND cancel each linked Android notification.
+                    InAppAlertState.dismissAll(ctx).forEach { nm.cancel(it.hashCode()) }
+                }) { Text("Dismiss all") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDismissAllConfirm = false }) { Text("Cancel") }
+            }
+        )
+    }
+
     Surface(
         color = Color.Transparent,
         modifier = Modifier.fillMaxWidth()
@@ -619,21 +639,52 @@ private fun InAppAlertCards() {
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .clickable { sectionExpanded = !sectionExpanded }
                     .padding(horizontal = 4.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
                     "Notifications (${groups.size})",
                     style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.onSurface
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable { sectionExpanded = !sectionExpanded }
                 )
+                // Dismiss-all sits to the LEFT of the collapse chevron, on the
+                // same header row. Its own tap is consumed here, so it never
+                // toggles the section.
+                Surface(
+                    onClick = { showDismissAllConfirm = true },
+                    shape = MaterialTheme.shapes.small,
+                    color = MaterialTheme.colorScheme.error.copy(alpha = 0.12f),
+                    modifier = Modifier.height(30.dp)
+                ) {
+                    Row(
+                        Modifier.padding(horizontal = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.ClearAll,
+                            contentDescription = null,
+                            modifier = Modifier.size(15.dp),
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                        Text(
+                            "Dismiss all",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+                Spacer(Modifier.width(8.dp))
                 Icon(
                     if (sectionExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
                     contentDescription = if (sectionExpanded) "Collapse" else "Expand",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(20.dp)
+                    modifier = Modifier
+                        .clickable { sectionExpanded = !sectionExpanded }
+                        .size(20.dp)
                 )
             }
             AnimatedVisibility(
@@ -646,7 +697,7 @@ private fun InAppAlertCards() {
                         listOf("All", "Friends", "Groups", "Bio").forEach { f ->
                             FilterChip(
                                 selected = filter == f,
-                                onClick = { filter = f; showAll = false },
+                                onClick = { filter = f },
                                 label = { Text(f, style = MaterialTheme.typography.labelMedium) }
                             )
                         }
@@ -660,36 +711,25 @@ private fun InAppAlertCards() {
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(horizontal = 4.dp)
                         )
-                    }
-                    val visible = if (showAll || filtered.size <= VISIBLE_ALERT_LIMIT) filtered
-                        else filtered.take(VISIBLE_ALERT_LIMIT)
-                    val hiddenCount = filtered.size - visible.size
-
-                    for (group in visible) {
-                        // Key by group identity so each card's expanded state stays
-                        // with ITS group. Without this, Compose tracks state by list
-                        // position, so a new alert prepended to the list would steal
-                        // the expanded state from the card the user was viewing.
-                        key(group.groupId) {
-                            AlertGroupCard(group = group, nowMs = nowMs, onDismiss = {
-                                InAppAlertState.dismiss(ctx, group.groupId)
-                                // Also dismiss the linked Android notification
-                                val nm = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
-                                nm.cancel(group.groupId.hashCode())
-                            })
-                        }
-                    }
-
-                    if (hiddenCount > 0) {
-                        OutlinedButton(
-                            onClick = { showAll = true },
-                            modifier = Modifier.fillMaxWidth(),
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+                    } else {
+                        // Lazy-render so an unbounded ("infinite") notification history
+                        // only composes the cards actually on screen — no lag. Bounded
+                        // height makes it its own scroll region inside the page's outer
+                        // scroll (wraps to content when there are only a few).
+                        val maxH = (LocalConfiguration.current.screenHeightDp * 0.7f).dp
+                        LazyColumn(
+                            modifier = Modifier.heightIn(max = maxH),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Text(
-                                "+$hiddenCount more alert${if (hiddenCount > 1) "s" else ""}",
-                                style = MaterialTheme.typography.labelMedium
-                            )
+                            // Key by group identity so each card's expanded state stays
+                            // with ITS group even as new alerts prepend to the list.
+                            items(filtered, key = { it.groupId }) { group ->
+                                AlertGroupCard(group = group, nowMs = nowMs, onDismiss = {
+                                    InAppAlertState.dismiss(ctx, group.groupId)
+                                    val nm = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+                                    nm.cancel(group.groupId.hashCode())
+                                })
+                            }
                         }
                     }
                 }
