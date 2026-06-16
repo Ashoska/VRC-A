@@ -18,7 +18,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.AlertDialog
@@ -32,7 +34,6 @@ import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -47,11 +48,11 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Login
 import androidx.compose.material.icons.automirrored.filled.Logout
@@ -66,6 +67,10 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.filled.ClearAll
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
@@ -446,8 +451,6 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
     }
 }
 
-private const val VISIBLE_ALERT_LIMIT = 3
-
 /**
  * Process-level expand state for the "Notifications (N)" alert section.
  * Default EXPANDED; the user's choice persists across tab switches for the
@@ -593,8 +596,8 @@ private fun InAppAlertCards() {
     // Shared, process-scoped: expanded by default, survives tab switches,
     // resets only on a genuine app reopen (see AlertSectionState).
     var sectionExpanded by AlertSectionState.expanded
-    var showAll by remember { mutableStateOf(false) }
     var filter by rememberSaveable { mutableStateOf("All") }
+    var showDismissAllConfirm by remember { mutableStateOf(false) }
 
     // Drive the relative timestamps ("just now" / "5m ago") so they advance on
     // their own — without a ticker Compose computes formatRelativeTime once and
@@ -611,6 +614,26 @@ private fun InAppAlertCards() {
         }
     }
 
+    // "Are you sure?" before nuking every alert.
+    if (showDismissAllConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDismissAllConfirm = false },
+            title = { Text("Dismiss all notifications?") },
+            text = { Text("This clears every in-app alert. This can't be undone.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showDismissAllConfirm = false
+                    val nm = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+                    // Clear in-app groups AND cancel each linked Android notification.
+                    InAppAlertState.dismissAll(ctx).forEach { nm.cancel(it.hashCode()) }
+                }) { Text("Dismiss all") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDismissAllConfirm = false }) { Text("Cancel") }
+            }
+        )
+    }
+
     Surface(
         color = Color.Transparent,
         modifier = Modifier.fillMaxWidth()
@@ -619,21 +642,52 @@ private fun InAppAlertCards() {
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .clickable { sectionExpanded = !sectionExpanded }
                     .padding(horizontal = 4.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
                     "Notifications (${groups.size})",
                     style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.onSurface
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable { sectionExpanded = !sectionExpanded }
                 )
+                // Dismiss-all sits to the LEFT of the collapse chevron, on the
+                // same header row. Its own tap is consumed here, so it never
+                // toggles the section.
+                Surface(
+                    onClick = { showDismissAllConfirm = true },
+                    shape = MaterialTheme.shapes.small,
+                    color = MaterialTheme.colorScheme.error.copy(alpha = 0.12f),
+                    modifier = Modifier.height(30.dp)
+                ) {
+                    Row(
+                        Modifier.padding(horizontal = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.ClearAll,
+                            contentDescription = null,
+                            modifier = Modifier.size(15.dp),
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                        Text(
+                            "Dismiss all",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+                Spacer(Modifier.width(8.dp))
                 Icon(
                     if (sectionExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
                     contentDescription = if (sectionExpanded) "Collapse" else "Expand",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(20.dp)
+                    modifier = Modifier
+                        .clickable { sectionExpanded = !sectionExpanded }
+                        .size(20.dp)
                 )
             }
             AnimatedVisibility(
@@ -646,7 +700,7 @@ private fun InAppAlertCards() {
                         listOf("All", "Friends", "Groups", "Bio").forEach { f ->
                             FilterChip(
                                 selected = filter == f,
-                                onClick = { filter = f; showAll = false },
+                                onClick = { filter = f },
                                 label = { Text(f, style = MaterialTheme.typography.labelMedium) }
                             )
                         }
@@ -660,36 +714,25 @@ private fun InAppAlertCards() {
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(horizontal = 4.dp)
                         )
-                    }
-                    val visible = if (showAll || filtered.size <= VISIBLE_ALERT_LIMIT) filtered
-                        else filtered.take(VISIBLE_ALERT_LIMIT)
-                    val hiddenCount = filtered.size - visible.size
-
-                    for (group in visible) {
-                        // Key by group identity so each card's expanded state stays
-                        // with ITS group. Without this, Compose tracks state by list
-                        // position, so a new alert prepended to the list would steal
-                        // the expanded state from the card the user was viewing.
-                        key(group.groupId) {
-                            AlertGroupCard(group = group, nowMs = nowMs, onDismiss = {
-                                InAppAlertState.dismiss(ctx, group.groupId)
-                                // Also dismiss the linked Android notification
-                                val nm = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
-                                nm.cancel(group.groupId.hashCode())
-                            })
-                        }
-                    }
-
-                    if (hiddenCount > 0) {
-                        OutlinedButton(
-                            onClick = { showAll = true },
-                            modifier = Modifier.fillMaxWidth(),
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+                    } else {
+                        // Lazy-render so an unbounded ("infinite") notification history
+                        // only composes the cards actually on screen — no lag. Bounded
+                        // height makes it its own scroll region inside the page's outer
+                        // scroll (wraps to content when there are only a few).
+                        val maxH = (LocalConfiguration.current.screenHeightDp * 0.7f).dp
+                        LazyColumn(
+                            modifier = Modifier.heightIn(max = maxH),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Text(
-                                "+$hiddenCount more alert${if (hiddenCount > 1) "s" else ""}",
-                                style = MaterialTheme.typography.labelMedium
-                            )
+                            // Key by group identity so each card's expanded state stays
+                            // with ITS group even as new alerts prepend to the list.
+                            items(filtered, key = { it.groupId }) { group ->
+                                AlertGroupCard(group = group, nowMs = nowMs, onDismiss = {
+                                    InAppAlertState.dismiss(ctx, group.groupId)
+                                    val nm = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+                                    nm.cancel(group.groupId.hashCode())
+                                })
+                            }
                         }
                     }
                 }
@@ -1153,6 +1196,67 @@ private fun CompactAlertButton(
     }
 }
 
+/** Extracts the `wrld_xxx` world ID from a VRChat instance location string. */
+private fun extractWorldId(location: String): String? =
+    location.substringBefore(':').takeIf { it.startsWith("wrld_") }
+
+/**
+ * Parses the instance type from the location string segments.
+ * VRChat locations: `wrld_xxx:id~type(params)~nonce(...)`.
+ * Returns a pair of (typeLabel, navigableId) where navigableId is a group/user ID
+ * that can be used for deep-linking, or null if not applicable.
+ */
+private data class InstanceTypeInfo(
+    val label: String,
+    val navigableUrl: String? = null
+)
+
+private fun parseInstanceType(
+    location: String,
+    apiType: String = "",
+    apiOwnerId: String = "",
+    apiGroupId: String = ""
+): InstanceTypeInfo {
+    val type = apiType.ifBlank {
+        val afterColon = location.substringAfter(':', "")
+        when {
+            afterColon.contains("~friends(") -> "friends"
+            afterColon.contains("~hidden(") -> "hidden"
+            afterColon.contains("~group(") -> "group"
+            afterColon.contains("~private(") && afterColon.contains("~canRequestInvite") -> "invite+"
+            afterColon.contains("~private(") -> "invite"
+            afterColon.isNotBlank() && !afterColon.contains('~') -> "public"
+            else -> ""
+        }
+    }
+    val groupId = apiGroupId.ifBlank {
+        val m = Regex("~group\\((grp_[^)]+)\\)").find(location)
+        m?.groupValues?.getOrNull(1) ?: ""
+    }
+    val ownerId = apiOwnerId.ifBlank {
+        val m = Regex("~(?:friends|hidden)\\((usr_[^)]+)\\)").find(location)
+        m?.groupValues?.getOrNull(1) ?: ""
+    }
+    return when (type) {
+        "public" -> InstanceTypeInfo("Public")
+        "friends" -> InstanceTypeInfo(
+            "Friends",
+            if (ownerId.startsWith("usr_")) "https://vrchat.com/home/user/$ownerId" else null
+        )
+        "hidden" -> InstanceTypeInfo(
+            "Friends+",
+            if (ownerId.startsWith("usr_")) "https://vrchat.com/home/user/$ownerId" else null
+        )
+        "group" -> InstanceTypeInfo(
+            "Group",
+            if (groupId.startsWith("grp_")) "https://vrchat.com/home/group/$groupId" else null
+        )
+        "invite" -> InstanceTypeInfo("Invite")
+        "invite+" -> InstanceTypeInfo("Invite+")
+        else -> InstanceTypeInfo("")
+    }
+}
+
 /** A target instance for the invite/history picker. [timeLabel] (history only) shows
  *  the join/left times so users can cross-reference what they played and when. */
 private data class InstanceTarget(
@@ -1187,14 +1291,23 @@ private fun InstanceListDialog(
         infos = result
         loading = false
     }
-    Dialog(onDismissRequest = onDismiss) {
+    // usePlatformDefaultWidth = false lets the card span nearly the full screen
+    // width (the default narrow dialog width was clipping world names + the
+    // join/left time line). Padding keeps small margins on each side.
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
         ElevatedCard(
             shape = MaterialTheme.shapes.large,
             colors = CardDefaults.elevatedCardColors(
                 containerColor = MaterialTheme.colorScheme.surfaceVariant
             ),
             elevation = CardDefaults.elevatedCardElevation(defaultElevation = 6.dp),
-            modifier = Modifier.fillMaxWidth().heightIn(max = 560.dp)
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .heightIn(max = 620.dp)
         ) {
             Column(Modifier.padding(18.dp)) {
                 // Header: world icon + title, dismiss on the right.
@@ -1269,16 +1382,41 @@ private fun InstanceRow(target: InstanceTarget, info: VrchatAuthManager.Instance
     val scope = rememberCoroutineScope()
     var sending by remember { mutableStateOf(false) }
     val status = info?.status ?: VrchatAuthManager.InstanceStatus.UNKNOWN
-    val canJoin = status != VrchatAuthManager.InstanceStatus.CLOSED &&
-        status != VrchatAuthManager.InstanceStatus.INACCESSIBLE
+    val isOpen = status == VrchatAuthManager.InstanceStatus.OPEN
+    val canJoin = isOpen && (info?.players ?: 0) > 0
+    val worldId = extractWorldId(target.location)
+    val typeInfo = parseInstanceType(
+        target.location,
+        info?.instanceType ?: "",
+        info?.ownerId ?: "",
+        info?.groupId ?: ""
+    )
+    val typeColor = when (typeInfo.label) {
+        "Public" -> Color(0xFF4CAF50)
+        "Friends", "Friends+" -> Color(0xFF42A5F5)
+        "Group" -> Color(0xFFAB47BC)
+        "Invite", "Invite+" -> Color(0xFFFFB300)
+        else -> MaterialTheme.colorScheme.outline
+    }
     Surface(
         color = MaterialTheme.colorScheme.surface,
-        shape = MaterialTheme.shapes.small,
+        shape = MaterialTheme.shapes.medium,
         modifier = Modifier.fillMaxWidth()
     ) {
-        Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-            // VRChat world thumbnails are wide (≈4:3); a square crop chopped the
-            // sides, so use a 4:3 box so the image reads like the real thumbnail.
+        Row(
+            Modifier.height(IntrinsicSize.Min).padding(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Type-colored accent bar (echoes the notification cards) — instant
+            // visual cue for the instance type.
+            Box(
+                Modifier
+                    .width(4.dp)
+                    .fillMaxHeight()
+                    .clip(CircleShape)
+                    .background(typeColor.copy(alpha = 0.85f))
+            )
+            Spacer(Modifier.width(8.dp))
             val img = info?.worldImageUrl.orEmpty()
             if (img.isNotBlank()) {
                 coil.compose.AsyncImage(
@@ -1287,79 +1425,144 @@ private fun InstanceRow(target: InstanceTarget, info: VrchatAuthManager.Instance
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
-                        .size(width = 72.dp, height = 54.dp)
+                        .size(width = 64.dp, height = 48.dp)
                         .clip(MaterialTheme.shapes.medium)
                 )
             } else {
                 Surface(
                     shape = MaterialTheme.shapes.medium,
                     color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
-                    modifier = Modifier.size(width = 72.dp, height = 54.dp)
+                    modifier = Modifier.size(width = 64.dp, height = 48.dp)
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Icon(
                             Icons.Filled.Public, null,
                             tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(24.dp)
+                            modifier = Modifier.size(22.dp)
                         )
                     }
                 }
             }
             Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
+            Column(
+                Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
+                val worldName = info?.worldName?.takeIf { it.isNotBlank() }
+                    ?: target.label.ifBlank { "Instance" }
+                // Name on ONE line (tap to open the world page); the metadata sits
+                // below it so neither competes for width.
                 Text(
-                    info?.worldName?.takeIf { it.isNotBlank() } ?: target.label.ifBlank { "Instance" },
+                    worldName,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 2, overflow = TextOverflow.Ellipsis
+                    fontWeight = FontWeight.Medium,
+                    color = if (worldId != null) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = if (worldId != null) Modifier.clickable {
+                        ctx.startActivity(
+                            Intent(Intent.ACTION_VIEW,
+                                Uri.parse("https://vrchat.com/home/world/$worldId"))
+                        )
+                    } else Modifier
                 )
-                Spacer(Modifier.height(2.dp))
-                val (statusText, statusColor) = when (status) {
-                    VrchatAuthManager.InstanceStatus.OPEN ->
-                        "${info?.players ?: 0}/${info?.capacity ?: 0} players" to Color(0xFF4CAF50)
-                    VrchatAuthManager.InstanceStatus.CLOSED ->
-                        "Closed (dead)" to Color(0xFFEF5350)
-                    VrchatAuthManager.InstanceStatus.INACCESSIBLE ->
-                        "Not accessible" to Color(0xFFFFB300)
-                    VrchatAuthManager.InstanceStatus.UNKNOWN ->
-                        "Status unknown" to MaterialTheme.colorScheme.outline
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    if (typeInfo.label.isNotBlank()) {
+                        val chipModifier = if (typeInfo.navigableUrl != null)
+                            Modifier
+                                .clip(MaterialTheme.shapes.extraSmall)
+                                .clickable {
+                                    ctx.startActivity(
+                                        Intent(Intent.ACTION_VIEW, Uri.parse(typeInfo.navigableUrl))
+                                    )
+                                }
+                        else Modifier.clip(MaterialTheme.shapes.extraSmall)
+                        Box(
+                            chipModifier
+                                .background(typeColor.copy(alpha = 0.18f))
+                                .padding(horizontal = 7.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                typeInfo.label,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = typeColor,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                    val (statusText, statusColor) = when {
+                        isOpen && (info?.players ?: 0) == 0 ->
+                            "Empty" to Color(0xFFEF5350)
+                        isOpen ->
+                            "${info?.players ?: 0}/${info?.capacity ?: 0} players" to Color(0xFF4CAF50)
+                        status == VrchatAuthManager.InstanceStatus.CLOSED ->
+                            "Closed" to Color(0xFFEF5350)
+                        status == VrchatAuthManager.InstanceStatus.INACCESSIBLE ->
+                            "Locked" to Color(0xFFFFB300)
+                        else ->
+                            "Checking" to MaterialTheme.colorScheme.outline
+                    }
+                    Text(
+                        statusText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = statusColor,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
                 }
-                Text(statusText, style = MaterialTheme.typography.labelSmall, color = statusColor)
                 if (!target.timeLabel.isNullOrBlank()) {
                     Text(
                         target.timeLabel,
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.outline
+                        color = MaterialTheme.colorScheme.outline,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
-            Spacer(Modifier.width(8.dp))
-            if (sending) {
-                CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-            } else {
-                FilledTonalButton(
-                    onClick = {
-                        sending = true
-                        scope.launch {
-                            val r = VrchatAuthManager.inviteSelfToInstance(ctx, target.location)
-                            Toast.makeText(
-                                ctx,
-                                NotificationActionReceiver.feedback(
-                                    NotificationActionReceiver.ACTION_INVITE_ME, r
-                                ),
-                                Toast.LENGTH_LONG
-                            ).show()
-                            sending = false
-                        }
-                    },
-                    enabled = canJoin,
-                    shape = MaterialTheme.shapes.small,
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
-                    modifier = Modifier.height(34.dp)
-                ) {
-                    Icon(Icons.AutoMirrored.Filled.Login, null, Modifier.size(15.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("Invite", style = MaterialTheme.typography.labelMedium)
+            Spacer(Modifier.width(10.dp))
+            // Icon-only invite affordance (matches the card's circular symbols).
+            // Muted + disabled when the instance is dead/empty/inaccessible.
+            val inviteEnabled = canJoin && !sending
+            Surface(
+                onClick = {
+                    sending = true
+                    scope.launch {
+                        val r = VrchatAuthManager.inviteSelfToInstance(ctx, target.location)
+                        Toast.makeText(
+                            ctx,
+                            NotificationActionReceiver.feedback(
+                                NotificationActionReceiver.ACTION_INVITE_ME, r
+                            ),
+                            Toast.LENGTH_LONG
+                        ).show()
+                        sending = false
+                    }
+                },
+                enabled = inviteEnabled,
+                shape = CircleShape,
+                color = if (canJoin) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f),
+                modifier = Modifier.size(38.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    if (sending) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    } else {
+                        Icon(
+                            Icons.AutoMirrored.Filled.Login,
+                            contentDescription = "Invite me",
+                            modifier = Modifier.size(19.dp),
+                            tint = if (canJoin) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.outline
+                        )
+                    }
                 }
             }
         }

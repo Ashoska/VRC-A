@@ -44,7 +44,8 @@ data class InAppAlert(
 object InAppAlertState {
     private const val PREFS_NAME = "vrca_in_app_alerts"
     private const val KEY_GROUPS = "groups_json"
-    private const val MAX_GROUPS = 20
+    // Group count is unbounded (notifications are "infinite") — the UI lazy-renders
+    // them so a long history doesn't lag, and a "Dismiss all" button clears them.
     private const val MAX_EVENTS_PER_GROUP = 50
 
     private val _groups = MutableStateFlow<List<InAppAlertGroup>>(emptyList())
@@ -135,7 +136,6 @@ object InAppAlertState {
                 lastUpdatedMs = event.timestampMs
             ))
         }
-        while (current.size > MAX_GROUPS) current.removeLast()
         _groups.value = current
         persist(ctx)
     }
@@ -162,6 +162,16 @@ object InAppAlertState {
         current.removeAll { it.groupId == groupId }
         _groups.value = current
         persist(ctx)
+    }
+
+    /** Clears every in-app alert group (the "Dismiss all" action). Returns the
+     *  group ids that were cleared so the caller can cancel their linked Android
+     *  notifications too. */
+    fun dismissAll(ctx: Context): List<String> {
+        val ids = _groups.value.map { it.groupId }
+        _groups.value = emptyList()
+        persist(ctx)
+        return ids
     }
 
     private fun persist(ctx: Context) {

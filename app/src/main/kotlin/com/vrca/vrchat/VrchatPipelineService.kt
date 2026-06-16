@@ -911,6 +911,12 @@ class VrchatPipelineService : Service() {
                 )
             }
             notifType == "invite" -> {
+                // Suppress self-invites: when the user invites THEMSELVES (the app's
+                // "Invite me" button or VRChat's own self-invite), VRChat echoes an
+                // invite notification whose sender is the user's OWN id. Don't surface
+                // it — they already know they invited themselves.
+                val myId = VrchatAuthManager.getStoredUserId(this@VrchatPipelineService)
+                if (senderUserId.isNotBlank() && senderUserId == myId) return
                 val det = try {
                     JSONObject(content.optString("details", "{}"))
                 } catch (e: Exception) { JSONObject() }
@@ -2118,6 +2124,9 @@ class VrchatPipelineService : Service() {
                             alertGroupKey = "friend_$senderUserId"
                         )
                         "invite" -> {
+                            // Skip self-invites (sender == our own id); see live path.
+                            val myId = VrchatAuthManager.getStoredUserId(this@VrchatPipelineService)
+                            if (senderUserId.isNotBlank() && senderUserId == myId) continue
                             val det = try {
                                 JSONObject(obj.optString("details", "{}"))
                             } catch (e: Exception) { JSONObject() }
