@@ -1153,6 +1153,67 @@ private fun CompactAlertButton(
     }
 }
 
+/** Extracts the `wrld_xxx` world ID from a VRChat instance location string. */
+private fun extractWorldId(location: String): String? =
+    location.substringBefore(':').takeIf { it.startsWith("wrld_") }
+
+/**
+ * Parses the instance type from the location string segments.
+ * VRChat locations: `wrld_xxx:id~type(params)~nonce(...)`.
+ * Returns a pair of (typeLabel, navigableId) where navigableId is a group/user ID
+ * that can be used for deep-linking, or null if not applicable.
+ */
+private data class InstanceTypeInfo(
+    val label: String,
+    val navigableUrl: String? = null
+)
+
+private fun parseInstanceType(
+    location: String,
+    apiType: String = "",
+    apiOwnerId: String = "",
+    apiGroupId: String = ""
+): InstanceTypeInfo {
+    val type = apiType.ifBlank {
+        val afterColon = location.substringAfter(':', "")
+        when {
+            afterColon.contains("~friends(") -> "friends"
+            afterColon.contains("~hidden(") -> "hidden"
+            afterColon.contains("~group(") -> "group"
+            afterColon.contains("~private(") && afterColon.contains("~canRequestInvite") -> "invite+"
+            afterColon.contains("~private(") -> "invite"
+            afterColon.isNotBlank() && !afterColon.contains('~') -> "public"
+            else -> ""
+        }
+    }
+    val groupId = apiGroupId.ifBlank {
+        val m = Regex("~group\\((grp_[^)]+)\\)").find(location)
+        m?.groupValues?.getOrNull(1) ?: ""
+    }
+    val ownerId = apiOwnerId.ifBlank {
+        val m = Regex("~(?:friends|hidden)\\((usr_[^)]+)\\)").find(location)
+        m?.groupValues?.getOrNull(1) ?: ""
+    }
+    return when (type) {
+        "public" -> InstanceTypeInfo("Public")
+        "friends" -> InstanceTypeInfo(
+            "Friends",
+            if (ownerId.startsWith("usr_")) "https://vrchat.com/home/user/$ownerId" else null
+        )
+        "hidden" -> InstanceTypeInfo(
+            "Friends+",
+            if (ownerId.startsWith("usr_")) "https://vrchat.com/home/user/$ownerId" else null
+        )
+        "group" -> InstanceTypeInfo(
+            "Group",
+            if (groupId.startsWith("grp_")) "https://vrchat.com/home/group/$groupId" else null
+        )
+        "invite" -> InstanceTypeInfo("Invite")
+        "invite+" -> InstanceTypeInfo("Invite+")
+        else -> InstanceTypeInfo("")
+    }
+}
+
 /** A target instance for the invite/history picker. [timeLabel] (history only) shows
  *  the join/left times so users can cross-reference what they played and when. */
 private data class InstanceTarget(
@@ -1269,16 +1330,21 @@ private fun InstanceRow(target: InstanceTarget, info: VrchatAuthManager.Instance
     val scope = rememberCoroutineScope()
     var sending by remember { mutableStateOf(false) }
     val status = info?.status ?: VrchatAuthManager.InstanceStatus.UNKNOWN
-    val canJoin = status != VrchatAuthManager.InstanceStatus.CLOSED &&
-        status != VrchatAuthManager.InstanceStatus.INACCESSIBLE
+    val isOpen = status == VrchatAuthManager.InstanceStatus.OPEN
+    val canJoin = isOpen && (info?.players ?: 0) > 0
+    val worldId = extractWorldId(target.location)
+    val typeInfo = parseInstanceType(
+        target.location,
+        info?.instanceType ?: "",
+        info?.ownerId ?: "",
+        info?.groupId ?: ""
+    )
     Surface(
         color = MaterialTheme.colorScheme.surface,
         shape = MaterialTheme.shapes.small,
         modifier = Modifier.fillMaxWidth()
     ) {
         Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-            // VRChat world thumbnails are wide (≈4:3); a square crop chopped the
-            // sides, so use a 4:3 box so the image reads like the real thumbnail.
             val img = info?.worldImageUrl.orEmpty()
             if (img.isNotBlank()) {
                 coil.compose.AsyncImage(
@@ -1307,24 +1373,91 @@ private fun InstanceRow(target: InstanceTarget, info: VrchatAuthManager.Instance
             }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(
-                    info?.worldName?.takeIf { it.isNotBlank() } ?: target.label.ifBlank { "Instance" },
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 2, overflow = TextOverflow.Ellipsis
-                )
-                Spacer(Modifier.height(2.dp))
-                val (statusText, statusColor) = when (status) {
-                    VrchatAuthManager.InstanceStatus.OPEN ->
-                        "${info?.players ?: 0}/${info?.capacity ?: 0} players" to Color(0xFF4CAF50)
-                    VrchatAuthManager.InstanceStatus.CLOSED ->
-                        "Closed (dead)" to Color(0xFFEF5350)
-                    VrchatAuthManager.InstanceStatus.INACCESSIBLE ->
-                        "Not accessible" to Color(0xFFFFB300)
-                    VrchatAuthManager.InstanceStatus.UNKNOWN ->
-                        "Status unknown" to MaterialTheme.colorScheme.outline
+                val worldName = info?.worldName?.takeIf { it.isNotBlank() }
+                    ?: target.label.ifBlank { "Instance" }
+                if (worldId != null) {
+                    Text(
+                        worldName,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.clickable {
+                            ctx.startActivity(
+                                Intent(Intent.ACTION_VIEW,
+                                    Uri.parse("https://vrchat.com/home/world/$worldId"))
+                            )
+                        }
+                    )
+                } else {
+                    Text(
+                        worldName,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis
+                    )
                 }
-                Text(statusText, style = MaterialTheme.typography.labelSmall, color = statusColor)
+                Spacer(Modifier.height(2.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    if (typeInfo.label.isNotBlank()) {
+                        val typeColor = when (typeInfo.label) {
+                            "Public" -> Color(0xFF4CAF50)
+                            "Friends", "Friends+" -> Color(0xFF42A5F5)
+                            "Group" -> Color(0xFFAB47BC)
+                            "Invite", "Invite+" -> Color(0xFFFFB300)
+                            else -> MaterialTheme.colorScheme.outline
+                        }
+                        if (typeInfo.navigableUrl != null) {
+                            Surface(
+                                onClick = {
+                                    ctx.startActivity(
+                                        Intent(Intent.ACTION_VIEW, Uri.parse(typeInfo.navigableUrl))
+                                    )
+                                },
+                                shape = MaterialTheme.shapes.extraSmall,
+                                color = typeColor.copy(alpha = 0.18f),
+                                modifier = Modifier.height(18.dp)
+                            ) {
+                                Box(Modifier.padding(horizontal = 6.dp), contentAlignment = Alignment.Center) {
+                                    Text(
+                                        typeInfo.label,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = typeColor
+                                    )
+                                }
+                            }
+                        } else {
+                            Surface(
+                                shape = MaterialTheme.shapes.extraSmall,
+                                color = typeColor.copy(alpha = 0.18f),
+                                modifier = Modifier.height(18.dp)
+                            ) {
+                                Box(Modifier.padding(horizontal = 6.dp), contentAlignment = Alignment.Center) {
+                                    Text(
+                                        typeInfo.label,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = typeColor
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    val (statusText, statusColor) = when {
+                        isOpen && (info?.players ?: 0) == 0 ->
+                            "Empty (0 players)" to Color(0xFFEF5350)
+                        isOpen ->
+                            "${info?.players ?: 0}/${info?.capacity ?: 0} players" to Color(0xFF4CAF50)
+                        status == VrchatAuthManager.InstanceStatus.CLOSED ->
+                            "Closed" to Color(0xFFEF5350)
+                        status == VrchatAuthManager.InstanceStatus.INACCESSIBLE ->
+                            "Not accessible" to Color(0xFFFFB300)
+                        else ->
+                            "Unknown" to MaterialTheme.colorScheme.outline
+                    }
+                    Text(statusText, style = MaterialTheme.typography.labelSmall, color = statusColor)
+                }
                 if (!target.timeLabel.isNullOrBlank()) {
                     Text(
                         target.timeLabel,

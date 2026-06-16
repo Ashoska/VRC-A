@@ -232,7 +232,10 @@ object VrchatAuthManager {
         val worldImageUrl: String,
         val players: Int,
         val capacity: Int,
-        val status: InstanceStatus
+        val status: InstanceStatus,
+        val instanceType: String = "",
+        val ownerId: String = "",
+        val groupId: String = ""
     )
 
     enum class InstanceStatus { OPEN, CLOSED, INACCESSIBLE, UNKNOWN }
@@ -265,9 +268,13 @@ object VrchatAuthManager {
                             worldImageUrl = img,
                             players = extractInstanceUserCount(inst),
                             capacity = inst.optInt("capacity", 0),
-                            // 200 with zero occupants still means the instance object
-                            // exists (joinable); a truly dead instance 404s.
-                            status = InstanceStatus.OPEN
+                            status = InstanceStatus.OPEN,
+                            instanceType = inst.optString("type", "").lowercase(),
+                            ownerId = inst.optString("ownerId", ""),
+                            groupId = inst.optString("groupId", "")
+                                .ifBlank { inst.optString("shortName", "").let { sn ->
+                                    if (sn.startsWith("grp_")) sn else ""
+                                } }
                         )
                     }
                     404 -> unknown.copy(status = InstanceStatus.CLOSED)
