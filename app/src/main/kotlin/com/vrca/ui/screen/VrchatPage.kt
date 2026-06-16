@@ -64,6 +64,7 @@ import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
@@ -293,36 +294,10 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
                         }
                     }
 
-                    // World line when in-game
-                    if (p?.isOnlineInVRChat == true) {
-                        Divider()
-                        if (p.worldName.isNotBlank()) {
-                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                Text(p.worldName, style = MaterialTheme.typography.bodyMedium)
-                                val count = if (p.instanceCapacity > 0)
-                                    "${p.instancePlayerCount} / ${p.instanceCapacity} players"
-                                else "${p.instancePlayerCount} players"
-                                Text(
-                                    count,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        } else {
-                            Text(
-                                when (p.location) {
-                                    "private"   -> "In a private world"
-                                    "traveling" -> "Traveling between worlds..."
-                                    else        -> "In a world"
-                                },
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-
                     // Friends online (free, from the local friends cache) sits on the
                     // SAME row as the 24h Instance History re-invite picker chip.
+                    // This sits ABOVE the current-world/player-count line so the
+                    // social summary reads first when the user is in VRChat.
                     Spacer(Modifier.height(2.dp))
                     Row(
                         Modifier.fillMaxWidth(),
@@ -366,6 +341,34 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
                                     color = MaterialTheme.colorScheme.primary
                                 )
                             }
+                        }
+                    }
+
+                    // World line when in-game
+                    if (p?.isOnlineInVRChat == true) {
+                        Divider()
+                        if (p.worldName.isNotBlank()) {
+                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text(p.worldName, style = MaterialTheme.typography.bodyMedium)
+                                val count = if (p.instanceCapacity > 0)
+                                    "${p.instancePlayerCount} / ${p.instanceCapacity} players"
+                                else "${p.instancePlayerCount} players"
+                                Text(
+                                    count,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        } else {
+                            Text(
+                                when (p.location) {
+                                    "private"   -> "In a private world"
+                                    "traveling" -> "Traveling between worlds..."
+                                    else        -> "In a world"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                     }
 
@@ -1403,120 +1406,181 @@ private fun InstanceRow(target: InstanceTarget, info: VrchatAuthManager.Instance
         shape = MaterialTheme.shapes.medium,
         modifier = Modifier.fillMaxWidth()
     ) {
-        Row(
-            Modifier.height(IntrinsicSize.Min).padding(8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // Type-colored accent bar (echoes the notification cards) — instant
-            // visual cue for the instance type.
-            Box(
-                Modifier
-                    .width(4.dp)
-                    .fillMaxHeight()
-                    .clip(CircleShape)
-                    .background(typeColor.copy(alpha = 0.85f))
-            )
-            Spacer(Modifier.width(8.dp))
-            val img = info?.worldImageUrl.orEmpty()
-            if (img.isNotBlank()) {
-                coil.compose.AsyncImage(
-                    model = img,
-                    imageLoader = com.vrca.admin.VrchatImageLoader.get(ctx),
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .size(width = 64.dp, height = 48.dp)
-                        .clip(MaterialTheme.shapes.medium)
-                )
-            } else {
-                Surface(
-                    shape = MaterialTheme.shapes.medium,
-                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
-                    modifier = Modifier.size(width = 64.dp, height = 48.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            Icons.Filled.Public, null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(22.dp)
-                        )
-                    }
-                }
-            }
-            Spacer(Modifier.width(12.dp))
-            Column(
-                Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(3.dp)
+        // Outer column: the main row (image · name/meta · invite) on top, then the
+        // join/left time on its OWN full-width line below. Times have a predictable
+        // max length ("Joined 12:00 AM · Left 12:00 AM") so giving them the whole
+        // card width means they never clip; the world name is free to wrap to a
+        // second line up top without fighting the time for horizontal space.
+        Column(Modifier.padding(8.dp)) {
+            Row(
+                Modifier.fillMaxWidth().height(IntrinsicSize.Min),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                val worldName = info?.worldName?.takeIf { it.isNotBlank() }
-                    ?: target.label.ifBlank { "Instance" }
-                // Name on ONE line (tap to open the world page); the metadata sits
-                // below it so neither competes for width.
-                Text(
-                    worldName,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium,
-                    color = if (worldId != null) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = if (worldId != null) Modifier.clickable {
-                        ctx.startActivity(
-                            Intent(Intent.ACTION_VIEW,
-                                Uri.parse("https://vrchat.com/home/world/$worldId"))
-                        )
-                    } else Modifier
+                // Type-colored accent bar (echoes the notification cards) — instant
+                // visual cue for the instance type.
+                Box(
+                    Modifier
+                        .width(4.dp)
+                        .fillMaxHeight()
+                        .clip(CircleShape)
+                        .background(typeColor.copy(alpha = 0.85f))
                 )
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    if (typeInfo.label.isNotBlank()) {
-                        val chipModifier = if (typeInfo.navigableUrl != null)
-                            Modifier
-                                .clip(MaterialTheme.shapes.extraSmall)
-                                .clickable {
-                                    ctx.startActivity(
-                                        Intent(Intent.ACTION_VIEW, Uri.parse(typeInfo.navigableUrl))
-                                    )
-                                }
-                        else Modifier.clip(MaterialTheme.shapes.extraSmall)
-                        Box(
-                            chipModifier
-                                .background(typeColor.copy(alpha = 0.18f))
-                                .padding(horizontal = 7.dp, vertical = 2.dp)
-                        ) {
-                            Text(
-                                typeInfo.label,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = typeColor,
-                                maxLines = 1
+                Spacer(Modifier.width(8.dp))
+                val img = info?.worldImageUrl.orEmpty()
+                if (img.isNotBlank()) {
+                    coil.compose.AsyncImage(
+                        model = img,
+                        imageLoader = com.vrca.admin.VrchatImageLoader.get(ctx),
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .size(width = 64.dp, height = 48.dp)
+                            .clip(MaterialTheme.shapes.medium)
+                    )
+                } else {
+                    Surface(
+                        shape = MaterialTheme.shapes.medium,
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                        modifier = Modifier.size(width = 64.dp, height = 48.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                Icons.Filled.Public, null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(22.dp)
                             )
                         }
                     }
-                    val (statusText, statusColor) = when {
-                        isOpen && (info?.players ?: 0) == 0 ->
-                            "Empty" to Color(0xFFEF5350)
-                        isOpen ->
-                            "${info?.players ?: 0}/${info?.capacity ?: 0} players" to Color(0xFF4CAF50)
-                        status == VrchatAuthManager.InstanceStatus.CLOSED ->
-                            "Closed" to Color(0xFFEF5350)
-                        status == VrchatAuthManager.InstanceStatus.INACCESSIBLE ->
-                            "Locked" to Color(0xFFFFB300)
-                        else ->
-                            "Checking" to MaterialTheme.colorScheme.outline
-                    }
-                    Text(
-                        statusText,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = statusColor,
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
-                    )
                 }
-                if (!target.timeLabel.isNullOrBlank()) {
+                Spacer(Modifier.width(12.dp))
+                Column(
+                    Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
+                    val worldName = info?.worldName?.takeIf { it.isNotBlank() }
+                        ?: target.label.ifBlank { "Instance" }
+                    // Name may wrap to TWO lines for long world names (tap to open
+                    // the world page); the metadata sits below it.
+                    Text(
+                        worldName,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        color = if (worldId != null) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = if (worldId != null) Modifier.clickable {
+                            ctx.startActivity(
+                                Intent(Intent.ACTION_VIEW,
+                                    Uri.parse("https://vrchat.com/home/world/$worldId"))
+                            )
+                        } else Modifier
+                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        if (typeInfo.label.isNotBlank()) {
+                            val chipModifier = if (typeInfo.navigableUrl != null)
+                                Modifier
+                                    .clip(MaterialTheme.shapes.extraSmall)
+                                    .clickable {
+                                        ctx.startActivity(
+                                            Intent(Intent.ACTION_VIEW, Uri.parse(typeInfo.navigableUrl))
+                                        )
+                                    }
+                            else Modifier.clip(MaterialTheme.shapes.extraSmall)
+                            Box(
+                                chipModifier
+                                    .background(typeColor.copy(alpha = 0.18f))
+                                    .padding(horizontal = 7.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    typeInfo.label,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = typeColor,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+                        val (statusText, statusColor) = when {
+                            isOpen && (info?.players ?: 0) == 0 ->
+                                "Empty" to Color(0xFFEF5350)
+                            isOpen ->
+                                "${info?.players ?: 0}/${info?.capacity ?: 0} players" to Color(0xFF4CAF50)
+                            status == VrchatAuthManager.InstanceStatus.CLOSED ->
+                                "Closed" to Color(0xFFEF5350)
+                            status == VrchatAuthManager.InstanceStatus.INACCESSIBLE ->
+                                "Locked" to Color(0xFFFFB300)
+                            else ->
+                                "Checking" to MaterialTheme.colorScheme.outline
+                        }
+                        Text(
+                            statusText,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = statusColor,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                    }
+                }
+                Spacer(Modifier.width(10.dp))
+                // Icon-only invite affordance (matches the card's circular symbols).
+                // Muted + disabled when the instance is dead/empty/inaccessible.
+                val inviteEnabled = canJoin && !sending
+                Surface(
+                    onClick = {
+                        sending = true
+                        scope.launch {
+                            val r = VrchatAuthManager.inviteSelfToInstance(ctx, target.location)
+                            Toast.makeText(
+                                ctx,
+                                NotificationActionReceiver.feedback(
+                                    NotificationActionReceiver.ACTION_INVITE_ME, r
+                                ),
+                                Toast.LENGTH_LONG
+                            ).show()
+                            sending = false
+                        }
+                    },
+                    enabled = inviteEnabled,
+                    shape = CircleShape,
+                    color = if (canJoin) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                        else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f),
+                    modifier = Modifier.size(38.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        if (sending) {
+                            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        } else {
+                            Icon(
+                                Icons.AutoMirrored.Filled.Login,
+                                contentDescription = "Invite me",
+                                modifier = Modifier.size(19.dp),
+                                tint = if (canJoin) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.outline
+                            )
+                        }
+                    }
+                }
+            }
+            // Join/left time on its own full-width line — predictable max length, so
+            // with the whole card width it never clips even at "12:00 AM" extremes.
+            if (!target.timeLabel.isNullOrBlank()) {
+                Spacer(Modifier.height(6.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Filled.Schedule,
+                        contentDescription = null,
+                        modifier = Modifier.size(13.dp),
+                        tint = MaterialTheme.colorScheme.outline
+                    )
+                    Spacer(Modifier.width(5.dp))
                     Text(
                         target.timeLabel,
                         style = MaterialTheme.typography.labelSmall,
@@ -1524,45 +1588,6 @@ private fun InstanceRow(target: InstanceTarget, info: VrchatAuthManager.Instance
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                }
-            }
-            Spacer(Modifier.width(10.dp))
-            // Icon-only invite affordance (matches the card's circular symbols).
-            // Muted + disabled when the instance is dead/empty/inaccessible.
-            val inviteEnabled = canJoin && !sending
-            Surface(
-                onClick = {
-                    sending = true
-                    scope.launch {
-                        val r = VrchatAuthManager.inviteSelfToInstance(ctx, target.location)
-                        Toast.makeText(
-                            ctx,
-                            NotificationActionReceiver.feedback(
-                                NotificationActionReceiver.ACTION_INVITE_ME, r
-                            ),
-                            Toast.LENGTH_LONG
-                        ).show()
-                        sending = false
-                    }
-                },
-                enabled = inviteEnabled,
-                shape = CircleShape,
-                color = if (canJoin) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
-                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f),
-                modifier = Modifier.size(38.dp)
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    if (sending) {
-                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                    } else {
-                        Icon(
-                            Icons.AutoMirrored.Filled.Login,
-                            contentDescription = "Invite me",
-                            modifier = Modifier.size(19.dp),
-                            tint = if (canJoin) MaterialTheme.colorScheme.primary
-                                else MaterialTheme.colorScheme.outline
-                        )
-                    }
                 }
             }
         }
