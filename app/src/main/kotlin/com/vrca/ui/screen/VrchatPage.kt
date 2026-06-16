@@ -18,7 +18,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.AlertDialog
@@ -50,6 +52,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Login
 import androidx.compose.material.icons.automirrored.filled.Logout
@@ -1288,14 +1291,23 @@ private fun InstanceListDialog(
         infos = result
         loading = false
     }
-    Dialog(onDismissRequest = onDismiss) {
+    // usePlatformDefaultWidth = false lets the card span nearly the full screen
+    // width (the default narrow dialog width was clipping world names + the
+    // join/left time line). Padding keeps small margins on each side.
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
         ElevatedCard(
             shape = MaterialTheme.shapes.large,
             colors = CardDefaults.elevatedCardColors(
                 containerColor = MaterialTheme.colorScheme.surfaceVariant
             ),
             elevation = CardDefaults.elevatedCardElevation(defaultElevation = 6.dp),
-            modifier = Modifier.fillMaxWidth().heightIn(max = 560.dp)
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .heightIn(max = 620.dp)
         ) {
             Column(Modifier.padding(18.dp)) {
                 // Header: world icon + title, dismiss on the right.
@@ -1379,12 +1391,32 @@ private fun InstanceRow(target: InstanceTarget, info: VrchatAuthManager.Instance
         info?.ownerId ?: "",
         info?.groupId ?: ""
     )
+    val typeColor = when (typeInfo.label) {
+        "Public" -> Color(0xFF4CAF50)
+        "Friends", "Friends+" -> Color(0xFF42A5F5)
+        "Group" -> Color(0xFFAB47BC)
+        "Invite", "Invite+" -> Color(0xFFFFB300)
+        else -> MaterialTheme.colorScheme.outline
+    }
     Surface(
         color = MaterialTheme.colorScheme.surface,
         shape = MaterialTheme.shapes.medium,
         modifier = Modifier.fillMaxWidth()
     ) {
-        Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.height(IntrinsicSize.Min).padding(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Type-colored accent bar (echoes the notification cards) — instant
+            // visual cue for the instance type.
+            Box(
+                Modifier
+                    .width(4.dp)
+                    .fillMaxHeight()
+                    .clip(CircleShape)
+                    .background(typeColor.copy(alpha = 0.85f))
+            )
+            Spacer(Modifier.width(8.dp))
             val img = info?.worldImageUrl.orEmpty()
             if (img.isNotBlank()) {
                 coil.compose.AsyncImage(
@@ -1440,13 +1472,6 @@ private fun InstanceRow(target: InstanceTarget, info: VrchatAuthManager.Instance
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     if (typeInfo.label.isNotBlank()) {
-                        val typeColor = when (typeInfo.label) {
-                            "Public" -> Color(0xFF4CAF50)
-                            "Friends", "Friends+" -> Color(0xFF42A5F5)
-                            "Group" -> Color(0xFFAB47BC)
-                            "Invite", "Invite+" -> Color(0xFFFFB300)
-                            else -> MaterialTheme.colorScheme.outline
-                        }
                         val chipModifier = if (typeInfo.navigableUrl != null)
                             Modifier
                                 .clip(MaterialTheme.shapes.extraSmall)
