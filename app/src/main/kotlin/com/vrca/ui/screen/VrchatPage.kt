@@ -298,7 +298,10 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
                     // SAME row as the 24h Instance History re-invite picker chip.
                     // This sits ABOVE the current-world/player-count line so the
                     // social summary reads first when the user is in VRChat.
-                    Spacer(Modifier.height(2.dp))
+                    // No extra Spacer here — the parent Column's 10dp spacedBy keeps
+                    // this row (friends text + Instance History button) on the same
+                    // uniform rhythm as the chips row above; a stray 2dp spacer made
+                    // this one gap 12dp and read as a "weird" uneven gap.
                     Row(
                         Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
