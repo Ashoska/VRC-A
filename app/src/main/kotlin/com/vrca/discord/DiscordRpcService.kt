@@ -308,6 +308,14 @@ class DiscordRpcService : Service() {
     @SuppressLint("SetJavaScriptEnabled")
     private fun loadWebView() {
         mainHandler.post {
+            // No validated network → don't load. The page would come from the HTTP
+            // cache and the shim would inject "ok" against it, falsely reporting
+            // CONNECTED while the gateway socket can't open. Park and wait instead.
+            if (!hasNetwork()) {
+                Log.i(TAG, "loadWebView skipped — offline; waiting for network")
+                parkOffline()
+                return@post
+            }
             webView?.let { old ->
                 old.stopLoading()
                 old.loadUrl("about:blank")
@@ -380,13 +388,7 @@ class DiscordRpcService : Service() {
                         // reloads once connectivity is back.
                         if (request?.isForMainFrame != true) return
                         Log.w(TAG, "WebView main-frame load error: ${error?.errorCode} ${error?.description}")
-                        if (!hasNetwork()) {
-                            awaitingNetwork = true
-                            DiscordRpcState.status = DiscordRpcStatus.RECONNECTING
-                            DiscordRpcState.failureMessage =
-                                "Waiting for network — Discord will reconnect automatically"
-                            updateNotif("Waiting for network — Discord will reconnect...")
-                        }
+                        if (!hasNetwork()) parkOffline()
                     }
                 }
 
@@ -411,7 +413,7 @@ class DiscordRpcService : Service() {
             ?: return true // can't tell — assume online so we don't wedge recovery
         val net = cm.activeNetwork ?: return false
         val caps = cm.getNetworkCapabilities(net) ?: return false
-        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
     }
 
     /** Registers a default-network callback (once) so the RPC auto-recovers when
@@ -420,8 +422,19 @@ class DiscordRpcService : Service() {
         if (networkCallback != null) return
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
         val cb = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                mainHandler.post { onNetworkAvailable() }
+            // onAvailable fires the instant a network REGISTERS — before Android has
+            // confirmed it actually reaches the internet (captive portal, connecting
+            // Wi-Fi). Reloading then loads the cached page and false-"connects". So we
+            // only recover on onCapabilitiesChanged once NET_CAPABILITY_VALIDATED is
+            // set (Android probed real connectivity). onLost parks us immediately.
+            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
+                    mainHandler.post { onNetworkAvailable() }
+                }
+            }
+
+            override fun onLost(network: Network) {
+                mainHandler.post { if (isRunning && !hasNetwork()) parkOffline() }
             }
         }
         try {
@@ -447,6 +460,7 @@ class DiscordRpcService : Service() {
      *  alone so a Wi-Fi handoff doesn't churn a working RPC. */
     private fun onNetworkAvailable() {
         if (!isRunning) return
+        if (!hasNetwork()) return // not actually validated-online yet
         val status = DiscordRpcState.status
         val stuck = awaitingNetwork ||
             status == DiscordRpcStatus.SESSION_EXPIRED ||
@@ -475,10 +489,7 @@ class DiscordRpcService : Service() {
         // shows auth expired and only reopening the app fixes it".
         if (!hasNetwork()) {
             Log.i(TAG, "Session expired but offline — waiting for network before recovering")
-            awaitingNetwork = true
-            DiscordRpcState.status = DiscordRpcStatus.RECONNECTING
-            DiscordRpcState.failureMessage = "Waiting for network — Discord will reconnect automatically"
-            updateNotif("Waiting for network — Discord will reconnect...")
+            parkOffline()
             return
         }
 
@@ -541,7 +552,14 @@ class DiscordRpcService : Service() {
             lastJsResponseMs = System.currentTimeMillis()
             val cleaned = result?.trim()?.replace("\"", "") ?: "null"
             lastShimResult = cleaned
-            if (cleaned == "ok") {
+            if (cleaned == "ok" && !hasNetwork()) {
+                // Module finder found Discord's modules on the CACHED page, but
+                // there's no network so the gateway socket isn't real. Don't declare
+                // CONNECTED — park and wait for connectivity (cached-page false
+                // "connected" was the offline flicker).
+                Log.i(TAG, "Shim ok but offline — parking instead of declaring connected")
+                parkOffline()
+            } else if (cleaned == "ok") {
                 Log.i(TAG, "JS shim injected — module finder succeeded")
                 shimReady = true
                 shimRetryCount = 0
@@ -588,6 +606,31 @@ class DiscordRpcService : Service() {
         presenceTimerJob?.cancel()
         presenceWatchJob = null
         presenceTimerJob = null
+    }
+
+    /** Park the RPC quietly in the offline-wait state. The whole point: while there
+     *  is genuinely no network, the WebView still serves discord.com from its HTTP
+     *  CACHE, so a page-load + shim-inject "succeeds" and we'd otherwise declare the
+     *  RPC CONNECTED even though the gateway WebSocket can never open — then a health
+     *  check finds the dead gateway, we reload, the cached page loads again, and the
+     *  status flickers CONNECTED -> RECONNECTING every ~10s. parkOffline stops all of
+     *  that: presence pushes off, shim marked not-ready (so health probes/pushes are
+     *  no-ops), no reload/reinject. The validated-network callback re-establishes from
+     *  scratch the moment real connectivity returns. Idempotent. */
+    private fun parkOffline() {
+        awaitingNetwork = true
+        shimReady = false
+        stopPresenceUpdates()
+        // Don't let the JS-freeze watchdog trip a reload while parked / on return.
+        lastJsResponseMs = System.currentTimeMillis()
+        deadHealthChecks = 0
+        degradedHealthChecks = 0
+        noGatewayChecks = 0
+        consecutivePushFailures = 0
+        DiscordRpcState.status = DiscordRpcStatus.RECONNECTING
+        DiscordRpcState.failureMessage =
+            "Waiting for network — Discord will reconnect automatically"
+        updateNotif("Waiting for network — Discord will reconnect...")
     }
 
     /** Recursive size of a directory in bytes (best-effort). */
@@ -656,6 +699,15 @@ class DiscordRpcService : Service() {
         sessionMonitorJob = scope.launch {
             while (true) {
                 delay(SESSION_CHECK_INTERVAL_MS)
+
+                // Offline → park quietly and skip ALL health-probe / freeze / reload
+                // logic. Probing the cached page would churn no_gateway -> reinject ->
+                // false CONNECTED. The validated-network callback recovers us.
+                if (!hasNetwork()) {
+                    if (!awaitingNetwork) Log.i(TAG, "Session monitor: offline — parking")
+                    parkOffline()
+                    continue
+                }
 
                 // Re-assert JS timer and visibility state every cycle. Chromium
                 // can throttle/freeze a detached WebView's JS when backgrounded
