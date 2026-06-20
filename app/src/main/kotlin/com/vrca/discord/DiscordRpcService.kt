@@ -8,12 +8,16 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.util.Log
 import android.view.View
 import android.webkit.CookieManager
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -166,6 +170,13 @@ class DiscordRpcService : Service() {
     @Volatile private var lastJsResponseMs = 0L
     @Volatile private var healthySinceMs = 0L
 
+    // Set true when recovery is blocked purely because the device is offline (WiFi
+    // off / no network). While true we DON'T burn MAX_SESSION_RECOVERIES on doomed
+    // reloads; the network callback re-kicks recovery the instant connectivity
+    // returns — so the user no longer has to reopen the app to fix "auth expired".
+    @Volatile private var awaitingNetwork = false
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
     private var onlineStartEpochMs = 0L
     private var offlineStartEpochMs = 0L
     private val rpcPrefs by lazy {
@@ -238,6 +249,8 @@ class DiscordRpcService : Service() {
             return START_NOT_STICKY
         }
         ensureChannel()
+        // Auto-recover the RPC when connectivity returns (idempotent — registers once).
+        registerNetworkCallback()
 
         if (isRunning && webView != null) {
             // Duplicate START while already running (app reopened after Back, or a
@@ -354,6 +367,27 @@ class DiscordRpcService : Service() {
                         }
                         return false
                     }
+
+                    override fun onReceivedError(
+                        view: WebView?,
+                        request: WebResourceRequest?,
+                        error: WebResourceError?
+                    ) {
+                        // Only the MAIN frame (the discord.com page itself) failing
+                        // matters — sub-resource errors are noise. When it fails with no
+                        // network, park in the offline-wait state instead of letting the
+                        // health/login paths burn recovery attempts; the network callback
+                        // reloads once connectivity is back.
+                        if (request?.isForMainFrame != true) return
+                        Log.w(TAG, "WebView main-frame load error: ${error?.errorCode} ${error?.description}")
+                        if (!hasNetwork()) {
+                            awaitingNetwork = true
+                            DiscordRpcState.status = DiscordRpcStatus.RECONNECTING
+                            DiscordRpcState.failureMessage =
+                                "Waiting for network — Discord will reconnect automatically"
+                            updateNotif("Waiting for network — Discord will reconnect...")
+                        }
+                    }
                 }
 
                 loadUrl("https://discord.com/channels/@me")
@@ -372,9 +406,81 @@ class DiscordRpcService : Service() {
         }
     }
 
+    private fun hasNetwork(): Boolean {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            ?: return true // can't tell — assume online so we don't wedge recovery
+        val net = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(net) ?: return false
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }
+
+    /** Registers a default-network callback (once) so the RPC auto-recovers when
+     *  connectivity returns instead of requiring an app reopen. */
+    private fun registerNetworkCallback() {
+        if (networkCallback != null) return
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                mainHandler.post { onNetworkAvailable() }
+            }
+        }
+        try {
+            cm.registerDefaultNetworkCallback(cb)
+            networkCallback = cb
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not register network callback", e)
+        }
+    }
+
+    private fun unregisterNetworkCallback() {
+        val cb = networkCallback ?: return
+        networkCallback = null
+        try {
+            (getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager)
+                ?.unregisterNetworkCallback(cb)
+        } catch (_: Exception) {}
+    }
+
+    /** Connectivity came back. If the RPC was stuck offline (awaiting network) or
+     *  had gone terminal, re-establish it from scratch — the automatic equivalent of
+     *  the manual "reopen the app" fix. A healthy/normally-recovering session is left
+     *  alone so a Wi-Fi handoff doesn't churn a working RPC. */
+    private fun onNetworkAvailable() {
+        if (!isRunning) return
+        val status = DiscordRpcState.status
+        val stuck = awaitingNetwork ||
+            status == DiscordRpcStatus.SESSION_EXPIRED ||
+            status == DiscordRpcStatus.FAILED
+        if (!stuck) return
+        Log.i(TAG, "Network available — re-establishing Discord RPC")
+        awaitingNetwork = false
+        sessionRecoveryCount = 0
+        shimRetryCount = 0
+        consecutivePushFailures = 0
+        DiscordRpcState.status = DiscordRpcStatus.RECONNECTING
+        DiscordRpcState.failureMessage = "Reconnecting to Discord..."
+        updateNotif("Reconnecting to Discord...")
+        // Full reload re-auths from the persisted localStorage token + cookies.
+        loadWebView()
+    }
+
     private fun onSessionExpired() {
         shimReady = false
         stopPresenceUpdates()
+
+        // If we're offline, a WebView reload can only fail (the page can't load) —
+        // don't waste a recovery attempt on it and don't go terminal "sign in again".
+        // Park in RECONNECTING and let the network callback re-establish the RPC the
+        // moment connectivity returns. This is the fix for "WiFi drops -> Discord
+        // shows auth expired and only reopening the app fixes it".
+        if (!hasNetwork()) {
+            Log.i(TAG, "Session expired but offline — waiting for network before recovering")
+            awaitingNetwork = true
+            DiscordRpcState.status = DiscordRpcStatus.RECONNECTING
+            DiscordRpcState.failureMessage = "Waiting for network — Discord will reconnect automatically"
+            updateNotif("Waiting for network — Discord will reconnect...")
+            return
+        }
 
         if (sessionRecoveryCount < MAX_SESSION_RECOVERIES) {
             sessionRecoveryCount++
@@ -808,6 +914,8 @@ class DiscordRpcService : Service() {
 
     private fun teardown() {
         stopPresenceUpdates()
+        unregisterNetworkCallback()
+        awaitingNetwork = false
         sessionMonitorJob?.cancel()
         sessionMonitorJob = null
         cacheMaintenanceJob?.cancel()
