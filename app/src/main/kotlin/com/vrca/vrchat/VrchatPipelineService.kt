@@ -2732,6 +2732,21 @@ class VrchatPipelineService : Service() {
         }
         VrchatPipelineState.presence = presence
 
+        // Stamp the instance-history leave time on a world -> offline transition that
+        // the WebSocket never reported. When the user turns off their headset, the
+        // game client disconnects but THIS app's own VRChat session keeps the account
+        // "online", so VRChat emits NO self user-location:offline event — the only
+        // signal is this periodic fetchPresence location flipping to "offline". Without
+        // this, the last world stayed "Still here" and kept counting until the user
+        // signed out or rejoined a world. Runs for unwatched users too (the slow 10s
+        // loop calls this with forceLocalUpdate=true). Guarded so it only fires on a
+        // real world -> offline change: "private" was already rewritten to the world
+        // above, and "traveling"/a new wrld_ don't match.
+        if (presence.location.equals("offline", true) &&
+            priorLoc != null && priorLoc.startsWith("wrld_")) {
+            InstanceHistoryStore.markCurrentLeft(this)
+        }
+
         if (deviceHash.isBlank()) return
         if (!AdminWatchState.isWatched.value) return
 
