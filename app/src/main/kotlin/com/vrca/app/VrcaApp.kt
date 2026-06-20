@@ -309,14 +309,21 @@ fun VrcaApp() {
         // Real-time detection: snapshot listener on releases/{deviceHash}
         if (deviceHash.isNotBlank()) {
             DisposableEffect(deviceHash) {
-                val reg = FirebaseFirestore.getInstance()
+                val releaseDocRef = FirebaseFirestore.getInstance()
                     .collection("releases").document(deviceHash)
+                val reg = releaseDocRef
                     .addSnapshotListener { snap, _ ->
                         if (snap == null || !snap.exists()) return@addSnapshotListener
                         val url = snap.getString("downloadUrl").orEmpty()
                         if (url.isBlank()) return@addSnapshotListener
                         val code = snap.getLong("versionCode") ?: return@addSnapshotListener
-                        if (code <= BuildConfig.VERSION_CODE) return@addSnapshotListener
+                        if (code <= BuildConfig.VERSION_CODE) {
+                            // The user is already on (or past) this targeted version —
+                            // they installed the directed update. Retract the per-device
+                            // release doc to save space; it has served its purpose.
+                            releaseDocRef.delete()
+                            return@addSnapshotListener
+                        }
                         val info = ReleaseInfo(
                             versionCode     = code,
                             versionName     = snap.getString("versionName").orEmpty(),

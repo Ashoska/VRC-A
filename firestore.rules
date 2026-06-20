@@ -208,7 +208,14 @@ service cloud.firestore {
         && (request.resource.data.versionCode is int || request.resource.data.versionCode is float)
         && (request.resource.data.downloadUrl is string)
         && request.resource.data.downloadUrl.size() > 0;
-      allow delete: if isOwner();
+      // Owner can delete any release doc. A device may ALSO retract its OWN
+      // targeted release (docId == its deviceHash) once it has installed the
+      // update — self-cleanup to save space. Scoped via isOwnerOfDeviceDoc so a
+      // device can only delete releases/{itsOwnHash}, and "latest" (the global
+      // release, a known non-hash id) is explicitly excluded so no client can
+      // retract the global release for everyone.
+      allow delete: if isOwner()
+        || (docId != "latest" && isOwnerOfDeviceDoc(docId));
     }
 
     /* =========================
