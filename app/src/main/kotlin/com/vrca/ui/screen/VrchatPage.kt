@@ -1285,15 +1285,19 @@ private fun InstanceListDialog(
     onDismiss: () -> Unit
 ) {
     val ctx = LocalContext.current
+    // Resolved instance info, filled in INCREMENTALLY (newest target first) so the
+    // list renders immediately and each row fills in as its fetch lands — the user
+    // is never stuck on a full-screen spinner waiting for every instance.
     var infos by remember { mutableStateOf<Map<String, VrchatAuthManager.InstanceInfo>>(emptyMap()) }
-    var loading by remember { mutableStateOf(true) }
     LaunchedEffect(Unit) {
-        loading = true
-        val result = LinkedHashMap<String, VrchatAuthManager.InstanceInfo>()
-        for (t in targets) result[t.location] = VrchatAuthManager.fetchInstanceInfo(ctx, t.location)
-        infos = result
-        loading = false
+        // targets are already ordered current → most-recently-left (newest to oldest),
+        // so resolving them in order fills the list top-down.
+        for (t in targets) {
+            val info = VrchatAuthManager.fetchInstanceInfo(ctx, t.location)
+            infos = infos + (t.location to info)
+        }
     }
+    val resolving = infos.size < targets.size
     // usePlatformDefaultWidth = false lets the card span nearly the full screen
     // width (the default narrow dialog width was clipping world names + the
     // join/left time line). Padding keeps small margins on each side.
@@ -1355,19 +1359,31 @@ private fun InstanceListDialog(
                         }
                     }
                 }
-                Spacer(Modifier.height(14.dp))
-                when {
-                    loading -> Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                        Spacer(Modifier.width(10.dp))
-                        Text("Checking instances...", style = MaterialTheme.typography.bodyMedium)
+                // Subtle progress hint while later (older) instances are still
+                // resolving — the rows above it are already interactive.
+                if (resolving && targets.isNotEmpty()) {
+                    Spacer(Modifier.height(12.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "Checking instances... (${infos.size}/${targets.size})",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
-                    targets.isEmpty() -> Text(
+                }
+                Spacer(Modifier.height(14.dp))
+                if (targets.isEmpty()) {
+                    Text(
                         "Nothing to show yet.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    else -> Column(
+                } else {
+                    // Render every row immediately; each one shows its own "Checking"
+                    // placeholder until its info arrives (newest first).
+                    Column(
                         Modifier.verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {

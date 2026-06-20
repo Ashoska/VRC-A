@@ -137,6 +137,14 @@ class VrchatPipelineService : Service() {
     private var wsJob: Job? = null
     private var webSocket: WebSocket? = null
     private var reconnectAttempt = 0
+    // Brief drops are kept INVISIBLE: on a socket failure/close we don't flip the
+    // UI to "disconnected" or fire the disconnect notification right away — we hold
+    // a grace window. A reconnect that lands within it (the common transient
+    // ping-timeout / radio-hiccup case) cancels this, so the user never sees a
+    // blip. Only if the grace elapses do we surface the disconnect.
+    private var disconnectMarkJob: Job? = null
+    @Volatile private var visiblyDisconnected = false
+    private val DISCONNECT_GRACE_MS = 12_000L
 
     private val friendsCache = mutableMapOf<String, FriendCacheEntry>()
     private val pendingOffline = mutableMapOf<String, Long>()
@@ -542,6 +550,11 @@ class VrchatPipelineService : Service() {
                     Log.i(TAG, "Pipeline connected")
                     this@VrchatPipelineService.webSocket = webSocket
                     reconnectAttempt = 0
+                    // Reconnected within the grace window (or freshly connected) —
+                    // cancel any pending "mark disconnected" so a brief drop never
+                    // surfaced to the user.
+                    disconnectMarkJob?.cancel()
+                    visiblyDisconnected = false
                     VrchatPipelineState.isConnected = true
                     pipelineConnectedAtMs = System.currentTimeMillis()
                     val displayName = VrchatAuthManager.getStoredDisplayName(this@VrchatPipelineService) ?: "VRChat user"
@@ -577,18 +590,35 @@ class VrchatPipelineService : Service() {
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                     Log.w(TAG, "Pipeline failure: ${t.message}")
-                    VrchatPipelineState.isConnected = false
-                    serviceScope.launch { fireConnectionNotification(false) }
+                    markDisconnectedAfterGrace()
                     scheduleReconnect()
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                     Log.i(TAG, "Pipeline closed: $code $reason")
-                    VrchatPipelineState.isConnected = false
-                    serviceScope.launch { fireConnectionNotification(false) }
+                    markDisconnectedAfterGrace()
                     scheduleReconnect()
                 }
             })
+        }
+    }
+
+    /**
+     * Holds off surfacing a disconnect for [DISCONNECT_GRACE_MS]. The socket is
+     * already being reconnected (scheduleReconnect runs in parallel); if onOpen
+     * fires first it cancels this job, so a fast transient drop stays invisible.
+     * Only when the grace elapses do we flip the UI to disconnected, fire the
+     * disconnect notification, and let the reconnect loop update the persistent
+     * notification with its progress.
+     */
+    private fun markDisconnectedAfterGrace() {
+        if (disconnectMarkJob?.isActive == true) return
+        disconnectMarkJob = serviceScope.launch {
+            delay(DISCONNECT_GRACE_MS)
+            visiblyDisconnected = true
+            VrchatPipelineState.isConnected = false
+            fireConnectionNotification(false)
+            updatePersistentNotif("Reconnecting...")
         }
     }
 
@@ -604,9 +634,18 @@ class VrchatPipelineService : Service() {
         // failure still schedules a fresh retry.
         if (wsJob?.isActive == true) return
         wsJob = serviceScope.launch {
-            val backoffMs = (minOf(reconnectAttempt, 6) * 10_000L).coerceAtLeast(5_000L)
+            // First retry is fast (2s) so a transient drop recovers well inside the
+            // disconnect grace window and stays invisible; later retries back off
+            // 5s → 10s → … capped at 60s for a genuinely dead session.
+            val backoffMs = when (reconnectAttempt) {
+                0 -> 2_000L
+                1 -> 5_000L
+                else -> (minOf(reconnectAttempt, 6) * 10_000L).coerceAtLeast(10_000L)
+            }
             reconnectAttempt++
-            updatePersistentNotif("Reconnecting in ${backoffMs / 1000}s...")
+            // Only churn the persistent notification once the disconnect is actually
+            // visible (grace elapsed). During the grace it still reads "Connected".
+            if (visiblyDisconnected) updatePersistentNotif("Reconnecting in ${backoffMs / 1000}s...")
             delay(backoffMs)
             if (!VrchatAuthManager.isLoggedIn(this@VrchatPipelineService)) {
                 startPipeline()
@@ -622,11 +661,11 @@ class VrchatPipelineService : Service() {
             if (reconnectAttempt >= 2) {
                 val valid = VrchatAuthManager.validateSession(this@VrchatPipelineService)
                 if (!valid) {
-                    updatePersistentNotif("Refreshing VRChat session...")
+                    if (visiblyDisconnected) updatePersistentNotif("Refreshing VRChat session...")
                     VrchatAuthManager.autoRelogin(this@VrchatPipelineService)
                 }
             }
-            updatePersistentNotif("Connecting...")
+            if (visiblyDisconnected) updatePersistentNotif("Connecting...")
             connectWebSocket()
         }
     }
@@ -906,6 +945,17 @@ class VrchatPipelineService : Service() {
                     prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_REQUEST,
                     channelId = NOTIF_CHANNEL_FRIEND_REQUESTS,
                     groupKey = GROUP_KEY_SOCIAL,
+                    // Dedup PER PERSON, not per notification id. One friend request is
+                    // delivered through up to three paths with DIFFERENT ids — the live
+                    // `notification` (V1) event, the live `notification-v2` event (VRChat
+                    // dual-sends both during their migration; both match this branch via
+                    // notifType=="friendRequest"), and the offline REST backfill — so a
+                    // notifId-based key let the same request fire 2-3x at once
+                    // ("Friend request (2)" from one person). The request collapses into a
+                    // single friend_$id card anyway, so one event per person is correct;
+                    // all paths share this exact key. (A genuine re-request after a
+                    // decline is the rare tradeoff — far better than the duplicates.)
+                    dedupId = "fr_$senderUserId",
                     alertBody = "$senderName sent you a friend request",
                     alertGroupKey = "friend_$senderUserId"
                 )
@@ -2119,7 +2169,9 @@ class VrchatPipelineService : Service() {
                             prefKey = VrchatNotificationPrefs.KEY_NOTIF_FRIEND_REQUEST,
                             channelId = NOTIF_CHANNEL_FRIEND_REQUESTS,
                             groupKey = GROUP_KEY_SOCIAL,
-                            dedupId = notifId.ifBlank { null },
+                            // Per-person dedup, shared with the live path (above), so the
+                            // backfill never re-fires a request the live event showed.
+                            dedupId = "fr_$senderUserId",
                             alertBody = "$senderName sent you a friend request",
                             alertGroupKey = "friend_$senderUserId"
                         )
@@ -2679,6 +2731,21 @@ class VrchatPipelineService : Service() {
             )
         }
         VrchatPipelineState.presence = presence
+
+        // Stamp the instance-history leave time on a world -> offline transition that
+        // the WebSocket never reported. When the user turns off their headset, the
+        // game client disconnects but THIS app's own VRChat session keeps the account
+        // "online", so VRChat emits NO self user-location:offline event — the only
+        // signal is this periodic fetchPresence location flipping to "offline". Without
+        // this, the last world stayed "Still here" and kept counting until the user
+        // signed out or rejoined a world. Runs for unwatched users too (the slow 10s
+        // loop calls this with forceLocalUpdate=true). Guarded so it only fires on a
+        // real world -> offline change: "private" was already rewritten to the world
+        // above, and "traveling"/a new wrld_ don't match.
+        if (presence.location.equals("offline", true) &&
+            priorLoc != null && priorLoc.startsWith("wrld_")) {
+            InstanceHistoryStore.markCurrentLeft(this)
+        }
 
         if (deviceHash.isBlank()) return
         if (!AdminWatchState.isWatched.value) return

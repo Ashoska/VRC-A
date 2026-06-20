@@ -173,8 +173,16 @@ fun VrcaApp() {
             bootError = null
 
             try {
+                val startMs = System.currentTimeMillis()
                 kotlinx.coroutines.withTimeout(20_000L) {
                     bootstrapFirebaseAndCache(ctx)
+                }
+                // Hold the boot screen for a minimum of 5s so it never flashes by —
+                // if bootstrap finished faster, wait out the remainder (errors are
+                // exempt: they surface immediately so the user can retry).
+                val elapsed = System.currentTimeMillis() - startMs
+                if (elapsed < BOOT_MIN_DURATION_MS) {
+                    kotlinx.coroutines.delay(BOOT_MIN_DURATION_MS - elapsed)
                 }
                 bootOk = true
             } catch (t: kotlinx.coroutines.TimeoutCancellationException) {
@@ -301,14 +309,21 @@ fun VrcaApp() {
         // Real-time detection: snapshot listener on releases/{deviceHash}
         if (deviceHash.isNotBlank()) {
             DisposableEffect(deviceHash) {
-                val reg = FirebaseFirestore.getInstance()
+                val releaseDocRef = FirebaseFirestore.getInstance()
                     .collection("releases").document(deviceHash)
+                val reg = releaseDocRef
                     .addSnapshotListener { snap, _ ->
                         if (snap == null || !snap.exists()) return@addSnapshotListener
                         val url = snap.getString("downloadUrl").orEmpty()
                         if (url.isBlank()) return@addSnapshotListener
                         val code = snap.getLong("versionCode") ?: return@addSnapshotListener
-                        if (code <= BuildConfig.VERSION_CODE) return@addSnapshotListener
+                        if (code <= BuildConfig.VERSION_CODE) {
+                            // The user is already on (or past) this targeted version —
+                            // they installed the directed update. Retract the per-device
+                            // release doc to save space; it has served its purpose.
+                            releaseDocRef.delete()
+                            return@addSnapshotListener
+                        }
                         val info = ReleaseInfo(
                             versionCode     = code,
                             versionName     = snap.getString("versionName").orEmpty(),
@@ -807,6 +822,10 @@ private fun UpdateDialog(
    ========================================================= */
 
 private const val REMOTE_PREFS_FILE = "vrca_remote"
+
+/** Minimum time the boot/loading screen is shown, even if bootstrap finishes
+ *  sooner, so it never flashes by. */
+private const val BOOT_MIN_DURATION_MS = 5_000L
 
 private object RemoteKeys {
     // AdminScreen reads these from prefs (keep these key names stable!)

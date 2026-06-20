@@ -460,6 +460,11 @@ object VrchatAuthManager {
 
     fun logout(context: Context) {
         getPrefs(context)?.edit()?.clear()?.apply()
+        // Close out the current instance's "left" time now. A VRChat logout doesn't
+        // fire a user-location:offline pipeline event (the socket just disconnects),
+        // so without this the last instance stayed marked "Still here" and kept
+        // counting until the user reopened VRChat and a new location event closed it.
+        InstanceHistoryStore.markCurrentLeft(context)
         _loggedOutSignal.tryEmit(Unit)
     }
 
