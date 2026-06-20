@@ -40,6 +40,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SportsEsports
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -55,6 +56,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -677,41 +679,99 @@ internal fun UsersTab(
                     // account logs out. VRChat sign-out ALSO deletes the single-session
                     // lock (accounts/{vrchatUserId}) so the user can sign in on a new
                     // device — the escape hatch for the hard-deny login.
+                    // Both buttons require a confirm dialog: these are destructive
+                    // account-wide actions and were too easy to fat-finger (several
+                    // users got logged out accidentally).
+                    var showLogoutVrcConfirm by remember(selectedDocId) { mutableStateOf(false) }
+                    var showLogoutDiscordConfirm by remember(selectedDocId) { mutableStateOf(false) }
+                    val targetName = row.vrchatDisplayName.ifBlank { row.displayName }.ifBlank { "this user" }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         OutlinedButton(
-                            onClick = {
-                                scope.launch {
-                                    setGlobalLoading(true)
-                                    runCatching {
-                                        AccountModeration.applyAccountWide(
-                                            db, row.docId,
-                                            mapOf("logoutVrchatAt" to com.google.firebase.firestore.FieldValue.serverTimestamp())
-                                        )
-                                        if (row.vrchatUserId.isNotBlank()) {
-                                            db.collection("accounts").document(row.vrchatUserId).delete().await()
-                                        }
-                                    }.onFailure { e -> setError(e.message ?: "VRChat sign-out failed") }
-                                    setGlobalLoading(false)
-                                }
-                            },
+                            onClick = { showLogoutVrcConfirm = true },
                             modifier = Modifier.weight(1f)
                         ) { Text("Log out VRChat") }
 
                         OutlinedButton(
-                            onClick = {
-                                scope.launch {
-                                    setGlobalLoading(true)
-                                    runCatching {
-                                        AccountModeration.applyAccountWide(
-                                            db, row.docId,
-                                            mapOf("logoutDiscordAt" to com.google.firebase.firestore.FieldValue.serverTimestamp())
-                                        )
-                                    }.onFailure { e -> setError(e.message ?: "Discord sign-out failed") }
-                                    setGlobalLoading(false)
-                                }
-                            },
+                            onClick = { showLogoutDiscordConfirm = true },
                             modifier = Modifier.weight(1f)
                         ) { Text("Log out Discord") }
+                    }
+
+                    if (showLogoutVrcConfirm) {
+                        AlertDialog(
+                            onDismissRequest = { showLogoutVrcConfirm = false },
+                            title = { Text("Log out VRChat?") },
+                            text = {
+                                Text(
+                                    "This signs $targetName out of VRChat on EVERY device on " +
+                                        "their account and frees their single-session lock. " +
+                                        "They'll have to log back in. This can't be undone."
+                                )
+                            },
+                            confirmButton = {
+                                TextButton(
+                                    onClick = {
+                                        showLogoutVrcConfirm = false
+                                        scope.launch {
+                                            setGlobalLoading(true)
+                                            runCatching {
+                                                AccountModeration.applyAccountWide(
+                                                    db, row.docId,
+                                                    mapOf("logoutVrchatAt" to com.google.firebase.firestore.FieldValue.serverTimestamp())
+                                                )
+                                                if (row.vrchatUserId.isNotBlank()) {
+                                                    db.collection("accounts").document(row.vrchatUserId).delete().await()
+                                                }
+                                            }.onFailure { e -> setError(e.message ?: "VRChat sign-out failed") }
+                                            setGlobalLoading(false)
+                                        }
+                                    },
+                                    colors = ButtonDefaults.textButtonColors(
+                                        contentColor = MaterialTheme.colorScheme.error
+                                    )
+                                ) { Text("Log out VRChat") }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { showLogoutVrcConfirm = false }) { Text("Cancel") }
+                            }
+                        )
+                    }
+
+                    if (showLogoutDiscordConfirm) {
+                        AlertDialog(
+                            onDismissRequest = { showLogoutDiscordConfirm = false },
+                            title = { Text("Log out Discord?") },
+                            text = {
+                                Text(
+                                    "This disconnects $targetName's Discord RPC on EVERY device on " +
+                                        "their account. They'll have to reconnect Discord. " +
+                                        "This can't be undone."
+                                )
+                            },
+                            confirmButton = {
+                                TextButton(
+                                    onClick = {
+                                        showLogoutDiscordConfirm = false
+                                        scope.launch {
+                                            setGlobalLoading(true)
+                                            runCatching {
+                                                AccountModeration.applyAccountWide(
+                                                    db, row.docId,
+                                                    mapOf("logoutDiscordAt" to com.google.firebase.firestore.FieldValue.serverTimestamp())
+                                                )
+                                            }.onFailure { e -> setError(e.message ?: "Discord sign-out failed") }
+                                            setGlobalLoading(false)
+                                        }
+                                    },
+                                    colors = ButtonDefaults.textButtonColors(
+                                        contentColor = MaterialTheme.colorScheme.error
+                                    )
+                                ) { Text("Log out Discord") }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { showLogoutDiscordConfirm = false }) { Text("Cancel") }
+                            }
+                        )
                     }
 
                     // Invite the ADMIN'S OWN logged-in VRChat account into this
