@@ -40,7 +40,6 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SportsEsports
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -626,6 +625,11 @@ internal fun UsersTab(
 
                     Divider()
 
+                    // Kill App is destructive (force-quits every device on the
+                    // account), so it now goes through a confirm like the logout
+                    // buttons below — it was previously a single mis-tappable tap.
+                    var showKillConfirm by remember(selectedDocId) { mutableStateOf(false) }
+
                     // Actions side-by-side for a tidy footer.
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Button(
@@ -648,22 +652,7 @@ internal fun UsersTab(
                         }
 
                         OutlinedButton(
-                            onClick = {
-                                scope.launch {
-                                    setGlobalLoading(true)
-                                    runCatching {
-                                        // Account-wide: kill every device on this VRChat account
-                                        // (only the currently-open one acts on a fresh killSignal).
-                                        AccountModeration.applyAccountWide(
-                                            db, row.docId,
-                                            mapOf("killSignal" to com.google.firebase.firestore.FieldValue.serverTimestamp())
-                                        )
-                                    }.onFailure { e ->
-                                        setError(e.message ?: "Kill failed")
-                                    }
-                                    setGlobalLoading(false)
-                                }
-                            },
+                            onClick = { showKillConfirm = true },
                             modifier = Modifier.weight(1f),
                             colors = ButtonDefaults.outlinedButtonColors(
                                 contentColor = MaterialTheme.colorScheme.error
@@ -673,6 +662,34 @@ internal fun UsersTab(
                             Spacer(Modifier.width(6.dp))
                             Text("Kill App")
                         }
+                    }
+
+                    if (showKillConfirm) {
+                        val killName = row.vrchatDisplayName.ifBlank { row.displayName }.ifBlank { "this user" }
+                        com.vrca.ui.common.VrcaConfirmDialog(
+                            title = "Force quit the app?",
+                            body = "This closes VRC-A on every device on $killName's account right " +
+                                "now. It does not ban them, and they can reopen the app whenever " +
+                                "they want.",
+                            confirmLabel = "Force quit",
+                            destructive = true,
+                            onConfirm = {
+                                showKillConfirm = false
+                                scope.launch {
+                                    setGlobalLoading(true)
+                                    runCatching {
+                                        // Account-wide: kill every device on this VRChat account
+                                        // (only the currently-open one acts on a fresh killSignal).
+                                        AccountModeration.applyAccountWide(
+                                            db, row.docId,
+                                            mapOf("killSignal" to com.google.firebase.firestore.FieldValue.serverTimestamp())
+                                        )
+                                    }.onFailure { e -> setError(e.message ?: "Kill failed") }
+                                    setGlobalLoading(false)
+                                }
+                            },
+                            onDismiss = { showKillConfirm = false }
+                        )
                     }
 
                     // Remote sign-out: account-wide so every device on this VRChat
@@ -698,79 +715,55 @@ internal fun UsersTab(
                     }
 
                     if (showLogoutVrcConfirm) {
-                        AlertDialog(
-                            onDismissRequest = { showLogoutVrcConfirm = false },
-                            title = { Text("Log out VRChat?") },
-                            text = {
-                                Text(
-                                    "This signs $targetName out of VRChat on EVERY device on " +
-                                        "their account and frees their single-session lock. " +
-                                        "They'll have to log back in. This can't be undone."
-                                )
-                            },
-                            confirmButton = {
-                                TextButton(
-                                    onClick = {
-                                        showLogoutVrcConfirm = false
-                                        scope.launch {
-                                            setGlobalLoading(true)
-                                            runCatching {
-                                                AccountModeration.applyAccountWide(
-                                                    db, row.docId,
-                                                    mapOf("logoutVrchatAt" to com.google.firebase.firestore.FieldValue.serverTimestamp())
-                                                )
-                                                if (row.vrchatUserId.isNotBlank()) {
-                                                    db.collection("accounts").document(row.vrchatUserId).delete().await()
-                                                }
-                                            }.onFailure { e -> setError(e.message ?: "VRChat sign-out failed") }
-                                            setGlobalLoading(false)
+                        com.vrca.ui.common.VrcaConfirmDialog(
+                            title = "Log out VRChat?",
+                            body = "This signs $targetName out of VRChat on every device on " +
+                                "their account and frees their single-session lock. They'll " +
+                                "have to log back in. This can't be undone.",
+                            confirmLabel = "Log out VRChat",
+                            destructive = true,
+                            onConfirm = {
+                                showLogoutVrcConfirm = false
+                                scope.launch {
+                                    setGlobalLoading(true)
+                                    runCatching {
+                                        AccountModeration.applyAccountWide(
+                                            db, row.docId,
+                                            mapOf("logoutVrchatAt" to com.google.firebase.firestore.FieldValue.serverTimestamp())
+                                        )
+                                        if (row.vrchatUserId.isNotBlank()) {
+                                            db.collection("accounts").document(row.vrchatUserId).delete().await()
                                         }
-                                    },
-                                    colors = ButtonDefaults.textButtonColors(
-                                        contentColor = MaterialTheme.colorScheme.error
-                                    )
-                                ) { Text("Log out VRChat") }
+                                    }.onFailure { e -> setError(e.message ?: "VRChat sign-out failed") }
+                                    setGlobalLoading(false)
+                                }
                             },
-                            dismissButton = {
-                                TextButton(onClick = { showLogoutVrcConfirm = false }) { Text("Cancel") }
-                            }
+                            onDismiss = { showLogoutVrcConfirm = false }
                         )
                     }
 
                     if (showLogoutDiscordConfirm) {
-                        AlertDialog(
-                            onDismissRequest = { showLogoutDiscordConfirm = false },
-                            title = { Text("Log out Discord?") },
-                            text = {
-                                Text(
-                                    "This disconnects $targetName's Discord RPC on EVERY device on " +
-                                        "their account. They'll have to reconnect Discord. " +
-                                        "This can't be undone."
-                                )
+                        com.vrca.ui.common.VrcaConfirmDialog(
+                            title = "Log out Discord?",
+                            body = "This disconnects $targetName's Discord Rich Presence on " +
+                                "every device on their account. They'll have to reconnect " +
+                                "Discord. This can't be undone.",
+                            confirmLabel = "Log out Discord",
+                            destructive = true,
+                            onConfirm = {
+                                showLogoutDiscordConfirm = false
+                                scope.launch {
+                                    setGlobalLoading(true)
+                                    runCatching {
+                                        AccountModeration.applyAccountWide(
+                                            db, row.docId,
+                                            mapOf("logoutDiscordAt" to com.google.firebase.firestore.FieldValue.serverTimestamp())
+                                        )
+                                    }.onFailure { e -> setError(e.message ?: "Discord sign-out failed") }
+                                    setGlobalLoading(false)
+                                }
                             },
-                            confirmButton = {
-                                TextButton(
-                                    onClick = {
-                                        showLogoutDiscordConfirm = false
-                                        scope.launch {
-                                            setGlobalLoading(true)
-                                            runCatching {
-                                                AccountModeration.applyAccountWide(
-                                                    db, row.docId,
-                                                    mapOf("logoutDiscordAt" to com.google.firebase.firestore.FieldValue.serverTimestamp())
-                                                )
-                                            }.onFailure { e -> setError(e.message ?: "Discord sign-out failed") }
-                                            setGlobalLoading(false)
-                                        }
-                                    },
-                                    colors = ButtonDefaults.textButtonColors(
-                                        contentColor = MaterialTheme.colorScheme.error
-                                    )
-                                ) { Text("Log out Discord") }
-                            },
-                            dismissButton = {
-                                TextButton(onClick = { showLogoutDiscordConfirm = false }) { Text("Cancel") }
-                            }
+                            onDismiss = { showLogoutDiscordConfirm = false }
                         )
                     }
 

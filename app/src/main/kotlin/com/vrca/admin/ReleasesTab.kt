@@ -20,7 +20,6 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -536,25 +535,22 @@ internal fun ReleasesTab(
                         Text("Retract Release")
                     }
                     if (showRetractConfirm) {
-                        AlertDialog(
-                            onDismissRequest = { showRetractConfirm = false },
-                            title = { Text("Retract live release?") },
-                            text = { Text("This will remove the update prompt for all users. Existing installs are not affected.") },
-                            confirmButton = {
-                                TextButton(onClick = {
-                                    showRetractConfirm = false
-                                    scope.launch {
-                                        runCatching {
-                                            db.collection("releases").document("latest").delete().await()
-                                            liveVersionCode = 0L; liveVersionName = ""; liveDownloadUrl = ""
-                                            liveRequiredMin = 0L; liveNotes = ""; livePublishedAt = null
-                                        }.onFailure { setError(it.message) }
-                                    }
-                                }) { Text("Retract", color = MaterialTheme.colorScheme.error) }
+                        com.vrca.ui.common.VrcaConfirmDialog(
+                            title = "Retract live release?",
+                            body = "This removes the update prompt for all users. Existing installs are not affected.",
+                            confirmLabel = "Retract",
+                            destructive = true,
+                            onConfirm = {
+                                showRetractConfirm = false
+                                scope.launch {
+                                    runCatching {
+                                        db.collection("releases").document("latest").delete().await()
+                                        liveVersionCode = 0L; liveVersionName = ""; liveDownloadUrl = ""
+                                        liveRequiredMin = 0L; liveNotes = ""; livePublishedAt = null
+                                    }.onFailure { setError(it.message) }
+                                }
                             },
-                            dismissButton = {
-                                TextButton(onClick = { showRetractConfirm = false }) { Text("Cancel") }
-                            }
+                            onDismiss = { showRetractConfirm = false }
                         )
                     }
                 }

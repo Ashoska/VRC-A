@@ -46,8 +46,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -896,13 +894,14 @@ private fun QuickTogglesGrid(
                         onLongPress = { timeMenuOpen = true },
                         modifier = Modifier.fillMaxWidth()
                     ) { vm.updateTimeEnabled(it) }
-                    DropdownMenu(expanded = timeMenuOpen, onDismissRequest = { timeMenuOpen = false }) {
-                        timeModeOptions.forEach { mode: String ->
-                            DropdownMenuItem(
-                                text = { Text(mode) },
-                                onClick = { vm.updateTimeMode(mode); timeMenuOpen = false }
-                            )
-                        }
+                    if (timeMenuOpen) {
+                        com.vrca.ui.common.VrcaSingleSelectDialog(
+                            title = "Time zone",
+                            options = timeModeOptions,
+                            selected = vm.timeMode,
+                            onSelect = { vm.updateTimeMode(it) },
+                            onDismiss = { timeMenuOpen = false }
+                        )
                     }
                 }
             }
