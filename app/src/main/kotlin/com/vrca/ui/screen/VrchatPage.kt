@@ -68,10 +68,14 @@ import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.material.icons.filled.ClearAll
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
@@ -101,6 +105,7 @@ import kotlinx.coroutines.launch
 import com.vrca.vrchat.VrchatPipelineService
 import com.vrca.vrchat.VrchatPipelineState
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun VrchatStatusPage(vm: VrcaViewModel) {
     val ctx = LocalContext.current
@@ -133,7 +138,39 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
 
     LaunchedEffect(Unit) { InAppAlertState.load(ctx) }
 
-    PageContainer {
+    // ----- In-app alert state, hoisted so the "Notifications (N)" header can be
+    // a real LazyColumn stickyHeader (pins to the top of the whole tab while the
+    // cards scroll underneath it, instead of clipping behind the app bar). -----
+    val alertGroups by InAppAlertState.groups.collectAsState()
+    var sectionExpanded by AlertSectionState.expanded
+    var filter by rememberSaveable { mutableStateOf("All") }
+    var showDismissAllConfirm by remember { mutableStateOf(false) }
+    // Drives the relative timestamps ("just now" / "5m ago") so they advance on
+    // their own; only the cheap formatRelativeTime Text nodes recompose.
+    var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1_000)
+            nowMs = System.currentTimeMillis()
+        }
+    }
+
+    var showInstanceHistory by remember { mutableStateOf(false) }
+
+    // Whole-tab scroller. Was a verticalScroll Column (PageContainer); a
+    // LazyColumn is required so the notifications header can be a stickyHeader.
+    // Matches PageContainer's padding / spacing / tap-to-clear-focus behavior.
+    val focusManager = LocalFocusManager.current
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .pointerInput(Unit) {
+                detectTapGestures(onTap = { focusManager.clearFocus() })
+            }
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+      item {
         // =========================
         // Identity header — ONE merged card (docs/ui-revamp.md, VRChat tab):
         // avatar + name + status dot + platform/trust chips + RPC dot, with
@@ -142,7 +179,6 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
         // =========================
         val p = presence
         val friendsOnline by VrchatPipelineState.friendsOnlineFlow.collectAsState()
-        var showInstanceHistory by remember { mutableStateOf(false) }
         val repoHdr = vm.userPreferencesRepository
         val discordSeededHdr by repoHdr.discordSessionSeeded.collectAsState(initial = false)
         val discordStatusHdr by DiscordRpcState.statusFlow.collectAsState()
@@ -395,39 +431,73 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
             }
             }
         }
+      } // end identity item
 
-        // 24h instance-history picker. Entries (with join/left times) are read fresh
-        // each open; the dialog then fetches each instance's live image/count/status.
-        if (showInstanceHistory) {
-            val historyTargets = remember {
-                InstanceHistoryStore.list(ctx).map { e ->
-                    val joined = clockTime(e.joinedMs)
-                    val time = if (e.leftMs == 0L) "Joined $joined · Still here"
-                        else "Joined $joined · Left ${clockTime(e.leftMs)}"
-                    InstanceTarget(
-                        location = e.location,
-                        label = e.worldName.ifBlank { "Instance" },
-                        timeLabel = time
-                    )
+      item { VrchatStatusBanner() }
+
+      // In-app alerts: a real stickyHeader so the "Notifications (N)" header,
+      // Dismiss-all button, and filter chips PIN to the top of the tab while the
+      // cards scroll underneath them (they used to clip behind the app bar — the
+      // old nested LazyColumn only pinned them relative to the inner card list).
+      // Discord RPC management + the duplicated About/trust card are GONE from
+      // this tab (docs/ui-revamp.md): the full Discord setup lives in
+      // Settings → Accounts; the identity header above keeps the small RPC chip.
+      inAppAlertSection(
+          ctx = ctx,
+          groups = alertGroups,
+          sectionExpanded = sectionExpanded,
+          onToggleExpanded = { sectionExpanded = !sectionExpanded },
+          filter = filter,
+          onFilterChange = { filter = it },
+          onDismissAll = { showDismissAllConfirm = true },
+          nowMs = nowMs
+      )
+    }
+
+    // 24h instance-history picker. Entries (with join/left times) are read fresh
+    // each open; the dialog then fetches each instance's live image/count/status.
+    if (showInstanceHistory) {
+        val historyTargets = remember {
+            InstanceHistoryStore.list(ctx).map { e ->
+                // One line per visit, newest first. "Still here" for the open session.
+                val lines = e.sessions.asReversed().map { s ->
+                    val joined = clockTime(s.joinedMs)
+                    if (s.leftMs == 0L) "Joined $joined · Still here"
+                    else "Joined $joined · Left ${clockTime(s.leftMs)}"
                 }
+                InstanceTarget(
+                    location = e.location,
+                    label = e.worldName.ifBlank { "Instance" },
+                    timeLines = lines
+                )
             }
-            InstanceListDialog(
-                title = "Instance History (24h)",
-                targets = historyTargets,
-                onDismiss = { showInstanceHistory = false }
-            )
         }
+        InstanceListDialog(
+            title = "Instance History (24h)",
+            targets = historyTargets,
+            onDismiss = { showInstanceHistory = false }
+        )
+    }
 
-        VrchatStatusBanner()
-
-        // In-app alerts (persistent until dismissed)
-        InAppAlertCards()
-
-        // Discord RPC management + the duplicated About/trust card are GONE
-        // from this tab (docs/ui-revamp.md): the full Discord setup lives in
-        // Settings → Accounts; the identity header above keeps the small RPC
-        // status chip. The tab is now the live feed: identity + status banner
-        // + alerts + friends count.
+    // "Are you sure?" before nuking every alert (moved out of the old
+    // InAppAlertCards composable now that the section is a LazyListScope helper).
+    if (showDismissAllConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDismissAllConfirm = false },
+            title = { Text("Dismiss all notifications?") },
+            text = { Text("This clears every in-app alert. This can't be undone.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showDismissAllConfirm = false
+                    val nm = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+                    // Clear in-app groups AND cancel each linked Android notification.
+                    InAppAlertState.dismissAll(ctx).forEach { nm.cancel(it.hashCode()) }
+                }) { Text("Dismiss all") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDismissAllConfirm = false }) { Text("Cancel") }
+            }
+        )
     }
 
     // Sign out confirmation
@@ -593,155 +663,136 @@ private fun alertMatchesFilter(groupId: String, filter: String): Boolean = when 
     else -> true
 }
 
-@Composable
-private fun InAppAlertCards() {
-    val ctx = LocalContext.current
-    val groups by InAppAlertState.groups.collectAsState()
+/**
+ * In-app alerts rendered straight into the VRChat-tab LazyColumn (NOT its own
+ * scroll region) so the header can be a real `stickyHeader`. The header row
+ * (Notifications (N) + Dismiss all + chevron) and the filter chips live inside
+ * the sticky header on an OPAQUE background, so they pin to the top of the tab
+ * and the cards scroll cleanly underneath — fixing the old behavior where the
+ * header clipped behind the app bar (the previous nested LazyColumn only pinned
+ * them relative to the inner card list, not the whole page).
+ *
+ * State (expanded/filter/nowMs/dismiss-all) is hoisted into VrchatStatusPage.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+private fun LazyListScope.inAppAlertSection(
+    ctx: android.content.Context,
+    groups: List<InAppAlertGroup>,
+    sectionExpanded: Boolean,
+    onToggleExpanded: () -> Unit,
+    filter: String,
+    onFilterChange: (String) -> Unit,
+    onDismissAll: () -> Unit,
+    nowMs: Long
+) {
     if (groups.isEmpty()) return
 
-    // Shared, process-scoped: expanded by default, survives tab switches,
-    // resets only on a genuine app reopen (see AlertSectionState).
-    var sectionExpanded by AlertSectionState.expanded
-    var filter by rememberSaveable { mutableStateOf("All") }
-    var showDismissAllConfirm by remember { mutableStateOf(false) }
-
-    // Drive the relative timestamps ("just now" / "5m ago") so they advance on
-    // their own — without a ticker Compose computes formatRelativeTime once and
-    // never re-runs it, so the times only refreshed when a card was expanded/
-    // collapsed or the tab was switched (i.e. on an unrelated recomposition).
-    // Ticks every 1s so the seconds range counts up smoothly; only the cheap
-    // formatRelativeTime Text nodes recompose (bio diffs are remembered), and the
-    // loop cancels when the tab leaves composition.
-    var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(1_000)
-            nowMs = System.currentTimeMillis()
-        }
-    }
-
-    // "Are you sure?" before nuking every alert.
-    if (showDismissAllConfirm) {
-        AlertDialog(
-            onDismissRequest = { showDismissAllConfirm = false },
-            title = { Text("Dismiss all notifications?") },
-            text = { Text("This clears every in-app alert. This can't be undone.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    showDismissAllConfirm = false
-                    val nm = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
-                    // Clear in-app groups AND cancel each linked Android notification.
-                    InAppAlertState.dismissAll(ctx).forEach { nm.cancel(it.hashCode()) }
-                }) { Text("Dismiss all") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDismissAllConfirm = false }) { Text("Cancel") }
-            }
-        )
-    }
-
-    Surface(
-        color = Color.Transparent,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 4.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    "Notifications (${groups.size})",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier
-                        .weight(1f)
-                        .clickable { sectionExpanded = !sectionExpanded }
-                )
-                // Dismiss-all sits to the LEFT of the collapse chevron, on the
-                // same header row. Its own tap is consumed here, so it never
-                // toggles the section.
-                Surface(
-                    onClick = { showDismissAllConfirm = true },
-                    shape = MaterialTheme.shapes.small,
-                    color = MaterialTheme.colorScheme.error.copy(alpha = 0.12f),
-                    modifier = Modifier.height(30.dp)
+    stickyHeader(key = "alerts_header") {
+        // Opaque background (the Scaffold's default container color) so the
+        // cards disappear cleanly behind the pinned header instead of bleeding
+        // through. Bottom padding extends the opaque band a touch below the
+        // content for a clean edge against the scrolling cards.
+        Surface(
+            color = MaterialTheme.colorScheme.background,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(Modifier.padding(bottom = 4.dp)) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        Modifier.padding(horizontal = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                    Text(
+                        "Notifications (${groups.size})",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { onToggleExpanded() }
+                    )
+                    // Dismiss-all sits to the LEFT of the collapse chevron, on the
+                    // same header row. Its own tap is consumed here, so it never
+                    // toggles the section.
+                    Surface(
+                        onClick = onDismissAll,
+                        shape = MaterialTheme.shapes.small,
+                        color = MaterialTheme.colorScheme.error.copy(alpha = 0.12f),
+                        modifier = Modifier.height(30.dp)
                     ) {
-                        Icon(
-                            Icons.Filled.ClearAll,
-                            contentDescription = null,
-                            modifier = Modifier.size(15.dp),
-                            tint = MaterialTheme.colorScheme.error
-                        )
-                        Text(
-                            "Dismiss all",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.error
-                        )
+                        Row(
+                            Modifier.padding(horizontal = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Icon(
+                                Icons.Filled.ClearAll,
+                                contentDescription = null,
+                                modifier = Modifier.size(15.dp),
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                            Text(
+                                "Dismiss all",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
                     }
+                    Spacer(Modifier.width(8.dp))
+                    Icon(
+                        if (sectionExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                        contentDescription = if (sectionExpanded) "Collapse" else "Expand",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .clickable { onToggleExpanded() }
+                            .size(20.dp)
+                    )
                 }
-                Spacer(Modifier.width(8.dp))
-                Icon(
-                    if (sectionExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                    contentDescription = if (sectionExpanded) "Collapse" else "Expand",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier
-                        .clickable { sectionExpanded = !sectionExpanded }
-                        .size(20.dp)
-                )
-            }
-            AnimatedVisibility(
-                visible = sectionExpanded,
-                enter = fadeIn() + expandVertically(),
-                exit = fadeOut() + shrinkVertically()
-            ) {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                // Filter chips pin WITH the header (they were inside the old
+                // AnimatedVisibility body). Only shown while expanded.
+                if (sectionExpanded) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
                         listOf("All", "Friends", "Groups", "Bio").forEach { f ->
                             FilterChip(
                                 selected = filter == f,
-                                onClick = { filter = f },
+                                onClick = { onFilterChange(f) },
                                 label = { Text(f, style = MaterialTheme.typography.labelMedium) }
                             )
                         }
                     }
-
-                    val filtered = groups.filter { alertMatchesFilter(it.groupId, filter) }
-                    if (filtered.isEmpty()) {
-                        Text(
-                            "No ${filter.lowercase()} alerts.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(horizontal = 4.dp)
-                        )
-                    } else {
-                        // Lazy-render so an unbounded ("infinite") notification history
-                        // only composes the cards actually on screen — no lag. Bounded
-                        // height makes it its own scroll region inside the page's outer
-                        // scroll (wraps to content when there are only a few).
-                        val maxH = (LocalConfiguration.current.screenHeightDp * 0.7f).dp
-                        LazyColumn(
-                            modifier = Modifier.heightIn(max = maxH),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            // Key by group identity so each card's expanded state stays
-                            // with ITS group even as new alerts prepend to the list.
-                            items(filtered, key = { it.groupId }) { group ->
-                                AlertGroupCard(group = group, nowMs = nowMs, onDismiss = {
-                                    InAppAlertState.dismiss(ctx, group.groupId)
-                                    val nm = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
-                                    nm.cancel(group.groupId.hashCode())
-                                })
-                            }
-                        }
-                    }
                 }
+            }
+        }
+    }
+
+    if (sectionExpanded) {
+        val filtered = groups.filter { alertMatchesFilter(it.groupId, filter) }
+        if (filtered.isEmpty()) {
+            item(key = "alerts_empty") {
+                Text(
+                    "No ${filter.lowercase()} alerts.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                )
+            }
+        } else {
+            // Cards are page-level items now (no inner scroll region / height
+            // cap) — the whole tab is one LazyColumn, so an unbounded alert
+            // history only composes the cards actually on screen. Keyed by group
+            // identity so each card's expanded state stays with ITS group even as
+            // new alerts prepend to the list.
+            items(filtered, key = { it.groupId }) { group ->
+                AlertGroupCard(group = group, nowMs = nowMs, onDismiss = {
+                    InAppAlertState.dismiss(ctx, group.groupId)
+                    val nm = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+                    nm.cancel(group.groupId.hashCode())
+                })
             }
         }
     }
@@ -1263,12 +1314,14 @@ private fun parseInstanceType(
     }
 }
 
-/** A target instance for the invite/history picker. [timeLabel] (history only) shows
- *  the join/left times so users can cross-reference what they played and when. */
+/** A target instance for the invite/history picker. [timeLines] (history only) shows
+ *  each VISIT's join/left times (newest first, one line per session) so users can
+ *  cross-reference what they played and when, and so rejoining a place keeps both
+ *  visits instead of resetting. */
 private data class InstanceTarget(
     val location: String,
     val label: String,
-    val timeLabel: String? = null
+    val timeLines: List<String> = emptyList()
 )
 
 private fun clockTime(ms: Long): String =
@@ -1589,28 +1642,35 @@ private fun InstanceRow(target: InstanceTarget, info: VrchatAuthManager.Instance
                     }
                 }
             }
-            // Join/left time on its own full-width line — predictable max length, so
-            // with the whole card width it never clips even at "12:00 AM" extremes.
-            if (!target.timeLabel.isNullOrBlank()) {
+            // Join/left times — one full-width line per VISIT (newest first). The clock
+            // icon sits on the first line; later sessions align under it. Predictable
+            // max length, so even at "12:00 AM" extremes nothing clips.
+            if (target.timeLines.isNotEmpty()) {
                 Spacer(Modifier.height(6.dp))
-                Row(
-                    Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        Icons.Filled.Schedule,
-                        contentDescription = null,
-                        modifier = Modifier.size(13.dp),
-                        tint = MaterialTheme.colorScheme.outline
-                    )
-                    Spacer(Modifier.width(5.dp))
-                    Text(
-                        target.timeLabel,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.outline,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                target.timeLines.forEachIndexed { i, line ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (i == 0) {
+                            Icon(
+                                Icons.Filled.Schedule,
+                                contentDescription = null,
+                                modifier = Modifier.size(13.dp),
+                                tint = MaterialTheme.colorScheme.outline
+                            )
+                        } else {
+                            Spacer(Modifier.width(13.dp))
+                        }
+                        Spacer(Modifier.width(5.dp))
+                        Text(
+                            line,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.outline,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
         }

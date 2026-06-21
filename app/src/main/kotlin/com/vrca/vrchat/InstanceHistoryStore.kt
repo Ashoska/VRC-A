@@ -7,36 +7,60 @@ import org.json.JSONObject
 /**
  * Records the instances the user has personally been in over the last 24 hours so
  * they can re-invite themselves to any of them from the VRChat tab, and cross-
- * reference what they were playing at what time. Each entry carries the FULL joinable
- * location (including the `~nonce(...)` access token captured from the self
- * `user-location` pipeline event), the world name, and the times the user JOINED and
- * LEFT it ([joinedMs] / [leftMs]; leftMs == 0 means they're still in it).
+ * reference what they were playing at what time.
+ *
+ * **One [Entry] per instance** (keyed by the FULL joinable [location] string, which
+ * includes the `~nonce(...)` access token captured from the self `user-location`
+ * pipeline event). Each entry holds a list of [Session]s — every distinct VISIT to
+ * that instance — so rejoining a place you'd already left no longer DESTROYS the
+ * earlier visit's times; both are kept and shown stacked in the picker.
  *
  * The nonce is the access grant for invite-only/friends instances; it lives only in
  * this device's local prefs (never synced to Firestore), exactly like the user's own
- * cookie — it is their own access to a place they were already in.
+ * cookie — it is their own access to a place they were already in. A different nonce
+ * (a fresh invite to the "same" world) is a different location string, so it is a
+ * different entry — correct, since either nonce might work for a re-invite.
  *
- * Entries left more than [RETENTION_MS] (24h) ago are pruned on every read/write; an
- * instance the user is still in is never pruned.
+ * Sessions older than [RETENTION_MS] (24h) are pruned on every read/write; an entry
+ * with any still-current session (leftMs == 0) is never pruned. There is deliberately
+ * NO entry cap — the 24h window is the natural bound (worst case a few dozen entries,
+ * well under 100 KB).
  */
 object InstanceHistoryStore {
     private const val PREFS = "vrca_instance_history"
     private const val KEY = "entries_json"
     private const val RETENTION_MS = 24L * 60 * 60 * 1000
-    private const val MAX_ENTRIES = 50
 
-    data class Entry(
-        val location: String,
-        val worldName: String,
+    /**
+     * Short-gap merge window. When the user re-enters an instance they left less than
+     * this ago — AND nothing else was joined in between (see [record]) — the previous
+     * session is REOPENED instead of starting a new one. This collapses headset-off /
+     * pipeline-reconnect blips into one continuous visit. 10 minutes is wide enough to
+     * absorb a headset coming off + reconnect backoff; a genuine "left for longer and
+     * came back" registers as a separate session.
+     *
+     * Tradeoff (intended): stepping away from the SAME instance for under 10 min with
+     * nothing in between shows as one continuous session, not two — exactly the
+     * headset-off behavior we want. Do not "fix" this into a strict split.
+     */
+    private const val MERGE_GAP_MS = 10L * 60 * 1000
+
+    data class Session(
         val joinedMs: Long,
         val leftMs: Long // 0 == still in this instance (current)
     )
 
+    data class Entry(
+        val location: String,
+        val worldName: String,
+        val sessions: List<Session> // chronological; newest last
+    )
+
     /**
-     * Records that the user just ENTERED [location]. Marks whatever instance they were
-     * previously in as left (now), and either starts a fresh visit for this instance
-     * (new join time) or marks an existing one current again. Only full `wrld_...`
-     * locations are stored.
+     * Records that the user just ENTERED [location]. Marks whatever OTHER instance they
+     * were in as left (now), then either reopens this instance's last session (a
+     * reconnect within [MERGE_GAP_MS] with no activity elsewhere in between) or starts a
+     * fresh session. Only full `wrld_...` locations are stored.
      */
     fun record(ctx: Context, location: String?, worldName: String?) {
         val loc = location?.trim().orEmpty()
@@ -45,52 +69,89 @@ object InstanceHistoryStore {
         ) return
         val now = System.currentTimeMillis()
         val entries = read(ctx).toMutableList()
-        // We've moved here, so any other instance still marked "current" was left now.
+
+        // We've moved here, so any OTHER instance still marked current was left now.
         for (i in entries.indices) {
-            if (entries[i].leftMs == 0L && entries[i].location != loc) {
-                entries[i] = entries[i].copy(leftMs = now)
+            val e = entries[i]
+            if (e.location == loc) continue
+            val last = e.sessions.lastOrNull()
+            if (last != null && last.leftMs == 0L) {
+                val s = e.sessions.toMutableList()
+                s[s.size - 1] = last.copy(leftMs = now)
+                entries[i] = e.copy(sessions = s)
             }
         }
+
         val idx = entries.indexOfFirst { it.location == loc }
-        if (idx >= 0) {
-            val e = entries.removeAt(idx)
-            // If we had already left this instance, re-entering is a NEW visit (fresh
-            // join time); if it was still current this is just a redundant event.
-            val newJoined = if (e.leftMs != 0L) now else e.joinedMs
-            entries.add(
-                e.copy(
-                    joinedMs = newJoined,
-                    leftMs = 0L,
-                    worldName = worldName?.takeIf { it.isNotBlank() } ?: e.worldName
-                )
-            )
+        if (idx < 0) {
+            entries.add(Entry(loc, worldName.orEmpty(), listOf(Session(now, 0L))))
+            persist(ctx, entries)
+            return
+        }
+
+        val e = entries[idx]
+        val newWorld = worldName?.takeIf { it.isNotBlank() } ?: e.worldName
+        val sessions = e.sessions.toMutableList()
+        val last = sessions.lastOrNull()
+
+        if (last != null && last.leftMs == 0L) {
+            // Already current here (redundant event) — just refresh the world name.
+            entries[idx] = e.copy(worldName = newWorld)
         } else {
-            entries.add(Entry(loc, worldName.orEmpty(), now, 0L))
+            // The most recent activity across every OTHER entry. If anything happened
+            // elsewhere AFTER we left this instance, this is a genuine hop-and-return,
+            // NOT a reconnect, so we must start a new session (merging would smear the
+            // timeline over the time we were demonstrably elsewhere).
+            val maxOtherActivity = entries
+                .filterIndexed { i, _ -> i != idx }
+                .flatMap { it.sessions }
+                .maxOfOrNull { if (it.leftMs == 0L) now else it.leftMs } ?: 0L
+
+            val canMerge = last != null &&
+                last.leftMs != 0L &&
+                (now - last.leftMs) <= MERGE_GAP_MS &&
+                last.leftMs >= maxOtherActivity
+
+            if (canMerge) {
+                sessions[sessions.size - 1] = last!!.copy(leftMs = 0L) // reopen
+            } else {
+                sessions.add(Session(now, 0L))
+            }
+            entries[idx] = e.copy(sessions = sessions, worldName = newWorld)
         }
         persist(ctx, entries)
     }
 
     /**
      * Marks the instance the user is currently in (if any) as LEFT now — called when
-     * they go offline / leave VRChat without hopping to another instance.
+     * they go offline / leave VRChat without hopping to another instance. Closes the
+     * current session of every entry that still has one open.
      */
     fun markCurrentLeft(ctx: Context) {
         val now = System.currentTimeMillis()
         val entries = read(ctx).toMutableList()
         var changed = false
         for (i in entries.indices) {
-            if (entries[i].leftMs == 0L) {
-                entries[i] = entries[i].copy(leftMs = now)
+            val e = entries[i]
+            val last = e.sessions.lastOrNull()
+            if (last != null && last.leftMs == 0L) {
+                val s = e.sessions.toMutableList()
+                s[s.size - 1] = last.copy(leftMs = now)
+                entries[i] = e.copy(sessions = s)
                 changed = true
             }
         }
         if (changed) persist(ctx, entries)
     }
 
-    /** Past-24h instances, current first then most-recently-left, pruned and capped. */
-    fun list(ctx: Context): List<Entry> = read(ctx).sortedByDescending {
-        if (it.leftMs == 0L) Long.MAX_VALUE else it.leftMs
-    }
+    /** Past-24h instances, current first then most-recently-left. Sessions within each
+     *  entry stay chronological (newest last); the UI reverses them for display. */
+    fun list(ctx: Context): List<Entry> =
+        read(ctx).sortedByDescending { sortKey(it) }
+
+    /** An entry sorts by its newest session: still-current floats to the top. */
+    private fun sortKey(e: Entry): Long =
+        e.sessions.maxOfOrNull { if (it.leftMs == 0L) Long.MAX_VALUE else it.leftMs } ?: 0L
 
     private fun read(ctx: Context): List<Entry> {
         val raw = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, null)
@@ -100,14 +161,22 @@ object InstanceHistoryStore {
         val out = mutableListOf<Entry>()
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
-            val left = o.optLong("left")
-            // Prune entries left more than 24h ago; keep anything still current.
-            if (left != 0L && left < cutoff) continue
+            // Skip any object that isn't the sessions shape (defensive — no public
+            // user ever wrote an older format, but a stray blob must not crash us).
+            val sArr = o.optJSONArray("sessions") ?: continue
+            val sessions = mutableListOf<Session>()
+            for (k in 0 until sArr.length()) {
+                val so = sArr.optJSONObject(k) ?: continue
+                val left = so.optLong("l")
+                // Prune sessions left more than 24h ago; keep anything still current.
+                if (left != 0L && left < cutoff) continue
+                sessions.add(Session(joinedMs = so.optLong("j"), leftMs = left))
+            }
+            if (sessions.isEmpty()) continue
             out += Entry(
                 location = o.optString("loc"),
                 worldName = o.optString("world"),
-                joinedMs = o.optLong("joined"),
-                leftMs = left
+                sessions = sessions
             )
         }
         return out
@@ -115,17 +184,21 @@ object InstanceHistoryStore {
 
     private fun persist(ctx: Context, entries: List<Entry>) {
         val cutoff = System.currentTimeMillis() - RETENTION_MS
-        val kept = entries
-            .filter { it.leftMs == 0L || it.leftMs >= cutoff }
-            .sortedByDescending { if (it.leftMs == 0L) Long.MAX_VALUE else it.leftMs }
-            .take(MAX_ENTRIES)
         val arr = JSONArray()
-        for (e in kept) {
+        for (e in entries) {
+            val kept = e.sessions.filter { it.leftMs == 0L || it.leftMs >= cutoff }
+            if (kept.isEmpty()) continue
+            val sArr = JSONArray()
+            for (s in kept) {
+                sArr.put(JSONObject().apply {
+                    put("j", s.joinedMs)
+                    put("l", s.leftMs)
+                })
+            }
             arr.put(JSONObject().apply {
                 put("loc", e.location)
                 put("world", e.worldName)
-                put("joined", e.joinedMs)
-                put("left", e.leftMs)
+                put("sessions", sArr)
             })
         }
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
