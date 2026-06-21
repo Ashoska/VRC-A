@@ -14,25 +14,36 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Loop
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PushPin
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material.icons.filled.Shuffle
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -51,8 +62,12 @@ import com.vrca.ui.common.KitSectionHeader
 import com.vrca.ui.common.KitStatusChip
 import com.vrca.ui.common.KitTone
 import com.vrca.ui.common.SelectPill
+import com.vrca.ui.common.VrcaCardDialog
 import com.vrca.ui.viewmodel.VrcaViewModel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+
+private val MAX_CYCLE_LINES = VrcaViewModel.MAX_CYCLE_LINES
 
 // VRChat's chatbox hard limit — the combined output is trimmed past this, so
 // the editors meter against it (mirrors VrcaViewModel.VRC_MAX_CHARS).
@@ -135,12 +150,27 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
         // =========================
         // Cycle — collapsed = "5 lines · 10s · now: '…'", expanded = editor.
         // =========================
-        val cycleNow = if (vm.oscSending && vm.cycleEnabled) vm.cycleCurrentLine() else ""
+        // Live "now sending" highlight needs a ticker — cycleIndex isn't observable,
+        // so pulse a counter every second while sending to recompose the rows.
+        var cycleTick by remember { mutableIntStateOf(0) }
+        LaunchedEffect(vm.oscSending, vm.cycleEnabled) {
+            while (vm.oscSending && vm.cycleEnabled) {
+                delay(1000L)
+                cycleTick++
+            }
+        }
+        val sending = vm.oscSending && vm.cycleEnabled
+        val cycleNow = if (sending) vm.cycleCurrentLine() else ""
+        val activeRaw = remember(cycleTick, sending, vm.cycleLines.size) {
+            if (sending) vm.cycleActiveRawIndex() else -1
+        }
         CompactSectionCard(
             title = "Cycle",
             icon = Icons.Filled.Loop,
             summary = buildString {
-                append("${vm.cycleLines.count { it.isNotBlank() }} lines · ${vm.cycleIntervalSeconds}s")
+                val live = vm.cycleLines.count { it.isNotBlank() }
+                append("$live lines · ${vm.cycleIntervalSeconds}s")
+                if (vm.cycleShuffle) append(" · shuffle")
                 if (cycleNow.isNotBlank()) append(" · now: “$cycleNow”")
             },
             trailing = {
@@ -154,22 +184,30 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                 Text("No lines yet. Tap Add line.", style = MaterialTheme.typography.bodySmall)
             }
 
-            // Compact line rows (slim bordered fields, inline number + delete) so
-            // a full 10-line cycle no longer eats the whole screen. The editing
-            // behavior is unchanged — tap to focus, type, tap the bin to remove —
-            // and TextFieldValue keeps the cursor position per line.
+            // Compact line rows: inline number, text field, a mute dot, and an
+            // overflow menu (move up/down, duplicate, delete) so all the new
+            // controls stay on one slim row. The currently-sending line is
+            // highlighted live while the cycle runs.
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 vm.cycleLines.forEachIndexed { idx, _ ->
                     val fieldValue =
                         cycleLineFields[idx] ?: TextFieldValue(vm.cycleLines.getOrNull(idx).orEmpty())
                     CycleLineRow(
                         index = idx,
+                        count = vm.cycleLines.size,
                         value = fieldValue,
+                        lineEnabled = vm.cycleLineEnabled.getOrElse(idx) { true },
+                        isActive = idx == activeRaw,
                         onValueChange = { v: TextFieldValue ->
                             cycleLineFields[idx] = v
                             vm.updateCycleLine(idx, v.text)
                         },
+                        onToggleEnabled = { vm.setCycleLineEnabled(idx, it) },
+                        onDuplicate = { vm.duplicateCycleLine(idx) },
+                        onMoveUp = { vm.moveCycleLine(idx, idx - 1) },
+                        onMoveDown = { vm.moveCycleLine(idx, idx + 1) },
                         onDelete = { vm.removeCycleLine(idx) },
+                        canDuplicate = vm.cycleLines.size < MAX_CYCLE_LINES,
                         enabled = !isBanned
                     )
                 }
@@ -178,12 +216,12 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(
                     onClick = { vm.addCycleLine() },
-                    enabled = !isBanned && vm.cycleLines.size < 10,
+                    enabled = !isBanned && vm.cycleLines.size < MAX_CYCLE_LINES,
                     modifier = Modifier.weight(1f)
                 ) {
                     Icon(Icons.Filled.Add, contentDescription = null)
                     Spacer(Modifier.width(6.dp))
-                    Text("Add line (${vm.cycleLines.size}/10)")
+                    Text("Add line (${vm.cycleLines.size}/$MAX_CYCLE_LINES)")
                 }
 
                 OutlinedButton(
@@ -191,6 +229,46 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                     enabled = !isBanned && vm.cycleLines.isNotEmpty(),
                     modifier = Modifier.weight(1f)
                 ) { Text("Clear") }
+            }
+
+            // Dynamic tokens hint — substituted live at send time.
+            Text(
+                "Tokens: {time}  {song}  {world}  {players}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            // Shuffle mode — random rotation that avoids repeating the last lines.
+            Surface(
+                shape = MaterialTheme.shapes.medium,
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    Modifier.padding(start = 14.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Filled.Shuffle,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("Shuffle order", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "Random, without repeating recent lines",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = vm.cycleShuffle,
+                        onCheckedChange = { vm.setCycleShuffleFlag(it) },
+                        enabled = !isBanned
+                    )
+                }
             }
 
             // Cycle speed — inline one-tap chips (no dropdown menu to open).
@@ -245,29 +323,49 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
 
     // Preset peek dialog (long-press): full content + Load / Save-here.
     peek?.let { p ->
-        AlertDialog(
-            onDismissRequest = { peek = null },
-            title = { Text(p.title) },
-            text = {
+        VrcaCardDialog(onDismiss = { peek = null }) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
                 Text(
-                    p.content.ifBlank { "(empty)" },
-                    fontFamily = FontFamily.Monospace,
-                    style = MaterialTheme.typography.bodySmall
+                    p.title,
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onSurface
                 )
-            },
-            confirmButton = {
-                Button(
-                    onClick = { p.onLoad(); peek = null },
-                    enabled = !isBanned && p.content.isNotBlank()
-                ) { Text("Load") }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = { p.onSave(); peek = null },
-                    enabled = !isBanned
-                ) { Text("Save current here") }
+                Surface(
+                    shape = MaterialTheme.shapes.medium,
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        p.content.ifBlank { "(empty)" },
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier
+                            .heightIn(max = 260.dp)
+                            .verticalScroll(rememberScrollState())
+                            .padding(12.dp)
+                            .fillMaxWidth()
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(
+                        onClick = { p.onSave(); peek = null },
+                        enabled = !isBanned
+                    ) { Text("Save current here") }
+                    Button(
+                        onClick = { p.onLoad(); peek = null },
+                        enabled = !isBanned && p.content.isNotBlank()
+                    ) { Text("Load") }
+                }
             }
-        )
+        }
     }
 }
 
@@ -335,38 +433,68 @@ private fun PresetChip(
 }
 
 /**
- * One compact cycle line: a slim bordered field with the line number inline on
- * the left and a delete bin on the right. About half the height of the old
- * labelled OutlinedTextField + separate delete button row, so a full 10-line
- * cycle stays scannable. Shows a placeholder ("Line N") while empty and the
- * per-line budget meter only once the line gets long.
+ * One compact cycle line, restyled for the revamp: a slim bordered field with an
+ * inline tappable number badge (mutes the line — dims when off), the text field,
+ * an always-on per-line char meter, and a single overflow menu carrying the new
+ * controls (move up/down, duplicate, delete). The line currently being sent is
+ * highlighted live ([isActive]). Tokens like {time}/{song} substitute at send time.
  */
 @Composable
 private fun CycleLineRow(
     index: Int,
+    count: Int,
     value: TextFieldValue,
+    lineEnabled: Boolean,
+    isActive: Boolean,
     onValueChange: (TextFieldValue) -> Unit,
+    onToggleEnabled: (Boolean) -> Unit,
+    onDuplicate: () -> Unit,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit,
     onDelete: () -> Unit,
+    canDuplicate: Boolean,
     enabled: Boolean
 ) {
+    var menuOpen by remember { mutableStateOf(false) }
+    val container = when {
+        isActive -> MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+        !lineEnabled -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
+        else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+    }
+    val dim = if (lineEnabled) 1f else 0.5f
     Surface(
         shape = MaterialTheme.shapes.medium,
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        color = container,
+        border = if (isActive)
+            androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.primary)
+        else null,
         modifier = Modifier.fillMaxWidth()
     ) {
         Row(
             modifier = Modifier
                 .heightIn(min = 44.dp)
-                .padding(start = 12.dp, end = 4.dp),
+                .padding(start = 6.dp, end = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(
-                "${index + 1}",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.widthIn(min = 16.dp)
-            )
-            Spacer(Modifier.width(10.dp))
+            // Number badge doubles as the mute toggle (most-used per-line action).
+            Surface(
+                shape = androidx.compose.foundation.shape.CircleShape,
+                color = if (lineEnabled) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.12f),
+                onClick = { if (enabled) onToggleEnabled(!lineEnabled) },
+                enabled = enabled,
+                modifier = Modifier.size(28.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(
+                        "${index + 1}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (lineEnabled) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            Spacer(Modifier.width(8.dp))
             Box(Modifier.weight(1f)) {
                 if (value.text.isEmpty()) {
                     Text(
@@ -381,27 +509,70 @@ private fun CycleLineRow(
                     enabled = enabled,
                     singleLine = true,
                     textStyle = MaterialTheme.typography.bodyMedium.copy(
-                        color = MaterialTheme.colorScheme.onSurface
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = dim)
                     ),
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                     modifier = Modifier.fillMaxWidth()
                 )
             }
-            if (value.text.length > 100) {
+            if (value.text.isNotEmpty()) {
                 Spacer(Modifier.width(6.dp))
                 CharBudgetMeter(value.text.length)
             }
+            // Mute quick-toggle icon (clear affordance alongside the number badge).
             IconButton(
-                onClick = onDelete,
+                onClick = { onToggleEnabled(!lineEnabled) },
                 enabled = enabled,
-                modifier = Modifier.size(36.dp)
+                modifier = Modifier.size(34.dp)
             ) {
                 Icon(
-                    Icons.Filled.Delete,
-                    contentDescription = "Remove line ${index + 1}",
+                    if (lineEnabled) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
+                    contentDescription = if (lineEnabled) "Mute line ${index + 1}" else "Unmute line ${index + 1}",
                     modifier = Modifier.size(18.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    tint = if (lineEnabled) MaterialTheme.colorScheme.onSurfaceVariant
+                    else MaterialTheme.colorScheme.primary
                 )
+            }
+            Box {
+                IconButton(
+                    onClick = { menuOpen = true },
+                    enabled = enabled,
+                    modifier = Modifier.size(34.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.MoreVert,
+                        contentDescription = "Line ${index + 1} actions",
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Move up") },
+                        enabled = index > 0,
+                        leadingIcon = { Icon(Icons.Filled.ArrowUpward, null) },
+                        onClick = { menuOpen = false; onMoveUp() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Move down") },
+                        enabled = index < count - 1,
+                        leadingIcon = { Icon(Icons.Filled.ArrowDownward, null) },
+                        onClick = { menuOpen = false; onMoveDown() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Duplicate") },
+                        enabled = canDuplicate,
+                        leadingIcon = { Icon(Icons.Filled.ContentCopy, null) },
+                        onClick = { menuOpen = false; onDuplicate() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Delete") },
+                        leadingIcon = {
+                            Icon(Icons.Filled.Delete, null, tint = MaterialTheme.colorScheme.error)
+                        },
+                        onClick = { menuOpen = false; onDelete() }
+                    )
+                }
             }
         }
     }

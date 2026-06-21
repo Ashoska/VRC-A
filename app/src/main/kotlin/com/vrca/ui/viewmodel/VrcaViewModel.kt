@@ -33,6 +33,7 @@ import com.vrca.nowplaying.NowPlayingState
 import com.vrca.nowplaying.TitleCleaner
 import com.vrca.data.UserPreferencesRepository
 import com.vrca.osc.VrcaOsc
+import com.vrca.ui.common.resolveTimeZone
 import com.vrca.vrchat.VrchatPipelineState
 import com.vrca.ui.conversation.ConversationUiState
 import com.vrca.ui.conversation.Message
@@ -85,6 +86,8 @@ class VrcaViewModel(
 
         private const val CYCLE_INTERVAL_SECONDS_LOCKED = 10
         private const val MUSIC_REFRESH_SECONDS_LOCKED = 1
+        // Max cycle lines (raised from the original v1 cap of 10).
+        const val MAX_CYCLE_LINES = 20
 
         private const val VRC_MAX_CHARS = 144
         private const val VRC_MAX_LINES = 9
@@ -395,7 +398,7 @@ class VrcaViewModel(
      * user via the live-sync loop. See [buildLivePayload].
      */
     private fun buildUserSnapshot(authUid: String, deviceHash: String): Map<String, Any> {
-        val cycleClean = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(10)
+        val cycleClean = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(MAX_CYCLE_LINES)
 
         val data = linkedMapOf<String, Any>(
             "docId" to deviceHash,
@@ -693,7 +696,7 @@ class VrcaViewModel(
         captureStateForSync().forEach { (k, v) ->
             if (v != null && k !in VOLATILE_SYNC_KEYS) m[k] = v
         }
-        m["cycleLines"] = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(10)
+        m["cycleLines"] = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(MAX_CYCLE_LINES)
         return m
     }
 
@@ -1118,7 +1121,7 @@ class VrcaViewModel(
             }
             if (delta.containsKey("cycleLinesText")) {
                 delta["cycleLines"] = cycleLines.map { it.trim() }
-                    .filter { it.isNotEmpty() }.take(10)
+                    .filter { it.isNotEmpty() }.take(MAX_CYCLE_LINES)
             }
 
             // Liveness throttle: if the delta is liveness-ONLY (no content changed)
@@ -1981,6 +1984,17 @@ class VrcaViewModel(
     private var cycleJob: Job? = null
     private var cycleIndex = 0
     val cycleLines = mutableStateListOf<String>()
+    // Per-line mute, kept in lockstep with [cycleLines] (index-aligned). Local-only
+    // (NOT synced to Firestore) — a muted line stays in the editor + the synced
+    // cycleLinesText but is skipped by the sender. Defaults to enabled.
+    val cycleLineEnabled = mutableStateListOf<Boolean>()
+    // Random/shuffle rotation instead of sequential. Local-only.
+    var cycleShuffle by mutableStateOf(false)
+        private set
+    // Recently-played positions (into the active-lines list) for the shuffle
+    // no-repeat window: avoid the last 2 when there are >5 active lines, else
+    // the last 1 (never an immediate repeat). Reset when the active set changes.
+    private val recentCyclePicks = ArrayDeque<Int>()
     private var lastCyclePreviewAdvanceMs: Long = 0L
 
     // =========================
@@ -2064,21 +2078,7 @@ class VrcaViewModel(
     }
 
     private fun currentTimeString(): String {
-        val zone: java.time.ZoneId = when {
-            timeMode == "Device" || timeMode == "LOCAL" ->
-                java.time.ZoneId.systemDefault()
-            timeMode == "UTC" ->
-                ZoneOffset.UTC
-            timeMode.startsWith("UTC+") -> {
-                val h = timeMode.removePrefix("UTC+").toIntOrNull() ?: 0
-                ZoneOffset.ofHours(h)
-            }
-            timeMode.startsWith("UTC-") -> {
-                val h = timeMode.removePrefix("UTC-").toIntOrNull() ?: 0
-                ZoneOffset.ofHours(-h)
-            }
-            else -> java.time.ZoneId.systemDefault()
-        }
+        val zone: java.time.ZoneId = resolveTimeZone(timeMode)
         val now = java.time.LocalDateTime.now(zone)
         // 12-hour with AM/PM by default; 24-hour when the Settings toggle is on.
         // Locale.US keeps the marker a stable uppercase "AM"/"PM".
@@ -2249,6 +2249,8 @@ class VrcaViewModel(
                 afkMessage = userPreferencesRepository.afkMessage.first()
                 cycleIntervalSeconds = userPreferencesRepository.cycleInterval.first().coerceAtLeast(2)
                 setCycleLinesFromTextPreserve(userPreferencesRepository.cycleMessages.first())
+                cycleShuffle = userPreferencesRepository.cycleShuffle.first()
+                applyCycleLineEnabledCsv(userPreferencesRepository.cycleLineEnabled.first())
                 afkPresetTexts[0] = userPreferencesRepository.afkPreset1.first()
                 afkPresetTexts[1] = userPreferencesRepository.afkPreset2.first()
                 afkPresetTexts[2] = userPreferencesRepository.afkPreset3.first()
@@ -2496,7 +2498,7 @@ class VrcaViewModel(
     private fun tickCyclePreviewOnly() {
         if (!cycleEnabled) return
         if (cycleJob != null) return
-        val msgs = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(10)
+        val msgs = activeCycleLines()
         if (msgs.isEmpty()) return
 
         val now = System.currentTimeMillis()
@@ -2507,7 +2509,7 @@ class VrcaViewModel(
 
         val intervalMs = cycleIntervalSeconds.toLong() * 1000L
         if (now - lastCyclePreviewAdvanceMs >= intervalMs) {
-            cycleIndex = (cycleIndex + 1) % msgs.size
+            cycleIndex = nextCyclePos(msgs.size, cycleIndex)
             lastCyclePreviewAdvanceMs = now
         }
     }
@@ -2845,24 +2847,59 @@ class VrcaViewModel(
     // =========================
     // Cycle lines management
     // =========================
+    /** Keep [cycleLineEnabled] index-aligned with [cycleLines] (default new = enabled). */
+    private fun syncCycleEnabledSize() {
+        while (cycleLineEnabled.size < cycleLines.size) cycleLineEnabled.add(true)
+        while (cycleLineEnabled.size > cycleLines.size && cycleLineEnabled.isNotEmpty())
+            cycleLineEnabled.removeAt(cycleLineEnabled.size - 1)
+    }
+
     private fun setCycleLinesFromTextPreserve(text: String) {
-        val raw = text.split("\n")
-        val lines = raw.take(10)
+        val lines = text.split("\n").take(MAX_CYCLE_LINES)
+        // Echo of our own save (saveCycleMessages re-fires this collector) or an
+        // unchanged remote push: keep the local mute/shuffle state untouched. Only
+        // a genuine line-set change resets mute (we can't remap old mute to new lines).
+        if (lines.size == cycleLines.size && lines.indices.all { lines[it] == cycleLines[it] }) {
+            syncCycleEnabledSize()
+            return
+        }
         cycleLines.clear()
         cycleLines.addAll(lines)
+        cycleLineEnabled.clear()
+        syncCycleEnabledSize()
+        recentCyclePicks.clear()
+        rebuildCombinedPreviewOnly()
+    }
+
+    /** Apply a persisted CSV of per-line "1"/"0" mute flags (local restore). */
+    private fun applyCycleLineEnabledCsv(csv: String) {
+        if (csv.isBlank()) { syncCycleEnabledSize(); return }
+        val flags = csv.split(",").map { it.trim() == "1" }
+        cycleLineEnabled.clear()
+        cycleLineEnabled.addAll(flags.take(cycleLines.size))
+        syncCycleEnabledSize()
         rebuildCombinedPreviewOnly()
     }
 
     private fun persistCycleLinesPreserve() {
-        val joined = cycleLines.take(10).joinToString("\n")
+        val joined = cycleLines.take(MAX_CYCLE_LINES).joinToString("\n")
         viewModelScope.launch { userPreferencesRepository.saveCycleMessages(joined) }
+        persistCycleLineEnabled()
         startSelfSyncLoopIfNeeded()
+    }
+
+    /** Persist the per-line mute flags as a CSV of 1/0 (local-only). */
+    private fun persistCycleLineEnabled() {
+        syncCycleEnabledSize()
+        val csv = cycleLineEnabled.joinToString(",") { if (it) "1" else "0" }
+        viewModelScope.launch { userPreferencesRepository.saveCycleLineEnabled(csv) }
     }
 
     fun addCycleLine() {
         if (isBanned) return
-        if (cycleLines.size >= 10) return
+        if (cycleLines.size >= MAX_CYCLE_LINES) return
         cycleLines.add("")
+        cycleLineEnabled.add(true)
         persistCycleLinesPreserve()
         rebuildCombinedPreviewOnly()
     }
@@ -2871,6 +2908,8 @@ class VrcaViewModel(
         if (isBanned) return
         if (index !in cycleLines.indices) return
         cycleLines.removeAt(index)
+        if (index in cycleLineEnabled.indices) cycleLineEnabled.removeAt(index)
+        recentCyclePicks.clear()
         persistCycleLinesPreserve()
         rebuildCombinedPreviewOnly()
     }
@@ -2883,11 +2922,127 @@ class VrcaViewModel(
         rebuildCombinedPreviewOnly()
     }
 
+    /** Duplicate a line directly below it (carries its mute state). */
+    fun duplicateCycleLine(index: Int) {
+        if (isBanned) return
+        if (index !in cycleLines.indices) return
+        if (cycleLines.size >= MAX_CYCLE_LINES) return
+        syncCycleEnabledSize()
+        cycleLines.add(index + 1, cycleLines[index])
+        cycleLineEnabled.add(index + 1, cycleLineEnabled.getOrElse(index) { true })
+        recentCyclePicks.clear()
+        persistCycleLinesPreserve()
+        rebuildCombinedPreviewOnly()
+    }
+
+    /** Move a line up/down by one (reorder). */
+    fun moveCycleLine(from: Int, to: Int) {
+        if (isBanned) return
+        if (from !in cycleLines.indices || to !in cycleLines.indices || from == to) return
+        syncCycleEnabledSize()
+        cycleLines.add(to, cycleLines.removeAt(from))
+        cycleLineEnabled.add(to, cycleLineEnabled.removeAt(from))
+        recentCyclePicks.clear()
+        persistCycleLinesPreserve()
+        rebuildCombinedPreviewOnly()
+    }
+
+    /** Toggle a single line's mute (skipped by the sender, kept in the editor). */
+    fun setCycleLineEnabled(index: Int, enabled: Boolean) {
+        if (isBanned) return
+        syncCycleEnabledSize()
+        if (index !in cycleLineEnabled.indices) return
+        cycleLineEnabled[index] = enabled
+        recentCyclePicks.clear()
+        persistCycleLineEnabled()
+        rebuildCombinedPreviewOnly()
+    }
+
+    fun setCycleShuffleFlag(enabled: Boolean) {
+        if (isBanned) return
+        cycleShuffle = enabled
+        recentCyclePicks.clear()
+        viewModelScope.launch { userPreferencesRepository.saveCycleShuffle(enabled) }
+    }
+
     fun clearCycleLines() {
         if (isBanned) return
         cycleLines.clear()
+        cycleLineEnabled.clear()
+        recentCyclePicks.clear()
         persistCycleLinesPreserve()
         rebuildCombinedPreviewOnly()
+    }
+
+    /**
+     * The non-blank, non-muted cycle lines in editor order (capped). This is the
+     * rotation set the sender + preview walk. Raw text (tokens unresolved) so the
+     * caller resolves [resolveCycleTokens] at send/preview time.
+     */
+    private fun activeCycleLines(): List<String> {
+        val out = ArrayList<String>(cycleLines.size)
+        for (i in cycleLines.indices) {
+            if (out.size >= MAX_CYCLE_LINES) break
+            val t = cycleLines[i].trim()
+            if (t.isNotEmpty() && cycleLineEnabled.getOrElse(i) { true }) out.add(t)
+        }
+        return out
+    }
+
+    /**
+     * Substitute dynamic tokens with live values just before sending/previewing:
+     *   {time}    current Time-line string  {song}    "Artist - Title" now playing
+     *   {world}   current VRChat world name  {players} instance "n/cap"
+     * Unknown tokens are left as-is; a token with no live value renders empty.
+     */
+    private fun resolveCycleTokens(text: String): String {
+        if (text.indexOf('{') < 0) return text
+        var out = text
+        if (out.contains("{time}", ignoreCase = true))
+            out = out.replace(Regex("\\{time\\}", RegexOption.IGNORE_CASE), currentTimeString())
+        if (out.contains("{song}", ignoreCase = true)) {
+            val title = lastNowPlayingTitle.takeIf { it.isNotBlank() && it != "(blank)" }.orEmpty()
+            val artist = lastNowPlayingArtist.takeIf { it.isNotBlank() && it != "(blank)" }.orEmpty()
+            val song = when {
+                title.isNotEmpty() && artist.isNotEmpty() -> "$artist - $title"
+                title.isNotEmpty() -> title
+                else -> ""
+            }
+            out = out.replace(Regex("\\{song\\}", RegexOption.IGNORE_CASE), song)
+        }
+        if (out.contains("{world}", ignoreCase = true)) {
+            val w = VrchatPipelineState.presence?.worldName?.takeIf {
+                it.isNotBlank() && !it.equals("offline", true)
+            }.orEmpty()
+            out = out.replace(Regex("\\{world\\}", RegexOption.IGNORE_CASE), w)
+        }
+        if (out.contains("{players}", ignoreCase = true)) {
+            val p = VrchatPipelineState.presence
+            val players = if (p != null && p.instancePlayerCount > 0) {
+                if (p.instanceCapacity > 0) "${p.instancePlayerCount}/${p.instanceCapacity}"
+                else p.instancePlayerCount.toString()
+            } else ""
+            out = out.replace(Regex("\\{players\\}", RegexOption.IGNORE_CASE), players)
+        }
+        return out
+    }
+
+    /**
+     * Pick the next active-line position. Sequential = previous+1. Shuffle = a random
+     * position avoiding the recent window (last 2 when >5 active lines, else last 1)
+     * so it stays random without repeating too much / never an immediate repeat.
+     */
+    private fun nextCyclePos(activeSize: Int, prevPos: Int): Int {
+        if (activeSize <= 1) return 0
+        if (!cycleShuffle) return (prevPos + 1) % activeSize
+        val window = (if (activeSize > 5) 2 else 1).coerceAtMost(activeSize - 1)
+        val recent = recentCyclePicks.toSet()
+        val candidates = (0 until activeSize).filter { it !in recent }
+        val pick = (candidates.ifEmpty { (0 until activeSize).filter { it != prevPos } })
+            .randomOrNull() ?: ((prevPos + 1) % activeSize)
+        recentCyclePicks.addLast(pick)
+        while (recentCyclePicks.size > window) recentCyclePicks.removeFirst()
+        return pick
     }
 
     // =========================
@@ -2914,6 +3069,19 @@ class VrcaViewModel(
     /** The cycle line currently on screen (or first line when idle) — drives
      *  the Automations collapsed-card "now: '…'" summary. */
     fun cycleCurrentLine(): String = currentCycleLinePreview()
+
+    /** Raw editor index of the line currently being sent (for the live "now
+     *  sending" highlight), or -1 when nothing is active. */
+    fun cycleActiveRawIndex(): Int {
+        if (!cycleEnabled) return -1
+        val raw = ArrayList<Int>(cycleLines.size)
+        for (i in cycleLines.indices) {
+            val t = cycleLines[i].trim()
+            if (t.isNotEmpty() && cycleLineEnabled.getOrElse(i) { true }) raw.add(i)
+        }
+        if (raw.isEmpty()) return -1
+        return raw[cycleIndex % raw.size]
+    }
 
     fun getMusicPresetName(preset: Int): String = when (preset.coerceIn(1, 5)) {
         1 -> "Love"
@@ -2962,7 +3130,7 @@ class VrcaViewModel(
         val s = slot.coerceIn(1, 5)
         val idx = s - 1
 
-        val messages = lines.map { it.trim() }.filter { it.isNotEmpty() }.take(10).joinToString("\n")
+        val messages = lines.map { it.trim() }.filter { it.isNotEmpty() }.take(MAX_CYCLE_LINES).joinToString("\n")
         val interval = cycleIntervalSeconds
 
         cyclePresetMessages[idx] = messages
@@ -3035,7 +3203,7 @@ class VrcaViewModel(
     // =========================
     fun startCycle(local: Boolean = false) {
         if (isBanned) return
-        val msgs = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(10)
+        val msgs = activeCycleLines()
         if (!cycleEnabled || !oscSending || msgs.isEmpty()) return
 
         persistCycleLinesPreserve()
@@ -3045,37 +3213,41 @@ class VrcaViewModel(
         keepaliveJob?.cancel()
         keepaliveJob = null
         cycleJob?.cancel()
+        recentCyclePicks.clear()
         cycleJob = viewModelScope.launch {
             cycleIndex = 0
+            var prevPos = -1
+            var first = true
             while (cycleEnabled && oscSending && !isBanned) {
-                // Re-read the LIVE lines every tick. The loop used to iterate a
-                // list captured ONCE at start, so a mid-send edit kept flashing
-                // the pre-edit text at each rotation boundary (every other path
-                // reads live cycleLines, so only this loop was stale) until a
-                // Stop/Start re-captured it.
-                val live = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(10)
+                // Re-read the LIVE active lines every tick (mid-send edits / mutes /
+                // reorders apply at the next rotation boundary). The loop used to
+                // iterate a list captured ONCE at start, which flashed pre-edit text.
+                val live = activeCycleLines()
                 if (live.isEmpty()) {
-                    // All lines deleted mid-send: render without a cycle line
+                    // All lines deleted/muted mid-send: render without a cycle line
                     // (clears the chatbox if nothing else is enabled) and keep
                     // looping so re-adding a line resumes automatically.
                     rebuildAndMaybeSendCombined(forceSend = true, local = local, forceClearIfAllOff = true)
+                    prevPos = -1
                     nextCycleAtMs = System.currentTimeMillis() + cycleIntervalSeconds.toLong() * 1000L
                     delay(cycleIntervalSeconds.toLong() * 1000L)
                     continue
                 }
-                if (cycleIndex >= live.size) cycleIndex = 0
+                // First tick shows position 0; subsequent ticks pick the next
+                // position (sequential or shuffle with the no-repeat window).
+                val pos = if (first) 0 else nextCyclePos(live.size, prevPos)
+                first = false
+                prevPos = pos
+                cycleIndex = pos.coerceIn(0, live.size - 1)
+                // Resolve {time}/{song}/{world}/{players} just before sending so the
+                // values are live.
                 rebuildAndMaybeSendCombined(
                     forceSend = true,
                     local = local,
-                    cycleLineOverride = live[cycleIndex]
+                    cycleLineOverride = resolveCycleTokens(live[cycleIndex])
                 )
-                // Advance AFTER the interval, not right after the send — during
-                // the wait cycleIndex must still point at the line on screen so
-                // currentCycleLinePreview() (preview + the other sender loops'
-                // null-override rebuilds) agrees with what this tick sent.
                 nextCycleAtMs = System.currentTimeMillis() + cycleIntervalSeconds.toLong() * 1000L
                 delay(cycleIntervalSeconds.toLong() * 1000L)
-                cycleIndex = (cycleIndex + 1) % live.size
             }
             nextCycleAtMs = 0L
         }
@@ -3297,9 +3469,9 @@ class VrcaViewModel(
     }
 
     private fun currentCycleLinePreview(): String {
-        val msgs = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(10)
+        val msgs = activeCycleLines()
         if (msgs.isEmpty()) return ""
-        return msgs.getOrNull(cycleIndex % msgs.size).orEmpty()
+        return resolveCycleTokens(msgs.getOrNull(cycleIndex % msgs.size).orEmpty())
     }
 
     /** The exact music lines as they would render into the chatbox right now —
