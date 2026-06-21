@@ -23,7 +23,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -93,6 +92,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.vrca.discord.DiscordRpcState
 import com.vrca.discord.DiscordRpcStatus
+import com.vrca.ui.common.VrcaConfirmDialog
+import com.vrca.ui.common.VrcaDialogCopy
 import com.vrca.ui.viewmodel.VrcaViewModel
 import com.vrca.vrchat.InAppAlertEvent
 import com.vrca.vrchat.InstanceHistoryStore
@@ -482,47 +483,37 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
     // "Are you sure?" before nuking every alert (moved out of the old
     // InAppAlertCards composable now that the section is a LazyListScope helper).
     if (showDismissAllConfirm) {
-        AlertDialog(
-            onDismissRequest = { showDismissAllConfirm = false },
-            title = { Text("Dismiss all notifications?") },
-            text = { Text("This clears every in-app alert. This can't be undone.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    showDismissAllConfirm = false
-                    val nm = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
-                    // Clear in-app groups AND cancel each linked Android notification.
-                    InAppAlertState.dismissAll(ctx).forEach { nm.cancel(it.hashCode()) }
-                }) { Text("Dismiss all") }
+        VrcaConfirmDialog(
+            title = "Dismiss all notifications?",
+            body = "This clears every in-app alert. This can't be undone.",
+            confirmLabel = "Dismiss all",
+            destructive = true,
+            onConfirm = {
+                showDismissAllConfirm = false
+                val nm = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+                // Clear in-app groups AND cancel each linked Android notification.
+                InAppAlertState.dismissAll(ctx).forEach { nm.cancel(it.hashCode()) }
             },
-            dismissButton = {
-                TextButton(onClick = { showDismissAllConfirm = false }) { Text("Cancel") }
-            }
+            onDismiss = { showDismissAllConfirm = false }
         )
     }
 
-    // Sign out confirmation
+    // Sign out confirmation — shared canonical copy (matches Settings).
     if (showLogoutDialog) {
-        AlertDialog(
-            onDismissRequest = { showLogoutDialog = false },
-            title = { Text("Sign out of VRChat?") },
-            text = {
-                Text("Notifications and presence stop, and chatbox sending is blocked until you sign back in. Your toggles and messages are kept.")
+        VrcaConfirmDialog(
+            title = VrcaDialogCopy.VRC_SIGN_OUT_TITLE,
+            body = VrcaDialogCopy.VRC_SIGN_OUT_BODY,
+            confirmLabel = "Sign out",
+            destructive = true,
+            onConfirm = {
+                showLogoutDialog = false
+                // logout() emits loggedOutSignal → vm.vrchatLoggedOut flips
+                // (isLinked above is derived from it) and the OSC gate blocks.
+                VrchatAuthManager.logout(ctx)
+                // Stop pipeline service
+                ctx.stopService(Intent(ctx, VrchatPipelineService::class.java))
             },
-            confirmButton = {
-                TextButton(onClick = {
-                    showLogoutDialog = false
-                    // logout() emits loggedOutSignal → vm.vrchatLoggedOut flips
-                    // (isLinked above is derived from it) and the OSC gate blocks.
-                    VrchatAuthManager.logout(ctx)
-                    // Stop pipeline service
-                    ctx.stopService(
-                        Intent(ctx, VrchatPipelineService::class.java)
-                    )
-                }) { Text("Sign out", color = MaterialTheme.colorScheme.error) }
-            },
-            dismissButton = {
-                TextButton(onClick = { showLogoutDialog = false }) { Text("Cancel") }
-            }
+            onDismiss = { showLogoutDialog = false }
         )
     }
 }

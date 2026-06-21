@@ -578,7 +578,7 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
                         "• This uses additional battery and data\n" +
                         "• Your Discord session cookies are stored on-device only\n" +
                         "• While unlikely, Discord could flag unusual client behavior\n" +
-                        "• Disconnecting clears your Discord session — Discord may also " +
+                        "• Disconnecting clears your Discord session, and Discord may also " +
                         "invalidate your sessions on other devices when it detects an " +
                         "unauthorized client, logging you out everywhere\n" +
                         "• You can disable this at any time from settings",
@@ -639,43 +639,37 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
     }
 
     if (confirmVrcSignOut) {
-        androidx.compose.material3.AlertDialog(
-            onDismissRequest = { confirmVrcSignOut = false },
-            title = { Text("Sign out of VRChat?") },
-            text = { Text("Chatbox sending stops immediately and stays blocked until you sign in again. Your toggles and messages are kept.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    confirmVrcSignOut = false
-                    com.vrca.vrchat.VrchatAuthManager.logout(ctx)
-                }) { Text("Sign out") }
+        com.vrca.ui.common.VrcaConfirmDialog(
+            title = com.vrca.ui.common.VrcaDialogCopy.VRC_SIGN_OUT_TITLE,
+            body = com.vrca.ui.common.VrcaDialogCopy.VRC_SIGN_OUT_BODY,
+            confirmLabel = "Sign out",
+            destructive = true,
+            onConfirm = {
+                confirmVrcSignOut = false
+                com.vrca.vrchat.VrchatAuthManager.logout(ctx)
             },
-            dismissButton = {
-                TextButton(onClick = { confirmVrcSignOut = false }) { Text("Cancel") }
-            }
+            onDismiss = { confirmVrcSignOut = false }
         )
     }
 
     if (confirmDiscordDisconnect) {
-        androidx.compose.material3.AlertDialog(
-            onDismissRequest = { confirmDiscordDisconnect = false },
-            title = { Text("Sign out of Discord?") },
-            text = { Text("Rich Presence stops and the on-device Discord session is cleared. Signing out may invalidate Discord sessions on other devices.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    confirmDiscordDisconnect = false
-                    scope.launch {
-                        repo.saveDiscordRpcEnabled(false)
-                        repo.saveDiscordSessionSeeded(false)
-                        android.webkit.CookieManager.getInstance().removeAllCookies(null)
-                        val svcIntent = android.content.Intent(ctx, com.vrca.discord.DiscordRpcService::class.java)
-                        svcIntent.action = com.vrca.discord.DiscordRpcService.ACTION_STOP
-                        ctx.startService(svcIntent)
-                    }
-                }) { Text("Sign out") }
+        com.vrca.ui.common.VrcaConfirmDialog(
+            title = com.vrca.ui.common.VrcaDialogCopy.DISCORD_SIGN_OUT_TITLE,
+            body = com.vrca.ui.common.VrcaDialogCopy.DISCORD_SIGN_OUT_BODY,
+            confirmLabel = "Sign out",
+            destructive = true,
+            onConfirm = {
+                confirmDiscordDisconnect = false
+                scope.launch {
+                    repo.saveDiscordRpcEnabled(false)
+                    repo.saveDiscordSessionSeeded(false)
+                    android.webkit.CookieManager.getInstance().removeAllCookies(null)
+                    val svcIntent = android.content.Intent(ctx, com.vrca.discord.DiscordRpcService::class.java)
+                    svcIntent.action = com.vrca.discord.DiscordRpcService.ACTION_STOP
+                    ctx.startService(svcIntent)
+                }
             },
-            dismissButton = {
-                TextButton(onClick = { confirmDiscordDisconnect = false }) { Text("Cancel") }
-            }
+            onDismiss = { confirmDiscordDisconnect = false }
         )
     }
 }

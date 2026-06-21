@@ -5,25 +5,23 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Loop
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -42,6 +40,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.TextFieldValue
@@ -51,6 +50,7 @@ import com.vrca.ui.common.CompactSectionCard
 import com.vrca.ui.common.KitSectionHeader
 import com.vrca.ui.common.KitStatusChip
 import com.vrca.ui.common.KitTone
+import com.vrca.ui.common.SelectPill
 import com.vrca.ui.viewmodel.VrcaViewModel
 import kotlinx.coroutines.launch
 
@@ -151,34 +151,27 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
             }
         ) {
             if (vm.cycleLines.isEmpty()) {
-                Text("No lines yet. Tap Add Line.", style = MaterialTheme.typography.bodySmall)
+                Text("No lines yet. Tap Add line.", style = MaterialTheme.typography.bodySmall)
             }
 
-            vm.cycleLines.forEachIndexed { idx, _ ->
-                val fieldValue =
-                    cycleLineFields[idx] ?: TextFieldValue(vm.cycleLines.getOrNull(idx).orEmpty())
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedTextField(
+            // Compact line rows (slim bordered fields, inline number + delete) so
+            // a full 10-line cycle no longer eats the whole screen. The editing
+            // behavior is unchanged — tap to focus, type, tap the bin to remove —
+            // and TextFieldValue keeps the cursor position per line.
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                vm.cycleLines.forEachIndexed { idx, _ ->
+                    val fieldValue =
+                        cycleLineFields[idx] ?: TextFieldValue(vm.cycleLines.getOrNull(idx).orEmpty())
+                    CycleLineRow(
+                        index = idx,
                         value = fieldValue,
                         onValueChange = { v: TextFieldValue ->
                             cycleLineFields[idx] = v
                             vm.updateCycleLine(idx, v.text)
                         },
-                        modifier = Modifier.weight(1f),
-                        singleLine = true,
-                        label = { Text("Line ${idx + 1}") },
-                        // Per-line meter only once the line approaches the
-                        // budget — 10 always-on meters would just be noise.
-                        supportingText = if (fieldValue.text.length > 100) {
-                            { CharBudgetMeter(fieldValue.text.length) }
-                        } else null,
+                        onDelete = { vm.removeCycleLine(idx) },
                         enabled = !isBanned
                     )
-                    Spacer(Modifier.width(8.dp))
-                    IconButton(onClick = { vm.removeCycleLine(idx) }, enabled = !isBanned) {
-                        Icon(Icons.Filled.Delete, contentDescription = "Remove line")
-                    }
                 }
             }
 
@@ -200,38 +193,20 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                 ) { Text("Clear") }
             }
 
-            // Cycle speed dropdown
+            // Cycle speed — inline one-tap chips (no dropdown menu to open).
+            KitSectionHeader(title = "Cycle speed")
             Row(
                 Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text("Cycle speed:", style = MaterialTheme.typography.bodySmall)
-                var cycleSpeedMenuOpen by remember { mutableStateOf(false) }
-                val cycleSpeedOptions = listOf(2, 5, 10, 20, 40)
-                Box {
-                    OutlinedButton(
-                        onClick = { cycleSpeedMenuOpen = true },
+                listOf(2, 5, 10, 20, 40).forEach { sec ->
+                    SelectPill(
+                        label = "${sec}s",
+                        selected = vm.cycleIntervalSeconds == sec,
                         enabled = !isBanned,
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-                    ) {
-                        Text("${vm.cycleIntervalSeconds}s", style = MaterialTheme.typography.bodySmall)
-                        Icon(Icons.Filled.ExpandMore, contentDescription = null, modifier = Modifier.size(16.dp))
-                    }
-                    DropdownMenu(
-                        expanded = cycleSpeedMenuOpen,
-                        onDismissRequest = { cycleSpeedMenuOpen = false }
-                    ) {
-                        cycleSpeedOptions.forEach { sec ->
-                            DropdownMenuItem(
-                                text = { Text("${sec} seconds") },
-                                onClick = {
-                                    vm.updateCycleIntervalSeconds(sec)
-                                    cycleSpeedMenuOpen = false
-                                }
-                            )
-                        }
-                    }
+                        onClick = { vm.updateCycleIntervalSeconds(sec) },
+                        modifier = Modifier.weight(1f)
+                    )
                 }
             }
 
@@ -355,6 +330,79 @@ private fun PresetChip(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+        }
+    }
+}
+
+/**
+ * One compact cycle line: a slim bordered field with the line number inline on
+ * the left and a delete bin on the right. About half the height of the old
+ * labelled OutlinedTextField + separate delete button row, so a full 10-line
+ * cycle stays scannable. Shows a placeholder ("Line N") while empty and the
+ * per-line budget meter only once the line gets long.
+ */
+@Composable
+private fun CycleLineRow(
+    index: Int,
+    value: TextFieldValue,
+    onValueChange: (TextFieldValue) -> Unit,
+    onDelete: () -> Unit,
+    enabled: Boolean
+) {
+    Surface(
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .heightIn(min = 44.dp)
+                .padding(start = 12.dp, end = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "${index + 1}",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.widthIn(min = 16.dp)
+            )
+            Spacer(Modifier.width(10.dp))
+            Box(Modifier.weight(1f)) {
+                if (value.text.isEmpty()) {
+                    Text(
+                        "Line ${index + 1}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    )
+                }
+                BasicTextField(
+                    value = value,
+                    onValueChange = onValueChange,
+                    enabled = enabled,
+                    singleLine = true,
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(
+                        color = MaterialTheme.colorScheme.onSurface
+                    ),
+                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+            if (value.text.length > 100) {
+                Spacer(Modifier.width(6.dp))
+                CharBudgetMeter(value.text.length)
+            }
+            IconButton(
+                onClick = onDelete,
+                enabled = enabled,
+                modifier = Modifier.size(36.dp)
+            ) {
+                Icon(
+                    Icons.Filled.Delete,
+                    contentDescription = "Remove line ${index + 1}",
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
     }
 }
