@@ -562,32 +562,46 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
                 confirmEnabled = false
             }
         }
-        androidx.compose.material3.AlertDialog(
-            onDismissRequest = { showRiskConsent = false },
-            title = { Text("Discord Rich Presence") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        "This feature runs a hidden Discord web session on your device to show " +
-                        "VRChat activity on your Discord profile.",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    Text("Please be aware:", style = MaterialTheme.typography.labelLarge)
-                    Text(
-                        "• A background Discord web session will be active while enabled\n" +
-                        "• This uses additional battery and data\n" +
-                        "• Your Discord session cookies are stored on-device only\n" +
-                        "• While unlikely, Discord could flag unusual client behavior\n" +
-                        "• Disconnecting clears your Discord session, and Discord may also " +
-                        "invalidate your sessions on other devices when it detects an " +
-                        "unauthorized client, logging you out everywhere\n" +
-                        "• You can disable this at any time from settings",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    Spacer(Modifier.height(4.dp))
+        com.vrca.ui.common.VrcaCardDialog(onDismiss = { showRiskConsent = false }) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    "Discord Rich Presence",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    "This feature runs a hidden Discord web session on your device to show " +
+                    "VRChat activity on your Discord profile.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text("Please be aware:", style = MaterialTheme.typography.labelLarge)
+                Text(
+                    "• A background Discord web session will be active while enabled\n" +
+                    "• This uses additional battery and data\n" +
+                    "• Your Discord session cookies are stored on-device only\n" +
+                    "• While unlikely, Discord could flag unusual client behavior\n" +
+                    "• Disconnecting clears your Discord session, and Discord may also " +
+                    "invalidate your sessions on other devices when it detects an " +
+                    "unauthorized client, logging you out everywhere\n" +
+                    "• You can disable this at any time from settings",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Surface(
+                    shape = MaterialTheme.shapes.medium,
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.clickable { riskChecked = !riskChecked }
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { riskChecked = !riskChecked }
+                            .padding(end = 12.dp)
                     ) {
                         androidx.compose.material3.Checkbox(
                             checked = riskChecked,
@@ -597,32 +611,44 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
                             style = MaterialTheme.typography.bodySmall)
                     }
                 }
-            },
-            confirmButton = {
-                androidx.compose.material3.Button(
-                    onClick = {
-                        scope.launch {
-                            repo.saveDiscordRiskAccepted(true)
-                            showRiskConsent = false
-                            if (discordSeeded) setDiscordRpcEnabled(true)
-                            else showDiscordLogin = true
-                        }
-                    },
-                    enabled = confirmEnabled
-                ) { Text(if (confirmEnabled) "Continue" else "Please wait...") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showRiskConsent = false }) { Text("Cancel") }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(onClick = { showRiskConsent = false }) { Text("Cancel") }
+                    androidx.compose.material3.Button(
+                        onClick = {
+                            scope.launch {
+                                repo.saveDiscordRiskAccepted(true)
+                                showRiskConsent = false
+                                if (discordSeeded) setDiscordRpcEnabled(true)
+                                else showDiscordLogin = true
+                            }
+                        },
+                        enabled = confirmEnabled
+                    ) { Text(if (confirmEnabled) "Continue" else "Please wait...") }
+                }
             }
-        )
+        }
     }
 
     // Discord login WebView (moved with the card).
     if (showDiscordLogin) {
-        androidx.compose.material3.AlertDialog(
-            onDismissRequest = { showDiscordLogin = false },
-            confirmButton = {},
-            text = {
+        com.vrca.ui.common.VrcaCardDialog(
+            onDismiss = { showDiscordLogin = false },
+            dismissOnOutsideTap = false
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Sign in to Discord",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = { showDiscordLogin = false }) { Text("Cancel") }
+                }
                 Box(Modifier.fillMaxWidth().height(500.dp)) {
                     com.vrca.discord.DiscordLoginWebView(
                         onLoginComplete = {
@@ -635,7 +661,7 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
                     )
                 }
             }
-        )
+        }
     }
 
     if (confirmVrcSignOut) {

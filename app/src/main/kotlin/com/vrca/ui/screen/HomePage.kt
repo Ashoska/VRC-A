@@ -847,13 +847,6 @@ private fun QuickTogglesGrid(
     onNavigate: (AppPage) -> Unit
 ) {
     var timeMenuOpen by remember { mutableStateOf(false) }
-    val timeModeOptions: List<String> = remember {
-        buildList {
-            add("Device"); add("UTC")
-            for (h in 1..14) add("UTC+$h")
-            for (h in 1..12) add("UTC-$h")
-        }
-    }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         vm.cardOrder.forEach { component ->
@@ -886,8 +879,17 @@ private fun QuickTogglesGrid(
                 ) { vm.setSpotifyEnabledFlag(it) }
 
                 "Time" -> Box {
+                    val tzMode = vm.timeMode
+                    val tzLabel = remember(tzMode) {
+                        if (tzMode == "Device" || tzMode == "LOCAL" || tzMode.isBlank()) "Device"
+                        else {
+                            val zone = com.vrca.ui.common.resolveTimeZone(tzMode)
+                            if (tzMode.startsWith("UTC")) com.vrca.ui.common.zoneOffsetLabel(zone)
+                            else "${com.vrca.ui.common.timeZoneCity(tzMode)} (${com.vrca.ui.common.zoneOffsetLabel(zone)})"
+                        }
+                    }
                     TogglePill(
-                        label = "Time · ${vm.timeMode}",
+                        label = "Time · $tzLabel",
                         icon = Icons.Filled.Schedule,
                         checked = vm.timeEnabled,
                         enabled = !isBanned,
@@ -895,10 +897,9 @@ private fun QuickTogglesGrid(
                         modifier = Modifier.fillMaxWidth()
                     ) { vm.updateTimeEnabled(it) }
                     if (timeMenuOpen) {
-                        com.vrca.ui.common.VrcaSingleSelectDialog(
-                            title = "Time zone",
-                            options = timeModeOptions,
-                            selected = vm.timeMode,
+                        com.vrca.ui.common.VrcaTimeZoneDialog(
+                            currentMode = vm.timeMode,
+                            use24h = vm.time24h,
                             onSelect = { vm.updateTimeMode(it) },
                             onDismiss = { timeMenuOpen = false }
                         )

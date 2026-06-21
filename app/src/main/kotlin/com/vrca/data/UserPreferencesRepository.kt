@@ -50,6 +50,10 @@ class UserPreferencesRepository(private val context: Context) {
         val CYCLE_ENABLED  = booleanPreferencesKey("cycle_enabled")
         val CYCLE_MESSAGES = stringPreferencesKey("cycle_messages")
         val CYCLE_INTERVAL = intPreferencesKey("cycle_interval")
+        // Local-only cycle refinements (NOT synced to Firestore — like minimal bg):
+        // shuffle mode + a CSV of per-line "1"/"0" enabled flags (lockstep with lines).
+        val CYCLE_SHUFFLE  = booleanPreferencesKey("cycle_shuffle")
+        val CYCLE_LINE_ENABLED = stringPreferencesKey("cycle_line_enabled")
 
         val CYCLE_P1_MSG  = stringPreferencesKey("cycle_p1_messages")
         val CYCLE_P1_INT  = intPreferencesKey("cycle_p1_interval")
@@ -166,6 +170,8 @@ class UserPreferencesRepository(private val context: Context) {
     val cycleEnabled:  Flow<Boolean> = context.dataStore.data.map { it[Keys.CYCLE_ENABLED]  ?: false }.distinctUntilChanged()
     val cycleMessages: Flow<String>  = context.dataStore.data.map { it[Keys.CYCLE_MESSAGES] ?: "" }.distinctUntilChanged()
     val cycleInterval: Flow<Int>     = context.dataStore.data.map { it[Keys.CYCLE_INTERVAL] ?: 10 }.distinctUntilChanged()
+    val cycleShuffle:  Flow<Boolean> = context.dataStore.data.map { it[Keys.CYCLE_SHUFFLE]  ?: false }.distinctUntilChanged()
+    val cycleLineEnabled: Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_LINE_ENABLED] ?: "" }.distinctUntilChanged()
 
     val cyclePreset1Messages: Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_P1_MSG]  ?: "" }.distinctUntilChanged()
     val cyclePreset1Interval: Flow<Int>    = context.dataStore.data.map { it[Keys.CYCLE_P1_INT]  ?: 10 }.distinctUntilChanged()
@@ -309,6 +315,8 @@ class UserPreferencesRepository(private val context: Context) {
     suspend fun saveCycleEnabled(v: Boolean)  = context.dataStore.edit { it[Keys.CYCLE_ENABLED]  = v }
     suspend fun saveCycleMessages(v: String)  = context.dataStore.edit { it[Keys.CYCLE_MESSAGES] = v }
     suspend fun saveCycleInterval(v: Int)     = context.dataStore.edit { it[Keys.CYCLE_INTERVAL] = v }
+    suspend fun saveCycleShuffle(v: Boolean)  = context.dataStore.edit { it[Keys.CYCLE_SHUFFLE] = v }
+    suspend fun saveCycleLineEnabled(v: String) = context.dataStore.edit { it[Keys.CYCLE_LINE_ENABLED] = v }
     suspend fun saveCyclePreset1(messages: String, interval: Int, name: String? = null) { context.dataStore.edit { it[Keys.CYCLE_P1_MSG] = messages; it[Keys.CYCLE_P1_INT] = interval } }
     suspend fun saveCyclePreset2(messages: String, interval: Int, name: String? = null) { context.dataStore.edit { it[Keys.CYCLE_P2_MSG] = messages; it[Keys.CYCLE_P2_INT] = interval } }
     suspend fun saveCyclePreset3(messages: String, interval: Int, name: String? = null) { context.dataStore.edit { it[Keys.CYCLE_P3_MSG] = messages; it[Keys.CYCLE_P3_INT] = interval } }
