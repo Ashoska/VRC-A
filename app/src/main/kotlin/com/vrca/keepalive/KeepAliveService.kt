@@ -28,6 +28,13 @@ class KeepAliveService : Service() {
         private const val CHANNEL_ID = "vrca_pipeline"
         private const val NOTIF_ID = 1001
 
+        // Android explicitly warns against indefinitely-held wakelocks, and some
+        // OEMs force-release them after a while. We acquire with a bounded timeout
+        // and RE-ACQUIRE on every tick — equivalent to "held forever" in practice
+        // while staying OEM-friendly and self-releasing if the tick loop ever dies.
+        private const val WAKELOCK_TIMEOUT_MS = 6L * 60L * 60L * 1000L // 6 hours
+        private const val TICK_MS = 30_000L
+
         fun start(context: Context) {
             val i = Intent(context, KeepAliveService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -57,7 +64,7 @@ class KeepAliveService : Service() {
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:chatbox_keepalive").apply {
             setReferenceCounted(false)
             try {
-                acquire()
+                acquire(WAKELOCK_TIMEOUT_MS)
                 Log.d(TAG, "WakeLock acquired")
             } catch (t: Throwable) {
                 Log.e(TAG, "WakeLock acquire failed", t)
@@ -65,10 +72,22 @@ class KeepAliveService : Service() {
         }
 
         // Small periodic loop to keep the process "active" under some OEMs.
+        // It also RE-ARMS the bounded wakelock each tick so the 6h timeout never
+        // actually expires while the loop is alive — held-forever in practice,
+        // but self-releasing the moment this loop stops (process death/teardown).
         loopJob?.cancel()
         loopJob = scope.launch {
             while (true) {
-                delay(30_000L)
+                delay(TICK_MS)
+                try {
+                    wakeLock?.let { wl ->
+                        // Non-reference-counted: a fresh timed acquire simply
+                        // resets the timeout; release-then-acquire isn't needed.
+                        wl.acquire(WAKELOCK_TIMEOUT_MS)
+                    }
+                } catch (t: Throwable) {
+                    Log.e(TAG, "WakeLock re-acquire failed", t)
+                }
                 Log.d(TAG, "tick")
             }
         }

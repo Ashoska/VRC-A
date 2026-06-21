@@ -242,8 +242,18 @@ internal fun SettingsPage(
             )
             HelpFaqRow(
                 question = "Stops sending with screen off",
-                answer = "- Disable Battery Optimization for VRC-A (App section above)\n" +
-                    "- On Samsung: add VRC-A to \"Never sleeping apps\""
+                answer = buildString {
+                    append("- Disable Battery Optimization for VRC-A (App section above)\n")
+                    val g = com.vrca.ui.common.OemPowerGuidance.forThisDevice()
+                    if (g != null) {
+                        append("\nYour phone (")
+                        append(g.brand)
+                        append(") restricts background apps. ")
+                        append(g.steps)
+                    } else {
+                        append("- Keep VRC-A out of any \"restricted\" or \"sleeping\" apps list")
+                    }
+                }
             )
         }
 
