@@ -2,6 +2,7 @@
 package com.vrca.overlay
 
 import android.annotation.SuppressLint
+import com.vrca.app.startForegroundSafely
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -166,8 +167,10 @@ class OverlayService : Service() {
             .setShowWhen(false)
             .build()
 
-        // On Android 14+ this helps avoid stricter background limits
-        startForeground(NOTIF_ID, notif)
+        // On Android 14+ this helps avoid stricter background limits. Wrap so a
+        // background-initiated start (API 31+/34 ForegroundServiceStartNotAllowedException)
+        // degrades gracefully instead of crashing the shared process.
+        startForegroundSafely(NOTIF_ID, notif)
     }
 
     private fun acquireWakeLock() {

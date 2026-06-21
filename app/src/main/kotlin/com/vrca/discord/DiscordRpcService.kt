@@ -1,6 +1,7 @@
 package com.vrca.discord
 
 import android.annotation.SuppressLint
+import com.vrca.app.startForegroundSafely
 import android.app.Notification
 import android.graphics.Bitmap
 import android.app.NotificationChannel
@@ -257,10 +258,15 @@ class DiscordRpcService : Service() {
             // sticky restart). startForeground must still be called, but post the
             // CURRENT "active" text — not "starting..." — so the shared persistent
             // notification (NOTIF_ID 1001) isn't reset to a stale startup state.
-            startForeground(NOTIF_ID, buildNotif("Discord RPC active"))
+            startForegroundSafely(NOTIF_ID, buildNotif("Discord RPC active"), TAG)
             return START_STICKY
         }
-        startForeground(NOTIF_ID, buildNotif("Discord RPC starting..."))
+        // FRESH start. A background-initiated start (sticky restart / pipeline onOpen
+        // after an OEM kill) on API 31+/34 throws ForegroundServiceStartNotAllowedException;
+        // wrap it so the process doesn't crash. On failure, don't sticky-restart into the throw.
+        if (!startForegroundSafely(NOTIF_ID, buildNotif("Discord RPC starting..."), TAG)) {
+            return START_NOT_STICKY
+        }
 
         sessionRecoveryCount = 0
         // Start from 0; buildActivityJson() re-resolves the start from persisted

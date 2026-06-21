@@ -183,12 +183,17 @@ class KeepAliveService : Service() {
             }
 
             startForeground(NOTIF_ID, notif)
-        } catch (se: SecurityException) {
-            // If POST_NOTIFICATIONS isn’t granted on Android 13+, some devices may throw.
-            // Service will still try to run, but foreground may fail; log it.
-            Log.e(TAG, "startForeground blocked (notification permission?)", se)
         } catch (t: Throwable) {
-            Log.e(TAG, "startAsForeground failed", t)
+            // API 31+ ForegroundServiceStartNotAllowedException (background start) or a
+            // SecurityException (POST_NOTIFICATIONS missing on 13+) land here. CRITICAL:
+            // this service is started via startForegroundService(), so if startForeground
+            // fails and the service KEEPS RUNNING, the OS throws
+            // ForegroundServiceDidNotStartInTimeException ~5s later and crashes the
+            // (shared) process — the same OEM-kill crash loop by a different name. Stop
+            // the service to satisfy the 5s contract; the watchdog / next foreground
+            // launch restarts it when the OS permits a foreground start.
+            Log.e(TAG, "startAsForeground failed — stopping to avoid did-not-start crash", t)
+            try { stopSelf() } catch (_: Throwable) {}
         }
     }
 }
