@@ -459,13 +459,16 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
     if (showInstanceHistory) {
         val historyTargets = remember {
             InstanceHistoryStore.list(ctx).map { e ->
-                val joined = clockTime(e.joinedMs)
-                val time = if (e.leftMs == 0L) "Joined $joined · Still here"
-                    else "Joined $joined · Left ${clockTime(e.leftMs)}"
+                // One line per visit, newest first. "Still here" for the open session.
+                val lines = e.sessions.asReversed().map { s ->
+                    val joined = clockTime(s.joinedMs)
+                    if (s.leftMs == 0L) "Joined $joined · Still here"
+                    else "Joined $joined · Left ${clockTime(s.leftMs)}"
+                }
                 InstanceTarget(
                     location = e.location,
                     label = e.worldName.ifBlank { "Instance" },
-                    timeLabel = time
+                    timeLines = lines
                 )
             }
         }
@@ -1311,12 +1314,14 @@ private fun parseInstanceType(
     }
 }
 
-/** A target instance for the invite/history picker. [timeLabel] (history only) shows
- *  the join/left times so users can cross-reference what they played and when. */
+/** A target instance for the invite/history picker. [timeLines] (history only) shows
+ *  each VISIT's join/left times (newest first, one line per session) so users can
+ *  cross-reference what they played and when, and so rejoining a place keeps both
+ *  visits instead of resetting. */
 private data class InstanceTarget(
     val location: String,
     val label: String,
-    val timeLabel: String? = null
+    val timeLines: List<String> = emptyList()
 )
 
 private fun clockTime(ms: Long): String =
@@ -1637,28 +1642,35 @@ private fun InstanceRow(target: InstanceTarget, info: VrchatAuthManager.Instance
                     }
                 }
             }
-            // Join/left time on its own full-width line — predictable max length, so
-            // with the whole card width it never clips even at "12:00 AM" extremes.
-            if (!target.timeLabel.isNullOrBlank()) {
+            // Join/left times — one full-width line per VISIT (newest first). The clock
+            // icon sits on the first line; later sessions align under it. Predictable
+            // max length, so even at "12:00 AM" extremes nothing clips.
+            if (target.timeLines.isNotEmpty()) {
                 Spacer(Modifier.height(6.dp))
-                Row(
-                    Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        Icons.Filled.Schedule,
-                        contentDescription = null,
-                        modifier = Modifier.size(13.dp),
-                        tint = MaterialTheme.colorScheme.outline
-                    )
-                    Spacer(Modifier.width(5.dp))
-                    Text(
-                        target.timeLabel,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.outline,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                target.timeLines.forEachIndexed { i, line ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (i == 0) {
+                            Icon(
+                                Icons.Filled.Schedule,
+                                contentDescription = null,
+                                modifier = Modifier.size(13.dp),
+                                tint = MaterialTheme.colorScheme.outline
+                            )
+                        } else {
+                            Spacer(Modifier.width(13.dp))
+                        }
+                        Spacer(Modifier.width(5.dp))
+                        Text(
+                            line,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.outline,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
         }
