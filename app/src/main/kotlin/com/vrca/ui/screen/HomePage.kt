@@ -59,6 +59,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -66,6 +67,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -127,6 +131,25 @@ internal fun HomePage(
         vm.userPreferencesRepository.ipAddress.collect { ip ->
             ipOk = ip.isNotBlank() && ip != "127.0.0.1"
         }
+    }
+
+    // Re-check the revocable system grants every time the app returns to the
+    // foreground. An OEM update (notably Samsung One UI) can silently REVOKE the
+    // battery-optimization exemption or Notification Access while VRC-A is in the
+    // background; without this the setup-health card would keep showing them green
+    // until a full recomposition. On ON_RESUME the card re-surfaces the now-red
+    // item so the user is nudged to re-grant it.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val obs = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                batteryOk = pm.isIgnoringBatteryOptimizations(ctx.packageName)
+                notifOk = androidx.core.app.NotificationManagerCompat
+                    .getEnabledListenerPackages(ctx).contains(ctx.packageName)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
     }
 
     // 1s wall-clock tick while sending — drives the uptime label and the

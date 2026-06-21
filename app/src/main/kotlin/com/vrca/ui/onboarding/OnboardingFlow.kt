@@ -601,11 +601,8 @@ private fun StepPermissions() {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            if (Build.MANUFACTURER.equals("samsung", ignoreCase = true)) {
-                TrustNote(
-                    "Samsung: also add VRC-A to Settings → Battery → \"Never sleeping apps\". " +
-                    "Samsung kills background apps aggressively even with the exemption."
-                )
+            com.vrca.ui.common.OemPowerGuidance.forThisDevice()?.let { g ->
+                TrustNote("${g.brand}: ${g.steps}")
             }
         }
     }

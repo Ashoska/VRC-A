@@ -20,6 +20,7 @@ import com.google.firebase.firestore.SetOptions
 import kotlinx.coroutines.tasks.await
 import com.vrca.BuildConfig
 import com.vrca.app.MainActivity
+import com.vrca.app.startForegroundSafely
 import com.vrca.R
 import com.vrca.discord.DiscordRpcService
 import com.vrca.discord.DiscordRpcState
@@ -229,7 +230,13 @@ class VrchatPipelineService : Service() {
                     val status = if (VrchatPipelineState.isConnected) {
                         lastConnectedNotifText ?: "Connected"
                     } else "Running"
-                    startForeground(NOTIF_ID_PERSISTENT, buildPersistentNotification(status))
+                    // Defensive: re-posting from a background coroutine can hit the
+                    // API 31+/34 background-FGS restriction; never crash the process.
+                    try {
+                        startForeground(NOTIF_ID_PERSISTENT, buildPersistentNotification(status))
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "notif re-post startForeground blocked", t)
+                    }
                 }
                 // WebSocket health check every 5th iteration (~50s)
                 notifRepostIterations++
@@ -309,12 +316,24 @@ class VrchatPipelineService : Service() {
                 // even though presence and RPC are live. Re-assert foreground with
                 // the CURRENT connected status instead.
                 if (VrchatPipelineState.isConnected) {
-                    startForeground(
+                    // Already foreground+connected → re-asserting won't hit the
+                    // background-start restriction; safe-wrap defensively anyway.
+                    startForegroundSafely(
                         NOTIF_ID_PERSISTENT,
-                        buildPersistentNotification(lastConnectedNotifText ?: "Connected")
+                        buildPersistentNotification(lastConnectedNotifText ?: "Connected"),
+                        TAG
                     )
                 } else {
-                    startForeground(NOTIF_ID_PERSISTENT, buildPersistentNotification("Connecting..."))
+                    // FRESH start. If this came from the background (sticky restart /
+                    // watchdog after an OEM kill) on API 31+/34, startForeground throws
+                    // ForegroundServiceStartNotAllowedException — wrap it so the process
+                    // doesn't crash. On failure, don't sticky-restart into the same throw.
+                    val started = startForegroundSafely(
+                        NOTIF_ID_PERSISTENT,
+                        buildPersistentNotification("Connecting..."),
+                        TAG
+                    )
+                    if (!started) return START_NOT_STICKY
                     startPipeline()
                 }
             }

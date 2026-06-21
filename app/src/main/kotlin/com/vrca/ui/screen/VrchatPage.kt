@@ -1566,7 +1566,11 @@ private fun InstanceRow(target: InstanceTarget, info: VrchatAuthManager.Instance
                     },
                     enabled = inviteEnabled,
                     shape = CircleShape,
-                    color = if (canJoin) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                    // Joinable = SOLID primaryContainer so it reads unmistakably as an
+                    // active button. A faint alpha-tinted primary (the old 0.16f wash)
+                    // looked like "just a different grey" next to the disabled state, so
+                    // a loaded, open, populated instance's invite button appeared dead.
+                    color = if (canJoin) MaterialTheme.colorScheme.primaryContainer
                         else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f),
                     modifier = Modifier.size(38.dp)
                 ) {
@@ -1578,7 +1582,7 @@ private fun InstanceRow(target: InstanceTarget, info: VrchatAuthManager.Instance
                                 Icons.AutoMirrored.Filled.Login,
                                 contentDescription = "Invite me",
                                 modifier = Modifier.size(19.dp),
-                                tint = if (canJoin) MaterialTheme.colorScheme.primary
+                                tint = if (canJoin) MaterialTheme.colorScheme.onPrimaryContainer
                                     else MaterialTheme.colorScheme.outline
                             )
                         }
