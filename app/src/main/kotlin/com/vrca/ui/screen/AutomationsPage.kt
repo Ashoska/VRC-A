@@ -171,10 +171,10 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
             summary = buildString {
                 val live = vm.cycleLines.count { it.isNotBlank() }
                 val hidden = vm.cycleLineEnabled.count { !it }
-                append(“$live lines · ${vm.cycleIntervalSeconds}s”)
-                if (hidden > 0) append(“ · $hidden hidden”)
-                if (vm.cycleShuffle) append(“ · shuffle”)
-                if (cycleNow.isNotBlank()) append(“ · now: “$cycleNow””)
+                append("$live lines · ${vm.cycleIntervalSeconds}s")
+                if (hidden > 0) append(" · $hidden hidden")
+                if (vm.cycleShuffle) append(" · shuffle")
+                if (cycleNow.isNotBlank()) append(" · now: “$cycleNow”")
             },
             trailing = {
                 KitStatusChip(
