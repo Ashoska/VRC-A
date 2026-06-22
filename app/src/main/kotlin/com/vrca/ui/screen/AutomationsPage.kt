@@ -44,6 +44,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -200,28 +201,30 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
 
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 vm.cycleLines.forEachIndexed { idx, _ ->
-                    val fieldValue =
-                        cycleLineFields[idx] ?: TextFieldValue(vm.cycleLines.getOrNull(idx).orEmpty())
-                    CycleLineRow(
-                        index = idx,
-                        count = vm.cycleLines.size,
-                        value = fieldValue,
-                        lineEnabled = cycleEnabledFlags.getOrElse(idx) { true },
-                        // Count the RESOLVED token length, not the literal "{world}".
-                        resolvedLength = vm.resolveTokens(fieldValue.text).length,
-                        isActive = idx == activeRaw,
-                        onValueChange = { v: TextFieldValue ->
-                            cycleLineFields[idx] = v
-                            vm.updateCycleLine(idx, v.text)
-                        },
-                        onToggleEnabled = { vm.setCycleLineEnabled(idx, it) },
-                        onDuplicate = { vm.duplicateCycleLine(idx) },
-                        onMoveUp = { vm.moveCycleLine(idx, idx - 1) },
-                        onMoveDown = { vm.moveCycleLine(idx, idx + 1) },
-                        onDelete = { vm.removeCycleLine(idx) },
-                        canDuplicate = vm.cycleLines.size < MAX_CYCLE_LINES,
-                        enabled = !isBanned
-                    )
+                    val lineEn = cycleEnabledFlags.getOrElse(idx) { true }
+                    key(idx, lineEn) {
+                        val fieldValue =
+                            cycleLineFields[idx] ?: TextFieldValue(vm.cycleLines.getOrNull(idx).orEmpty())
+                        CycleLineRow(
+                            index = idx,
+                            count = vm.cycleLines.size,
+                            value = fieldValue,
+                            lineEnabled = lineEn,
+                            resolvedLength = vm.resolveTokens(fieldValue.text).length,
+                            isActive = idx == activeRaw,
+                            onValueChange = { v: TextFieldValue ->
+                                cycleLineFields[idx] = v
+                                vm.updateCycleLine(idx, v.text)
+                            },
+                            onToggleEnabled = { vm.setCycleLineEnabled(idx, it) },
+                            onDuplicate = { vm.duplicateCycleLine(idx) },
+                            onMoveUp = { vm.moveCycleLine(idx, idx - 1) },
+                            onMoveDown = { vm.moveCycleLine(idx, idx + 1) },
+                            onDelete = { vm.removeCycleLine(idx) },
+                            canDuplicate = vm.cycleLines.size < MAX_CYCLE_LINES,
+                            enabled = !isBanned
+                        )
+                    }
                 }
             }
 
