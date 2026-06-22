@@ -853,12 +853,12 @@ class VrcaViewModel(
                 }
             }
         }
-        val presetSavers = listOf<suspend (String, Int, String?) -> Unit>(
-            userPreferencesRepository::saveCyclePreset1,
-            userPreferencesRepository::saveCyclePreset2,
-            userPreferencesRepository::saveCyclePreset3,
-            userPreferencesRepository::saveCyclePreset4,
-            userPreferencesRepository::saveCyclePreset5
+        val presetSavers = listOf<suspend (String, Int, Boolean, String?) -> Unit>(
+            { m, iv, sh, n -> userPreferencesRepository.saveCyclePreset1(m, iv, sh, n) },
+            { m, iv, sh, n -> userPreferencesRepository.saveCyclePreset2(m, iv, sh, n) },
+            { m, iv, sh, n -> userPreferencesRepository.saveCyclePreset3(m, iv, sh, n) },
+            { m, iv, sh, n -> userPreferencesRepository.saveCyclePreset4(m, iv, sh, n) },
+            { m, iv, sh, n -> userPreferencesRepository.saveCyclePreset5(m, iv, sh, n) }
         )
         for (i in 1..5) {
             snap.getString("cyclePreset$i")?.trim()?.let { remote ->
@@ -867,7 +867,8 @@ class VrcaViewModel(
                 if (remote != baseline && remote != local) {
                     cyclePresetMessages[i - 1] = remote
                     val interval = cyclePresetIntervals.getOrElse(i - 1) { 10 }
-                    presetSavers[i - 1](remote, interval, null)
+                    val shuffle = cyclePresetShuffle.getOrElse(i - 1) { false }
+                    presetSavers[i - 1](remote, interval, shuffle, null)
                     lastSyncedValues["cyclePreset$i"] = remote
                 }
             }
@@ -1552,12 +1553,12 @@ class VrcaViewModel(
                 }
                 lastSyncedValues["afkPreset$i"] = trimmed
             }
-            val presetSavers = listOf<suspend (String, Int, String?) -> Unit>(
-                userPreferencesRepository::saveCyclePreset1,
-                userPreferencesRepository::saveCyclePreset2,
-                userPreferencesRepository::saveCyclePreset3,
-                userPreferencesRepository::saveCyclePreset4,
-                userPreferencesRepository::saveCyclePreset5
+            val presetSavers = listOf<suspend (String, Int, Boolean, String?) -> Unit>(
+                { m, iv, sh, n -> userPreferencesRepository.saveCyclePreset1(m, iv, sh, n) },
+                { m, iv, sh, n -> userPreferencesRepository.saveCyclePreset2(m, iv, sh, n) },
+                { m, iv, sh, n -> userPreferencesRepository.saveCyclePreset3(m, iv, sh, n) },
+                { m, iv, sh, n -> userPreferencesRepository.saveCyclePreset4(m, iv, sh, n) },
+                { m, iv, sh, n -> userPreferencesRepository.saveCyclePreset5(m, iv, sh, n) }
             )
             for (i in 1..5) {
                 val remoteMsg = snap.getString("cyclePreset$i") ?: continue
@@ -1568,7 +1569,8 @@ class VrcaViewModel(
                     if (baseline == null || trimmed != baseline) {
                         cyclePresetMessages[i - 1] = trimmed
                         val interval = cyclePresetIntervals.getOrElse(i - 1) { 10 }
-                        presetSavers[i - 1](trimmed, interval, null)
+                        val shuffle = cyclePresetShuffle.getOrElse(i - 1) { false }
+                        presetSavers[i - 1](trimmed, interval, shuffle, null)
                     }
                 }
                 lastSyncedValues["cyclePreset$i"] = trimmed
