@@ -165,6 +165,17 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
         val activeRaw = remember(cycleTick, sending, vm.cycleLines.size) {
             if (sending) vm.cycleActiveRawIndex() else -1
         }
+        // Snapshot the per-line mute flags into a plain List HERE, in the page
+        // scope. This is the SAME mechanism the live `activeRaw` highlight uses:
+        // the value is captured by the CompactSectionCard content lambda below,
+        // so when a mute toggle changes it the lambda instance changes and
+        // AnimatedVisibility re-runs the rows. Reading cycleLineEnabled only
+        // INSIDE the content lambda (or inside a memoized provider on the row)
+        // did NOT work — nothing the content lambda *captures* changed on a mute
+        // toggle, so AnimatedVisibility skipped re-invoking content (the header
+        // summary updated, the rows did not). Each row gets a plain Boolean so
+        // its value param actually differs and it can't be skipped.
+        val cycleEnabledFlags: List<Boolean> = vm.cycleLineEnabled.toList()
         CompactSectionCard(
             title = "Cycle",
             icon = Icons.Filled.Loop,
@@ -195,7 +206,7 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                         index = idx,
                         count = vm.cycleLines.size,
                         value = fieldValue,
-                        lineEnabledProvider = { vm.cycleLineEnabled.getOrElse(idx) { true } },
+                        lineEnabled = cycleEnabledFlags.getOrElse(idx) { true },
                         // Count the RESOLVED token length, not the literal "{world}".
                         resolvedLength = vm.resolveTokens(fieldValue.text).length,
                         isActive = idx == activeRaw,
@@ -527,7 +538,7 @@ private fun CycleLineRow(
     index: Int,
     count: Int,
     value: TextFieldValue,
-    lineEnabledProvider: () -> Boolean,
+    lineEnabled: Boolean,
     resolvedLength: Int,
     isActive: Boolean,
     onValueChange: (TextFieldValue) -> Unit,
@@ -540,15 +551,6 @@ private fun CycleLineRow(
     enabled: Boolean
 ) {
     var menuOpen by remember { mutableStateOf(false) }
-    // Read the mute flag INSIDE this leaf composable's own scope (deferred
-    // provider) so a SnapshotStateList element-write (vm.cycleLineEnabled[idx] =
-    // ...) invalidates THIS row directly — it does NOT have to propagate down
-    // through CompactSectionCard's AnimatedVisibility content slot, which was
-    // swallowing the change (the eye/shading/dim "doesn't update until you touch
-    // something else" bug). The summary count read in the parent scope updated
-    // fine; the rows did not, because their lineEnabled was read above the
-    // AnimatedVisibility barrier.
-    val lineEnabled = lineEnabledProvider()
     // When this field is focused, let a long line wrap onto multiple lines so the
     // whole thing is visible while typing; collapse back to one line on blur.
     var focused by remember { mutableStateOf(false) }
