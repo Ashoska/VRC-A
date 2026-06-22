@@ -458,13 +458,24 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
     // 24h instance-history picker. Entries (with join/left times) are read fresh
     // each open; the dialog then fetches each instance's live image/count/status.
     if (showInstanceHistory) {
-        val historyTargets = remember {
+        // "Still here" is derived from the LIVE presence (the same signal the Discord
+        // RPC reads): an open session counts as current only while the user's presence
+        // location still equals this instance. The moment presence leaves the world
+        // (offline / traveling / hopped), the label drops "Still here" — no reliance on
+        // a stored flag firing. Keyed on the live location so it recomputes reactively.
+        val liveLocation = presence?.location.orEmpty()
+        val historyTargets = remember(liveLocation) {
             InstanceHistoryStore.list(ctx).map { e ->
-                // One line per visit, newest first. "Still here" for the open session.
-                val lines = e.sessions.asReversed().map { s ->
+                val isCurrent = liveLocation.isNotBlank() && liveLocation == e.location
+                // One line per visit, newest first.
+                val lines = e.sessions.asReversed().mapIndexed { idx, s ->
                     val joined = clockTime(s.joinedMs)
-                    if (s.leftMs == 0L) "Joined $joined · Still here"
-                    else "Joined $joined · Left ${clockTime(s.leftMs)}"
+                    when {
+                        s.leftMs != 0L -> "Joined $joined · Left ${clockTime(s.leftMs)}"
+                        // Newest open session AND presence is still in this instance.
+                        idx == 0 && isCurrent -> "Joined $joined · Still here"
+                        else -> "Joined $joined"
+                    }
                 }
                 InstanceTarget(
                     location = e.location,

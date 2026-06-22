@@ -2611,8 +2611,10 @@ class VrchatPipelineService : Service() {
         // VRChat tab, with join/left times. Stays on-device only; pruned after 24h.
         if (location.startsWith("wrld_")) {
             InstanceHistoryStore.record(this, location, patched.worldName)
-        } else if (location.equals("offline", true)) {
-            // Left VRChat without hopping — close out the current instance's "left" time.
+        } else if (location.isNotBlank() && !location.equals("private", true)) {
+            // No longer in a world (offline / traveling / between instances) — close
+            // out the current instance's "left" time so it stops showing "Still here".
+            // "private" is the redacted-but-still-in-instance marker and is excluded.
             InstanceHistoryStore.markCurrentLeft(this)
         }
 
@@ -2751,18 +2753,19 @@ class VrchatPipelineService : Service() {
         }
         VrchatPipelineState.presence = presence
 
-        // Stamp the instance-history leave time on a world -> offline transition that
+        // Stamp the instance-history leave time on a world -> not-in-world transition
         // the WebSocket never reported. When the user turns off their headset, the
         // game client disconnects but THIS app's own VRChat session keeps the account
         // "online", so VRChat emits NO self user-location:offline event — the only
-        // signal is this periodic fetchPresence location flipping to "offline". Without
-        // this, the last world stayed "Still here" and kept counting until the user
-        // signed out or rejoined a world. Runs for unwatched users too (the slow 10s
-        // loop calls this with forceLocalUpdate=true). Guarded so it only fires on a
-        // real world -> offline change: "private" was already rewritten to the world
-        // above, and "traveling"/a new wrld_ don't match.
-        if (presence.location.equals("offline", true) &&
-            priorLoc != null && priorLoc.startsWith("wrld_")) {
+        // signal is this periodic fetchPresence location flipping away from the world.
+        // Without this, the last world stayed "Still here" and kept counting until the
+        // user signed out or rejoined. Runs for unwatched users too (the slow 10s loop
+        // calls this with forceLocalUpdate=true). Fires on ANY world -> non-world change
+        // (offline / traveling / blank): "private" was already rewritten to the world
+        // above (still-in-instance), so it can never close an active instance.
+        if (priorLoc != null && priorLoc.startsWith("wrld_") &&
+            !presence.location.startsWith("wrld_") &&
+            !presence.location.equals("private", true)) {
             InstanceHistoryStore.markCurrentLeft(this)
         }
 

@@ -238,12 +238,19 @@ fun VrcaTimeZoneDialog(
     val results = remember(query) {
         val q = query.trim()
         if (q.isEmpty()) commonTimeZoneIds
-        else allTimeZoneIds.filter {
-            timeZoneCity(it).contains(q, ignoreCase = true) ||
-                timeZoneRegion(it).contains(q, ignoreCase = true) ||
-                it.contains(q, ignoreCase = true) ||
-                zoneOffsetLabel(resolveTimeZone(it)).contains(q, ignoreCase = true)
-        }.take(80)
+        else {
+            // Expand colloquial names ("usa", "uk") to the term that matches a country.
+            val terms = (listOf(q) + (countrySynonyms[q.lowercase()]?.let { listOf(it) } ?: emptyList()))
+            allTimeZoneIds.filter { id ->
+                terms.any { t ->
+                    timeZoneCity(id).contains(t, ignoreCase = true) ||
+                        timeZoneRegion(id).contains(t, ignoreCase = true) ||
+                        zoneCountryName(id).contains(t, ignoreCase = true) ||
+                        id.contains(t, ignoreCase = true) ||
+                        zoneOffsetLabel(resolveTimeZone(id)).contains(t, ignoreCase = true)
+                }
+            }.take(80)
+        }
     }
     val deviceSelected = currentMode == "Device" || currentMode == "LOCAL" || currentMode.isBlank()
 

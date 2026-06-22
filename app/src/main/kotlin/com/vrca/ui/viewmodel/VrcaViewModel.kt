@@ -1997,6 +1997,14 @@ class VrcaViewModel(
     private val recentCyclePicks = ArrayDeque<Int>()
     private var lastCyclePreviewAdvanceMs: Long = 0L
 
+    // Auto-save preset model: the selected slot is the auto-save target — editing
+    // the Pinned message / cycle lines writes straight into it, so switching slots
+    // is the only "save" (no manual save button). Persisted (local DataStore).
+    var selectedAfkPreset by mutableStateOf(1)
+        private set
+    var selectedCyclePreset by mutableStateOf(1)
+        private set
+
     // =========================
     // Now Playing
     // =========================
@@ -2251,6 +2259,8 @@ class VrcaViewModel(
                 setCycleLinesFromTextPreserve(userPreferencesRepository.cycleMessages.first())
                 cycleShuffle = userPreferencesRepository.cycleShuffle.first()
                 applyCycleLineEnabledCsv(userPreferencesRepository.cycleLineEnabled.first())
+                selectedAfkPreset = userPreferencesRepository.selectedAfkPreset.first().coerceIn(1, 3)
+                selectedCyclePreset = userPreferencesRepository.selectedCyclePreset.first().coerceIn(1, 5)
                 afkPresetTexts[0] = userPreferencesRepository.afkPreset1.first()
                 afkPresetTexts[1] = userPreferencesRepository.afkPreset2.first()
                 afkPresetTexts[2] = userPreferencesRepository.afkPreset3.first()
@@ -2840,6 +2850,37 @@ class VrcaViewModel(
         if (isBanned) return
         afkMessage = text
         viewModelScope.launch { userPreferencesRepository.saveAfkMessage(text) }
+        autoSaveSelectedAfkPreset(text)
+        rebuildCombinedPreviewOnly()
+        startSelfSyncLoopIfNeeded()
+    }
+
+    /** Auto-save the live Pinned text into the currently-selected preset slot —
+     *  the selected slot mirrors the editor, so switching slots is the only save. */
+    private fun autoSaveSelectedAfkPreset(text: String) {
+        val idx = selectedAfkPreset.coerceIn(1, 3) - 1
+        afkPresetTexts[idx] = text
+        viewModelScope.launch {
+            when (idx + 1) {
+                1 -> userPreferencesRepository.saveAfkPreset1(text)
+                2 -> userPreferencesRepository.saveAfkPreset2(text)
+                else -> userPreferencesRepository.saveAfkPreset3(text)
+            }
+        }
+    }
+
+    /** Switch the active Pinned preset: the old slot was already auto-saved (the
+     *  editor mirrors it), so this just records the new selection and loads it. */
+    fun selectAfkPreset(slot: Int) {
+        if (isBanned) return
+        val s = slot.coerceIn(1, 3)
+        selectedAfkPreset = s
+        viewModelScope.launch { userPreferencesRepository.saveSelectedAfkPreset(s) }
+        val txt = afkPresetTexts.getOrElse(s - 1) { "" }
+        // Set the live editor to the slot's content WITHOUT re-saving (it already
+        // holds this content); updateAfkText would auto-save back into the slot.
+        afkMessage = txt
+        viewModelScope.launch { userPreferencesRepository.saveAfkMessage(txt) }
         rebuildCombinedPreviewOnly()
         startSelfSyncLoopIfNeeded()
     }
@@ -2885,6 +2926,47 @@ class VrcaViewModel(
         val joined = cycleLines.take(MAX_CYCLE_LINES).joinToString("\n")
         viewModelScope.launch { userPreferencesRepository.saveCycleMessages(joined) }
         persistCycleLineEnabled()
+        autoSaveSelectedCyclePreset()
+        startSelfSyncLoopIfNeeded()
+    }
+
+    /** Auto-save the live cycle lines into the selected cycle preset slot — the
+     *  selected slot mirrors the editor, so switching slots is the only save. */
+    private fun autoSaveSelectedCyclePreset() {
+        val s = selectedCyclePreset.coerceIn(1, 5)
+        val idx = s - 1
+        val messages = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(MAX_CYCLE_LINES).joinToString("\n")
+        val interval = cycleIntervalSeconds
+        cyclePresetMessages[idx] = messages
+        cyclePresetIntervals[idx] = interval
+        viewModelScope.launch {
+            when (s) {
+                1 -> userPreferencesRepository.saveCyclePreset1(messages, interval)
+                2 -> userPreferencesRepository.saveCyclePreset2(messages, interval)
+                3 -> userPreferencesRepository.saveCyclePreset3(messages, interval)
+                4 -> userPreferencesRepository.saveCyclePreset4(messages, interval)
+                else -> userPreferencesRepository.saveCyclePreset5(messages, interval)
+            }
+        }
+    }
+
+    /** Switch the active cycle preset: the old slot was already auto-saved, so this
+     *  records the new selection and loads it into the editor. */
+    fun selectCyclePreset(slot: Int) {
+        if (isBanned) return
+        val s = slot.coerceIn(1, 5)
+        selectedCyclePreset = s
+        viewModelScope.launch { userPreferencesRepository.saveSelectedCyclePreset(s) }
+        val messages = cyclePresetMessages.getOrElse(s - 1) { "" }
+        val storedInterval = cyclePresetIntervals.getOrElse(s - 1) { cycleIntervalSeconds }
+        cycleIntervalSeconds = storedInterval.coerceAtLeast(2)
+        viewModelScope.launch { userPreferencesRepository.saveCycleInterval(cycleIntervalSeconds) }
+        setCycleLinesFromTextPreserve(messages)
+        // Persist the loaded lines as the live cycle (NOT via the auto-save path,
+        // which would re-save into the same slot redundantly — fine either way).
+        viewModelScope.launch { userPreferencesRepository.saveCycleMessages(cycleLines.take(MAX_CYCLE_LINES).joinToString("\n")) }
+        persistCycleLineEnabled()
+        rebuildCombinedPreviewOnly()
         startSelfSyncLoopIfNeeded()
     }
 
@@ -2994,8 +3076,10 @@ class VrcaViewModel(
      *   {time}    current Time-line string  {song}    "Artist - Title" now playing
      *   {world}   current VRChat world name  {players} instance "n/cap"
      * Unknown tokens are left as-is; a token with no live value renders empty.
+     * Public so Pinned + Cycle editors can resolve tokens for their char meter
+     * (the meter must count the RESOLVED length, not the literal "{world}").
      */
-    private fun resolveCycleTokens(text: String): String {
+    fun resolveTokens(text: String): String {
         if (text.indexOf('{') < 0) return text
         var out = text
         if (out.contains("{time}", ignoreCase = true))
@@ -3244,7 +3328,7 @@ class VrcaViewModel(
                 rebuildAndMaybeSendCombined(
                     forceSend = true,
                     local = local,
-                    cycleLineOverride = resolveCycleTokens(live[cycleIndex])
+                    cycleLineOverride = resolveTokens(live[cycleIndex])
                 )
                 nextCycleAtMs = System.currentTimeMillis() + cycleIntervalSeconds.toLong() * 1000L
                 delay(cycleIntervalSeconds.toLong() * 1000L)
@@ -3398,7 +3482,7 @@ class VrcaViewModel(
         cycleTrimWarning = ""
 
         // If banned, preview can still show what WOULD be sent, but nothing will send.
-        val afkLine = if (afkEnabled && afkMessage.trim().isNotEmpty()) afkMessage.trim() else ""
+        val afkLine = if (afkEnabled && afkMessage.trim().isNotEmpty()) resolveTokens(afkMessage.trim()) else ""
         val cycleLine = if (cycleEnabled) (cycleLineOverride ?: currentCycleLinePreview()) else ""
         val musicLines = if (spotifyEnabled) buildNowPlayingLines() else emptyList()
 
@@ -3471,7 +3555,7 @@ class VrcaViewModel(
     private fun currentCycleLinePreview(): String {
         val msgs = activeCycleLines()
         if (msgs.isEmpty()) return ""
-        return resolveCycleTokens(msgs.getOrNull(cycleIndex % msgs.size).orEmpty())
+        return resolveTokens(msgs.getOrNull(cycleIndex % msgs.size).orEmpty())
     }
 
     /** The exact music lines as they would render into the chatbox right now —

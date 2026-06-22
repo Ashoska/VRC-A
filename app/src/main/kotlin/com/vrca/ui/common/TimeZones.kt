@@ -40,6 +40,37 @@ fun timeZoneCity(id: String): String =
 fun timeZoneRegion(id: String): String =
     if (id.contains('/')) id.substringBeforeLast('/').replace('_', ' ') else ""
 
+/**
+ * Country display name for a zone id via ICU's region table: "Asia/Tokyo" → "Japan",
+ * "Europe/Paris" → "France". Covers ALL countries automatically (no hand-maintained
+ * list) so a search for a country name resolves to its city zones. Cached per id.
+ * Returns "" for non-country zones (e.g. "Etc/UTC", region code "001").
+ */
+fun zoneCountryName(id: String): String = zoneCountryNameCache.getOrPut(id) {
+    runCatching {
+        val region = android.icu.util.TimeZone.getRegion(id)
+        if (region.isNullOrBlank() || region == "001" || region.all { it.isDigit() }) ""
+        else Locale("", region).displayCountry.ifBlank { "" }
+    }.getOrDefault("")
+}
+
+private val zoneCountryNameCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+/**
+ * Common alternate/colloquial country names that don't match the ICU display name,
+ * mapped to a substring that DOES appear in some zone's country/city/id. So "usa"
+ * finds United States zones, "uk"/"england" find United Kingdom, etc.
+ */
+val countrySynonyms: Map<String, String> = mapOf(
+    "usa" to "united states", "us" to "united states", "america" to "united states",
+    "uk" to "united kingdom", "england" to "united kingdom", "britain" to "united kingdom",
+    "great britain" to "united kingdom", "scotland" to "united kingdom",
+    "holland" to "netherlands", "uae" to "united arab emirates", "emirates" to "united arab emirates",
+    "south korea" to "korea", "north korea" to "korea", "russia" to "russia",
+    "czech republic" to "czechia", "burma" to "myanmar", "ivory coast" to "côte d'ivoire",
+    "vatican" to "vatican", "deutschland" to "germany"
+)
+
 /** Live, DST-correct offset label for a zone: "UTC+2", "UTC", "UTC+5:30". */
 fun zoneOffsetLabel(zone: ZoneId): String {
     val secs = zone.rules.getOffset(Instant.now()).totalSeconds
