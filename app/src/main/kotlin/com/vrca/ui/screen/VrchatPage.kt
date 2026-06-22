@@ -1347,12 +1347,22 @@ private fun InstanceListDialog(
     // list renders immediately and each row fills in as its fetch lands — the user
     // is never stuck on a full-screen spinner waiting for every instance.
     var infos by remember { mutableStateOf<Map<String, VrchatAuthManager.InstanceInfo>>(emptyMap()) }
-    LaunchedEffect(Unit) {
-        // targets are already ordered current → most-recently-left (newest to oldest),
-        // so resolving them in order fills the list top-down.
-        for (t in targets) {
-            val info = VrchatAuthManager.fetchInstanceInfo(ctx, t.location)
-            infos = infos + (t.location to info)
+    // Key on the set of target locations so a NEWLY-joined instance (the targets list
+    // grows while the dialog is open) gets fetched instead of sitting on "Checking
+    // (7/8)" forever. The loop also re-fetches every 15s so live occupancy / open-or-
+    // closed status track reality while the dialog stays open ("an instance updates
+    // while I'm in the menu" no longer needs a reopen). Old infos are kept across
+    // re-keys so rows don't flash back to a spinner.
+    val locationsKey = targets.joinToString("|") { it.location }
+    LaunchedEffect(locationsKey) {
+        while (true) {
+            // targets are ordered current → most-recently-left (newest to oldest), so
+            // resolving them in order fills/refreshes the list top-down.
+            for (t in targets) {
+                val info = VrchatAuthManager.fetchInstanceInfo(ctx, t.location)
+                infos = infos + (t.location to info)
+            }
+            delay(15_000)
         }
     }
     val resolving = infos.size < targets.size

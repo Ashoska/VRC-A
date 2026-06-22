@@ -194,9 +194,11 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                         index = idx,
                         count = vm.cycleLines.size,
                         value = fieldValue,
-                        // Deferred read so toggling one line's mute recomposes ONLY
-                        // that row, not all 20 text fields (instant eye response).
-                        lineEnabledProvider = { vm.cycleLineEnabled.getOrElse(idx) { true } },
+                        // Eager read in the parent loop so any mute toggle recomposes
+                        // the list immediately — the deferred-provider scoping looked
+                        // tidy but the snapshot read wasn't reliably invalidating the
+                        // row (the eye updated only after some other interaction).
+                        lineEnabled = vm.cycleLineEnabled.getOrElse(idx) { true },
                         // Count the RESOLVED token length, not the literal "{world}".
                         resolvedLength = vm.resolveTokens(fieldValue.text).length,
                         isActive = idx == activeRaw,
@@ -448,7 +450,7 @@ private fun CycleLineRow(
     index: Int,
     count: Int,
     value: TextFieldValue,
-    lineEnabledProvider: () -> Boolean,
+    lineEnabled: Boolean,
     resolvedLength: Int,
     isActive: Boolean,
     onValueChange: (TextFieldValue) -> Unit,
@@ -461,9 +463,6 @@ private fun CycleLineRow(
     enabled: Boolean
 ) {
     var menuOpen by remember { mutableStateOf(false) }
-    // Reading the provider here scopes the mute-state snapshot read to THIS row,
-    // so a mute toggle only recomposes the toggled line (instant eye response).
-    val lineEnabled = lineEnabledProvider()
     // When this field is focused, let a long line wrap onto multiple lines so the
     // whole thing is visible while typing; collapse back to one line on blur.
     var focused by remember { mutableStateOf(false) }
