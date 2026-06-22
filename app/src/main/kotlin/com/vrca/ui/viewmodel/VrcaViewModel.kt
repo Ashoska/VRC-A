@@ -2000,9 +2000,11 @@ class VrcaViewModel(
     // Auto-save preset model: the selected slot is the auto-save target — editing
     // the Pinned message / cycle lines writes straight into it, so switching slots
     // is the only "save" (no manual save button). Persisted (local DataStore).
-    var selectedAfkPreset by mutableStateOf(1)
+    // 0 = NOTHING selected: editing does NOT touch any preset (so an existing user's
+    // saved slots are never clobbered until they deliberately tap/switch to one).
+    var selectedAfkPreset by mutableStateOf(0)
         private set
-    var selectedCyclePreset by mutableStateOf(1)
+    var selectedCyclePreset by mutableStateOf(0)
         private set
 
     // =========================
@@ -2259,8 +2261,8 @@ class VrcaViewModel(
                 setCycleLinesFromTextPreserve(userPreferencesRepository.cycleMessages.first())
                 cycleShuffle = userPreferencesRepository.cycleShuffle.first()
                 applyCycleLineEnabledCsv(userPreferencesRepository.cycleLineEnabled.first())
-                selectedAfkPreset = userPreferencesRepository.selectedAfkPreset.first().coerceIn(1, 3)
-                selectedCyclePreset = userPreferencesRepository.selectedCyclePreset.first().coerceIn(1, 5)
+                selectedAfkPreset = userPreferencesRepository.selectedAfkPreset.first().coerceIn(0, 3)
+                selectedCyclePreset = userPreferencesRepository.selectedCyclePreset.first().coerceIn(0, 5)
                 afkPresetTexts[0] = userPreferencesRepository.afkPreset1.first()
                 afkPresetTexts[1] = userPreferencesRepository.afkPreset2.first()
                 afkPresetTexts[2] = userPreferencesRepository.afkPreset3.first()
@@ -2856,9 +2858,11 @@ class VrcaViewModel(
     }
 
     /** Auto-save the live Pinned text into the currently-selected preset slot —
-     *  the selected slot mirrors the editor, so switching slots is the only save. */
+     *  the selected slot mirrors the editor, so switching slots is the only save.
+     *  No-op when nothing is selected (slot 0) so existing presets aren't clobbered. */
     private fun autoSaveSelectedAfkPreset(text: String) {
-        val idx = selectedAfkPreset.coerceIn(1, 3) - 1
+        if (selectedAfkPreset !in 1..3) return
+        val idx = selectedAfkPreset - 1
         afkPresetTexts[idx] = text
         viewModelScope.launch {
             when (idx + 1) {
@@ -2931,9 +2935,11 @@ class VrcaViewModel(
     }
 
     /** Auto-save the live cycle lines into the selected cycle preset slot — the
-     *  selected slot mirrors the editor, so switching slots is the only save. */
+     *  selected slot mirrors the editor, so switching slots is the only save.
+     *  No-op when nothing is selected (slot 0) so existing presets aren't clobbered. */
     private fun autoSaveSelectedCyclePreset() {
-        val s = selectedCyclePreset.coerceIn(1, 5)
+        if (selectedCyclePreset !in 1..5) return
+        val s = selectedCyclePreset
         val idx = s - 1
         val messages = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(MAX_CYCLE_LINES).joinToString("\n")
         val interval = cycleIntervalSeconds

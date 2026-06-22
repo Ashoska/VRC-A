@@ -176,8 +176,10 @@ class UserPreferencesRepository(private val context: Context) {
     val cycleInterval: Flow<Int>     = context.dataStore.data.map { it[Keys.CYCLE_INTERVAL] ?: 10 }.distinctUntilChanged()
     val cycleShuffle:  Flow<Boolean> = context.dataStore.data.map { it[Keys.CYCLE_SHUFFLE]  ?: false }.distinctUntilChanged()
     val cycleLineEnabled: Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_LINE_ENABLED] ?: "" }.distinctUntilChanged()
-    val selectedAfkPreset: Flow<Int> = context.dataStore.data.map { it[Keys.SELECTED_AFK_PRESET] ?: 1 }.distinctUntilChanged()
-    val selectedCyclePreset: Flow<Int> = context.dataStore.data.map { it[Keys.SELECTED_CYCLE_PRESET] ?: 1 }.distinctUntilChanged()
+    // Default 0 = NO slot selected (so we never auto-save / clobber an existing
+    // user's preset until they deliberately pick a slot — backward-compatible).
+    val selectedAfkPreset: Flow<Int> = context.dataStore.data.map { it[Keys.SELECTED_AFK_PRESET] ?: 0 }.distinctUntilChanged()
+    val selectedCyclePreset: Flow<Int> = context.dataStore.data.map { it[Keys.SELECTED_CYCLE_PRESET] ?: 0 }.distinctUntilChanged()
 
     val cyclePreset1Messages: Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_P1_MSG]  ?: "" }.distinctUntilChanged()
     val cyclePreset1Interval: Flow<Int>    = context.dataStore.data.map { it[Keys.CYCLE_P1_INT]  ?: 10 }.distinctUntilChanged()
