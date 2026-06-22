@@ -45,39 +45,81 @@ fun timeZoneRegion(id: String): String =
  * "France". Covers ALL countries automatically (no hand-maintained list) so a search
  * for a country name resolves to its city zones. Returns "" for non-country zones
  * (e.g. "Etc/UTC").
- *
- * Resolution is built from an INVERSE map ([zoneToCountryName]) — for every ISO
- * country we ask ICU for that country's zones (`getAvailableIDs(region)`) and tag them
- * with the country's display name. This is far more reliable than the per-id
- * `getRegion(id)` lookup, which returned blank/"001" inconsistently on-device (the
- * "searching Japan finds nothing" bug). A per-id [getRegion] fallback covers any id the
- * inverse map misses.
  */
-fun zoneCountryName(id: String): String =
-    zoneToCountryName[id] ?: zoneCountryNameCache.getOrPut(id) {
-        runCatching {
-            val region = android.icu.util.TimeZone.getRegion(id)
-            if (region.isNullOrBlank() || region == "001" || region.all { it.isDigit() }) ""
-            else Locale("", region).displayCountry.ifBlank { "" }
-        }.getOrDefault("")
-    }
+fun zoneCountryName(id: String): String = zoneToCountryName[id].orEmpty()
 
-/** zoneId → country display name, built once from ICU's per-country zone lists. */
+/**
+ * zoneId → country display name, precomputed once. Built from THREE sources so an
+ * ID-format mismatch or ICU quirk on any single device can't silently drop a country
+ * (the "searching Japan finds nothing" bug — the previous single-source inverse map
+ * keyed on ICU's `getAvailableIDs` ids, which don't always match java.time's ids):
+ *   1. Per-id `getRegion(id)` over the EXACT picker ids in [allTimeZoneIds] — no id
+ *      mismatch possible since we map the same strings the picker uses.
+ *   2. ICU's country→zones inverse (`getAvailableIDs(code)`), with each id ALSO mapped
+ *      via its canonical form so a legacy/alias id still tags the canonical zone.
+ *   3. A hardcoded fallback ([commonCountryZones]) for the most-searched countries, so
+ *      they resolve even if ICU misbehaves on a given device.
+ * Earlier sources win; the hardcoded fallback only fills gaps.
+ */
 private val zoneToCountryName: Map<String, String> by lazy {
     val map = HashMap<String, String>()
+    // (1) Per-id getRegion over the actual picker ids.
+    for (id in allTimeZoneIds) {
+        runCatching {
+            val region = android.icu.util.TimeZone.getRegion(id)
+            if (!region.isNullOrBlank() && region != "001" && !region.all { it.isDigit() }) {
+                val name = Locale("", region).displayCountry
+                if (name.isNotBlank()) map[id] = name
+            }
+        }
+    }
+    // (2) ICU country→zones inverse, canonicalizing each id.
     runCatching {
         for (code in Locale.getISOCountries()) {
             val name = Locale("", code).displayCountry
             if (name.isBlank()) continue
             runCatching {
-                for (z in android.icu.util.TimeZone.getAvailableIDs(code)) map[z] = name
+                for (z in android.icu.util.TimeZone.getAvailableIDs(code)) {
+                    map.putIfAbsent(z, name)
+                    runCatching {
+                        val canon = android.icu.util.TimeZone.getCanonicalID(z)
+                        if (!canon.isNullOrBlank()) map.putIfAbsent(canon, name)
+                    }
+                }
             }
         }
     }
+    // (3) Hardcoded fallback for popular countries (fills any remaining gaps).
+    for ((zone, name) in commonCountryZones) map.putIfAbsent(zone, name)
     map
 }
 
-private val zoneCountryNameCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+/** Guaranteed zone→country for the most-searched countries (ICU-independent). */
+private val commonCountryZones: Map<String, String> = mapOf(
+    "Asia/Tokyo" to "Japan", "Asia/Seoul" to "South Korea", "Asia/Shanghai" to "China",
+    "Asia/Hong_Kong" to "Hong Kong", "Asia/Singapore" to "Singapore",
+    "Asia/Bangkok" to "Thailand", "Asia/Jakarta" to "Indonesia", "Asia/Manila" to "Philippines",
+    "Asia/Kolkata" to "India", "Asia/Karachi" to "Pakistan", "Asia/Dubai" to "United Arab Emirates",
+    "Asia/Tel_Aviv" to "Israel", "Asia/Jerusalem" to "Israel", "Asia/Istanbul" to "Turkey",
+    "Europe/Istanbul" to "Turkey", "Europe/London" to "United Kingdom",
+    "Europe/Paris" to "France", "Europe/Berlin" to "Germany", "Europe/Madrid" to "Spain",
+    "Europe/Rome" to "Italy", "Europe/Amsterdam" to "Netherlands", "Europe/Brussels" to "Belgium",
+    "Europe/Zurich" to "Switzerland", "Europe/Vienna" to "Austria", "Europe/Stockholm" to "Sweden",
+    "Europe/Oslo" to "Norway", "Europe/Copenhagen" to "Denmark", "Europe/Helsinki" to "Finland",
+    "Europe/Warsaw" to "Poland", "Europe/Lisbon" to "Portugal", "Europe/Dublin" to "Ireland",
+    "Europe/Athens" to "Greece", "Europe/Moscow" to "Russia", "Europe/Kiev" to "Ukraine",
+    "Europe/Kyiv" to "Ukraine", "America/New_York" to "United States",
+    "America/Los_Angeles" to "United States", "America/Chicago" to "United States",
+    "America/Denver" to "United States", "America/Toronto" to "Canada",
+    "America/Vancouver" to "Canada", "America/Mexico_City" to "Mexico",
+    "America/Sao_Paulo" to "Brazil", "America/Buenos_Aires" to "Argentina",
+    "America/Argentina/Buenos_Aires" to "Argentina", "America/Bogota" to "Colombia",
+    "America/Santiago" to "Chile", "Australia/Sydney" to "Australia",
+    "Australia/Melbourne" to "Australia", "Australia/Perth" to "Australia",
+    "Pacific/Auckland" to "New Zealand", "Africa/Cairo" to "Egypt",
+    "Africa/Johannesburg" to "South Africa", "Africa/Lagos" to "Nigeria",
+    "Africa/Nairobi" to "Kenya", "Africa/Casablanca" to "Morocco"
+)
 
 /**
  * Common alternate/colloquial country names that don't match the ICU display name,

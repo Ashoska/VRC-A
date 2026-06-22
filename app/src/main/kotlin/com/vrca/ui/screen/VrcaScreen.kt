@@ -417,9 +417,16 @@ fun VrcaScreen(
         return
     }
 
+    // Tapping the top bar (e.g. the "VRC-A" title) clears any focused text field /
+    // dismisses the keyboard — the page background isn't always reachable when cards
+    // cover it. The icon buttons consume their own taps, so they still work.
+    val topBarFocus = androidx.compose.ui.platform.LocalFocusManager.current
     Scaffold(
             topBar = {
                 CenterAlignedTopAppBar(
+                    modifier = Modifier.pointerInput(Unit) {
+                        detectTapGestures(onTap = { topBarFocus.clearFocus() })
+                    },
                     title = { Text(if (BuildConfig.IS_ADMIN_BUILD) "VRC-A (ADMIN)" else "VRC-A") },
                     navigationIcon = {
                         if (BuildConfig.IS_ADMIN_BUILD) {

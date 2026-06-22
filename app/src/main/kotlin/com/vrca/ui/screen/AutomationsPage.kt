@@ -20,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Loop
@@ -53,7 +54,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -136,7 +136,10 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                         onPeek = {
                             peek = PresetPeek(
                                 title = "Pinned preset $slot",
+                                subtitle = if (content.isBlank()) "Empty" else "${content.length} characters",
                                 content = content,
+                                icon = Icons.Filled.PushPin,
+                                numbered = false,
                                 onLoad = { vm.selectAfkPreset(slot) }
                             )
                         }
@@ -186,6 +189,9 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
             // overflow menu (move up/down, duplicate, delete) so all the new
             // controls stay on one slim row. The currently-sending line is
             // highlighted live while the cycle runs.
+            // Reading cycleMuteRev here makes the whole line list recompose the instant
+            // a mute toggles (a SnapshotStateList index set wasn't invalidating it).
+            @Suppress("UNUSED_EXPRESSION") vm.cycleMuteRev
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 vm.cycleLines.forEachIndexed { idx, _ ->
                     val fieldValue =
@@ -307,7 +313,10 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                         onPeek = {
                             peek = PresetPeek(
                                 title = "Cycle preset $slot",
+                                subtitle = vm.getCyclePresetSubtitle(slot),
                                 content = full,
+                                icon = Icons.Filled.Loop,
+                                numbered = true,
                                 onLoad = { vm.selectCyclePreset(slot) }
                             )
                         }
@@ -317,34 +326,108 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
         }
     }
 
-    // Preset peek dialog (long-press): full content + Load / Save-here.
+    // Preset peek dialog (long-press): iconed header + per-line content + switch.
     peek?.let { p ->
         VrcaCardDialog(onDismiss = { peek = null }) {
             Column(
                 modifier = Modifier.padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                Text(
-                    p.title,
-                    style = MaterialTheme.typography.titleLarge,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
+                // Header: tinted icon circle + title/subtitle + close affordance.
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Surface(
+                        shape = androidx.compose.foundation.shape.CircleShape,
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                        modifier = Modifier.size(40.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                p.icon, null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            p.title,
+                            style = MaterialTheme.typography.titleLarge,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        if (p.subtitle.isNotBlank()) {
+                            Text(
+                                p.subtitle,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Surface(
+                        onClick = { peek = null },
+                        shape = androidx.compose.foundation.shape.CircleShape,
+                        color = MaterialTheme.colorScheme.error.copy(alpha = 0.14f),
+                        modifier = Modifier.size(34.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                Icons.Filled.Close, "Close",
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                }
+                // Content: each non-blank line as its own numbered (cycle) or plain
+                // (pinned) row in a tinted card — far cleaner than a raw monospace blob.
+                val lines = p.content.lines().map { it.trim() }.filter { it.isNotEmpty() }
                 Surface(
                     shape = MaterialTheme.shapes.medium,
-                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    color = MaterialTheme.colorScheme.surface,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text(
-                        p.content.ifBlank { "(empty)" },
-                        fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier
-                            .heightIn(max = 260.dp)
-                            .verticalScroll(rememberScrollState())
-                            .padding(12.dp)
-                            .fillMaxWidth()
-                    )
+                    if (lines.isEmpty()) {
+                        Text(
+                            "This preset is empty.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(16.dp)
+                        )
+                    } else {
+                        Column(
+                            modifier = Modifier
+                                .heightIn(max = 300.dp)
+                                .verticalScroll(rememberScrollState())
+                                .padding(vertical = 8.dp)
+                        ) {
+                            lines.forEachIndexed { i, line ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 14.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.Top
+                                ) {
+                                    if (p.numbered) {
+                                        Text(
+                                            "${i + 1}",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.width(22.dp)
+                                        )
+                                    }
+                                    Text(
+                                        line,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -364,7 +447,10 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
 
 private data class PresetPeek(
     val title: String,
+    val subtitle: String,
     val content: String,
+    val icon: androidx.compose.ui.graphics.vector.ImageVector,
+    val numbered: Boolean,
     val onLoad: () -> Unit
 )
 

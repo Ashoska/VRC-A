@@ -1988,6 +1988,12 @@ class VrcaViewModel(
     // (NOT synced to Firestore) — a muted line stays in the editor + the synced
     // cycleLinesText but is skipped by the sender. Defaults to enabled.
     val cycleLineEnabled = mutableStateListOf<Boolean>()
+    // Bumped on every per-line mute change. The cycle-line list UI reads this so the
+    // eye/dim state repaints IMMEDIATELY — an index set on a SnapshotStateList wasn't
+    // reliably invalidating the parent loop on-device (the eye updated only after some
+    // other interaction). Reading a plain Int state in the loop forces the recompose.
+    var cycleMuteRev by mutableStateOf(0)
+        private set
     // Random/shuffle rotation instead of sequential. Local-only.
     var cycleShuffle by mutableStateOf(false)
         private set
@@ -2208,6 +2214,8 @@ class VrcaViewModel(
         CYCLE_INTERVAL_SECONDS_LOCKED,
         CYCLE_INTERVAL_SECONDS_LOCKED
     )
+    // Per-preset shuffle, mirrored from DataStore so each slot restores its own.
+    private val cyclePresetShuffle = mutableStateListOf(false, false, false, false, false)
 
     init {
         // Restore the last-synced baseline from the previous session so the
@@ -2271,6 +2279,16 @@ class VrcaViewModel(
                 cyclePresetMessages[2] = userPreferencesRepository.cyclePreset3Messages.first()
                 cyclePresetMessages[3] = userPreferencesRepository.cyclePreset4Messages.first()
                 cyclePresetMessages[4] = userPreferencesRepository.cyclePreset5Messages.first()
+                cyclePresetIntervals[0] = userPreferencesRepository.cyclePreset1Interval.first().coerceAtLeast(2)
+                cyclePresetIntervals[1] = userPreferencesRepository.cyclePreset2Interval.first().coerceAtLeast(2)
+                cyclePresetIntervals[2] = userPreferencesRepository.cyclePreset3Interval.first().coerceAtLeast(2)
+                cyclePresetIntervals[3] = userPreferencesRepository.cyclePreset4Interval.first().coerceAtLeast(2)
+                cyclePresetIntervals[4] = userPreferencesRepository.cyclePreset5Interval.first().coerceAtLeast(2)
+                cyclePresetShuffle[0] = userPreferencesRepository.cyclePreset1Shuffle.first()
+                cyclePresetShuffle[1] = userPreferencesRepository.cyclePreset2Shuffle.first()
+                cyclePresetShuffle[2] = userPreferencesRepository.cyclePreset3Shuffle.first()
+                cyclePresetShuffle[3] = userPreferencesRepository.cyclePreset4Shuffle.first()
+                cyclePresetShuffle[4] = userPreferencesRepository.cyclePreset5Shuffle.first()
                 spotifyPreset = userPreferencesRepository.spotifyPreset.first().coerceIn(1, 5)
                 timeMode = userPreferencesRepository.timeMode.first()
             }
@@ -2381,15 +2399,20 @@ class VrcaViewModel(
         viewModelScope.launch { userPreferencesRepository.afkPreset3.collect { afkPresetTexts[2] = it; startSelfSyncLoopIfNeeded() } }
 
         viewModelScope.launch { userPreferencesRepository.cyclePreset1Messages.collect { cyclePresetMessages[0] = it; startSelfSyncLoopIfNeeded() } }
-        viewModelScope.launch { userPreferencesRepository.cyclePreset1Interval.collect { cyclePresetIntervals[0] = CYCLE_INTERVAL_SECONDS_LOCKED } }
+        viewModelScope.launch { userPreferencesRepository.cyclePreset1Interval.collect { cyclePresetIntervals[0] = it.coerceAtLeast(2) } }
+        viewModelScope.launch { userPreferencesRepository.cyclePreset1Shuffle.collect { cyclePresetShuffle[0] = it } }
         viewModelScope.launch { userPreferencesRepository.cyclePreset2Messages.collect { cyclePresetMessages[1] = it; startSelfSyncLoopIfNeeded() } }
-        viewModelScope.launch { userPreferencesRepository.cyclePreset2Interval.collect { cyclePresetIntervals[1] = CYCLE_INTERVAL_SECONDS_LOCKED } }
+        viewModelScope.launch { userPreferencesRepository.cyclePreset2Interval.collect { cyclePresetIntervals[1] = it.coerceAtLeast(2) } }
+        viewModelScope.launch { userPreferencesRepository.cyclePreset2Shuffle.collect { cyclePresetShuffle[1] = it } }
         viewModelScope.launch { userPreferencesRepository.cyclePreset3Messages.collect { cyclePresetMessages[2] = it; startSelfSyncLoopIfNeeded() } }
-        viewModelScope.launch { userPreferencesRepository.cyclePreset3Interval.collect { cyclePresetIntervals[2] = CYCLE_INTERVAL_SECONDS_LOCKED } }
+        viewModelScope.launch { userPreferencesRepository.cyclePreset3Interval.collect { cyclePresetIntervals[2] = it.coerceAtLeast(2) } }
+        viewModelScope.launch { userPreferencesRepository.cyclePreset3Shuffle.collect { cyclePresetShuffle[2] = it } }
         viewModelScope.launch { userPreferencesRepository.cyclePreset4Messages.collect { cyclePresetMessages[3] = it; startSelfSyncLoopIfNeeded() } }
-        viewModelScope.launch { userPreferencesRepository.cyclePreset4Interval.collect { cyclePresetIntervals[3] = CYCLE_INTERVAL_SECONDS_LOCKED } }
+        viewModelScope.launch { userPreferencesRepository.cyclePreset4Interval.collect { cyclePresetIntervals[3] = it.coerceAtLeast(2) } }
+        viewModelScope.launch { userPreferencesRepository.cyclePreset4Shuffle.collect { cyclePresetShuffle[3] = it } }
         viewModelScope.launch { userPreferencesRepository.cyclePreset5Messages.collect { cyclePresetMessages[4] = it; startSelfSyncLoopIfNeeded() } }
-        viewModelScope.launch { userPreferencesRepository.cyclePreset5Interval.collect { cyclePresetIntervals[4] = CYCLE_INTERVAL_SECONDS_LOCKED } }
+        viewModelScope.launch { userPreferencesRepository.cyclePreset5Interval.collect { cyclePresetIntervals[4] = it.coerceAtLeast(2) } }
+        viewModelScope.launch { userPreferencesRepository.cyclePreset5Shuffle.collect { cyclePresetShuffle[4] = it } }
 
         viewModelScope.launch {
             userPreferencesRepository.spotifyPreset.collect { saved ->
@@ -2833,6 +2856,8 @@ class VrcaViewModel(
         val safe = allowed.minByOrNull { kotlin.math.abs(it - seconds) } ?: 10
         cycleIntervalSeconds = safe
         viewModelScope.launch { userPreferencesRepository.saveCycleInterval(safe) }
+        // Speed is part of a preset — write it into the selected slot (no-op at slot 0).
+        autoSaveSelectedCyclePreset()
         startSelfSyncLoopIfNeeded()
     }
 
@@ -2943,15 +2968,17 @@ class VrcaViewModel(
         val idx = s - 1
         val messages = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(MAX_CYCLE_LINES).joinToString("\n")
         val interval = cycleIntervalSeconds
+        val shuffle = cycleShuffle
         cyclePresetMessages[idx] = messages
         cyclePresetIntervals[idx] = interval
+        cyclePresetShuffle[idx] = shuffle
         viewModelScope.launch {
             when (s) {
-                1 -> userPreferencesRepository.saveCyclePreset1(messages, interval)
-                2 -> userPreferencesRepository.saveCyclePreset2(messages, interval)
-                3 -> userPreferencesRepository.saveCyclePreset3(messages, interval)
-                4 -> userPreferencesRepository.saveCyclePreset4(messages, interval)
-                else -> userPreferencesRepository.saveCyclePreset5(messages, interval)
+                1 -> userPreferencesRepository.saveCyclePreset1(messages, interval, shuffle)
+                2 -> userPreferencesRepository.saveCyclePreset2(messages, interval, shuffle)
+                3 -> userPreferencesRepository.saveCyclePreset3(messages, interval, shuffle)
+                4 -> userPreferencesRepository.saveCyclePreset4(messages, interval, shuffle)
+                else -> userPreferencesRepository.saveCyclePreset5(messages, interval, shuffle)
             }
         }
     }
@@ -2967,6 +2994,10 @@ class VrcaViewModel(
         val storedInterval = cyclePresetIntervals.getOrElse(s - 1) { cycleIntervalSeconds }
         cycleIntervalSeconds = storedInterval.coerceAtLeast(2)
         viewModelScope.launch { userPreferencesRepository.saveCycleInterval(cycleIntervalSeconds) }
+        // Restore this preset's own shuffle mode too (speed + shuffle are per-preset).
+        cycleShuffle = cyclePresetShuffle.getOrElse(s - 1) { false }
+        recentCyclePicks.clear()
+        viewModelScope.launch { userPreferencesRepository.saveCycleShuffle(cycleShuffle) }
         setCycleLinesFromTextPreserve(messages)
         // Persist the loaded lines as the live cycle (NOT via the auto-save path,
         // which would re-save into the same slot redundantly — fine either way).
@@ -3041,6 +3072,7 @@ class VrcaViewModel(
         syncCycleEnabledSize()
         if (index !in cycleLineEnabled.indices) return
         cycleLineEnabled[index] = enabled
+        cycleMuteRev++
         recentCyclePicks.clear()
         persistCycleLineEnabled()
         rebuildCombinedPreviewOnly()
@@ -3051,6 +3083,8 @@ class VrcaViewModel(
         cycleShuffle = enabled
         recentCyclePicks.clear()
         viewModelScope.launch { userPreferencesRepository.saveCycleShuffle(enabled) }
+        // Shuffle is part of a preset — write it into the selected slot (no-op at slot 0).
+        autoSaveSelectedCyclePreset()
     }
 
     fun clearCycleLines() {
@@ -3154,6 +3188,19 @@ class VrcaViewModel(
     fun getCyclePresetFull(slot: Int): String {
         val i = slot.coerceIn(1, 5) - 1
         return cyclePresetMessages[i]
+    }
+
+    /** Short metadata line for a cycle preset ("5 lines · 10s · shuffle"). */
+    fun getCyclePresetSubtitle(slot: Int): String {
+        val i = slot.coerceIn(1, 5) - 1
+        val lines = cyclePresetMessages.getOrElse(i) { "" }.lines().count { it.isNotBlank() }
+        val interval = cyclePresetIntervals.getOrElse(i) { 10 }
+        val shuf = cyclePresetShuffle.getOrElse(i) { false }
+        return buildString {
+            append("$lines line").append(if (lines == 1) "" else "s")
+            append(" · ${interval}s")
+            if (shuf) append(" · shuffle")
+        }
     }
 
     /** The cycle line currently on screen (or first line when idle) — drives
