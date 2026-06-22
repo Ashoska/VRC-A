@@ -189,9 +189,20 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
             // overflow menu (move up/down, duplicate, delete) so all the new
             // controls stay on one slim row. The currently-sending line is
             // highlighted live while the cycle runs.
-            // Reading cycleMuteRev here makes the whole line list recompose the instant
-            // a mute toggles (a SnapshotStateList index set wasn't invalidating it).
-            @Suppress("UNUSED_EXPRESSION") vm.cycleMuteRev
+            //
+            // Mute repaint: a SnapshotStateList index set (cycleLineEnabled[i]=x)
+            // was NOT reliably invalidating this scope, and a bare
+            // `@Suppress("UNUSED_EXPRESSION") vm.cycleMuteRev` read could be
+            // dropped as a discarded statement — so the eye/shading only updated
+            // after some other interaction. Fix: read cycleMuteRev into a USED
+            // value (a remember key) and materialize the enabled flags off it, so
+            // every mute toggle provably recomposes the parent and re-feeds each
+            // row a fresh lineEnabled (no row-identity change, so text/focus stay).
+            val muteRev = vm.cycleMuteRev
+            val lineCount = vm.cycleLines.size
+            val enabledFlags = remember(muteRev, lineCount) {
+                List(lineCount) { vm.cycleLineEnabled.getOrElse(it) { true } }
+            }
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 vm.cycleLines.forEachIndexed { idx, _ ->
                     val fieldValue =
@@ -200,11 +211,7 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                         index = idx,
                         count = vm.cycleLines.size,
                         value = fieldValue,
-                        // Eager read in the parent loop so any mute toggle recomposes
-                        // the list immediately — the deferred-provider scoping looked
-                        // tidy but the snapshot read wasn't reliably invalidating the
-                        // row (the eye updated only after some other interaction).
-                        lineEnabled = vm.cycleLineEnabled.getOrElse(idx) { true },
+                        lineEnabled = enabledFlags.getOrElse(idx) { true },
                         // Count the RESOLVED token length, not the literal "{world}".
                         resolvedLength = vm.resolveTokens(fieldValue.text).length,
                         isActive = idx == activeRaw,
