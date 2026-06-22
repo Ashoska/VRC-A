@@ -204,6 +204,9 @@ fun VrcaApp() {
 
     var phase1BanId   by remember { mutableStateOf<String?>(null) }
     var phase1Checked by remember { mutableStateOf(false) }
+    // Holds the boot screen a beat after the check lands so its green "Account
+    // status" tick is actually visible before the screen hands off to the app.
+    var phase1HoldDone by remember { mutableStateOf(false) }
 
     LaunchedEffect(bootOk) {
         if (!bootOk) return@LaunchedEffect
@@ -217,14 +220,22 @@ fun VrcaApp() {
         phase1Checked = true
     }
 
-    if (bootOk && !phase1Checked) {
+    LaunchedEffect(phase1Checked) {
+        if (phase1Checked) {
+            kotlinx.coroutines.delay(450)
+            phase1HoldDone = true
+        }
+    }
+
+    if (bootOk && (!phase1Checked || !phase1HoldDone)) {
         // Same screen as the bootstrap so the whole boot reads as one
         // continuous loading experience instead of dropping to a bare spinner.
         BootstrapScreen(
             working = true,
             error = null,
             onRetry = {},
-            phase = 2
+            phase = 2,
+            accountChecked = phase1Checked
         )
         return
     }
@@ -1128,7 +1139,11 @@ private fun BootstrapScreen(
     working: Boolean,
     error: String?,
     onRetry: () -> Unit,
-    phase: Int = 1
+    phase: Int = 1,
+    // True once the phase-1 account/device check has finished cleanly — lets the
+    // "Account status" row show a green tick (otherwise it only ever spins, because
+    // finishing the check immediately dismisses the boot screen).
+    accountChecked: Boolean = false
 ) {
     val colors = MaterialTheme.colorScheme
     // Soft vertical wash: theme background into a faint primary tint at the
@@ -1242,7 +1257,11 @@ private fun BootstrapScreen(
                         )
                         BootCheckRow(
                             label = "Account status",
-                            state = if (phase >= 2) 1 else 0
+                            state = when {
+                                accountChecked -> 2
+                                phase >= 2 -> 1
+                                else -> 0
+                            }
                         )
                         val vrcState by BootVrcStatus.state
                         val vrcDetail by BootVrcStatus.detail

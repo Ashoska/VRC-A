@@ -69,6 +69,13 @@ class UserPreferencesRepository(private val context: Context) {
         val CYCLE_P4_INT  = intPreferencesKey("cycle_p4_interval")
         val CYCLE_P5_MSG  = stringPreferencesKey("cycle_p5_messages")
         val CYCLE_P5_INT  = intPreferencesKey("cycle_p5_interval")
+        // Per-preset shuffle flag (local-only, like the live CYCLE_SHUFFLE) so each
+        // cycle preset remembers its own shuffle + speed, not just its lines.
+        val CYCLE_P1_SHUF = booleanPreferencesKey("cycle_p1_shuffle")
+        val CYCLE_P2_SHUF = booleanPreferencesKey("cycle_p2_shuffle")
+        val CYCLE_P3_SHUF = booleanPreferencesKey("cycle_p3_shuffle")
+        val CYCLE_P4_SHUF = booleanPreferencesKey("cycle_p4_shuffle")
+        val CYCLE_P5_SHUF = booleanPreferencesKey("cycle_p5_shuffle")
 
         val SPOTIFY_ENABLED          = booleanPreferencesKey("spotify_enabled")
         val SPOTIFY_PRESET           = intPreferencesKey("spotify_preset")
@@ -191,6 +198,11 @@ class UserPreferencesRepository(private val context: Context) {
     val cyclePreset4Interval: Flow<Int>    = context.dataStore.data.map { it[Keys.CYCLE_P4_INT]  ?: 10 }.distinctUntilChanged()
     val cyclePreset5Messages: Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_P5_MSG]  ?: "" }.distinctUntilChanged()
     val cyclePreset5Interval: Flow<Int>    = context.dataStore.data.map { it[Keys.CYCLE_P5_INT]  ?: 10 }.distinctUntilChanged()
+    val cyclePreset1Shuffle: Flow<Boolean> = context.dataStore.data.map { it[Keys.CYCLE_P1_SHUF] ?: false }.distinctUntilChanged()
+    val cyclePreset2Shuffle: Flow<Boolean> = context.dataStore.data.map { it[Keys.CYCLE_P2_SHUF] ?: false }.distinctUntilChanged()
+    val cyclePreset3Shuffle: Flow<Boolean> = context.dataStore.data.map { it[Keys.CYCLE_P3_SHUF] ?: false }.distinctUntilChanged()
+    val cyclePreset4Shuffle: Flow<Boolean> = context.dataStore.data.map { it[Keys.CYCLE_P4_SHUF] ?: false }.distinctUntilChanged()
+    val cyclePreset5Shuffle: Flow<Boolean> = context.dataStore.data.map { it[Keys.CYCLE_P5_SHUF] ?: false }.distinctUntilChanged()
 
     val spotifyEnabled:        Flow<Boolean> = context.dataStore.data.map { it[Keys.SPOTIFY_ENABLED] ?: false }.distinctUntilChanged()
     val spotifyPreset:         Flow<Int>     = context.dataStore.data.map { (it[Keys.SPOTIFY_PRESET] ?: 1).coerceIn(1, 5) }.distinctUntilChanged()
@@ -327,11 +339,11 @@ class UserPreferencesRepository(private val context: Context) {
     suspend fun saveCycleLineEnabled(v: String) = context.dataStore.edit { it[Keys.CYCLE_LINE_ENABLED] = v }
     suspend fun saveSelectedAfkPreset(v: Int) = context.dataStore.edit { it[Keys.SELECTED_AFK_PRESET] = v }
     suspend fun saveSelectedCyclePreset(v: Int) = context.dataStore.edit { it[Keys.SELECTED_CYCLE_PRESET] = v }
-    suspend fun saveCyclePreset1(messages: String, interval: Int, name: String? = null) { context.dataStore.edit { it[Keys.CYCLE_P1_MSG] = messages; it[Keys.CYCLE_P1_INT] = interval } }
-    suspend fun saveCyclePreset2(messages: String, interval: Int, name: String? = null) { context.dataStore.edit { it[Keys.CYCLE_P2_MSG] = messages; it[Keys.CYCLE_P2_INT] = interval } }
-    suspend fun saveCyclePreset3(messages: String, interval: Int, name: String? = null) { context.dataStore.edit { it[Keys.CYCLE_P3_MSG] = messages; it[Keys.CYCLE_P3_INT] = interval } }
-    suspend fun saveCyclePreset4(messages: String, interval: Int, name: String? = null) { context.dataStore.edit { it[Keys.CYCLE_P4_MSG] = messages; it[Keys.CYCLE_P4_INT] = interval } }
-    suspend fun saveCyclePreset5(messages: String, interval: Int, name: String? = null) { context.dataStore.edit { it[Keys.CYCLE_P5_MSG] = messages; it[Keys.CYCLE_P5_INT] = interval } }
+    suspend fun saveCyclePreset1(messages: String, interval: Int, shuffle: Boolean = false, name: String? = null) { context.dataStore.edit { it[Keys.CYCLE_P1_MSG] = messages; it[Keys.CYCLE_P1_INT] = interval; it[Keys.CYCLE_P1_SHUF] = shuffle } }
+    suspend fun saveCyclePreset2(messages: String, interval: Int, shuffle: Boolean = false, name: String? = null) { context.dataStore.edit { it[Keys.CYCLE_P2_MSG] = messages; it[Keys.CYCLE_P2_INT] = interval; it[Keys.CYCLE_P2_SHUF] = shuffle } }
+    suspend fun saveCyclePreset3(messages: String, interval: Int, shuffle: Boolean = false, name: String? = null) { context.dataStore.edit { it[Keys.CYCLE_P3_MSG] = messages; it[Keys.CYCLE_P3_INT] = interval; it[Keys.CYCLE_P3_SHUF] = shuffle } }
+    suspend fun saveCyclePreset4(messages: String, interval: Int, shuffle: Boolean = false, name: String? = null) { context.dataStore.edit { it[Keys.CYCLE_P4_MSG] = messages; it[Keys.CYCLE_P4_INT] = interval; it[Keys.CYCLE_P4_SHUF] = shuffle } }
+    suspend fun saveCyclePreset5(messages: String, interval: Int, shuffle: Boolean = false, name: String? = null) { context.dataStore.edit { it[Keys.CYCLE_P5_MSG] = messages; it[Keys.CYCLE_P5_INT] = interval; it[Keys.CYCLE_P5_SHUF] = shuffle } }
 
     suspend fun saveSpotifyEnabled(v: Boolean)           = context.dataStore.edit { it[Keys.SPOTIFY_ENABLED]         = v }
     suspend fun saveSpotifyPreset(v: Int)               = context.dataStore.edit { it[Keys.SPOTIFY_PRESET]           = v.coerceIn(1, 5) }
