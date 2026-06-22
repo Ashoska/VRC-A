@@ -101,6 +101,13 @@ object OnboardingPrefs {
     private const val FILE = "vrca_onboarding"
     private const val KEY_COMPLETE = "complete"
     private const val KEY_STEP = "step"
+    // Set the moment the genuine first-run tutorial begins. It's what lets a
+    // crash/close mid-tutorial RESUME the tutorial instead of being mistaken for an
+    // existing install: once the user accepts the ToS in onboarding step 1,
+    // TosPrefs.acceptedVersion > 0, which the existing-user pre-seed keys on — but a
+    // started-and-not-complete onboarding must keep showing, so the pre-seed only
+    // applies when onboarding was never started.
+    private const val KEY_STARTED = "started"
 
     fun isComplete(ctx: Context): Boolean =
         ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE).getBoolean(KEY_COMPLETE, false)
@@ -108,6 +115,15 @@ object OnboardingPrefs {
     fun markComplete(ctx: Context) {
         ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit()
             .putBoolean(KEY_COMPLETE, true).remove(KEY_STEP).apply()
+    }
+
+    /** True once the first-run tutorial has actually begun on this install. */
+    fun wasStarted(ctx: Context): Boolean =
+        ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE).getBoolean(KEY_STARTED, false)
+
+    fun markStarted(ctx: Context) {
+        ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_STARTED, true).apply()
     }
 
     fun savedStep(ctx: Context): Int =
@@ -201,6 +217,11 @@ fun OnboardingFlow(
 
     // Persist resume point (not in replay — replay always starts clean).
     LaunchedEffect(step) { if (!replay) OnboardingPrefs.saveStep(ctx, step) }
+
+    // Mark the genuine tutorial as started so a crash/close mid-tutorial RESUMES it
+    // (the existing-user ToS pre-seed in VrcaApp is skipped once this is set). Replay
+    // never sets it — replaying must not change first-run state.
+    LaunchedEffect(Unit) { if (!replay) OnboardingPrefs.markStarted(ctx) }
 
     fun advance() { if (step < STEP_COUNT - 1) step++ else { OnboardingPrefs.markComplete(ctx); onFinish() } }
     fun back() { if (step > 0) step-- }

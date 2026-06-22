@@ -522,13 +522,20 @@ fun VrcaApp() {
 
     var onboardingDone by remember {
         mutableStateOf(
-            com.vrca.ui.onboarding.OnboardingPrefs.isComplete(ctx).also { done ->
-                // Pre-seed: an install that already accepted ANY ToS version is an
-                // existing user — mark complete so the tutorial never shows.
-                if (!done && TosPrefs.acceptedVersion(ctx) > 0) {
-                    com.vrca.ui.onboarding.OnboardingPrefs.markComplete(ctx)
-                }
-            } || TosPrefs.acceptedVersion(ctx) > 0
+            run {
+                val complete = com.vrca.ui.onboarding.OnboardingPrefs.isComplete(ctx)
+                // Existing-user pre-seed: an install that accepted ANY ToS version
+                // BEFORE the tutorial existed is an upgrade — mark complete so it
+                // never shows. But ONLY when the tutorial was never started: once
+                // started, accepting the ToS in step 1 sets acceptedVersion > 0, and
+                // a crash/close mid-tutorial must RESUME the tutorial, not be mistaken
+                // for an existing install. Replay leaves the started flag untouched.
+                val existingUser = !complete &&
+                    !com.vrca.ui.onboarding.OnboardingPrefs.wasStarted(ctx) &&
+                    TosPrefs.acceptedVersion(ctx) > 0
+                if (existingUser) com.vrca.ui.onboarding.OnboardingPrefs.markComplete(ctx)
+                complete || existingUser
+            }
         )
     }
     val onboardingReplay by com.vrca.ui.onboarding.OnboardingState.replayRequested
