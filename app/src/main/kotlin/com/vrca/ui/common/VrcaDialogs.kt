@@ -241,15 +241,35 @@ fun VrcaTimeZoneDialog(
         else {
             // Expand colloquial names ("usa", "uk") to the term that matches a country.
             val terms = (listOf(q) + (countrySynonyms[q.lowercase()]?.let { listOf(it) } ?: emptyList()))
-            allTimeZoneIds.filter { id ->
-                terms.any { t ->
-                    timeZoneCity(id).contains(t, ignoreCase = true) ||
+            // Match on city, region, country name, id, or offset; then RANK by quality
+            // (city/country prefix best) and sort by rank, not raw offset — a raw
+            // offset sort + small cap truncated eastern zones (e.g. "asia" never
+            // reaching Tokyo at UTC+9). The cap is generous so a broad region search
+            // shows every match.
+            allTimeZoneIds.mapNotNull { id ->
+                val city = timeZoneCity(id)
+                val country = zoneCountryName(id)
+                val hit = terms.any { t ->
+                    city.contains(t, ignoreCase = true) ||
                         timeZoneRegion(id).contains(t, ignoreCase = true) ||
-                        zoneCountryName(id).contains(t, ignoreCase = true) ||
+                        country.contains(t, ignoreCase = true) ||
                         id.contains(t, ignoreCase = true) ||
                         zoneOffsetLabel(resolveTimeZone(id)).contains(t, ignoreCase = true)
                 }
-            }.take(80)
+                if (!hit) return@mapNotNull null
+                val rank = terms.minOf { t ->
+                    when {
+                        city.startsWith(t, ignoreCase = true) ||
+                            country.startsWith(t, ignoreCase = true) -> 0
+                        city.contains(t, ignoreCase = true) ||
+                            country.contains(t, ignoreCase = true) -> 1
+                        else -> 2
+                    }
+                }
+                id to rank
+            }.sortedWith(
+                compareBy({ it.second }, { zoneOffsetSeconds(it.first) }, { it.first })
+            ).map { it.first }.take(200)
         }
     }
     val deviceSelected = currentMode == "Device" || currentMode == "LOCAL" || currentMode.isBlank()

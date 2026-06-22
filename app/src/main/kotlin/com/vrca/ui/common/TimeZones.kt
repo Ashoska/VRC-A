@@ -41,17 +41,40 @@ fun timeZoneRegion(id: String): String =
     if (id.contains('/')) id.substringBeforeLast('/').replace('_', ' ') else ""
 
 /**
- * Country display name for a zone id via ICU's region table: "Asia/Tokyo" → "Japan",
- * "Europe/Paris" → "France". Covers ALL countries automatically (no hand-maintained
- * list) so a search for a country name resolves to its city zones. Cached per id.
- * Returns "" for non-country zones (e.g. "Etc/UTC", region code "001").
+ * Country display name for a zone id: "Asia/Tokyo" → "Japan", "Europe/Paris" →
+ * "France". Covers ALL countries automatically (no hand-maintained list) so a search
+ * for a country name resolves to its city zones. Returns "" for non-country zones
+ * (e.g. "Etc/UTC").
+ *
+ * Resolution is built from an INVERSE map ([zoneToCountryName]) — for every ISO
+ * country we ask ICU for that country's zones (`getAvailableIDs(region)`) and tag them
+ * with the country's display name. This is far more reliable than the per-id
+ * `getRegion(id)` lookup, which returned blank/"001" inconsistently on-device (the
+ * "searching Japan finds nothing" bug). A per-id [getRegion] fallback covers any id the
+ * inverse map misses.
  */
-fun zoneCountryName(id: String): String = zoneCountryNameCache.getOrPut(id) {
+fun zoneCountryName(id: String): String =
+    zoneToCountryName[id] ?: zoneCountryNameCache.getOrPut(id) {
+        runCatching {
+            val region = android.icu.util.TimeZone.getRegion(id)
+            if (region.isNullOrBlank() || region == "001" || region.all { it.isDigit() }) ""
+            else Locale("", region).displayCountry.ifBlank { "" }
+        }.getOrDefault("")
+    }
+
+/** zoneId → country display name, built once from ICU's per-country zone lists. */
+private val zoneToCountryName: Map<String, String> by lazy {
+    val map = HashMap<String, String>()
     runCatching {
-        val region = android.icu.util.TimeZone.getRegion(id)
-        if (region.isNullOrBlank() || region == "001" || region.all { it.isDigit() }) ""
-        else Locale("", region).displayCountry.ifBlank { "" }
-    }.getOrDefault("")
+        for (code in Locale.getISOCountries()) {
+            val name = Locale("", code).displayCountry
+            if (name.isBlank()) continue
+            runCatching {
+                for (z in android.icu.util.TimeZone.getAvailableIDs(code)) map[z] = name
+            }
+        }
+    }
+    map
 }
 
 private val zoneCountryNameCache = java.util.concurrent.ConcurrentHashMap<String, String>()
