@@ -54,6 +54,10 @@ class UserPreferencesRepository(private val context: Context) {
         // shuffle mode + a CSV of per-line "1"/"0" enabled flags (lockstep with lines).
         val CYCLE_SHUFFLE  = booleanPreferencesKey("cycle_shuffle")
         val CYCLE_LINE_ENABLED = stringPreferencesKey("cycle_line_enabled")
+        // Auto-save preset model: the currently selected slot is the auto-save
+        // target — editing writes straight to it, so switching slots IS saving.
+        val SELECTED_AFK_PRESET = intPreferencesKey("selected_afk_preset")
+        val SELECTED_CYCLE_PRESET = intPreferencesKey("selected_cycle_preset")
 
         val CYCLE_P1_MSG  = stringPreferencesKey("cycle_p1_messages")
         val CYCLE_P1_INT  = intPreferencesKey("cycle_p1_interval")
@@ -172,6 +176,10 @@ class UserPreferencesRepository(private val context: Context) {
     val cycleInterval: Flow<Int>     = context.dataStore.data.map { it[Keys.CYCLE_INTERVAL] ?: 10 }.distinctUntilChanged()
     val cycleShuffle:  Flow<Boolean> = context.dataStore.data.map { it[Keys.CYCLE_SHUFFLE]  ?: false }.distinctUntilChanged()
     val cycleLineEnabled: Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_LINE_ENABLED] ?: "" }.distinctUntilChanged()
+    // Default 0 = NO slot selected (so we never auto-save / clobber an existing
+    // user's preset until they deliberately pick a slot — backward-compatible).
+    val selectedAfkPreset: Flow<Int> = context.dataStore.data.map { it[Keys.SELECTED_AFK_PRESET] ?: 0 }.distinctUntilChanged()
+    val selectedCyclePreset: Flow<Int> = context.dataStore.data.map { it[Keys.SELECTED_CYCLE_PRESET] ?: 0 }.distinctUntilChanged()
 
     val cyclePreset1Messages: Flow<String> = context.dataStore.data.map { it[Keys.CYCLE_P1_MSG]  ?: "" }.distinctUntilChanged()
     val cyclePreset1Interval: Flow<Int>    = context.dataStore.data.map { it[Keys.CYCLE_P1_INT]  ?: 10 }.distinctUntilChanged()
@@ -317,6 +325,8 @@ class UserPreferencesRepository(private val context: Context) {
     suspend fun saveCycleInterval(v: Int)     = context.dataStore.edit { it[Keys.CYCLE_INTERVAL] = v }
     suspend fun saveCycleShuffle(v: Boolean)  = context.dataStore.edit { it[Keys.CYCLE_SHUFFLE] = v }
     suspend fun saveCycleLineEnabled(v: String) = context.dataStore.edit { it[Keys.CYCLE_LINE_ENABLED] = v }
+    suspend fun saveSelectedAfkPreset(v: Int) = context.dataStore.edit { it[Keys.SELECTED_AFK_PRESET] = v }
+    suspend fun saveSelectedCyclePreset(v: Int) = context.dataStore.edit { it[Keys.SELECTED_CYCLE_PRESET] = v }
     suspend fun saveCyclePreset1(messages: String, interval: Int, name: String? = null) { context.dataStore.edit { it[Keys.CYCLE_P1_MSG] = messages; it[Keys.CYCLE_P1_INT] = interval } }
     suspend fun saveCyclePreset2(messages: String, interval: Int, name: String? = null) { context.dataStore.edit { it[Keys.CYCLE_P2_MSG] = messages; it[Keys.CYCLE_P2_INT] = interval } }
     suspend fun saveCyclePreset3(messages: String, interval: Int, name: String? = null) { context.dataStore.edit { it[Keys.CYCLE_P3_MSG] = messages; it[Keys.CYCLE_P3_INT] = interval } }

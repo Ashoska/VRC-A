@@ -47,10 +47,10 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontFamily
@@ -65,7 +65,6 @@ import com.vrca.ui.common.SelectPill
 import com.vrca.ui.common.VrcaCardDialog
 import com.vrca.ui.viewmodel.VrcaViewModel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 private val MAX_CYCLE_LINES = VrcaViewModel.MAX_CYCLE_LINES
 
@@ -75,8 +74,6 @@ private const val VRC_CHAR_BUDGET = 144
 
 @Composable
 internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
-    val scope = rememberCoroutineScope()
-
     val cycleLineFields = remember { mutableStateMapOf<Int, TextFieldValue>() }
 
     fun syncCycleLineFieldsFromVm() {
@@ -115,11 +112,13 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
                 label = { Text("Pinned text") },
-                supportingText = { CharBudgetMeter(vm.afkMessage.length) },
+                supportingText = { CharBudgetMeter(vm.resolveTokens(vm.afkMessage).length) },
                 enabled = !isBanned
             )
 
-            KitSectionHeader(title = "Presets", trailingValue = "tap to load · hold to peek")
+            TokensHint()
+
+            KitSectionHeader(title = "Presets", trailingValue = "tap to switch · hold to peek")
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -131,15 +130,14 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                     PresetChip(
                         slot = slot,
                         preview = content,
-                        equipped = content.isNotBlank() && content == vm.afkMessage.trim(),
+                        equipped = slot == vm.selectedAfkPreset,
                         enabled = !isBanned,
-                        onLoad = { scope.launch { vm.loadAfkPreset(slot) } },
+                        onLoad = { vm.selectAfkPreset(slot) },
                         onPeek = {
                             peek = PresetPeek(
                                 title = "Pinned preset $slot",
                                 content = content,
-                                onLoad = { scope.launch { vm.loadAfkPreset(slot) } },
-                                onSave = { scope.launch { vm.saveAfkPreset(slot, vm.afkMessage) } }
+                                onLoad = { vm.selectAfkPreset(slot) }
                             )
                         }
                     )
@@ -196,7 +194,11 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                         index = idx,
                         count = vm.cycleLines.size,
                         value = fieldValue,
-                        lineEnabled = vm.cycleLineEnabled.getOrElse(idx) { true },
+                        // Deferred read so toggling one line's mute recomposes ONLY
+                        // that row, not all 20 text fields (instant eye response).
+                        lineEnabledProvider = { vm.cycleLineEnabled.getOrElse(idx) { true } },
+                        // Count the RESOLVED token length, not the literal "{world}".
+                        resolvedLength = vm.resolveTokens(fieldValue.text).length,
                         isActive = idx == activeRaw,
                         onValueChange = { v: TextFieldValue ->
                             cycleLineFields[idx] = v
@@ -232,11 +234,7 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
             }
 
             // Dynamic tokens hint — substituted live at send time.
-            Text(
-                "Tokens: {time}  {song}  {world}  {players}",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            TokensHint()
 
             // Shuffle mode — random rotation that avoids repeating the last lines.
             Surface(
@@ -288,7 +286,7 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                 }
             }
 
-            KitSectionHeader(title = "Presets", trailingValue = "tap to load · hold to peek")
+            KitSectionHeader(title = "Presets", trailingValue = "tap to switch · hold to peek")
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -298,21 +296,17 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                 (1..5).forEach { slot ->
                     val firstLine = vm.getCyclePresetPreview(slot)
                     val full = vm.getCyclePresetFull(slot)
-                    val equipped = full.isNotBlank() &&
-                        full.lines().map { it.trim() }.filter { it.isNotEmpty() } ==
-                        vm.cycleLines.map { it.trim() }.filter { it.isNotEmpty() }
                     PresetChip(
                         slot = slot,
                         preview = firstLine,
-                        equipped = equipped,
+                        equipped = slot == vm.selectedCyclePreset,
                         enabled = !isBanned,
-                        onLoad = { scope.launch { vm.loadCyclePreset(slot) } },
+                        onLoad = { vm.selectCyclePreset(slot) },
                         onPeek = {
                             peek = PresetPeek(
                                 title = "Cycle preset $slot",
                                 content = full,
-                                onLoad = { scope.launch { vm.loadCyclePreset(slot) } },
-                                onSave = { scope.launch { vm.saveCyclePreset(slot, vm.cycleLines.toList()) } }
+                                onLoad = { vm.selectCyclePreset(slot) }
                             )
                         }
                     )
@@ -355,14 +349,11 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                     horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    TextButton(
-                        onClick = { p.onSave(); peek = null },
-                        enabled = !isBanned
-                    ) { Text("Save current here") }
+                    TextButton(onClick = { peek = null }) { Text("Close") }
                     Button(
                         onClick = { p.onLoad(); peek = null },
-                        enabled = !isBanned && p.content.isNotBlank()
-                    ) { Text("Load") }
+                        enabled = !isBanned
+                    ) { Text("Switch to this preset") }
                 }
             }
         }
@@ -372,9 +363,22 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
 private data class PresetPeek(
     val title: String,
     val content: String,
-    val onLoad: () -> Unit,
-    val onSave: () -> Unit
+    val onLoad: () -> Unit
 )
+
+/**
+ * Dynamic-tokens hint shown under both the Pinned and Cycle editors. The tokens
+ * substitute live at send time; the char meter counts the RESOLVED length.
+ */
+@Composable
+private fun TokensHint() {
+    Text(
+        "Currently experimenting, feel free to try by putting these tags into your " +
+            "pinned and cycle message:  {time}  {song}  {world}  {players}",
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+}
 
 /**
  * Horizontal preset chip: slot number + first words of the content. Tap to
@@ -444,7 +448,8 @@ private fun CycleLineRow(
     index: Int,
     count: Int,
     value: TextFieldValue,
-    lineEnabled: Boolean,
+    lineEnabledProvider: () -> Boolean,
+    resolvedLength: Int,
     isActive: Boolean,
     onValueChange: (TextFieldValue) -> Unit,
     onToggleEnabled: (Boolean) -> Unit,
@@ -456,6 +461,12 @@ private fun CycleLineRow(
     enabled: Boolean
 ) {
     var menuOpen by remember { mutableStateOf(false) }
+    // Reading the provider here scopes the mute-state snapshot read to THIS row,
+    // so a mute toggle only recomposes the toggled line (instant eye response).
+    val lineEnabled = lineEnabledProvider()
+    // When this field is focused, let a long line wrap onto multiple lines so the
+    // whole thing is visible while typing; collapse back to one line on blur.
+    var focused by remember { mutableStateOf(false) }
     val container = when {
         isActive -> MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
         !lineEnabled -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
@@ -507,17 +518,20 @@ private fun CycleLineRow(
                     value = value,
                     onValueChange = onValueChange,
                     enabled = enabled,
-                    singleLine = true,
+                    singleLine = !focused,
+                    maxLines = if (focused) 6 else 1,
                     textStyle = MaterialTheme.typography.bodyMedium.copy(
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = dim)
                     ),
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onFocusChanged { focused = it.isFocused }
                 )
             }
             if (value.text.isNotEmpty()) {
                 Spacer(Modifier.width(6.dp))
-                CharBudgetMeter(value.text.length)
+                CharBudgetMeter(resolvedLength)
             }
             // Mute quick-toggle icon (clear affordance alongside the number badge).
             IconButton(
