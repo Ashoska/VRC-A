@@ -170,9 +170,11 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
             icon = Icons.Filled.Loop,
             summary = buildString {
                 val live = vm.cycleLines.count { it.isNotBlank() }
-                append("$live lines · ${vm.cycleIntervalSeconds}s")
-                if (vm.cycleShuffle) append(" · shuffle")
-                if (cycleNow.isNotBlank()) append(" · now: “$cycleNow”")
+                val hidden = vm.cycleLineEnabled.count { !it }
+                append(“$live lines · ${vm.cycleIntervalSeconds}s”)
+                if (hidden > 0) append(“ · $hidden hidden”)
+                if (vm.cycleShuffle) append(“ · shuffle”)
+                if (cycleNow.isNotBlank()) append(“ · now: “$cycleNow””)
             },
             trailing = {
                 KitStatusChip(
@@ -185,24 +187,6 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                 Text("No lines yet. Tap Add line.", style = MaterialTheme.typography.bodySmall)
             }
 
-            // Compact line rows: inline number, text field, a mute dot, and an
-            // overflow menu (move up/down, duplicate, delete) so all the new
-            // controls stay on one slim row. The currently-sending line is
-            // highlighted live while the cycle runs.
-            //
-            // Mute repaint: a SnapshotStateList index set (cycleLineEnabled[i]=x)
-            // was NOT reliably invalidating this scope, and a bare
-            // `@Suppress("UNUSED_EXPRESSION") vm.cycleMuteRev` read could be
-            // dropped as a discarded statement — so the eye/shading only updated
-            // after some other interaction. Fix: read cycleMuteRev into a USED
-            // value (a remember key) and materialize the enabled flags off it, so
-            // every mute toggle provably recomposes the parent and re-feeds each
-            // row a fresh lineEnabled (no row-identity change, so text/focus stay).
-            val muteRev = vm.cycleMuteRev
-            val lineCount = vm.cycleLines.size
-            val enabledFlags = remember(muteRev, lineCount) {
-                List(lineCount) { vm.cycleLineEnabled.getOrElse(it) { true } }
-            }
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 vm.cycleLines.forEachIndexed { idx, _ ->
                     val fieldValue =
@@ -211,7 +195,7 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                         index = idx,
                         count = vm.cycleLines.size,
                         value = fieldValue,
-                        lineEnabled = enabledFlags.getOrElse(idx) { true },
+                        lineEnabled = vm.cycleLineEnabled.getOrElse(idx) { true },
                         // Count the RESOLVED token length, not the literal "{world}".
                         resolvedLength = vm.resolveTokens(fieldValue.text).length,
                         isActive = idx == activeRaw,

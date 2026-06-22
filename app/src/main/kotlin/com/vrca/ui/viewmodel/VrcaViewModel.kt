@@ -1990,10 +1990,14 @@ class VrcaViewModel(
     // (NOT synced to Firestore) — a muted line stays in the editor + the synced
     // cycleLinesText but is skipped by the sender. Defaults to enabled.
     val cycleLineEnabled = mutableStateListOf<Boolean>()
-    // Bumped on every per-line mute change. The cycle-line list UI reads this so the
-    // eye/dim state repaints IMMEDIATELY — an index set on a SnapshotStateList wasn't
-    // reliably invalidating the parent loop on-device (the eye updated only after some
-    // other interaction). Reading a plain Int state in the loop forces the recompose.
+    // Legacy mute-repaint counter. Reading a version Int INSIDE the Cycle card's
+    // content lambda still didn't repaint on-device (the content lambda lives in a
+    // separate AnimatedVisibility sub-composition that a SnapshotStateList index-set
+    // didn't invalidate). The repaint is now driven where it actually works: the
+    // Cycle CompactSectionCard's `summary` reads `cycleLineEnabled.count { !it }`
+    // EAGERLY in the PARENT composable's scope, so a mute toggle invalidates the
+    // parent -> the whole card (header + content) recomposes with fresh per-line
+    // state. This counter is kept (bumped, unread) as harmless belt-and-suspenders.
     var cycleMuteRev by mutableStateOf(0)
         private set
     // Random/shuffle rotation instead of sequential. Local-only.

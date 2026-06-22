@@ -581,6 +581,20 @@ class VrchatPipelineService : Service() {
                     lastConnectedNotifText = notifText
                     updatePersistentNotif(notifText)
                     serviceScope.launch { fireConnectionNotification(true) }
+                    // Immediately refresh presence on every (re)connect so a reconnect
+                    // behaves "like nothing happened": startPipeline() runs an initial
+                    // syncPresenceToFirestore before the FIRST connect, but a later
+                    // reconnect (scheduleReconnect -> connectWebSocket) skips that, so
+                    // presence/world/count would otherwise sit stale until the slow 10s
+                    // refresh loop's next tick. This re-fetches it right away and emits
+                    // on presenceFlow, which the Discord RPC's collector also picks up.
+                    serviceScope.launch {
+                        try {
+                            syncPresenceToFirestore(forceLocalUpdate = true)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Reconnect presence refresh failed", e)
+                        }
+                    }
                     // Profile pictures are NOT written to Firestore (cost) and NOT
                     // shown in the admin panel (AdminAvatar renders name initials).
                     // Auto-start Discord RPC if enabled

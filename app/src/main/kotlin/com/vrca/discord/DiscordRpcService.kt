@@ -509,10 +509,18 @@ class DiscordRpcService : Service() {
             scope.launch {
                 delay(2000L * sessionRecoveryCount)
                 mainHandler.post {
-                    webView?.let { wv ->
-                        CookieManager.getInstance().flush()
-                        wv.loadUrl("https://discord.com/channels/@me")
-                    }
+                    CookieManager.getInstance().flush()
+                    // FULL WebView recreation (loadWebView), NOT a same-page loadUrl on
+                    // the existing WebView. Discord is a SPA already sitting at
+                    // /channels/@me, so a loadUrl to the same route can soft-navigate
+                    // WITHOUT tearing down and reopening the gateway WebSocket — the shim
+                    // then recaptures the SAME half-dead gateway and presence pushes never
+                    // resume (the user-reported "RPC doesn't start sending to Discord after
+                    // reconnection; only fully reopening the app fixes it"). Recreating the
+                    // WebView from scratch is exactly what reopening the app does: fresh
+                    // Discord JS -> fresh gateway -> shim recapture -> startPresenceUpdates
+                    // pushes again, so recovery behaves "like nothing happened".
+                    loadWebView()
                 }
             }
         } else {
