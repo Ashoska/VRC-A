@@ -2298,6 +2298,11 @@ class VrcaViewModel(
                 spotifyPreset = userPreferencesRepository.spotifyPreset.first().coerceIn(1, 5)
                 timeMode = userPreferencesRepository.timeMode.first()
             }
+            // One-shot: park a pre-auto-save user's live content into a preset
+            // slot so tapping a chip can't load over (destroy) it. Must run
+            // AFTER the loads above (needs live content + slot contents) and
+            // BEFORE any UI interaction can select a preset.
+            runCatching { migrateLiveContentIntoPresetSlot() }
             initialDataLoaded = true
             // Auto-restore feature toggles after an unexpected process death (OS
             // memory pressure / Doze / OEM killer). A deliberate swipe disarms this
@@ -3243,6 +3248,69 @@ class VrcaViewModel(
     // =========================
     // Preset save/load
     // =========================
+    /**
+     * One-shot migration for users updating from the pre-auto-save preset
+     * system. They arrive at slot 0 (nothing selected) with their live Pinned
+     * message / cycle lines saved in NO preset slot — tapping any preset chip
+     * would load that slot over the live editor and silently destroy their
+     * content. Park the live content in a slot ONCE: prefer a slot already
+     * holding identical content (just select it — no write needed), else the
+     * first EMPTY slot (save + select). If every slot is full with distinct
+     * content, leave slot 0 selected and change nothing (never clobber a
+     * deliberately saved preset). Selecting here does NOT reload the editor —
+     * the editor already holds the content by construction. Guarded by the
+     * PRESET_SEED_MIGRATED DataStore flag so it runs at most once.
+     */
+    private suspend fun migrateLiveContentIntoPresetSlot() {
+        if (userPreferencesRepository.presetSeedMigrated.first()) return
+        // Pinned: live message → matching or first empty slot.
+        if (selectedAfkPreset == 0) {
+            val live = afkMessage.trim()
+            if (live.isNotEmpty()) {
+                val match = (1..3).firstOrNull { afkPresetTexts[it - 1].trim() == live }
+                val target = match ?: (1..3).firstOrNull { afkPresetTexts[it - 1].isBlank() }
+                if (target != null) {
+                    if (match == null) {
+                        afkPresetTexts[target - 1] = afkMessage
+                        when (target) {
+                            1 -> userPreferencesRepository.saveAfkPreset1(afkMessage)
+                            2 -> userPreferencesRepository.saveAfkPreset2(afkMessage)
+                            else -> userPreferencesRepository.saveAfkPreset3(afkMessage)
+                        }
+                    }
+                    selectedAfkPreset = target
+                    userPreferencesRepository.saveSelectedAfkPreset(target)
+                }
+            }
+        }
+        // Cycle: live lines (normalized like the auto-save) → matching or empty slot.
+        if (selectedCyclePreset == 0) {
+            val liveLines = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }
+                .take(MAX_CYCLE_LINES).joinToString("\n")
+            if (liveLines.isNotEmpty()) {
+                val match = (1..5).firstOrNull { cyclePresetMessages[it - 1].trim() == liveLines }
+                val target = match ?: (1..5).firstOrNull { cyclePresetMessages[it - 1].isBlank() }
+                if (target != null) {
+                    if (match == null) {
+                        cyclePresetMessages[target - 1] = liveLines
+                        cyclePresetIntervals[target - 1] = cycleIntervalSeconds
+                        cyclePresetShuffle[target - 1] = cycleShuffle
+                        when (target) {
+                            1 -> userPreferencesRepository.saveCyclePreset1(liveLines, cycleIntervalSeconds, cycleShuffle)
+                            2 -> userPreferencesRepository.saveCyclePreset2(liveLines, cycleIntervalSeconds, cycleShuffle)
+                            3 -> userPreferencesRepository.saveCyclePreset3(liveLines, cycleIntervalSeconds, cycleShuffle)
+                            4 -> userPreferencesRepository.saveCyclePreset4(liveLines, cycleIntervalSeconds, cycleShuffle)
+                            else -> userPreferencesRepository.saveCyclePreset5(liveLines, cycleIntervalSeconds, cycleShuffle)
+                        }
+                    }
+                    selectedCyclePreset = target
+                    userPreferencesRepository.saveSelectedCyclePreset(target)
+                }
+            }
+        }
+        userPreferencesRepository.savePresetSeedMigrated(true)
+    }
+
     suspend fun saveAfkPreset(slot: Int, text: String) {
         if (isBanned) return
         val s = slot.coerceIn(1, 3)

@@ -92,6 +92,19 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
     // Preset peek dialog state — set by long-pressing a preset chip.
     var peek by remember { mutableStateOf<PresetPeek?>(null) }
 
+    // Preset previews + selection are snapshotted in the PAGE scope for the
+    // same AnimatedVisibility-skip reason as the cycle mute flags below:
+    // reads inside a CompactSectionCard content lambda don't reliably
+    // retrigger it, so the auto-save writing into the selected slot left the
+    // chips (and the long-press peek) showing STALE content until the user
+    // tabbed out and back. Captured here, a preset edit changes the content
+    // lambda instance and the chips re-run; key() at the call site forces the
+    // repaint through.
+    val afkPresetPreviews = List(3) { vm.getAfkPresetPreview(it + 1) }
+    val selectedAfkSlot = vm.selectedAfkPreset
+    val cyclePresetPreviews = List(5) { vm.getCyclePresetPreview(it + 1) }
+    val selectedCycleSlot = vm.selectedCyclePreset
+
     PageContainer {
         // =========================
         // Pinned — collapsed = status ("'msg' · ON"), expanded = editor.
@@ -127,24 +140,29 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 (1..3).forEach { slot ->
-                    val content = vm.getAfkPresetPreview(slot)
-                    PresetChip(
-                        slot = slot,
-                        preview = content,
-                        equipped = slot == vm.selectedAfkPreset,
-                        enabled = !isBanned,
-                        onLoad = { vm.selectAfkPreset(slot) },
-                        onPeek = {
-                            peek = PresetPeek(
-                                title = "Pinned preset $slot",
-                                subtitle = if (content.isBlank()) "Empty" else "${content.length} characters",
-                                content = content,
-                                icon = Icons.Filled.PushPin,
-                                numbered = false,
-                                onLoad = { vm.selectAfkPreset(slot) }
-                            )
-                        }
-                    )
+                    val content = afkPresetPreviews[slot - 1]
+                    key(slot, content, slot == selectedAfkSlot) {
+                        PresetChip(
+                            slot = slot,
+                            preview = content,
+                            equipped = slot == selectedAfkSlot,
+                            enabled = !isBanned,
+                            onLoad = { vm.selectAfkPreset(slot) },
+                            onPeek = {
+                                // Read FRESH at press time — a composition-captured
+                                // value can be stale if the chip was skipped.
+                                val fresh = vm.getAfkPresetPreview(slot)
+                                peek = PresetPeek(
+                                    title = "Pinned preset $slot",
+                                    subtitle = if (fresh.isBlank()) "Empty" else "${fresh.length} characters",
+                                    content = fresh,
+                                    icon = Icons.Filled.PushPin,
+                                    numbered = false,
+                                    onLoad = { vm.selectAfkPreset(slot) }
+                                )
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -307,25 +325,28 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 (1..5).forEach { slot ->
-                    val firstLine = vm.getCyclePresetPreview(slot)
-                    val full = vm.getCyclePresetFull(slot)
-                    PresetChip(
-                        slot = slot,
-                        preview = firstLine,
-                        equipped = slot == vm.selectedCyclePreset,
-                        enabled = !isBanned,
-                        onLoad = { vm.selectCyclePreset(slot) },
-                        onPeek = {
-                            peek = PresetPeek(
-                                title = "Cycle preset $slot",
-                                subtitle = vm.getCyclePresetSubtitle(slot),
-                                content = full,
-                                icon = Icons.Filled.Loop,
-                                numbered = true,
-                                onLoad = { vm.selectCyclePreset(slot) }
-                            )
-                        }
-                    )
+                    val firstLine = cyclePresetPreviews[slot - 1]
+                    key(slot, firstLine, slot == selectedCycleSlot) {
+                        PresetChip(
+                            slot = slot,
+                            preview = firstLine,
+                            equipped = slot == selectedCycleSlot,
+                            enabled = !isBanned,
+                            onLoad = { vm.selectCyclePreset(slot) },
+                            onPeek = {
+                                // Read FRESH at press time — a composition-captured
+                                // value can be stale if the chip was skipped.
+                                peek = PresetPeek(
+                                    title = "Cycle preset $slot",
+                                    subtitle = vm.getCyclePresetSubtitle(slot),
+                                    content = vm.getCyclePresetFull(slot),
+                                    icon = Icons.Filled.Loop,
+                                    numbered = true,
+                                    onLoad = { vm.selectCyclePreset(slot) }
+                                )
+                            }
+                        )
+                    }
                 }
             }
         }
