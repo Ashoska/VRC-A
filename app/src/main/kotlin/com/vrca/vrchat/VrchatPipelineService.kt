@@ -156,18 +156,17 @@ class VrchatPipelineService : Service() {
     // Tracks user IDs for which an unfriend notification has already been fired
     // this session, so the real-time and offline-diff handlers don't both fire.
     private val notifiedUnfriendIds = mutableSetOf<String>()
+    // Dedup-id retention: UNBOUNDED (deliberate). This one set holds EVERY dedup
+    // key: V1/V2 notification ids, announcement content fingerprints (ann_fp_),
+    // event fingerprints (evt_fp_), per-person friend-request keys (fr_)...
+    // It used to be capped (500, then 4000) with eviction — but ANY eviction of
+    // a pending-state key (e.g. an unaccepted friend request, which VRChat
+    // RE-LISTS on every backfill until accepted/declined) guarantees a visible
+    // duplicate notification: the tester-reported "unaccepted friend requests
+    // resend in app on every restart". No cap = structurally impossible to
+    // refire. Growth is human-rate (a few ids per real notification, ~40-60
+    // chars each) — even years of heavy use is only a few MB, loaded once.
     private val seenNotifIds = LinkedHashSet<String>()
-    // Dedup-id retention. This one set holds EVERY dedup key: V1/V2 notification
-    // ids, announcement content fingerprints (ann_fp_), event fingerprints
-    // (evt_fp_), per-person friend-request keys (fr_)... Months of normal use
-    // fill it PERMANENTLY — once at the cap, every new id evicts an old one.
-    // At the old cap of 500 that eviction hit pending friend-request keys, and
-    // since a pending request is RE-LISTED by VRChat on every backfill until
-    // accepted/declined, an evicted fr_ key meant the same request re-fired on
-    // the next app restart/reconnect — the tester-reported "unaccepted friend
-    // requests resend in app on every restart". 4000 gives years of headroom
-    // (~40 chars/id ≈ 160 KB persisted, loaded once).
-    private val MAX_SEEN_NOTIF_IDS = 4000
     // Per-friend throttle for chatty events (location/avatar/status). One
     // notification per friend per LOCATION_NOTIF_COOLDOWN_MS prevents spam
     // when a friend rapidly hops worlds or swaps avatars.
@@ -1773,12 +1772,9 @@ class VrchatPipelineService : Service() {
 
     private fun loadSeenNotifIds() {
         val prefs = getSharedPreferences("vrca_seen_notifs", Context.MODE_PRIVATE)
-        // Ordered JSON array (new format) preserves LinkedHashSet insertion order
-        // across restarts so eviction is genuinely oldest-first. The legacy
-        // "ids" StringSet persisted as a HashSet — ORDER WAS LOST on reload, so
-        // post-restart "FIFO" eviction removed effectively RANDOM entries
-        // (including fresh pending friend-request keys). Migrate once; order of
-        // the legacy entries is unknown (harmless — true FIFO resumes from here).
+        // Ordered JSON array (new format). The set is unbounded now, so only
+        // MEMBERSHIP matters — order is preserved harmlessly. The legacy "ids"
+        // StringSet is migrated once (its order was never preserved anyway).
         val ordered = prefs.getString("ids_ordered", null)
         if (ordered != null) {
             try {
@@ -1814,19 +1810,6 @@ class VrchatPipelineService : Service() {
         prefs.edit().putString("ids_ordered", arr.toString()).commit()
     }
 
-    /** Evict oldest-first down to the cap. MUST be called holding the
-     *  [seenNotifIds] lock. Pending-state friend-request keys ("fr_<userId>")
-     *  are NEVER evicted: VRChat re-lists a pending request on EVERY backfill
-     *  until it's accepted/declined, so losing its dedup key guarantees a
-     *  visible duplicate notification. They're bounded (one per unique
-     *  requester) and reclaimed naturally by the cap sweep ignoring them. */
-    private fun evictSeenNotifIdsLocked() {
-        if (seenNotifIds.size <= MAX_SEEN_NOTIF_IDS) return
-        val it = seenNotifIds.iterator()
-        while (seenNotifIds.size > MAX_SEEN_NOTIF_IDS && it.hasNext()) {
-            if (!it.next().startsWith("fr_")) it.remove()
-        }
-    }
 
     /**
      * Two-fetch confirmation: only fire unfriend notifications for IDs
@@ -3449,22 +3432,9 @@ class VrchatPipelineService : Service() {
         }
 
         if (dedupId != null) {
-            var alreadySeen = false
-            synchronized(seenNotifIds) {
-                if (dedupId in seenNotifIds) {
-                    // LRU refresh: move a re-listed id back to the newest end so
-                    // an item VRChat keeps re-delivering (pending state swept by
-                    // every backfill/poll) can never age to the eviction end and
-                    // get dropped — dropping it is what caused refires. Order-only
-                    // change; persisted with the next genuine add.
-                    seenNotifIds.remove(dedupId)
-                    seenNotifIds.add(dedupId)
-                    alreadySeen = true
-                } else {
-                    seenNotifIds.add(dedupId)
-                    evictSeenNotifIdsLocked()
-                }
-            }
+            // The set is unbounded (no eviction), so membership alone decides:
+            // once an id is in, that notification can never fire again.
+            val alreadySeen = synchronized(seenNotifIds) { !seenNotifIds.add(dedupId) }
             if (alreadySeen) {
                 Log.d(TAG, "notif skip (already seen): dedup=$dedupId title=$title")
                 return
