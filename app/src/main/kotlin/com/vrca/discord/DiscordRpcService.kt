@@ -18,6 +18,7 @@ import android.os.Looper
 import android.util.Log
 import android.view.View
 import android.webkit.CookieManager
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
@@ -395,6 +396,31 @@ class DiscordRpcService : Service() {
                         if (request?.isForMainFrame != true) return
                         Log.w(TAG, "WebView main-frame load error: ${error?.errorCode} ${error?.description}")
                         if (!hasNetwork()) parkOffline()
+                    }
+
+                    override fun onRenderProcessGone(
+                        view: WebView?,
+                        detail: RenderProcessGoneDetail?
+                    ): Boolean {
+                        // The OS reclaimed this WebView's renderer process — common for a
+                        // long-running BACKGROUND WebView under memory pressure. If we do
+                        // NOT handle this (return true), the system may terminate our whole
+                        // service process; and even if it doesn't, the page is blank and the
+                        // RPC is dead until the 120s JS-freeze detector eventually reloads.
+                        // Handle it: destroy the dead WebView and recreate from scratch NOW
+                        // (fresh gateway), so a renderer reclaim recovers in seconds instead
+                        // of leaving the RPC silently gone for up to two minutes.
+                        Log.w(TAG, "WebView renderer gone (didCrash=${detail?.didCrash()}) — recreating WebView")
+                        shimReady = false
+                        stopPresenceUpdates()
+                        if (view === webView) webView = null
+                        try { view?.destroy() } catch (_: Throwable) {}
+                        DiscordRpcState.status = DiscordRpcStatus.RECONNECTING
+                        DiscordRpcState.failureMessage = "Discord connection lost — recovering..."
+                        // loadWebView re-checks network (parks if offline). Post so we're not
+                        // recreating while this callback is still on the WebView's stack.
+                        mainHandler.post { loadWebView() }
+                        return true
                     }
                 }
 
@@ -1289,6 +1315,13 @@ private const val MODULE_FINDER_JS = """
                 var gw = window._vrca_gatewayWs;
                 if (!gw || gw.readyState !== 1) return 'no_gateway';
                 var activity = JSON.parse(jsonStr);
+                // Each call supersedes any in-flight image resolution. Bump a
+                // generation token so a SLOW external-assets resolve for a PREVIOUS
+                // world can't land late and overwrite _vrca_activity with the stale
+                // world — the rapid-world-switch flicker / wrong-world / re-send
+                // churn (worse the faster the user hops instances).
+                window._vrca_activityGen = (window._vrca_activityGen || 0) + 1;
+                var myGen = window._vrca_activityGen;
                 var imageUrl = activity.assets && activity.assets.large_image;
                 if (imageUrl && imageUrl.indexOf('http') === 0) {
                     var cached = window._vrca_asset_cache[imageUrl];
@@ -1315,6 +1348,9 @@ private const val MODULE_FINDER_JS = """
                     var retries = 0;
                     var tryResolve = function() {
                         VRCA_resolveAsset(imageUrl).then(function(resolved) {
+                            // Superseded by a newer world? Abandon — do not overwrite
+                            // the current activity or keep retrying for a stale world.
+                            if (myGen !== window._vrca_activityGen) return;
                             if (resolved) {
                                 activity.assets.large_image = resolved;
                                 window._vrca_activity = activity;
@@ -1340,6 +1376,9 @@ private const val MODULE_FINDER_JS = """
 
         window.VRCA_clearActivity = function() {
             try {
+                // Supersede any in-flight image resolution so it can't re-add an
+                // activity after we've cleared it.
+                window._vrca_activityGen = (window._vrca_activityGen || 0) + 1;
                 window._vrca_activity = null;
                 var gw = window._vrca_gatewayWs;
                 if (!gw || gw.readyState !== 1) return 'no_gateway';
