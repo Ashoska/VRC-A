@@ -687,6 +687,20 @@ class DiscordRpcService : Service() {
                                     Log.w(TAG, "WebView cacheDir sweep failed", e)
                                 }
                                 mainHandler.post {
+                                    // Tear down the RPC state BEFORE reloading. The reload
+                                    // destroys the page's shim (VRCA_gatewayHealth /
+                                    // VRCA_setActivity) and the gateway — if shimReady stays
+                                    // true, the session monitor probes the reloading page,
+                                    // gets `no_probe`/`no_gateway`, and (pre-fix) treated it
+                                    // as healthy, leaving a CONNECTED-but-dead RPC only a
+                                    // toggle could clear. Reset like a planned reconnect (but
+                                    // do NOT consume a sessionRecovery attempt — this is
+                                    // maintenance, not a failure); onPageFinished re-injects
+                                    // the shim and resumes presence + the monitor.
+                                    shimReady = false
+                                    stopPresenceUpdates()
+                                    DiscordRpcState.status = DiscordRpcStatus.RECONNECTING
+                                    DiscordRpcState.failureMessage = "Refreshing Discord connection..."
                                     try {
                                         webView?.reload()
                                     } catch (_: Throwable) {
@@ -757,7 +771,7 @@ class DiscordRpcService : Service() {
                         lastJsResponseMs = System.currentTimeMillis()
                         if (!shimReady) return@evaluateJavascript
                         when (result?.trim()?.replace("\"", "") ?: "null") {
-                            "alive", "connecting", "no_probe" -> {
+                            "alive", "connecting" -> {
                                 if (deadHealthChecks != 0) deadHealthChecks = 0
                                 if (degradedHealthChecks != 0) degradedHealthChecks = 0
                                 if (noGatewayChecks != 0) noGatewayChecks = 0
@@ -773,7 +787,15 @@ class DiscordRpcService : Service() {
                                     sessionRecoveryCount = 0
                                 }
                             }
-                            "no_gateway" -> {
+                            // `no_probe` = window.VRCA_gatewayHealth is UNDEFINED. Because this
+                            // branch only runs while shimReady==true, an undefined probe means
+                            // the shim was destroyed out from under us (a page reload — e.g.
+                            // cache maintenance — that blew away the injected functions). This
+                            // was previously grouped with "alive", so a reloaded/dead page kept
+                            // reporting CONNECTED and never recovered on its own (only a toggle
+                            // fixed it). Treat it exactly like a lost gateway: re-inject, then
+                            // reload after the threshold.
+                            "no_gateway", "no_probe" -> {
                                 healthySinceMs = 0L
                                 deadHealthChecks = 0
                                 degradedHealthChecks = 0
