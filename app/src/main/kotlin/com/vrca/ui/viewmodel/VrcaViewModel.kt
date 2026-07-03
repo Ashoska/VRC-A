@@ -2222,6 +2222,9 @@ class VrcaViewModel(
     )
     // Per-preset shuffle, mirrored from DataStore so each slot restores its own.
     private val cyclePresetShuffle = mutableStateListOf(false, false, false, false, false)
+    // Per-preset per-line mute CSV (aligned to the preset's non-empty saved lines),
+    // mirrored from DataStore so each slot restores which lines were hidden.
+    private val cyclePresetEnabled = mutableStateListOf("", "", "", "", "")
 
     init {
         // Restore the last-synced baseline from the previous session so the
@@ -2295,6 +2298,11 @@ class VrcaViewModel(
                 cyclePresetShuffle[2] = userPreferencesRepository.cyclePreset3Shuffle.first()
                 cyclePresetShuffle[3] = userPreferencesRepository.cyclePreset4Shuffle.first()
                 cyclePresetShuffle[4] = userPreferencesRepository.cyclePreset5Shuffle.first()
+                cyclePresetEnabled[0] = userPreferencesRepository.cyclePreset1Enabled.first()
+                cyclePresetEnabled[1] = userPreferencesRepository.cyclePreset2Enabled.first()
+                cyclePresetEnabled[2] = userPreferencesRepository.cyclePreset3Enabled.first()
+                cyclePresetEnabled[3] = userPreferencesRepository.cyclePreset4Enabled.first()
+                cyclePresetEnabled[4] = userPreferencesRepository.cyclePreset5Enabled.first()
                 spotifyPreset = userPreferencesRepository.spotifyPreset.first().coerceIn(1, 5)
                 timeMode = userPreferencesRepository.timeMode.first()
             }
@@ -2978,18 +2986,26 @@ class VrcaViewModel(
         val s = selectedCyclePreset
         val idx = s - 1
         val messages = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(MAX_CYCLE_LINES).joinToString("\n")
+        // Mute CSV aligned to the SAME non-empty lines the preset saves (empty
+        // lines are dropped from `messages`, so the flags must skip them too) —
+        // otherwise the indices wouldn't line up when the preset reloads.
+        val enabledCsv = cycleLines.indices
+            .filter { cycleLines[it].trim().isNotEmpty() }
+            .take(MAX_CYCLE_LINES)
+            .joinToString(",") { if (cycleLineEnabled.getOrElse(it) { true }) "1" else "0" }
         val interval = cycleIntervalSeconds
         val shuffle = cycleShuffle
         cyclePresetMessages[idx] = messages
         cyclePresetIntervals[idx] = interval
         cyclePresetShuffle[idx] = shuffle
+        cyclePresetEnabled[idx] = enabledCsv
         viewModelScope.launch {
             when (s) {
-                1 -> userPreferencesRepository.saveCyclePreset1(messages, interval, shuffle)
-                2 -> userPreferencesRepository.saveCyclePreset2(messages, interval, shuffle)
-                3 -> userPreferencesRepository.saveCyclePreset3(messages, interval, shuffle)
-                4 -> userPreferencesRepository.saveCyclePreset4(messages, interval, shuffle)
-                else -> userPreferencesRepository.saveCyclePreset5(messages, interval, shuffle)
+                1 -> userPreferencesRepository.saveCyclePreset1(messages, interval, shuffle, enabledCsv = enabledCsv)
+                2 -> userPreferencesRepository.saveCyclePreset2(messages, interval, shuffle, enabledCsv = enabledCsv)
+                3 -> userPreferencesRepository.saveCyclePreset3(messages, interval, shuffle, enabledCsv = enabledCsv)
+                4 -> userPreferencesRepository.saveCyclePreset4(messages, interval, shuffle, enabledCsv = enabledCsv)
+                else -> userPreferencesRepository.saveCyclePreset5(messages, interval, shuffle, enabledCsv = enabledCsv)
             }
         }
     }
@@ -3010,6 +3026,19 @@ class VrcaViewModel(
         recentCyclePicks.clear()
         viewModelScope.launch { userPreferencesRepository.saveCycleShuffle(cycleShuffle) }
         setCycleLinesFromTextPreserve(messages)
+        // Restore THIS preset's saved hide state. A blank CSV (legacy presets
+        // saved before this feature) means all-visible — reset explicitly so a
+        // switch between identical-line presets can't inherit the prior slot's
+        // mute (setCycleLinesFromTextPreserve early-returns when lines match and
+        // applyCycleLineEnabledCsv keeps current flags on a blank CSV).
+        val presetEnabledCsv = cyclePresetEnabled.getOrElse(s - 1) { "" }
+        if (presetEnabledCsv.isBlank()) {
+            cycleLineEnabled.clear()
+            syncCycleEnabledSize()
+            rebuildCombinedPreviewOnly()
+        } else {
+            applyCycleLineEnabledCsv(presetEnabledCsv)
+        }
         // Persist the loaded lines as the live cycle (NOT via the auto-save path,
         // which would re-save into the same slot redundantly — fine either way).
         viewModelScope.launch { userPreferencesRepository.saveCycleMessages(cycleLines.take(MAX_CYCLE_LINES).joinToString("\n")) }
@@ -3086,6 +3115,10 @@ class VrcaViewModel(
         cycleMuteRev++
         recentCyclePicks.clear()
         persistCycleLineEnabled()
+        // Persist the hide state INTO the selected preset too — otherwise a
+        // preset never remembers which lines were hidden ("presets don't save
+        // hidden lines"). No-op at slot 0 (autoSave early-returns).
+        autoSaveSelectedCyclePreset()
         rebuildCombinedPreviewOnly()
     }
 
@@ -3292,15 +3325,22 @@ class VrcaViewModel(
                 val target = match ?: (1..5).firstOrNull { cyclePresetMessages[it - 1].isBlank() }
                 if (target != null) {
                     if (match == null) {
+                        // Mute CSV aligned to the non-empty lines (same as the auto-save)
+                        // so the parked preset keeps the user's live hide state.
+                        val liveEnabledCsv = cycleLines.indices
+                            .filter { cycleLines[it].trim().isNotEmpty() }
+                            .take(MAX_CYCLE_LINES)
+                            .joinToString(",") { if (cycleLineEnabled.getOrElse(it) { true }) "1" else "0" }
                         cyclePresetMessages[target - 1] = liveLines
                         cyclePresetIntervals[target - 1] = cycleIntervalSeconds
                         cyclePresetShuffle[target - 1] = cycleShuffle
+                        cyclePresetEnabled[target - 1] = liveEnabledCsv
                         when (target) {
-                            1 -> userPreferencesRepository.saveCyclePreset1(liveLines, cycleIntervalSeconds, cycleShuffle)
-                            2 -> userPreferencesRepository.saveCyclePreset2(liveLines, cycleIntervalSeconds, cycleShuffle)
-                            3 -> userPreferencesRepository.saveCyclePreset3(liveLines, cycleIntervalSeconds, cycleShuffle)
-                            4 -> userPreferencesRepository.saveCyclePreset4(liveLines, cycleIntervalSeconds, cycleShuffle)
-                            else -> userPreferencesRepository.saveCyclePreset5(liveLines, cycleIntervalSeconds, cycleShuffle)
+                            1 -> userPreferencesRepository.saveCyclePreset1(liveLines, cycleIntervalSeconds, cycleShuffle, enabledCsv = liveEnabledCsv)
+                            2 -> userPreferencesRepository.saveCyclePreset2(liveLines, cycleIntervalSeconds, cycleShuffle, enabledCsv = liveEnabledCsv)
+                            3 -> userPreferencesRepository.saveCyclePreset3(liveLines, cycleIntervalSeconds, cycleShuffle, enabledCsv = liveEnabledCsv)
+                            4 -> userPreferencesRepository.saveCyclePreset4(liveLines, cycleIntervalSeconds, cycleShuffle, enabledCsv = liveEnabledCsv)
+                            else -> userPreferencesRepository.saveCyclePreset5(liveLines, cycleIntervalSeconds, cycleShuffle, enabledCsv = liveEnabledCsv)
                         }
                     }
                     selectedCyclePreset = target
