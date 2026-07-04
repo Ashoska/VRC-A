@@ -161,6 +161,31 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
         }
     }
 
+    // Live refresh for on-screen event/announcement alerts: while this tab is
+    // composed, periodically re-sweep the groups behind them so the interested
+    // count, an edited start time/description, and a late banner UPDATE IN PLACE
+    // — the card no longer freezes at fire-time data. First pass runs shortly
+    // after entering the tab (stale alerts from a previous session catch up),
+    // then every 60s; the enricher is debounced per group and skips groups whose
+    // alerts were dismissed. Only rich event/announcement groups are swept —
+    // bounded to a handful of groups → ~2 REST calls each per cycle, on-tab only.
+    LaunchedEffect(Unit) {
+        delay(5_000)
+        while (true) {
+            val groupIds = InAppAlertState.groups.value
+                .asSequence()
+                .filter { it.groupId.startsWith("event_grp_") || it.groupId.startsWith("announcement_grp_") }
+                .flatMap { g -> g.events.asSequence().mapNotNull { it.groupRefId } }
+                .distinct()
+                .take(6)
+                .toList()
+            for (gid in groupIds) {
+                runCatching { com.vrca.vrchat.GroupAlertEnricher.enrich(ctx, gid, minIntervalMs = 55_000) }
+            }
+            delay(60_000)
+        }
+    }
+
     var showInstanceHistory by remember { mutableStateOf(false) }
 
     // Whole-tab scroller. Was a verticalScroll Column (PageContainer); a
@@ -989,10 +1014,6 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
     val showPerEventOpen = sharedOpenUrl == null
     val headerOpenUrl = sharedOpenUrl
         ?: group.url?.takeIf { group.events.none { e -> e.url != null } }
-    // Group web page for event/announcement groups — tapping the group's name in
-    // the header opens it on the website.
-    val groupPageUrl = remember(group.groupId) { groupWebUrl(group.groupId) }
-
     // "Join event": lists the hosting group's currently-open instances in the
     // same picker the multi-invite flow uses. null = closed; empty = fetched,
     // group has nothing open right now.
@@ -1056,10 +1077,9 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
                             shape = MaterialTheme.shapes.small
                         )
                 )
-                // Title block is the expand tap target. For event/announcement
-                // groups the TITLE ITSELF (the group's display name) opens the
-                // group's page on the website instead — tinted primary to signal
-                // the link; the preview/time lines below still toggle expand.
+                // Title block is the expand tap target. (Opening the group page
+                // lives on the "Group" chip inside the event body, per feedback —
+                // NOT on the title.)
                 Column(
                     Modifier
                         .weight(1f)
@@ -1068,11 +1088,7 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
                     Text(
                         displayTitle,
                         style = MaterialTheme.typography.titleSmall,
-                        color = if (groupPageUrl != null) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.onSurface,
-                        modifier = if (groupPageUrl != null) Modifier.clickable {
-                            ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(groupPageUrl)))
-                        } else Modifier
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                     if (!expanded && previewText.isNotBlank()) {
                         Text(
@@ -1291,9 +1307,10 @@ private fun AlertEventBody(
         modifier = Modifier.fillMaxWidth()
     ) {
         Column {
-            // Banner — event/announcement images are BANNER-shaped, so render
-            // full-width at ~21:9 instead of a square thumb. Cached file first;
-            // Coil's session-authed loader is the network fallback.
+            // Banner — VRChat event/post images are 1200×630 (1.9:1), so match
+            // that ratio exactly to avoid cropping the top/bottom (21:9 clipped
+            // them). Cached file first; Coil's session-authed loader is the
+            // network fallback.
             if (!event.imageUrl.isNullOrBlank()) {
                 val model: Any = AlertImageStore.resolve(ctx, event.imageUrl) ?: event.imageUrl
                 coil.compose.AsyncImage(
@@ -1303,7 +1320,7 @@ private fun AlertEventBody(
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .aspectRatio(21f / 9f)
+                        .aspectRatio(1200f / 630f)
                         .clip(MaterialTheme.shapes.small)
                 )
             }
@@ -1316,7 +1333,9 @@ private fun AlertEventBody(
                     )
                     Spacer(Modifier.height(3.dp))
                 }
-                // Status + metadata chips (rich events only).
+                // Status + metadata chips (rich events only). The "Group"/"Public"
+                // access chip is the tap target for the group's web page (per
+                // feedback: the CHIP opens the group, not the card title).
                 if (isRichEvent) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -1333,7 +1352,9 @@ private fun AlertEventBody(
                             EventPhase.ENDED -> "Ended" to MaterialTheme.colorScheme.outline
                         }
                         EventMetaChip(phaseLabel, phaseColor, bold = true)
-                        event.category?.let { EventMetaChip(it, MaterialTheme.colorScheme.tertiary) }
+                        event.category?.let {
+                            EventMetaChip(prettyEventCategory(it), MaterialTheme.colorScheme.tertiary)
+                        }
                         event.accessType?.let {
                             val label = it.replaceFirstChar { c -> c.uppercase() }
                             val color = when (it.lowercase()) {
@@ -1341,46 +1362,24 @@ private fun AlertEventBody(
                                 "group" -> Color(0xFFAB47BC)
                                 else -> MaterialTheme.colorScheme.outline
                             }
-                            EventMetaChip(label, color)
-                        }
-                    }
-                    // Platforms + interested count on a compact second line.
-                    val platforms = platformsLabel(event.platforms)
-                    if (platforms != null || event.interestedCount >= 0) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                            modifier = Modifier.padding(bottom = 6.dp)
-                        ) {
-                            if (platforms != null) {
-                                Text(
-                                    platforms,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            if (event.interestedCount >= 0) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        Icons.Filled.Group, null,
-                                        modifier = Modifier.size(13.dp),
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    Spacer(Modifier.width(3.dp))
-                                    Text(
-                                        "${event.interestedCount} interested",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
+                            EventMetaChip(
+                                label, color,
+                                onClick = event.groupRefId?.let { gid ->
+                                    {
+                                        ctx.startActivity(
+                                            Intent(Intent.ACTION_VIEW,
+                                                Uri.parse("https://vrchat.com/home/group/$gid"))
+                                        )
+                                    }
                                 }
-                            }
+                            )
                         }
                     }
                 }
                 if (displayBody.isNotBlank() && displayBody != event.eventTitle) {
                     Text(
                         displayBody,
-                        style = MaterialTheme.typography.bodyMedium,
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     if (longBody) {
@@ -1394,37 +1393,51 @@ private fun AlertEventBody(
                         )
                     }
                 }
-                // Structured timing: when it begins/ends AND when it was made.
                 if (isRichEvent) {
+                    // One compact timing line ("Jul 5 · 3:05 PM → Jul 8 · 5:05 PM")
+                    // and one muted meta line (posted · interested · platforms) —
+                    // replaces the old stacked Starts/Ends/Posted block that read
+                    // as bolted-on.
                     Spacer(Modifier.height(6.dp))
-                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Filled.Schedule, null,
+                            modifier = Modifier.size(13.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.width(4.dp))
                         Text(
-                            "Starts: ${eventDateTime(event.startsAtMs)}",
+                            buildString {
+                                append(eventDateTime(event.startsAtMs))
+                                if (event.endsAtMs > 0) append("  →  ${eventDateTime(event.endsAtMs)}")
+                            },
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        if (event.endsAtMs > 0) {
-                            Text(
-                                "Ends: ${eventDateTime(event.endsAtMs)}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        if (event.createdAtMs > 0) {
-                            Text(
-                                "Posted: ${eventDate(event.createdAtMs)}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.outline
-                            )
-                        }
                     }
+                    val metaParts = buildList {
+                        if (event.createdAtMs > 0) add("Posted ${eventDate(event.createdAtMs)}")
+                        if (event.interestedCount >= 0) add("${event.interestedCount} interested")
+                        platformsLabel(event.platforms)?.let { add(it) }
+                    }
+                    if (metaParts.isNotEmpty()) {
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            metaParts.joinToString(" · "),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.outline
+                        )
+                    }
+                } else {
+                    // Plain alerts keep the relative-time footer. Rich events don't
+                    // need it — the status chip + timing line already say when.
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        formatRelativeTime(event.timestampMs, nowMs),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.outline
+                    )
                 }
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    formatRelativeTime(event.timestampMs, nowMs),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.outline
-                )
                 // "Visit link" buttons for URLs embedded in announcement bodies —
                 // tappable instead of raw blue text.
                 for (url in bodyUrls) {
@@ -1514,13 +1527,16 @@ private fun AlertEventBody(
     }
 }
 
-/** Small tinted status/metadata chip on rich event alerts. */
+/** Small tinted status/metadata chip on rich event alerts. [onClick] makes it a
+ *  tap target (the access chip opens the hosting group's web page). */
 @Composable
-private fun EventMetaChip(label: String, color: Color, bold: Boolean = false) {
-    Surface(
-        color = color.copy(alpha = 0.16f),
-        shape = MaterialTheme.shapes.extraSmall
-    ) {
+private fun EventMetaChip(
+    label: String,
+    color: Color,
+    bold: Boolean = false,
+    onClick: (() -> Unit)? = null
+) {
+    val content: @Composable () -> Unit = {
         Text(
             label,
             style = MaterialTheme.typography.labelSmall,
@@ -1528,6 +1544,18 @@ private fun EventMetaChip(label: String, color: Color, bold: Boolean = false) {
             color = color,
             modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
         )
+    }
+    if (onClick != null) {
+        Surface(
+            onClick = onClick,
+            color = color.copy(alpha = 0.16f),
+            shape = MaterialTheme.shapes.extraSmall
+        ) { content() }
+    } else {
+        Surface(
+            color = color.copy(alpha = 0.16f),
+            shape = MaterialTheme.shapes.extraSmall
+        ) { content() }
     }
 }
 
@@ -1633,9 +1661,11 @@ private data class InstanceTarget(
 private fun clockTime(ms: Long): String =
     java.text.SimpleDateFormat("h:mm a", java.util.Locale.US).format(java.util.Date(ms))
 
-/** "Jul 5, 2026 · 10:22 AM" — begin/end lines on rich event alerts. */
+/** "Jul 5 · 10:22 AM" — compact begin/end stamps on rich event alerts (the
+ *  Posted line carries the year; events are near-term so the timing line
+ *  stays short). */
 private fun eventDateTime(ms: Long): String =
-    java.text.SimpleDateFormat("MMM d, yyyy · h:mm a", java.util.Locale.US).format(java.util.Date(ms))
+    java.text.SimpleDateFormat("MMM d · h:mm a", java.util.Locale.US).format(java.util.Date(ms))
 
 /** "Jul 4, 2026" — the Posted line. */
 private fun eventDate(ms: Long): String =
@@ -1675,10 +1705,13 @@ private fun extractBodyUrls(body: String): List<String> =
         .take(3)
         .toList()
 
-/** The group web page for grp_-keyed alert groups (event_/announcement_/group*). */
-private fun groupWebUrl(alertGroupId: String): String? =
-    Regex("grp_[0-9a-fA-F\\-]+").find(alertGroupId)?.value
-        ?.let { "https://vrchat.com/home/group/$it" }
+/** VRChat calendar category ids → display names ("film_media" → "Film & Media"). */
+private fun prettyEventCategory(raw: String): String = when (raw.lowercase().trim()) {
+    "film_media", "film_and_media" -> "Film & Media"
+    else -> raw.split('_', ' ')
+        .filter { it.isNotBlank() }
+        .joinToString(" ") { part -> part.replaceFirstChar { it.uppercase() } }
+}
 
 /**
  * A compact, app-styled picker that lists instances (world image, live occupancy, an
