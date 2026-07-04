@@ -1198,9 +1198,15 @@ class VrchatPipelineService : Service() {
                             alertGroupKey = groupKey2,
                             alertBody = announcementBody,
                             alertEventTitle = cleanName(v2Title).ifBlank { null },
-                            eventTimestampMs = v2CreatedMs.takeIf { it > 0 }
+                            eventTimestampMs = v2CreatedMs.takeIf { it > 0 },
+                            alertRich = AlertRichMeta(
+                                groupRefId = groupId.ifBlank { null },
+                                createdAtMs = v2CreatedMs
+                            )
                         )
                         if (groupId.isNotBlank()) addContentFingerprintToSeen(groupId, v2Title, message)
+                        // Pull the post's image (v2 payloads don't carry it).
+                        if (groupId.isNotBlank()) scheduleTargetedGroupSweep(groupId)
                         }
                     }
                     v2Type.contains("event", true) || v2Type.contains("calendar", true) -> {
@@ -1229,9 +1235,10 @@ class VrchatPipelineService : Service() {
                             .ifBlank { evDetails?.optString("endsAt", "").orEmpty() }
                         val evStartsMs = parseVrcTimestampMs(evStartsAt)
                         val evEndsMs = parseVrcTimestampMs(evEndsAt)
-                        val eventBody = buildCalendarEventBody(
-                            message, v2Title.ifBlank { "New group event" }, evStartsMs, evEndsMs, v2CreatedMs
-                        )
+                        val eventBody = if (evStartsMs > 0) message.ifBlank { v2Title.ifBlank { "New group event" } }
+                            else buildCalendarEventBody(
+                                message, v2Title.ifBlank { "New group event" }, evStartsMs, evEndsMs, v2CreatedMs
+                            )
                         fireEventNotification(
                             id = baseId.hashCode(),
                             title = eventTitleStr,
@@ -1244,9 +1251,20 @@ class VrchatPipelineService : Service() {
                             alertGroupKey = groupKey2,
                             alertBody = eventBody,
                             alertEventTitle = cleanName(v2Title).ifBlank { null },
-                            eventTimestampMs = (evStartsMs.takeIf { it > 0 } ?: v2CreatedMs).takeIf { it > 0 }
+                            eventTimestampMs = (evStartsMs.takeIf { it > 0 } ?: v2CreatedMs).takeIf { it > 0 },
+                            alertRich = AlertRichMeta(
+                                groupRefId = groupId.ifBlank { null },
+                                eventRefId = eventId.ifBlank { null },
+                                startsAtMs = evStartsMs,
+                                endsAtMs = evEndsMs,
+                                createdAtMs = v2CreatedMs
+                            )
                         )
                         if (groupId.isNotBlank()) addEventFingerprintToSeen(groupId, eventId)
+                        // The push payload never carries the banner (and often no
+                        // timing) — enrich from the group's calendar right away
+                        // instead of waiting for the 5-min poll.
+                        if (groupId.isNotBlank()) scheduleTargetedGroupSweep(groupId)
                         }
                     }
                     v2Type.contains("invite", true) -> {
@@ -1956,6 +1974,140 @@ class VrchatPipelineService : Service() {
         }
     }.ifBlank { title }
 
+    /** Event banner URL off a calendar-event object (field name varies). */
+    private fun extractEventImageUrl(ev: JSONObject): String? =
+        ev.optString("imageUrl", "")
+            .ifBlank { ev.optString("imageURL", "") }
+            .ifBlank { ev.optString("bannerUrl", "") }
+            .ifBlank { ev.optString("thumbnailUrl", "") }
+            .takeIf { it.startsWith("http") }
+
+    /** "Interested people" count off a calendar-event object. -1 = unknown. */
+    private fun extractInterestedCount(ev: JSONObject): Int {
+        val direct = ev.optInt("interestedUserCount", -1)
+        if (direct >= 0) return direct
+        val alt = ev.optInt("interestedCount", -1)
+        if (alt >= 0) return alt
+        return ev.optJSONObject("interested")?.optInt("count", -1) ?: -1
+    }
+
+    /** Whether the USER has this event on their calendar, when the object says. */
+    private fun extractEventFollowing(ev: JSONObject): Boolean? = when {
+        ev.has("isFollowing") -> ev.optBoolean("isFollowing")
+        ev.has("userInterest") -> !ev.isNull("userInterest")
+        else -> null
+    }
+
+    private fun jsonArrayToCsv(arr: org.json.JSONArray?): String? {
+        if (arr == null || arr.length() == 0) return null
+        val parts = (0 until arr.length()).mapNotNull { arr.optString(it).ifBlank { null } }
+        return parts.joinToString(",").ifBlank { null }
+    }
+
+    /** Normalized announcement body for enrichment matching — same normalization
+     *  as the content fingerprint so a REST post matches the v2-fired alert. */
+    private fun normalizeAnnBody(s: String): String =
+        s.trim().lowercase().replace(Regex("\\s+"), " ").take(120)
+
+    // Debounce for the targeted per-group sweep (min 60s per group).
+    private val targetedSweepLastMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /**
+     * The "don't wait 5 minutes for full info" path: when an event/announcement
+     * arrives through notification-v2 with a THIN payload (no banner, often no
+     * timing — VRChat's push carries far less than the calendar object), this
+     * kicks an immediate one-group REST sweep (calendar events + posts, 2 calls)
+     * that ENRICHES the already-fired alert in place: banner image, start/end,
+     * interested count, category, platforms, access type. Debounced per group so
+     * a burst of activity can't storm the API; delayed a moment so VRChat's own
+     * backend has the new item indexed by the time we fetch.
+     */
+    private fun scheduleTargetedGroupSweep(groupId: String) {
+        if (groupId.isBlank()) return
+        val now = System.currentTimeMillis()
+        val last = targetedSweepLastMs[groupId] ?: 0L
+        if (now - last < 60_000L) return
+        targetedSweepLastMs[groupId] = now
+        serviceScope.launch {
+            delay(2500)
+            try {
+                enrichGroupAlertsFromRest(groupId)
+            } catch (e: Exception) {
+                Log.w(TAG, "Targeted group sweep failed for $groupId", e)
+            }
+        }
+    }
+
+    /** One-group REST enrichment pass — see [scheduleTargetedGroupSweep]. */
+    private suspend fun enrichGroupAlertsFromRest(groupId: String) {
+        val ctx = this@VrchatPipelineService
+        // ---- Calendar events: match alerts by the cal_ id ----
+        val events = VrchatAuthManager.fetchGroupCalendarEvents(ctx, groupId, 20)
+        if (events != null) {
+            for (j in 0 until events.length()) {
+                val ev = events.optJSONObject(j) ?: continue
+                val evId = ev.optString("id", "").ifBlank { findIdWithPrefix(ev, "cal_").orEmpty() }
+                if (evId.isBlank()) continue
+                val startsMs = parseVrcTimestampMs(ev.optString("startsAt", ""))
+                val endsMs = parseVrcTimestampMs(ev.optString("endsAt", ""))
+                val createdMs = parseVrcTimestampMs(ev.optString("createdAt", ""))
+                val img = extractEventImageUrl(ev)
+                val category = ev.optString("category", "")
+                val platformsCsv = jsonArrayToCsv(ev.optJSONArray("platforms"))
+                val access = ev.optString("accessType", "")
+                val interested = extractInterestedCount(ev)
+                val following = extractEventFollowing(ev)
+                val desc = ev.optString("description", "").ifBlank { ev.optString("text", "") }
+                if (img != null) AlertImageStore.ensureCached(ctx, img)
+                InAppAlertState.enrichEvents(
+                    ctx, "event_$groupId",
+                    match = { e ->
+                        e.eventRefId == evId ||
+                            (e.eventRefId == null && e.url?.contains(evId) == true)
+                    },
+                    transform = { e ->
+                        e.copy(
+                            imageUrl = img ?: e.imageUrl,
+                            groupRefId = e.groupRefId ?: groupId,
+                            eventRefId = evId,
+                            startsAtMs = if (startsMs > 0) startsMs else e.startsAtMs,
+                            endsAtMs = if (endsMs > 0) endsMs else e.endsAtMs,
+                            createdAtMs = if (createdMs > 0) createdMs else e.createdAtMs,
+                            interestedCount = if (interested >= 0) interested else e.interestedCount,
+                            category = category.ifBlank { e.category.orEmpty() }.ifBlank { null },
+                            platforms = platformsCsv ?: e.platforms,
+                            accessType = access.ifBlank { e.accessType.orEmpty() }.ifBlank { null },
+                            following = following ?: e.following,
+                            // Upgrade the display: timestamp = scheduled start, body =
+                            // clean description (the structured renderer shows timing).
+                            timestampMs = if (startsMs > 0) startsMs else e.timestampMs,
+                            body = if (startsMs > 0 && desc.isNotBlank()) desc else e.body
+                        )
+                    }
+                )
+            }
+        }
+        // ---- Posts/announcements: match alerts by normalized body (the v2 path
+        // and the REST post describe the same post with different field names) ----
+        val posts = VrchatAuthManager.fetchGroupPosts(ctx, groupId, 10)
+        if (posts != null) {
+            for (j in 0 until posts.length()) {
+                val post = posts.optJSONObject(j) ?: continue
+                val img = post.optString("imageUrl", "").takeIf { it.startsWith("http") } ?: continue
+                val text = post.optString("text", "")
+                val title = post.optString("title", "")
+                val norm = normalizeAnnBody(text.ifBlank { title })
+                if (norm.isBlank()) continue
+                AlertImageStore.ensureCached(ctx, img)
+                InAppAlertState.enrichEvents(
+                    ctx, "announcement_$groupId",
+                    match = { e -> e.imageUrl == null && normalizeAnnBody(e.body) == norm },
+                    transform = { e -> e.copy(imageUrl = img, groupRefId = e.groupRefId ?: groupId) }
+                )
+            }
+        }
+    }
+
     // Recursively scans a JSON object/array for the first string value (or
     // string-key) that starts with the given prefix (e.g. "cal_", "grp_").
     // VRChat's notification-v2 payloads bury the calendar event id and group
@@ -2084,9 +2236,14 @@ class VrchatPipelineService : Service() {
                     alertGroupKey = backfillGroupKey,
                     alertBody = body,
                     alertEventTitle = cleanName(v2Title).ifBlank { null },
-                    eventTimestampMs = v2CreatedMs.takeIf { it > 0 }
+                    eventTimestampMs = v2CreatedMs.takeIf { it > 0 },
+                    alertRich = AlertRichMeta(
+                        groupRefId = groupId.ifBlank { null },
+                        createdAtMs = v2CreatedMs
+                    )
                 )
                 if (groupId.isNotBlank()) addContentFingerprintToSeen(groupId, v2Title, message)
+                if (groupId.isNotBlank()) scheduleTargetedGroupSweep(groupId)
             }
             v2Type.contains("event", true) || v2Type.contains("calendar", true) -> {
                 val eventId2 = obj.optString("eventId", "").ifBlank {
@@ -2119,9 +2276,10 @@ class VrchatPipelineService : Service() {
                     .ifBlank { evDetails?.optString("endsAt", "").orEmpty() }
                 val evStartsMs = parseVrcTimestampMs(evStartsAt)
                 val evEndsMs = parseVrcTimestampMs(evEndsAt)
-                val body = buildCalendarEventBody(
-                    message, v2Title.ifBlank { "New group event" }, evStartsMs, evEndsMs, v2CreatedMs
-                )
+                val body = if (evStartsMs > 0) message.ifBlank { v2Title.ifBlank { "New group event" } }
+                    else buildCalendarEventBody(
+                        message, v2Title.ifBlank { "New group event" }, evStartsMs, evEndsMs, v2CreatedMs
+                    )
                 fireEventNotification(
                     id = baseId.hashCode(),
                     title = "Event from $displayName",
@@ -2133,9 +2291,17 @@ class VrchatPipelineService : Service() {
                     alertGroupKey = backfillGroupKey,
                     alertBody = body,
                     alertEventTitle = cleanName(v2Title).ifBlank { null },
-                    eventTimestampMs = (evStartsMs.takeIf { it > 0 } ?: v2CreatedMs).takeIf { it > 0 }
+                    eventTimestampMs = (evStartsMs.takeIf { it > 0 } ?: v2CreatedMs).takeIf { it > 0 },
+                    alertRich = AlertRichMeta(
+                        groupRefId = groupId.ifBlank { null },
+                        eventRefId = eventId2.ifBlank { null },
+                        startsAtMs = evStartsMs,
+                        endsAtMs = evEndsMs,
+                        createdAtMs = v2CreatedMs
+                    )
                 )
                 if (groupId.isNotBlank()) addEventFingerprintToSeen(groupId, eventId2)
+                if (groupId.isNotBlank()) scheduleTargetedGroupSweep(groupId)
             }
             v2Type.contains("invite", true) -> fireEventNotification(
                 id = baseId.hashCode(), title = v2Title.ifBlank { "Group invite" },
@@ -2454,7 +2620,13 @@ class VrchatPipelineService : Service() {
                                             alertGroupKey = "announcement_$groupId",
                                             alertBody = postText.ifBlank { rawPostTitle.ifBlank { null } },
                                             alertEventTitle = rawPostTitle.ifBlank { null },
-                                            eventTimestampMs = postCreatedMs.takeIf { it > 0 }
+                                            eventTimestampMs = postCreatedMs.takeIf { it > 0 },
+                                            alertRich = AlertRichMeta(
+                                                imageUrl = post.optString("imageUrl", "")
+                                                    .takeIf { it.startsWith("http") },
+                                                groupRefId = groupId,
+                                                createdAtMs = postCreatedMs
+                                            )
                                         )
                                         updatedMap.put(postSeenKey, postCreatedAt)
                                         addContentFingerprintToSeen(groupId, rawPostTitle, postText)
@@ -3063,6 +3235,15 @@ class VrchatPipelineService : Service() {
                         val postLastSeen = seenMap.optString(postSeenKey, "")
                         if (postCreatedAt.isNotBlank() && postCreatedAt != postLastSeen &&
                             (postText.isNotBlank() || rawPostTitle.isNotBlank())) {
+                            // Cross-path dedup (same as the backfill site): if the live
+                            // v2 path already fired this post's content fingerprint,
+                            // just record the timestamp — don't fire a duplicate on
+                            // the next poll cycle.
+                            if (isContentFingerprintSeen(groupId, rawPostTitle, postText)) {
+                                updatedMap.put(postSeenKey, postCreatedAt)
+                                changed = true
+                                continue
+                            }
                             fireEventNotification(
                                 id = "gp_${postId}".hashCode(),
                                 title = "Announcement from $groupName",
@@ -3075,7 +3256,13 @@ class VrchatPipelineService : Service() {
                                 alertGroupKey = "announcement_$groupId",
                                 alertBody = postText.ifBlank { rawPostTitle.ifBlank { null } },
                                 alertEventTitle = rawPostTitle.ifBlank { null },
-                                eventTimestampMs = postCreatedMs.takeIf { it > 0 }
+                                eventTimestampMs = postCreatedMs.takeIf { it > 0 },
+                                alertRich = AlertRichMeta(
+                                    imageUrl = post.optString("imageUrl", "")
+                                        .takeIf { it.startsWith("http") },
+                                    groupRefId = groupId,
+                                    createdAtMs = postCreatedMs
+                                )
                             )
                             updatedMap.put(postSeenKey, postCreatedAt)
                             addContentFingerprintToSeen(groupId, rawPostTitle, postText)
@@ -3182,8 +3369,26 @@ class VrchatPipelineService : Service() {
         // as a "Posted:" line in the body below. Fall back to createdAt only if
         // startsAt is missing.
         val displayMs = startsMs.takeIf { it > 0 } ?: createdMs
-        // Body carries the full timing: description, then Starts / Ends / Posted.
-        val eventBody = buildCalendarEventBody(eventDesc, eventTitle, startsMs, endsMs, createdMs)
+        // Rich metadata for the in-app structured renderer (banner, chips, timing,
+        // Add-to-Calendar / Join-event actions).
+        val rich = AlertRichMeta(
+            imageUrl = extractEventImageUrl(event),
+            groupRefId = groupId,
+            eventRefId = eventId,
+            startsAtMs = startsMs,
+            endsAtMs = endsMs,
+            createdAtMs = createdMs,
+            interestedCount = extractInterestedCount(event),
+            category = event.optString("category", "").ifBlank { null },
+            platforms = jsonArrayToCsv(event.optJSONArray("platforms")),
+            accessType = event.optString("accessType", "").ifBlank { null },
+            following = extractEventFollowing(event)
+        )
+        // With structured timing available the body is just the description; the
+        // text-timing fallback (buildCalendarEventBody) covers events with no
+        // parsed start time.
+        val eventBody = if (startsMs > 0) eventDesc.ifBlank { eventTitle }
+            else buildCalendarEventBody(eventDesc, eventTitle, startsMs, endsMs, createdMs)
         val seenKey = "${groupId}_event_$eventId"
         val lastSeen = seenMap.optString(seenKey, "")
         // Change marker still tracks startsAt (then createdAt) so an unchanged
@@ -3206,7 +3411,8 @@ class VrchatPipelineService : Service() {
             alertGroupKey = "event_$groupId",
             alertBody = eventBody.ifBlank { null },
             alertEventTitle = eventTitle.ifBlank { null },
-            eventTimestampMs = displayMs.takeIf { it > 0 }
+            eventTimestampMs = displayMs.takeIf { it > 0 },
+            alertRich = rich
         )
         updatedMap.put(seenKey, marker)
         addEventFingerprintToSeen(groupId, eventId)
@@ -3486,7 +3692,12 @@ class VrchatPipelineService : Service() {
         // When true, a new event whose actionData matches an existing event in the
         // group REPLACES it (dedup by target) — e.g. repeated world invites to the
         // SAME instance collapse to one entry instead of stacking duplicates.
-        alertDedupByActionData: Boolean = false
+        alertDedupByActionData: Boolean = false,
+        // Rich event/announcement metadata (banner image, calendar ids, timing,
+        // interested count, category/platforms/access) for the in-app alert's
+        // rich renderer. The banner is downloaded into AlertImageStore here so
+        // the UI never loads it from the network.
+        alertRich: AlertRichMeta? = null
     ) {
         // Check the toggle BEFORE touching seenNotifIds. Adding the dedup id
         // first risks permanently poisoning it: if `enabled` reads false for a
@@ -3574,6 +3785,10 @@ class VrchatPipelineService : Service() {
 
         if (alertBody != null) {
             val now = System.currentTimeMillis()
+            // Persist the banner into the image store BEFORE the alert lands so the
+            // UI's first render already has the file (non-fatal on failure — Coil
+            // falls back to a network load).
+            alertRich?.imageUrl?.let { AlertImageStore.ensureCached(this, it) }
             // Use the event's real creation time (e.g. when the announcement was
             // posted on the website) for display, falling back to now. Keep a
             // unique id off `now` so two events at the same creation time don't collide.
@@ -3593,7 +3808,18 @@ class VrchatPipelineService : Service() {
                         eventTitle = alertEventTitle,
                         url = profileUrl,
                         actionType = alertActionType,
-                        actionData = alertActionData
+                        actionData = alertActionData,
+                        imageUrl = alertRich?.imageUrl,
+                        groupRefId = alertRich?.groupRefId,
+                        eventRefId = alertRich?.eventRefId,
+                        startsAtMs = alertRich?.startsAtMs ?: 0L,
+                        endsAtMs = alertRich?.endsAtMs ?: 0L,
+                        createdAtMs = alertRich?.createdAtMs ?: 0L,
+                        interestedCount = alertRich?.interestedCount ?: -1,
+                        category = alertRich?.category,
+                        platforms = alertRich?.platforms,
+                        accessType = alertRich?.accessType,
+                        following = alertRich?.following
                     ),
                     singleEvent = alertSingleEvent,
                     dedupByActionData = alertDedupByActionData

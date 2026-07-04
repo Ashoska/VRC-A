@@ -1179,6 +1179,84 @@ object VrchatAuthManager {
         null
     }
 
+    /**
+     * The group's currently-OPEN instances (`GET /groups/{id}/instances` — what the
+     * website's group page lists). Returns joinable `wrld_x:instance` location
+     * strings, newest-activity first as VRChat returns them. Used by the in-app
+     * "Join event" action: VRChat doesn't reliably link an event to a specific
+     * instance, so we surface every instance the hosting group has up.
+     */
+    suspend fun fetchGroupInstances(context: Context, groupId: String): List<String> =
+        withContext(Dispatchers.IO) {
+            if (groupId.isBlank()) return@withContext emptyList()
+            val cookieHeader = getCookieHeader(context) ?: return@withContext emptyList()
+            try {
+                val (code, body, rawCookies) = get("$BASE/groups/$groupId/instances", null, cookieHeader)
+                if (code != 200) {
+                    Log.w(TAG, "fetchGroupInstances($groupId) http=$code")
+                    return@withContext emptyList()
+                }
+                captureRolledCookies(context, rawCookies)
+                val arr = when {
+                    body.startsWith("[") -> org.json.JSONArray(body)
+                    body.startsWith("{") -> org.json.JSONObject(body).optJSONArray("instances")
+                    else -> null
+                } ?: return@withContext emptyList()
+                val out = mutableListOf<String>()
+                for (i in 0 until arr.length()) {
+                    val inst = arr.optJSONObject(i) ?: continue
+                    // Prefer the full `location`; fall back to world.id + instanceId.
+                    val loc = inst.optString("location", "").ifBlank {
+                        val worldId = inst.optJSONObject("world")?.optString("id", "").orEmpty()
+                        val instanceId = inst.optString("instanceId", "")
+                        if (worldId.startsWith("wrld_") && instanceId.isNotBlank())
+                            "$worldId:$instanceId" else ""
+                    }
+                    if (loc.startsWith("wrld_")) out.add(loc)
+                }
+                out
+            } catch (e: Exception) {
+                Log.w(TAG, "fetchGroupInstances($groupId) failed", e)
+                emptyList()
+            }
+        }
+
+    /**
+     * Adds/removes a group calendar event on the USER's VRChat calendar — the
+     * website's "Add to Calendar" / "Remove from Calendar" buttons
+     * (`POST /calendar/{groupId}/{eventId}/follow` with `{"isFollowing":bool}`,
+     * the community-documented follow endpoint). On failure the [InviteResult]
+     * carries VRChat's own error message so the UI can show WHY.
+     */
+    suspend fun setCalendarEventFollowing(
+        context: Context,
+        groupId: String,
+        eventId: String,
+        following: Boolean
+    ): InviteResult = withContext(Dispatchers.IO) {
+        if (groupId.isBlank() || eventId.isBlank())
+            return@withContext InviteResult(false, "Event info is missing")
+        val cookieHeader = getCookieHeader(context)
+            ?: return@withContext InviteResult(false, "Not signed in to VRChat")
+        try {
+            val (code, respBody, rawCookies) = post(
+                "$BASE/calendar/$groupId/$eventId/follow",
+                "{\"isFollowing\":$following}",
+                cookieHeader
+            )
+            if (code in 200..299) {
+                captureRolledCookies(context, rawCookies)
+                InviteResult(true)
+            } else {
+                Log.w(TAG, "setCalendarEventFollowing($groupId,$eventId,$following) $code body=${respBody.take(200)}")
+                InviteResult(false, parseVrcError(respBody, code))
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "setCalendarEventFollowing failed", e)
+            InviteResult(false, "Network error")
+        }
+    }
+
     // ------------------------------------------------------------------
     // Private helpers
     // ------------------------------------------------------------------

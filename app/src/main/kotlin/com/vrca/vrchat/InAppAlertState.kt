@@ -18,7 +18,29 @@ data class InAppAlertEvent(
     // "invite_me" (actionData = instance location) or "invite_user"
     // (actionData = the requester's userId; the instance is read live at tap).
     val actionType: String? = null,
-    val actionData: String? = null
+    val actionData: String? = null,
+    // ---- Rich event/announcement metadata (all optional, additive) ----
+    // Banner image URL (event banner / group post image / world thumb). The
+    // actual bytes are persisted by AlertImageStore until this event is
+    // dismissed, so the UI never re-downloads on menu open.
+    val imageUrl: String? = null,
+    // VRChat ids backing the calendar actions (Add to Calendar / Join event).
+    val groupRefId: String? = null,   // grp_...
+    val eventRefId: String? = null,   // cal_...
+    // Scheduled timing (epoch ms; 0 = unknown). Drives the countdown / Live
+    // now / Ended status chip and the Starts/Ends rows.
+    val startsAtMs: Long = 0L,
+    val endsAtMs: Long = 0L,
+    // When the event/announcement was posted (epoch ms; 0 = unknown).
+    val createdAtMs: Long = 0L,
+    // Calendar metadata: -1 = unknown count.
+    val interestedCount: Int = -1,
+    val category: String? = null,     // "Performance" / "Hangout" / ...
+    val platforms: String? = null,    // CSV: "standalonewindows,android,ios"
+    val accessType: String? = null,   // "public" / "group" / ...
+    // Whether the USER has this event on their VRChat calendar (null = unknown).
+    // Updated optimistically when the Add/Remove button succeeds.
+    val following: Boolean? = null
 )
 
 data class InAppAlertGroup(
@@ -28,6 +50,25 @@ data class InAppAlertGroup(
     val events: List<InAppAlertEvent>,
     val firstSeenMs: Long,
     val lastUpdatedMs: Long
+)
+
+/**
+ * Optional rich event/announcement metadata threaded through
+ * `fireEventNotification` into the [InAppAlertEvent] it creates. Mirrors the
+ * rich fields on the event; see those for semantics.
+ */
+data class AlertRichMeta(
+    val imageUrl: String? = null,
+    val groupRefId: String? = null,
+    val eventRefId: String? = null,
+    val startsAtMs: Long = 0L,
+    val endsAtMs: Long = 0L,
+    val createdAtMs: Long = 0L,
+    val interestedCount: Int = -1,
+    val category: String? = null,
+    val platforms: String? = null,
+    val accessType: String? = null,
+    val following: Boolean? = null
 )
 
 // Kept for backward compat with callers that don't use grouping
@@ -56,6 +97,9 @@ object InAppAlertState {
         val raw = prefs.getString(KEY_GROUPS, null)
         if (raw != null) {
             _groups.value = deserializeGroups(raw)
+            // Startup sweep: drop stored images orphaned by dismissals/prunes that
+            // happened without a gc (e.g. process death mid-dismiss).
+            AlertImageStore.gc(ctx)
             return
         }
         // Migration: load old flat alerts into single-event groups
@@ -162,6 +206,8 @@ object InAppAlertState {
         current.removeAll { it.groupId == groupId }
         _groups.value = current
         persist(ctx)
+        // Drop stored banner/thumbnail files nothing references anymore.
+        AlertImageStore.gc(ctx)
     }
 
     /** Clears every in-app alert group (the "Dismiss all" action). Returns the
@@ -171,7 +217,60 @@ object InAppAlertState {
         val ids = _groups.value.map { it.groupId }
         _groups.value = emptyList()
         persist(ctx)
+        AlertImageStore.gc(ctx)
         return ids
+    }
+
+    /**
+     * Applies [transform] to every event in [groupKey] matched by [match] and
+     * persists. Used to ENRICH an already-fired alert in place — e.g. a thin
+     * notification-v2 event upgraded with the banner/timing/interested-count from
+     * the targeted calendar sweep, an Add-to-Calendar button updating `following`,
+     * or an invite target learning its world image. Returns true if anything
+     * changed. Never fires a notification — display-state only.
+     */
+    fun enrichEvents(
+        ctx: Context,
+        groupKey: String,
+        match: (InAppAlertEvent) -> Boolean,
+        transform: (InAppAlertEvent) -> InAppAlertEvent
+    ): Boolean {
+        val current = _groups.value.toMutableList()
+        val idx = current.indexOfFirst { it.groupId == groupKey }
+        if (idx < 0) return false
+        val g = current[idx]
+        var changed = false
+        val updated = g.events.map { e ->
+            if (match(e)) {
+                val t = transform(e)
+                if (t != e) { changed = true; t } else e
+            } else e
+        }
+        if (!changed) return false
+        current[idx] = g.copy(events = updated)
+        _groups.value = current
+        persist(ctx)
+        return true
+    }
+
+    /** Records the world image for invite-target events whose actionData is
+     *  [location] (any group) — lets the image store keep the file referenced
+     *  until the invite alert is dismissed. */
+    fun setInviteTargetImage(ctx: Context, location: String, imageUrl: String) {
+        if (location.isBlank() || imageUrl.isBlank()) return
+        var changed = false
+        val current = _groups.value.map { g ->
+            val updated = g.events.map { e ->
+                if (e.actionData == location && e.imageUrl != imageUrl) {
+                    changed = true; e.copy(imageUrl = imageUrl)
+                } else e
+            }
+            if (updated != g.events) g.copy(events = updated) else g
+        }
+        if (changed) {
+            _groups.value = current
+            persist(ctx)
+        }
     }
 
     private fun persist(ctx: Context) {
@@ -189,6 +288,18 @@ object InAppAlertState {
                     put("url", e.url ?: "")
                     put("actionType", e.actionType ?: "")
                     put("actionData", e.actionData ?: "")
+                    put("imageUrl", e.imageUrl ?: "")
+                    put("groupRefId", e.groupRefId ?: "")
+                    put("eventRefId", e.eventRefId ?: "")
+                    put("startsAt", e.startsAtMs)
+                    put("endsAt", e.endsAtMs)
+                    put("createdAt", e.createdAtMs)
+                    put("interested", e.interestedCount)
+                    put("category", e.category ?: "")
+                    put("platforms", e.platforms ?: "")
+                    put("accessType", e.accessType ?: "")
+                    // -1 unknown / 0 false / 1 true
+                    put("following", when (e.following) { null -> -1; false -> 0; true -> 1 })
                 })
             }
             arr.put(JSONObject().apply {
@@ -222,7 +333,20 @@ object InAppAlertState {
                     eventTitle = eObj.optString("eventTitle").ifBlank { null },
                     url = eObj.optString("url").ifBlank { null },
                     actionType = eObj.optString("actionType").ifBlank { null },
-                    actionData = eObj.optString("actionData").ifBlank { null }
+                    actionData = eObj.optString("actionData").ifBlank { null },
+                    imageUrl = eObj.optString("imageUrl").ifBlank { null },
+                    groupRefId = eObj.optString("groupRefId").ifBlank { null },
+                    eventRefId = eObj.optString("eventRefId").ifBlank { null },
+                    startsAtMs = eObj.optLong("startsAt", 0L),
+                    endsAtMs = eObj.optLong("endsAt", 0L),
+                    createdAtMs = eObj.optLong("createdAt", 0L),
+                    interestedCount = eObj.optInt("interested", -1),
+                    category = eObj.optString("category").ifBlank { null },
+                    platforms = eObj.optString("platforms").ifBlank { null },
+                    accessType = eObj.optString("accessType").ifBlank { null },
+                    following = when (eObj.optInt("following", -1)) {
+                        1 -> true; 0 -> false; else -> null
+                    }
                 )
             }
             list += InAppAlertGroup(

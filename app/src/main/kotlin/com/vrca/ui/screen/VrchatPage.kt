@@ -56,15 +56,20 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Login
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.EventBusy
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Public
+import androidx.compose.foundation.layout.aspectRatio
+import com.vrca.vrchat.AlertImageStore
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -480,7 +485,10 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
                 InstanceTarget(
                     location = e.location,
                     label = e.worldName.ifBlank { "Instance" },
-                    timeLines = lines
+                    timeLines = lines,
+                    // Stored world thumb (persisted via AlertImageStore for the
+                    // entry's 24h lifetime) renders instantly while live info loads.
+                    imageUrl = e.imageUrl
                 )
             }
         }
@@ -972,7 +980,7 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
     // opens in the body instead.
     val inviteMeTargets = group.events
         .filter { it.actionType == NotificationActionReceiver.ACTION_INVITE_ME && !it.actionData.isNullOrBlank() }
-        .map { InstanceTarget(it.actionData!!, it.eventTitle ?: it.body) }
+        .map { InstanceTarget(it.actionData!!, it.eventTitle ?: it.body, imageUrl = it.imageUrl.orEmpty()) }
         .distinctBy { it.location }
     val inviteUserData = group.events
         .firstOrNull { it.actionType == NotificationActionReceiver.ACTION_INVITE_USER && !it.actionData.isNullOrBlank() }
@@ -981,6 +989,15 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
     val showPerEventOpen = sharedOpenUrl == null
     val headerOpenUrl = sharedOpenUrl
         ?: group.url?.takeIf { group.events.none { e -> e.url != null } }
+    // Group web page for event/announcement groups — tapping the group's name in
+    // the header opens it on the website.
+    val groupPageUrl = remember(group.groupId) { groupWebUrl(group.groupId) }
+
+    // "Join event": lists the hosting group's currently-open instances in the
+    // same picker the multi-invite flow uses. null = closed; empty = fetched,
+    // group has nothing open right now.
+    var joinTargets by remember { mutableStateOf<List<InstanceTarget>?>(null) }
+    var joinLoading by remember { mutableStateOf(false) }
 
     fun doInstantAction(actionType: String, data: String) {
         actionSending = true
@@ -991,11 +1008,29 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
         }
     }
 
+    fun openJoinPicker(groupRefId: String, eventLabel: String) {
+        if (joinLoading) return
+        joinLoading = true
+        scope.launch {
+            val locations = VrchatAuthManager.fetchGroupInstances(ctx, groupRefId)
+            joinTargets = locations.map { InstanceTarget(it, eventLabel) }
+            joinLoading = false
+        }
+    }
+
     if (showInstancePicker) {
         InstanceListDialog(
             title = group.title,
             targets = inviteMeTargets,
             onDismiss = { showInstancePicker = false }
+        )
+    }
+    joinTargets?.let { targets ->
+        InstanceListDialog(
+            title = "Join event · ${group.title}",
+            targets = targets,
+            onDismiss = { joinTargets = null },
+            emptyText = "This group has no open instances right now. The host may not have opened one yet — try Open in VRChat instead."
         )
     }
 
@@ -1021,7 +1056,10 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
                             shape = MaterialTheme.shapes.small
                         )
                 )
-                // Title block is the expand tap target.
+                // Title block is the expand tap target. For event/announcement
+                // groups the TITLE ITSELF (the group's display name) opens the
+                // group's page on the website instead — tinted primary to signal
+                // the link; the preview/time lines below still toggle expand.
                 Column(
                     Modifier
                         .weight(1f)
@@ -1030,7 +1068,11 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
                     Text(
                         displayTitle,
                         style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onSurface
+                        color = if (groupPageUrl != null) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface,
+                        modifier = if (groupPageUrl != null) Modifier.clickable {
+                            ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(groupPageUrl)))
+                        } else Modifier
                     )
                     if (!expanded && previewText.isNotBlank()) {
                         Text(
@@ -1188,51 +1230,304 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
                                     }
                                 }
                             }
-                        } else if (event.body.isNotBlank()) {
-                            Surface(
-                                color = MaterialTheme.colorScheme.surface,
-                                shape = MaterialTheme.shapes.small,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Column(Modifier.padding(12.dp)) {
-                                    if (!event.eventTitle.isNullOrBlank()) {
-                                        Text(
-                                            event.eventTitle,
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                        Spacer(Modifier.height(3.dp))
+                        } else if (event.body.isNotBlank() || event.imageUrl != null) {
+                            // key() so per-event remember state (read-more, action
+                            // spinners) tracks the EVENT, not the list position.
+                            key(event.id) {
+                                AlertEventBody(
+                                    event = event,
+                                    nowMs = nowMs,
+                                    groupKey = group.groupId,
+                                    showOpen = showPerEventOpen && event.url != null,
+                                    joinLoading = joinLoading,
+                                    onJoinEvent = { grpId ->
+                                        openJoinPicker(grpId, event.eventTitle ?: group.title)
                                     }
-                                    Text(
-                                        event.body,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    Spacer(Modifier.height(6.dp))
-                                    Text(
-                                        formatRelativeTime(event.timestampMs, nowMs),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.outline
-                                    )
-                                    // Per-event open only for distinct-url groups
-                                    // (group posts/events); shared opens are in the header.
-                                    if (showPerEventOpen && event.url != null) {
-                                        Spacer(Modifier.height(8.dp))
-                                        CompactAlertButton(
-                                            label = "Open in VRChat",
-                                            icon = Icons.Filled.OpenInNew,
-                                            prominent = false,
-                                            enabled = true,
-                                            onClick = { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(event.url!!))) }
-                                        )
-                                    }
-                                }
+                                )
                             }
                         }
                     }
                 }
             }
         }
+    }
+}
+
+/**
+ * One event/announcement inside an alert group — the RICH renderer. Shows the
+ * banner (from AlertImageStore's dismissal-scoped disk cache, so opening the menu
+ * never re-downloads), category/access/platform/interested chips, a live status
+ * chip (countdown → "Live now" → "Ended"), Starts/Ends/Posted lines, the body
+ * (with read-more for long announcements), tappable "Visit link" buttons for URLs
+ * in the body, and phase-appropriate actions: Add/Remove Calendar before start,
+ * Join event while live. Plain events (no rich metadata) render exactly like the
+ * old simple card.
+ */
+@Composable
+private fun AlertEventBody(
+    event: InAppAlertEvent,
+    nowMs: Long,
+    groupKey: String,
+    showOpen: Boolean,
+    joinLoading: Boolean,
+    onJoinEvent: (String) -> Unit
+) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var calSending by remember { mutableStateOf(false) }
+    var bodyExpanded by remember { mutableStateOf(false) }
+
+    // Rich display needs only a known start time; the calendar ACTION additionally
+    // needs the cal_/grp_ ids (checked at the button below).
+    val isRichEvent = event.startsAtMs > 0L
+    val phase = eventPhase(event.startsAtMs, event.endsAtMs, nowMs)
+    val bodyUrls = remember(event.body) { extractBodyUrls(event.body) }
+    val longBody = event.body.length > 320
+    val displayBody = if (longBody && !bodyExpanded) event.body.take(300).trimEnd() + "…" else event.body
+
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        shape = MaterialTheme.shapes.small,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column {
+            // Banner — event/announcement images are BANNER-shaped, so render
+            // full-width at ~21:9 instead of a square thumb. Cached file first;
+            // Coil's session-authed loader is the network fallback.
+            if (!event.imageUrl.isNullOrBlank()) {
+                val model: Any = AlertImageStore.resolve(ctx, event.imageUrl) ?: event.imageUrl
+                coil.compose.AsyncImage(
+                    model = model,
+                    imageLoader = com.vrca.admin.VrchatImageLoader.get(ctx),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(21f / 9f)
+                        .clip(MaterialTheme.shapes.small)
+                )
+            }
+            Column(Modifier.padding(12.dp)) {
+                if (!event.eventTitle.isNullOrBlank()) {
+                    Text(
+                        event.eventTitle,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(Modifier.height(3.dp))
+                }
+                // Status + metadata chips (rich events only).
+                if (isRichEvent) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.padding(bottom = 6.dp)
+                    ) {
+                        val (phaseLabel, phaseColor) = when (phase) {
+                            EventPhase.UPCOMING -> {
+                                val startingSoon = event.startsAtMs - nowMs < 2L * 60 * 60 * 1000
+                                "Starts ${formatRelativeTime(event.startsAtMs, nowMs)}" to
+                                    (if (startingSoon) Color(0xFFFFB300) else MaterialTheme.colorScheme.primary)
+                            }
+                            EventPhase.LIVE -> "Live now" to Color(0xFF4CAF50)
+                            EventPhase.ENDED -> "Ended" to MaterialTheme.colorScheme.outline
+                        }
+                        EventMetaChip(phaseLabel, phaseColor, bold = true)
+                        event.category?.let { EventMetaChip(it, MaterialTheme.colorScheme.tertiary) }
+                        event.accessType?.let {
+                            val label = it.replaceFirstChar { c -> c.uppercase() }
+                            val color = when (it.lowercase()) {
+                                "public" -> Color(0xFF4CAF50)
+                                "group" -> Color(0xFFAB47BC)
+                                else -> MaterialTheme.colorScheme.outline
+                            }
+                            EventMetaChip(label, color)
+                        }
+                    }
+                    // Platforms + interested count on a compact second line.
+                    val platforms = platformsLabel(event.platforms)
+                    if (platforms != null || event.interestedCount >= 0) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.padding(bottom = 6.dp)
+                        ) {
+                            if (platforms != null) {
+                                Text(
+                                    platforms,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            if (event.interestedCount >= 0) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        Icons.Filled.Group, null,
+                                        modifier = Modifier.size(13.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Spacer(Modifier.width(3.dp))
+                                    Text(
+                                        "${event.interestedCount} interested",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                if (displayBody.isNotBlank() && displayBody != event.eventTitle) {
+                    Text(
+                        displayBody,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (longBody) {
+                        Text(
+                            if (bodyExpanded) "Show less" else "Read more",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier
+                                .padding(top = 4.dp)
+                                .clickable { bodyExpanded = !bodyExpanded }
+                        )
+                    }
+                }
+                // Structured timing: when it begins/ends AND when it was made.
+                if (isRichEvent) {
+                    Spacer(Modifier.height(6.dp))
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            "Starts: ${eventDateTime(event.startsAtMs)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (event.endsAtMs > 0) {
+                            Text(
+                                "Ends: ${eventDateTime(event.endsAtMs)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        if (event.createdAtMs > 0) {
+                            Text(
+                                "Posted: ${eventDate(event.createdAtMs)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.outline
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    formatRelativeTime(event.timestampMs, nowMs),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline
+                )
+                // "Visit link" buttons for URLs embedded in announcement bodies —
+                // tappable instead of raw blue text.
+                for (url in bodyUrls) {
+                    Spacer(Modifier.height(8.dp))
+                    CompactAlertButton(
+                        label = remember(url) {
+                            val host = try { Uri.parse(url).host ?: url } catch (_: Throwable) { url }
+                            "Visit $host"
+                        },
+                        icon = Icons.Filled.Link,
+                        prominent = false,
+                        enabled = true,
+                        onClick = { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+                    )
+                }
+                // Phase-appropriate calendar/join actions.
+                if (isRichEvent && event.groupRefId != null) {
+                    when (phase) {
+                        EventPhase.UPCOMING -> if (event.eventRefId != null) {
+                            val onCal = event.following == true
+                            Spacer(Modifier.height(8.dp))
+                            CompactAlertButton(
+                                label = when {
+                                    calSending -> if (onCal) "Removing..." else "Adding..."
+                                    onCal -> "Remove from Calendar"
+                                    else -> "Add to Calendar"
+                                },
+                                icon = if (onCal) Icons.Filled.EventBusy else Icons.Filled.CalendarMonth,
+                                prominent = !onCal,
+                                enabled = !calSending,
+                                onClick = {
+                                    calSending = true
+                                    val target = !onCal
+                                    scope.launch {
+                                        val r = VrchatAuthManager.setCalendarEventFollowing(
+                                            ctx, event.groupRefId, event.eventRefId!!, target
+                                        )
+                                        if (r.ok) {
+                                            InAppAlertState.enrichEvents(
+                                                ctx, groupKey,
+                                                match = { it.id == event.id },
+                                                transform = { it.copy(following = target) }
+                                            )
+                                            Toast.makeText(
+                                                ctx,
+                                                if (target) "Added to your VRChat calendar"
+                                                else "Removed from your VRChat calendar",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        } else {
+                                            Toast.makeText(
+                                                ctx,
+                                                r.error ?: "Couldn't update your calendar",
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                        }
+                                        calSending = false
+                                    }
+                                }
+                            )
+                        }
+                        EventPhase.LIVE -> {
+                            Spacer(Modifier.height(8.dp))
+                            CompactAlertButton(
+                                label = if (joinLoading) "Finding instances..." else "Join event",
+                                icon = Icons.AutoMirrored.Filled.Login,
+                                prominent = true,
+                                enabled = !joinLoading,
+                                onClick = { onJoinEvent(event.groupRefId) }
+                            )
+                        }
+                        EventPhase.ENDED -> { /* concluded — no action */ }
+                    }
+                }
+                if (showOpen && event.url != null) {
+                    Spacer(Modifier.height(8.dp))
+                    CompactAlertButton(
+                        label = "Open in VRChat",
+                        icon = Icons.Filled.OpenInNew,
+                        prominent = false,
+                        enabled = true,
+                        onClick = { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(event.url))) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Small tinted status/metadata chip on rich event alerts. */
+@Composable
+private fun EventMetaChip(label: String, color: Color, bold: Boolean = false) {
+    Surface(
+        color = color.copy(alpha = 0.16f),
+        shape = MaterialTheme.shapes.extraSmall
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = if (bold) FontWeight.Bold else FontWeight.Medium,
+            color = color,
+            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+        )
     }
 }
 
@@ -1329,11 +1624,61 @@ private fun parseInstanceType(
 private data class InstanceTarget(
     val location: String,
     val label: String,
-    val timeLines: List<String> = emptyList()
+    val timeLines: List<String> = emptyList(),
+    // Known world thumbnail (from a stored alert/history entry) so the row can
+    // show the cached image INSTANTLY while the live info fetch is in flight.
+    val imageUrl: String = ""
 )
 
 private fun clockTime(ms: Long): String =
     java.text.SimpleDateFormat("h:mm a", java.util.Locale.US).format(java.util.Date(ms))
+
+/** "Jul 5, 2026 · 10:22 AM" — begin/end lines on rich event alerts. */
+private fun eventDateTime(ms: Long): String =
+    java.text.SimpleDateFormat("MMM d, yyyy · h:mm a", java.util.Locale.US).format(java.util.Date(ms))
+
+/** "Jul 4, 2026" — the Posted line. */
+private fun eventDate(ms: Long): String =
+    java.text.SimpleDateFormat("MMM d, yyyy", java.util.Locale.US).format(java.util.Date(ms))
+
+/** Human platform list off the calendar CSV ("standalonewindows,android,ios" → "PC · Quest · iOS"). */
+private fun platformsLabel(csv: String?): String? {
+    if (csv.isNullOrBlank()) return null
+    val parts = csv.split(",").mapNotNull { raw ->
+        when (raw.trim().lowercase()) {
+            "standalonewindows", "pc", "windows" -> "PC"
+            "android", "quest" -> "Quest"
+            "ios" -> "iOS"
+            "" -> null
+            else -> raw.trim().replaceFirstChar { it.uppercase() }
+        }
+    }.distinct()
+    return parts.joinToString(" · ").ifBlank { null }
+}
+
+/** Where an event is in its lifecycle right now. */
+private enum class EventPhase { UPCOMING, LIVE, ENDED }
+
+private fun eventPhase(startsAtMs: Long, endsAtMs: Long, nowMs: Long): EventPhase = when {
+    startsAtMs <= 0L -> EventPhase.UPCOMING
+    nowMs < startsAtMs -> EventPhase.UPCOMING
+    endsAtMs > 0L -> if (nowMs <= endsAtMs) EventPhase.LIVE else EventPhase.ENDED
+    // No published end time: call it live for 4h after start, then ended.
+    else -> if (nowMs - startsAtMs <= 4L * 60 * 60 * 1000) EventPhase.LIVE else EventPhase.ENDED
+}
+
+/** Pull tappable links out of an announcement body ("Visit link" buttons). */
+private fun extractBodyUrls(body: String): List<String> =
+    Regex("https?://[^\\s)\\]}>\"']+").findAll(body)
+        .map { it.value.trimEnd('.', ',', ';', ':') }
+        .distinct()
+        .take(3)
+        .toList()
+
+/** The group web page for grp_-keyed alert groups (event_/announcement_/group*). */
+private fun groupWebUrl(alertGroupId: String): String? =
+    Regex("grp_[0-9a-fA-F\\-]+").find(alertGroupId)?.value
+        ?.let { "https://vrchat.com/home/group/$it" }
 
 /**
  * A compact, app-styled picker that lists instances (world image, live occupancy, an
@@ -1346,7 +1691,8 @@ private fun clockTime(ms: Long): String =
 private fun InstanceListDialog(
     title: String,
     targets: List<InstanceTarget>,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    emptyText: String = "Nothing to show yet."
 ) {
     val ctx = LocalContext.current
     // Resolved instance info, filled in INCREMENTALLY (newest target first) so the
@@ -1367,6 +1713,16 @@ private fun InstanceListDialog(
             for (t in targets) {
                 val info = VrchatAuthManager.fetchInstanceInfo(ctx, t.location)
                 infos = infos + (t.location to info)
+                // Persist the world image so future opens render it INSTANTLY from
+                // disk instead of re-downloading (the "thumbnails reload every time
+                // you open the menu" jank): cache the bytes, and record the URL on
+                // whatever owns this location (a 24h history entry and/or an invite
+                // alert event) so the file stays referenced until that owner goes.
+                if (info.worldImageUrl.isNotBlank()) {
+                    AlertImageStore.ensureCached(ctx, info.worldImageUrl)
+                    InstanceHistoryStore.updateImage(ctx, t.location, info.worldImageUrl)
+                    InAppAlertState.setInviteTargetImage(ctx, t.location, info.worldImageUrl)
+                }
             }
             delay(15_000)
         }
@@ -1450,7 +1806,7 @@ private fun InstanceListDialog(
                 Spacer(Modifier.height(14.dp))
                 if (targets.isEmpty()) {
                     Text(
-                        "Nothing to show yet.",
+                        emptyText,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1516,10 +1872,14 @@ private fun InstanceRow(target: InstanceTarget, info: VrchatAuthManager.Instance
                         .background(typeColor.copy(alpha = 0.85f))
                 )
                 Spacer(Modifier.width(8.dp))
-                val img = info?.worldImageUrl.orEmpty()
+                // Live info's image first; else the STORED url from the alert /
+                // history entry so the thumb shows instantly while info resolves.
+                // Either way prefer the on-disk cached file over a network load.
+                val img = info?.worldImageUrl.orEmpty().ifBlank { target.imageUrl }
                 if (img.isNotBlank()) {
+                    val model: Any = AlertImageStore.resolve(ctx, img) ?: img
                     coil.compose.AsyncImage(
-                        model = img,
+                        model = model,
                         imageLoader = com.vrca.admin.VrchatImageLoader.get(ctx),
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
