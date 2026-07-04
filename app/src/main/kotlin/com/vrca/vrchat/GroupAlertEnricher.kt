@@ -122,6 +122,7 @@ object GroupAlertEnricher {
                     val img = extractEventImageUrl(ev)
                     val category = ev.optString("category", "")
                     val platformsCsv = jsonArrayToCsv(ev.optJSONArray("platforms"))
+                    val languagesCsv = jsonArrayToCsv(ev.optJSONArray("languages"))
                     val access = ev.optString("accessType", "")
                     val interested = extractInterestedCount(ev)
                     val following = extractEventFollowing(ev)
@@ -146,6 +147,11 @@ object GroupAlertEnricher {
                                 category = category.ifBlank { e.category.orEmpty() }.ifBlank { null },
                                 platforms = platformsCsv ?: e.platforms,
                                 accessType = access.ifBlank { e.accessType.orEmpty() }.ifBlank { null },
+                                // Languages are the one field an edit can REMOVE
+                                // entirely: when the object carries the key, its
+                                // (possibly empty) value is authoritative — an
+                                // emptied list must CLEAR the chip, not keep stale.
+                                languages = if (ev.has("languages")) languagesCsv else e.languages,
                                 following = following ?: e.following,
                                 // Upgrade the display: the event's REAL name (drops the
                                 // "New event by X:" v2 boilerplate), timestamp = start,

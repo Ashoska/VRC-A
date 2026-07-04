@@ -38,6 +38,7 @@ data class InAppAlertEvent(
     val category: String? = null,     // "Performance" / "Hangout" / ...
     val platforms: String? = null,    // CSV: "standalonewindows,android,ios"
     val accessType: String? = null,   // "public" / "group" / ...
+    val languages: String? = null,    // CSV of language codes ("eng,jpn")
     // Whether the USER has this event on their VRChat calendar (null = unknown).
     // Updated optimistically when the Add/Remove button succeeds.
     val following: Boolean? = null
@@ -68,6 +69,7 @@ data class AlertRichMeta(
     val category: String? = null,
     val platforms: String? = null,
     val accessType: String? = null,
+    val languages: String? = null,
     val following: Boolean? = null
 )
 
@@ -298,6 +300,7 @@ object InAppAlertState {
                     put("category", e.category ?: "")
                     put("platforms", e.platforms ?: "")
                     put("accessType", e.accessType ?: "")
+                    put("languages", e.languages ?: "")
                     // -1 unknown / 0 false / 1 true
                     put("following", when (e.following) { null -> -1; false -> 0; true -> 1 })
                 })
@@ -344,6 +347,7 @@ object InAppAlertState {
                     category = eObj.optString("category").ifBlank { null },
                     platforms = eObj.optString("platforms").ifBlank { null },
                     accessType = eObj.optString("accessType").ifBlank { null },
+                    languages = eObj.optString("languages").ifBlank { null },
                     following = when (eObj.optInt("following", -1)) {
                         1 -> true; 0 -> false; else -> null
                     }

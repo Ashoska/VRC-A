@@ -3273,6 +3273,7 @@ class VrchatPipelineService : Service() {
             category = event.optString("category", "").ifBlank { null },
             platforms = GroupAlertEnricher.jsonArrayToCsv(event.optJSONArray("platforms")),
             accessType = event.optString("accessType", "").ifBlank { null },
+            languages = GroupAlertEnricher.jsonArrayToCsv(event.optJSONArray("languages")),
             following = GroupAlertEnricher.extractEventFollowing(event)
         )
         // With structured timing available the body is just the description; the
@@ -3710,6 +3711,7 @@ class VrchatPipelineService : Service() {
                         category = alertRich?.category,
                         platforms = alertRich?.platforms,
                         accessType = alertRich?.accessType,
+                        languages = alertRich?.languages,
                         following = alertRich?.following
                     ),
                     singleEvent = alertSingleEvent,

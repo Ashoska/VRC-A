@@ -1419,6 +1419,7 @@ private fun AlertEventBody(
                         if (event.createdAtMs > 0) add("Posted ${eventDate(event.createdAtMs)}")
                         if (event.interestedCount >= 0) add("${event.interestedCount} interested")
                         platformsLabel(event.platforms)?.let { add(it) }
+                        languagesLabel(event.languages)?.let { add(it) }
                     }
                     if (metaParts.isNotEmpty()) {
                         Spacer(Modifier.height(2.dp))
@@ -1711,6 +1712,30 @@ private fun prettyEventCategory(raw: String): String = when (raw.lowercase().tri
     else -> raw.split('_', ' ')
         .filter { it.isNotBlank() }
         .joinToString(" ") { part -> part.replaceFirstChar { it.uppercase() } }
+}
+
+/** Human language list off the event's CSV of codes ("eng,jpn" → "English,
+ *  Japanese"). VRChat uses ISO 639-ish codes plus sign-language tags; the sign
+ *  languages don't resolve through Locale so they're mapped explicitly, then
+ *  Locale handles the spoken ones, then the raw code uppercased as last resort. */
+private fun languagesLabel(csv: String?): String? {
+    if (csv.isNullOrBlank()) return null
+    val signLanguages = mapOf(
+        "ase" to "ASL", "bfi" to "BSL", "dse" to "DSL", "fsl" to "FSL",
+        "jsl" to "JSL", "kvk" to "KSL"
+    )
+    val parts = csv.split(",").mapNotNull { raw ->
+        val code = raw.trim().lowercase().removePrefix("language_")
+        if (code.isBlank()) return@mapNotNull null
+        signLanguages[code] ?: run {
+            val resolved = try { java.util.Locale(code).displayLanguage } catch (_: Throwable) { "" }
+            // Locale echoes the code back when it can't resolve it — treat that
+            // as unresolved and fall back to the uppercased code.
+            if (resolved.isNotBlank() && !resolved.equals(code, ignoreCase = true)) resolved
+            else code.uppercase()
+        }
+    }.distinct()
+    return parts.joinToString(", ").ifBlank { null }
 }
 
 /**
