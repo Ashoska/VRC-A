@@ -801,15 +801,21 @@ private fun LazyListScope.inAppAlertSection(
 }
 
 private fun formatRelativeTime(timestampMs: Long, nowMs: Long = System.currentTimeMillis()): String {
+    // Future-aware: a FUTURE timestamp (delta < 0) renders "in Xd" instead of
+    // clamping to "just now". Group calendar events use their scheduled start
+    // (normally upcoming) as the display timestamp, so without this an event
+    // tomorrow would read "just now" and never advance.
     val delta = nowMs - timestampMs
-    val sec = delta / 1000L
-    return when {
-        sec < 5 -> "just now"
-        sec < 60 -> "${sec}s ago"
-        sec < 3600 -> "${sec / 60}m ago"
-        sec < 86400 -> "${sec / 3600}h ago"
-        else -> "${sec / 86400}d ago"
+    val future = delta < 0
+    val sec = kotlin.math.abs(delta) / 1000L
+    val rel = when {
+        sec < 5 -> return "just now"
+        sec < 60 -> "${sec}s"
+        sec < 3600 -> "${sec / 60}m"
+        sec < 86400 -> "${sec / 3600}h"
+        else -> "${sec / 86400}d"
     }
+    return if (future) "in $rel" else "$rel ago"
 }
 
 private fun wordDiff(before: String, after: String): Pair<androidx.compose.ui.text.AnnotatedString, androidx.compose.ui.text.AnnotatedString> {

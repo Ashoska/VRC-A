@@ -1218,11 +1218,24 @@ class VrchatPipelineService : Service() {
                             "https://vrchat.com/home/group/$groupId/calendar/$eventId"
                         else if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId"
                         else groupUrl
-                        val eventBody = message.ifBlank { v2Title.ifBlank { "New group event" } }
+                        // Same rich timing as the REST calendar sweep / backfill path.
+                        val evData = content.optJSONObject("data")
+                        val evDetails = content.optJSONObject("details")
+                        val evStartsAt = content.optString("startsAt", "")
+                            .ifBlank { evData?.optString("startsAt", "").orEmpty() }
+                            .ifBlank { evDetails?.optString("startsAt", "").orEmpty() }
+                        val evEndsAt = content.optString("endsAt", "")
+                            .ifBlank { evData?.optString("endsAt", "").orEmpty() }
+                            .ifBlank { evDetails?.optString("endsAt", "").orEmpty() }
+                        val evStartsMs = parseVrcTimestampMs(evStartsAt)
+                        val evEndsMs = parseVrcTimestampMs(evEndsAt)
+                        val eventBody = buildCalendarEventBody(
+                            message, v2Title.ifBlank { "New group event" }, evStartsMs, evEndsMs, v2CreatedMs
+                        )
                         fireEventNotification(
                             id = baseId.hashCode(),
                             title = eventTitleStr,
-                            text = "${v2Title.ifBlank { "Event" }}: ${eventBody.take(120)}",
+                            text = "${v2Title.ifBlank { "Event" }}${if (evStartsMs > 0) " · starts ${formatEventDateTime(evStartsMs)}" else ""}",
                             profileUrl = eventUrl,
                             prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT,
                             channelId = NOTIF_CHANNEL_GROUPS,
@@ -1231,7 +1244,7 @@ class VrchatPipelineService : Service() {
                             alertGroupKey = groupKey2,
                             alertBody = eventBody,
                             alertEventTitle = cleanName(v2Title).ifBlank { null },
-                            eventTimestampMs = v2CreatedMs.takeIf { it > 0 }
+                            eventTimestampMs = (evStartsMs.takeIf { it > 0 } ?: v2CreatedMs).takeIf { it > 0 }
                         )
                         if (groupId.isNotBlank()) addEventFingerprintToSeen(groupId, eventId)
                         }
@@ -1909,6 +1922,40 @@ class VrchatPipelineService : Service() {
         } catch (_: Exception) { 0L }
     }
 
+    /** Human date+time in the DEVICE's local zone ("Jul 5, 2026 · 12:00 AM"),
+     *  for the begin/end lines in a calendar-event alert body. */
+    private fun formatEventDateTime(ms: Long): String =
+        try { SimpleDateFormat("MMM d, yyyy · h:mm a", Locale.US).format(java.util.Date(ms)) }
+        catch (_: Exception) { "" }
+
+    /** Human date only ("Jul 5, 2026") for the "Posted" (created) line. */
+    private fun formatEventDate(ms: Long): String =
+        try { SimpleDateFormat("MMM d, yyyy", Locale.US).format(java.util.Date(ms)) }
+        catch (_: Exception) { "" }
+
+    /** Shared calendar-event alert body: description, then Starts / Ends / Posted
+     *  timing lines. Used by BOTH the REST calendar sweep (fireGroupCalendarEvent)
+     *  and the live/backfill notification-v2 event path so whichever fires first
+     *  (they share the event-id dedup) shows the same rich timing. */
+    private fun buildCalendarEventBody(
+        desc: String, title: String, startsMs: Long, endsMs: Long, createdMs: Long
+    ): String = buildString {
+        if (desc.isNotBlank()) append(desc)
+        val timing = StringBuilder()
+        if (startsMs > 0) {
+            timing.append("Starts: ${formatEventDateTime(startsMs)}")
+            if (endsMs > 0) timing.append("\nEnds: ${formatEventDateTime(endsMs)}")
+        }
+        if (createdMs > 0) {
+            if (timing.isNotEmpty()) timing.append("\n")
+            timing.append("Posted: ${formatEventDate(createdMs)}")
+        }
+        if (timing.isNotEmpty()) {
+            if (isNotEmpty()) append("\n\n")
+            append(timing)
+        }
+    }.ifBlank { title }
+
     // Recursively scans a JSON object/array for the first string value (or
     // string-key) that starts with the given prefix (e.g. "cal_", "grp_").
     // VRChat's notification-v2 payloads bury the calendar event id and group
@@ -2058,11 +2105,27 @@ class VrchatPipelineService : Service() {
                     "https://vrchat.com/home/group/$groupId/calendar/$eventId2"
                 else if (groupId.isNotBlank()) "https://vrchat.com/home/group/$groupId"
                 else groupUrl
-                val body = message.ifBlank { v2Title.ifBlank { "New group event" } }
+                // Pull the event's scheduled start/end from the payload (top-level
+                // or nested data/details) so the alert shows the SAME rich timing
+                // as the REST calendar sweep — and displays "in 1d" for an upcoming
+                // event instead of "65d ago" (createdAt of a repeating series).
+                val evData = obj.optJSONObject("data")
+                val evDetails = obj.optJSONObject("details")
+                val evStartsAt = obj.optString("startsAt", "")
+                    .ifBlank { evData?.optString("startsAt", "").orEmpty() }
+                    .ifBlank { evDetails?.optString("startsAt", "").orEmpty() }
+                val evEndsAt = obj.optString("endsAt", "")
+                    .ifBlank { evData?.optString("endsAt", "").orEmpty() }
+                    .ifBlank { evDetails?.optString("endsAt", "").orEmpty() }
+                val evStartsMs = parseVrcTimestampMs(evStartsAt)
+                val evEndsMs = parseVrcTimestampMs(evEndsAt)
+                val body = buildCalendarEventBody(
+                    message, v2Title.ifBlank { "New group event" }, evStartsMs, evEndsMs, v2CreatedMs
+                )
                 fireEventNotification(
                     id = baseId.hashCode(),
                     title = "Event from $displayName",
-                    text = "${v2Title.ifBlank { "Event" }}: ${body.take(120)}",
+                    text = "${v2Title.ifBlank { "Event" }}${if (evStartsMs > 0) " · starts ${formatEventDateTime(evStartsMs)}" else ""}",
                     profileUrl = evtUrl,
                     prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT,
                     channelId = NOTIF_CHANNEL_GROUPS, groupKey = GROUP_KEY_GROUPS,
@@ -2070,7 +2133,7 @@ class VrchatPipelineService : Service() {
                     alertGroupKey = backfillGroupKey,
                     alertBody = body,
                     alertEventTitle = cleanName(v2Title).ifBlank { null },
-                    eventTimestampMs = v2CreatedMs.takeIf { it > 0 }
+                    eventTimestampMs = (evStartsMs.takeIf { it > 0 } ?: v2CreatedMs).takeIf { it > 0 }
                 )
                 if (groupId.isNotBlank()) addEventFingerprintToSeen(groupId, eventId2)
             }
@@ -3106,14 +3169,21 @@ class VrchatPipelineService : Service() {
         val eventTitle = event.optString("title", "").ifBlank { event.optString("name", "") }
         val eventDesc = event.optString("description", "").ifBlank { event.optString("text", "") }
         val startsAt = event.optString("startsAt", "")
+        val endsAt = event.optString("endsAt", "")
         val createdAt = event.optString("createdAt", "")
-        // DISPLAY timestamp = when the event was POSTED (createdAt), NOT its
-        // scheduled start. startsAt is normally in the FUTURE, so feeding it to
-        // formatRelativeTime produced a negative delta that clamped to a
-        // permanent "just now" that never advanced. Fall back to startsAt only
-        // when createdAt is missing.
-        val postedMs = parseVrcTimestampMs(createdAt).takeIf { it > 0 }
-            ?: parseVrcTimestampMs(startsAt)
+        val startsMs = parseVrcTimestampMs(startsAt)
+        val endsMs = parseVrcTimestampMs(endsAt)
+        val createdMs = parseVrcTimestampMs(createdAt)
+        // DISPLAY timestamp = the event's scheduled START (future-aware
+        // formatRelativeTime now renders it "in 1d"). Using createdAt showed
+        // "65d ago" for a REPEATING event because the series was CREATED 65d ago
+        // even though this occurrence is tomorrow — the tester-reported "events
+        // show a really old date". The when-it-was-made time is still surfaced
+        // as a "Posted:" line in the body below. Fall back to createdAt only if
+        // startsAt is missing.
+        val displayMs = startsMs.takeIf { it > 0 } ?: createdMs
+        // Body carries the full timing: description, then Starts / Ends / Posted.
+        val eventBody = buildCalendarEventBody(eventDesc, eventTitle, startsMs, endsMs, createdMs)
         val seenKey = "${groupId}_event_$eventId"
         val lastSeen = seenMap.optString(seenKey, "")
         // Change marker still tracks startsAt (then createdAt) so an unchanged
@@ -3127,16 +3197,16 @@ class VrchatPipelineService : Service() {
         fireEventNotification(
             id = "gce_$eventId".hashCode(),
             title = "Event from $groupName",
-            text = "${eventTitle.ifBlank { "Event" }}: ${eventDesc.take(120)}",
+            text = "${eventTitle.ifBlank { "Event" }}${if (startsMs > 0) " · starts ${formatEventDateTime(startsMs)}" else ""}",
             profileUrl = "https://vrchat.com/home/group/$groupId/calendar/$eventId",
             prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT,
             channelId = NOTIF_CHANNEL_GROUPS,
             groupKey = GROUP_KEY_GROUPS,
             dedupId = "gce_${eventId}_$marker",
             alertGroupKey = "event_$groupId",
-            alertBody = eventDesc.ifBlank { eventTitle }.ifBlank { null },
+            alertBody = eventBody.ifBlank { null },
             alertEventTitle = eventTitle.ifBlank { null },
-            eventTimestampMs = postedMs.takeIf { it > 0 }
+            eventTimestampMs = displayMs.takeIf { it > 0 }
         )
         updatedMap.put(seenKey, marker)
         addEventFingerprintToSeen(groupId, eventId)
