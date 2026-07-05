@@ -1327,7 +1327,7 @@ private fun AlertEventBody(
     val bodyUrls = remember(event.body) { extractBodyUrls(event.body) }
     val longBody = event.body.length > 320
     val displayBody = if (longBody && !bodyExpanded) event.body.take(300).trimEnd() + "…" else event.body
-    val langNames = remember(event.languages) { languageNames(event.languages) }
+    val langCodes = remember(event.languages) { languageCodes(event.languages) }
     val startingSoon = event.startsAtMs - nowMs < 2L * 60 * 60 * 1000
     val (phaseLabel, phaseColor) = when (phase) {
         EventPhase.UPCOMING -> "Starts ${formatRelativeTime(event.startsAtMs, nowMs)}" to
@@ -1387,7 +1387,7 @@ private fun AlertEventBody(
                         contentScale = ContentScale.FillWidth,
                         modifier = Modifier.fillMaxWidth()
                     )
-                    if (langNames.isNotEmpty()) {
+                    if (langCodes.isNotEmpty()) {
                         // Right-aligned STACK (not a row): native sign-language
                         // names ("American Sign Language", 日本手話) are long, so a
                         // horizontal row overflowed the banner on 2-3 languages.
@@ -1396,7 +1396,7 @@ private fun AlertEventBody(
                             verticalArrangement = Arrangement.spacedBy(3.dp),
                             horizontalAlignment = Alignment.End
                         ) {
-                            for (lang in langNames.take(3)) LanguageChip(lang, overlay = true)
+                            for (code in langCodes.take(3)) LanguageChip(code, overlay = true)
                         }
                     }
                     if (isRichEvent) {
@@ -1446,9 +1446,19 @@ private fun AlertEventBody(
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        richChips(false)
+                        // The status/category/access chips are ONE inseparable
+                        // unit — a bare FlowRow split them mid-sequence ("Group"
+                        // wrapped off the row on its own, tester-reported).
+                        // Platform symbols and each language chip wrap as their
+                        // own units when space runs out.
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            richChips(false)
+                        }
                         PlatformSymbols(event.platforms, overlay = false)
-                        for (lang in langNames.take(4)) LanguageChip(lang, overlay = false)
+                        for (code in langCodes.take(4)) LanguageChip(code, overlay = false)
                     }
                     Divider(
                         color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f),
@@ -1649,13 +1659,26 @@ private fun EventMetaChip(
     }
 }
 
-/** Language chip — native name ("日本語", "English", "日本手話"), matching
- *  VRChat's own rendering. Same fixed 22dp height as EventMetaChip so mixed
- *  Latin/CJK chips line up instead of rendering at different sizes. Overlay
- *  variant sits on the banner's top-right corner. */
+/** Language chip — shows the NATIVE name ("日本語", "日本手話") like VRChat's
+ *  website. TAPPING it shows the name translated into the device language
+ *  ("Japanese", "Japanese Sign Language" — VRChat's in-client localization
+ *  style) in the same spot for 5 seconds, then reverts to the native name.
+ *  Re-tapping within the window restarts the 5s. Fixed 22dp height so mixed
+ *  Latin/CJK chips line up. Overlay variant sits on the banner's top-right. */
 @Composable
-private fun LanguageChip(label: String, overlay: Boolean) {
+private fun LanguageChip(code: String, overlay: Boolean) {
+    var tapCount by remember(code) { mutableStateOf(0) }
+    var translated by remember(code) { mutableStateOf(false) }
+    LaunchedEffect(tapCount) {
+        if (tapCount > 0) {
+            translated = true
+            delay(5_000)
+            translated = false
+        }
+    }
+    val label = if (translated) deviceLanguageName(code) else nativeLanguageName(code)
     Surface(
+        onClick = { tapCount++ },
         color = if (overlay) Color.Black.copy(alpha = 0.55f)
             else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.12f),
         shape = MaterialTheme.shapes.extraSmall
@@ -1887,20 +1910,37 @@ private val vrcLanguageNames = mapOf(
     "jsl" to "日本手話", "kvk" to "한국수어"
 )
 
-private fun languageNames(csv: String?): List<String> {
-    if (csv.isNullOrBlank()) return emptyList()
-    return csv.split(",").mapNotNull { raw ->
-        val code = raw.trim().lowercase().removePrefix("language_")
-        if (code.isBlank()) return@mapNotNull null
-        vrcLanguageNames[code] ?: run {
-            // Native-name resolution: display the language IN ITSELF.
-            val loc = java.util.Locale(code)
-            val resolved = try { loc.getDisplayLanguage(loc) } catch (_: Throwable) { "" }
-            if (resolved.isNotBlank() && !resolved.equals(code, ignoreCase = true)) resolved
-            else code.uppercase()
-        }
-    }.distinct()
-}
+private fun languageCodes(csv: String?): List<String> =
+    csv?.split(",")?.mapNotNull { raw ->
+        raw.trim().lowercase().removePrefix("language_").ifBlank { null }
+    }?.distinct().orEmpty()
+
+/** The language's NATIVE name ("日本語", "日本手話") — VRChat's website style. */
+private fun nativeLanguageName(code: String): String =
+    vrcLanguageNames[code] ?: run {
+        // Native-name resolution: display the language IN ITSELF.
+        val loc = java.util.Locale(code)
+        val resolved = try { loc.getDisplayLanguage(loc) } catch (_: Throwable) { "" }
+        if (resolved.isNotBlank() && !resolved.equals(code, ignoreCase = true)) resolved
+        else code.uppercase()
+    }
+
+// Sign languages can't be resolved through Locale, so their translated names are
+// English (the best universal fallback — spoken languages DO localize properly).
+private val signLanguageTranslatedNames = mapOf(
+    "ase" to "American Sign Language", "bfi" to "British Sign Language",
+    "dse" to "Dutch Sign Language", "fsl" to "French Sign Language",
+    "jsl" to "Japanese Sign Language", "kvk" to "Korean Sign Language"
+)
+
+/** The language's name translated into the DEVICE language ("Japanese" on an
+ *  English phone, 日本語 on a Japanese phone) — VRChat's in-client style. */
+private fun deviceLanguageName(code: String): String =
+    signLanguageTranslatedNames[code] ?: run {
+        val resolved = try { java.util.Locale(code).displayLanguage } catch (_: Throwable) { "" }
+        if (resolved.isNotBlank() && !resolved.equals(code, ignoreCase = true)) resolved
+        else code.uppercase()
+    }
 
 /**
  * A compact, app-styled picker that lists instances (world image, live occupancy, an
