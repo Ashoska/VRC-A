@@ -97,17 +97,46 @@ object GroupAlertEnricher {
         return null
     }
 
+    // Global cross-group guard: all sweeps run ONE AT A TIME with a minimum
+    // spacing between them. The per-group debounce alone left a hole — a user
+    // with cards from several DIFFERENT groups spamming expand across them got
+    // one unspaced burst per distinct group. With the mutex + spacing, worst
+    // case is one 2-call sweep every 2.5s no matter how many cards are poked;
+    // pending sweeps queue (bounded by the distinct-group count) instead of
+    // firing concurrently.
+    private val sweepMutex = kotlinx.coroutines.sync.Mutex()
+    @Volatile private var lastAnySweepMs = 0L
+    private const val GLOBAL_SPACING_MS = 2_500L
+
     /**
      * Sweeps [groupId]'s calendar events + posts and merges fresh values into the
-     * matching alert events. Debounced per group ([minIntervalMs]); returns true
-     * when a sweep actually ran.
+     * matching alert events. Debounced per group ([minIntervalMs]) AND globally
+     * serialized/spaced across groups; returns true when a sweep actually ran.
      */
     suspend fun enrich(ctx: Context, groupId: String, minIntervalMs: Long = 60_000L): Boolean {
         if (groupId.isBlank()) return false
+        // Atomic per-group debounce check+stamp (two concurrent calls for the
+        // same group can't both pass).
         val now = System.currentTimeMillis()
-        val last = lastSweepMs[groupId] ?: 0L
-        if (now - last < minIntervalMs) return false
-        lastSweepMs[groupId] = now
+        var proceed = false
+        lastSweepMs.compute(groupId) { _, last ->
+            if (last == null || now - last >= minIntervalMs) { proceed = true; now } else last
+        }
+        if (!proceed) return false
+        sweepMutex.lock()
+        try {
+            val sinceLast = System.currentTimeMillis() - lastAnySweepMs
+            if (sinceLast < GLOBAL_SPACING_MS) {
+                kotlinx.coroutines.delay(GLOBAL_SPACING_MS - sinceLast)
+            }
+            lastAnySweepMs = System.currentTimeMillis()
+            return enrichLocked(ctx, groupId)
+        } finally {
+            sweepMutex.unlock()
+        }
+    }
+
+    private suspend fun enrichLocked(ctx: Context, groupId: String): Boolean {
         try {
             // ---- Calendar events: match alerts by the cal_ id ----
             val events = VrchatAuthManager.fetchGroupCalendarEvents(ctx, groupId, 20)
@@ -166,6 +195,8 @@ object GroupAlertEnricher {
                 }
             }
             // ---- Posts/announcements: match alerts by normalized body ----
+            // Same 250ms pacing the backfill uses between REST calls.
+            kotlinx.coroutines.delay(250)
             val posts = VrchatAuthManager.fetchGroupPosts(ctx, groupId, 10)
             if (posts != null) {
                 for (j in 0 until posts.length()) {
