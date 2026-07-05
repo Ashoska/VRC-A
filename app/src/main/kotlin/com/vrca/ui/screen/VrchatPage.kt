@@ -1674,18 +1674,15 @@ private fun EventMetaChip(
             )
         }
     }
-    if (onClick != null) {
-        Surface(
-            onClick = onClick,
-            color = container,
-            shape = MaterialTheme.shapes.extraSmall
-        ) { content() }
-    } else {
-        Surface(
-            color = container,
-            shape = MaterialTheme.shapes.extraSmall
-        ) { content() }
-    }
+    // Modifier.clickable (NOT Surface(onClick=...)): a clickable Surface enforces
+    // Material3's 48dp minimum interactive size, which padded each tappable chip
+    // to 48dp tall and blew a huge invisible gap between the chip rows. clickable
+    // keeps the chip its true 22dp height.
+    Surface(
+        color = container,
+        shape = MaterialTheme.shapes.extraSmall,
+        modifier = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
+    ) { content() }
 }
 
 /** Language chip — shows the NATIVE name ("日本語", "日本手話") like VRChat's
@@ -1698,10 +1695,12 @@ private fun EventMetaChip(
 private fun LanguageChip(code: String, overlay: Boolean, translated: Boolean, onTap: () -> Unit) {
     val label = if (translated) deviceLanguageName(code) else nativeLanguageName(code)
     Surface(
-        onClick = onTap,
+        // Modifier.clickable, not Surface(onClick=): avoids the 48dp minimum
+        // interactive size that padded these chips and blew the row gap open.
         color = if (overlay) Color.Black.copy(alpha = 0.55f)
             else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.12f),
-        shape = MaterialTheme.shapes.extraSmall
+        shape = MaterialTheme.shapes.extraSmall,
+        modifier = Modifier.clickable(onClick = onTap)
     ) {
         Box(
             Modifier.height(20.dp).padding(horizontal = 7.dp),
