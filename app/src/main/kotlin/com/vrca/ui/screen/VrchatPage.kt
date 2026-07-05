@@ -56,9 +56,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Login
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DesktopWindows
 import androidx.compose.material.icons.filled.EventBusy
+import androidx.compose.material.icons.filled.PhoneIphone
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Group
@@ -1020,6 +1023,20 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
     var joinTargets by remember { mutableStateOf<List<InstanceTarget>?>(null) }
     var joinLoading by remember { mutableStateOf(false) }
 
+    // Expanding an event/announcement card checks VRChat for changes (interested
+    // count, edited times/description/thumbnail/languages) right then — the
+    // enricher's per-group debounce (30s here, shared with the 60s tab loop) is
+    // the rate-limit guard so repeated expand/collapse can't spam the API.
+    LaunchedEffect(expanded) {
+        if (!expanded) return@LaunchedEffect
+        if (!group.groupId.startsWith("event_grp_") &&
+            !group.groupId.startsWith("announcement_grp_")) return@LaunchedEffect
+        val refIds = group.events.mapNotNull { it.groupRefId }.distinct().take(2)
+        for (gid in refIds) {
+            runCatching { com.vrca.vrchat.GroupAlertEnricher.enrich(ctx, gid, minIntervalMs = 30_000) }
+        }
+    }
+
     fun doInstantAction(actionType: String, data: String) {
         actionSending = true
         scope.launch {
@@ -1300,6 +1317,42 @@ private fun AlertEventBody(
     val bodyUrls = remember(event.body) { extractBodyUrls(event.body) }
     val longBody = event.body.length > 320
     val displayBody = if (longBody && !bodyExpanded) event.body.take(300).trimEnd() + "…" else event.body
+    val langNames = remember(event.languages) { languageNames(event.languages) }
+    val startingSoon = event.startsAtMs - nowMs < 2L * 60 * 60 * 1000
+    val (phaseLabel, phaseColor) = when (phase) {
+        EventPhase.UPCOMING -> "Starts ${formatRelativeTime(event.startsAtMs, nowMs)}" to
+            (if (startingSoon) Color(0xFFFFB300) else MaterialTheme.colorScheme.primary)
+        EventPhase.LIVE -> "Live now" to Color(0xFF4CAF50)
+        EventPhase.ENDED -> "Ended" to MaterialTheme.colorScheme.outline
+    }
+    // The status/category/access chips render either ON the banner's bottom scrim
+    // (solid dark chips, identity-card style) or as a normal row when there's no
+    // banner — same content, one definition.
+    val richChips: @Composable (Boolean) -> Unit = { solid ->
+        EventMetaChip(phaseLabel, phaseColor, bold = true, solid = solid)
+        event.category?.let {
+            EventMetaChip(prettyEventCategory(it), MaterialTheme.colorScheme.tertiary, solid = solid)
+        }
+        event.accessType?.let {
+            val label = it.replaceFirstChar { c -> c.uppercase() }
+            val color = when (it.lowercase()) {
+                "public" -> Color(0xFF4CAF50)
+                "group" -> Color(0xFFAB47BC)
+                else -> MaterialTheme.colorScheme.outline
+            }
+            EventMetaChip(
+                label, color, solid = solid,
+                onClick = event.groupRefId?.let { gid ->
+                    {
+                        ctx.startActivity(
+                            Intent(Intent.ACTION_VIEW,
+                                Uri.parse("https://vrchat.com/home/group/$gid"))
+                        )
+                    }
+                }
+            )
+        }
+    }
 
     Surface(
         color = MaterialTheme.colorScheme.surface,
@@ -1307,22 +1360,56 @@ private fun AlertEventBody(
         modifier = Modifier.fillMaxWidth()
     ) {
         Column {
-            // Banner — VRChat event/post images are 1200×630 (1.9:1), so match
-            // that ratio exactly to avoid cropping the top/bottom (21:9 clipped
-            // them). Cached file first; Coil's session-authed loader is the
-            // network fallback.
+            // Banner at the image's OWN ratio (FillWidth + wrapped height) so the
+            // WHOLE picture shows — any fixed-ratio Crop box cut edges because
+            // creators upload arbitrary ratios (tester-confirmed twice). Overlays
+            // ride the banner like the identity header card: language chips
+            // top-right (native names, as VRChat renders them), status/category/
+            // access chips + platform symbols on a bottom scrim. Cached file
+            // first; Coil's session-authed loader is the network fallback.
             if (!event.imageUrl.isNullOrBlank()) {
                 val model: Any = AlertImageStore.resolve(ctx, event.imageUrl) ?: event.imageUrl
-                coil.compose.AsyncImage(
-                    model = model,
-                    imageLoader = com.vrca.admin.VrchatImageLoader.get(ctx),
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(1200f / 630f)
-                        .clip(MaterialTheme.shapes.small)
-                )
+                Box(Modifier.fillMaxWidth().clip(MaterialTheme.shapes.small)) {
+                    coil.compose.AsyncImage(
+                        model = model,
+                        imageLoader = com.vrca.admin.VrchatImageLoader.get(ctx),
+                        contentDescription = null,
+                        contentScale = ContentScale.FillWidth,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (langNames.isNotEmpty()) {
+                        Row(
+                            Modifier.align(Alignment.TopEnd).padding(6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            for (lang in langNames.take(3)) LanguageChip(lang, overlay = true)
+                        }
+                    }
+                    if (isRichEvent) {
+                        Box(
+                            Modifier
+                                .align(Alignment.BottomCenter)
+                                .fillMaxWidth()
+                                .background(
+                                    Brush.verticalGradient(
+                                        listOf(Color.Transparent, Color.Black.copy(alpha = 0.72f))
+                                    )
+                                )
+                        ) {
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                richChips(true)
+                                Spacer(Modifier.weight(1f))
+                                PlatformSymbols(event.platforms, overlay = true)
+                            }
+                        }
+                    }
+                }
             }
             Column(Modifier.padding(12.dp)) {
                 if (!event.eventTitle.isNullOrBlank()) {
@@ -1333,46 +1420,26 @@ private fun AlertEventBody(
                     )
                     Spacer(Modifier.height(3.dp))
                 }
-                // Status + metadata chips (rich events only). The "Group"/"Public"
-                // access chip is the tap target for the group's web page (per
-                // feedback: the CHIP opens the group, not the card title).
-                if (isRichEvent) {
+                // No banner to overlay on → the same chips render as a normal row
+                // under the title (status/category/access + platform symbols),
+                // with the language chips on their own line when set. The access
+                // chip is the tap target for the group's web page either way.
+                if (isRichEvent && event.imageUrl.isNullOrBlank()) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         modifier = Modifier.padding(bottom = 6.dp)
                     ) {
-                        val (phaseLabel, phaseColor) = when (phase) {
-                            EventPhase.UPCOMING -> {
-                                val startingSoon = event.startsAtMs - nowMs < 2L * 60 * 60 * 1000
-                                "Starts ${formatRelativeTime(event.startsAtMs, nowMs)}" to
-                                    (if (startingSoon) Color(0xFFFFB300) else MaterialTheme.colorScheme.primary)
-                            }
-                            EventPhase.LIVE -> "Live now" to Color(0xFF4CAF50)
-                            EventPhase.ENDED -> "Ended" to MaterialTheme.colorScheme.outline
-                        }
-                        EventMetaChip(phaseLabel, phaseColor, bold = true)
-                        event.category?.let {
-                            EventMetaChip(prettyEventCategory(it), MaterialTheme.colorScheme.tertiary)
-                        }
-                        event.accessType?.let {
-                            val label = it.replaceFirstChar { c -> c.uppercase() }
-                            val color = when (it.lowercase()) {
-                                "public" -> Color(0xFF4CAF50)
-                                "group" -> Color(0xFFAB47BC)
-                                else -> MaterialTheme.colorScheme.outline
-                            }
-                            EventMetaChip(
-                                label, color,
-                                onClick = event.groupRefId?.let { gid ->
-                                    {
-                                        ctx.startActivity(
-                                            Intent(Intent.ACTION_VIEW,
-                                                Uri.parse("https://vrchat.com/home/group/$gid"))
-                                        )
-                                    }
-                                }
-                            )
+                        richChips(false)
+                        Spacer(Modifier.weight(1f))
+                        PlatformSymbols(event.platforms, overlay = false)
+                    }
+                    if (langNames.isNotEmpty()) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier.padding(bottom = 6.dp)
+                        ) {
+                            for (lang in langNames.take(4)) LanguageChip(lang, overlay = false)
                         }
                     }
                 }
@@ -1416,10 +1483,8 @@ private fun AlertEventBody(
                         )
                     }
                     val metaParts = buildList {
-                        if (event.createdAtMs > 0) add("Posted ${eventDate(event.createdAtMs)}")
                         if (event.interestedCount >= 0) add("${event.interestedCount} interested")
-                        platformsLabel(event.platforms)?.let { add(it) }
-                        languagesLabel(event.languages)?.let { add(it) }
+                        if (event.createdAtMs > 0) add("Posted ${eventDate(event.createdAtMs)}")
                     }
                     if (metaParts.isNotEmpty()) {
                         Spacer(Modifier.height(2.dp))
@@ -1529,14 +1594,18 @@ private fun AlertEventBody(
 }
 
 /** Small tinted status/metadata chip on rich event alerts. [onClick] makes it a
- *  tap target (the access chip opens the hosting group's web page). */
+ *  tap target (the access chip opens the hosting group's web page). [solid]
+ *  renders the dark-translucent variant used ON the banner's bottom scrim,
+ *  where the usual 16%-alpha tint would be illegible. */
 @Composable
 private fun EventMetaChip(
     label: String,
     color: Color,
     bold: Boolean = false,
+    solid: Boolean = false,
     onClick: (() -> Unit)? = null
 ) {
+    val container = if (solid) Color.Black.copy(alpha = 0.55f) else color.copy(alpha = 0.16f)
     val content: @Composable () -> Unit = {
         Text(
             label,
@@ -1549,14 +1618,66 @@ private fun EventMetaChip(
     if (onClick != null) {
         Surface(
             onClick = onClick,
-            color = color.copy(alpha = 0.16f),
+            color = container,
             shape = MaterialTheme.shapes.extraSmall
         ) { content() }
     } else {
         Surface(
-            color = color.copy(alpha = 0.16f),
+            color = container,
             shape = MaterialTheme.shapes.extraSmall
         ) { content() }
+    }
+}
+
+/** Language chip — native name ("日本語", "English"), matching VRChat's own
+ *  rendering. Overlay variant sits on the banner's top-right corner. */
+@Composable
+private fun LanguageChip(label: String, overlay: Boolean) {
+    Surface(
+        color = if (overlay) Color.Black.copy(alpha = 0.55f)
+            else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.12f),
+        shape = MaterialTheme.shapes.extraSmall
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = if (overlay) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+        )
+    }
+}
+
+/** Platform support as highlighted circular symbols (PC monitor / Android robot /
+ *  iPhone), VRChat-style, instead of a text list. Sits next to the access chip. */
+@Composable
+private fun PlatformSymbols(csv: String?, overlay: Boolean) {
+    val entries = csv?.split(",")?.mapNotNull { raw ->
+        when (raw.trim().lowercase()) {
+            "standalonewindows", "pc", "windows" ->
+                Triple(Icons.Filled.DesktopWindows, Color(0xFF64B5F6), "PC")
+            "android", "quest" ->
+                Triple(Icons.Filled.Android, Color(0xFF81C784), "Quest")
+            "ios" ->
+                Triple(Icons.Filled.PhoneIphone, Color(0xFFE0E0E0), "iOS")
+            else -> null
+        }
+    }?.distinctBy { it.third }.orEmpty()
+    if (entries.isEmpty()) return
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        for ((icon, tint, desc) in entries) {
+            Surface(
+                shape = CircleShape,
+                color = if (overlay) Color.Black.copy(alpha = 0.55f) else tint.copy(alpha = 0.18f),
+                modifier = Modifier.size(20.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(icon, contentDescription = desc, tint = tint, modifier = Modifier.size(12.dp))
+                }
+            }
+        }
     }
 }
 
@@ -1672,21 +1793,6 @@ private fun eventDateTime(ms: Long): String =
 private fun eventDate(ms: Long): String =
     java.text.SimpleDateFormat("MMM d, yyyy", java.util.Locale.US).format(java.util.Date(ms))
 
-/** Human platform list off the calendar CSV ("standalonewindows,android,ios" → "PC · Quest · iOS"). */
-private fun platformsLabel(csv: String?): String? {
-    if (csv.isNullOrBlank()) return null
-    val parts = csv.split(",").mapNotNull { raw ->
-        when (raw.trim().lowercase()) {
-            "standalonewindows", "pc", "windows" -> "PC"
-            "android", "quest" -> "Quest"
-            "ios" -> "iOS"
-            "" -> null
-            else -> raw.trim().replaceFirstChar { it.uppercase() }
-        }
-    }.distinct()
-    return parts.joinToString(" · ").ifBlank { null }
-}
-
 /** Where an event is in its lifecycle right now. */
 private enum class EventPhase { UPCOMING, LIVE, ENDED }
 
@@ -1714,28 +1820,40 @@ private fun prettyEventCategory(raw: String): String = when (raw.lowercase().tri
         .joinToString(" ") { part -> part.replaceFirstChar { it.uppercase() } }
 }
 
-/** Human language list off the event's CSV of codes ("eng,jpn" → "English,
- *  Japanese"). VRChat uses ISO 639-ish codes plus sign-language tags; the sign
- *  languages don't resolve through Locale so they're mapped explicitly, then
- *  Locale handles the spoken ones, then the raw code uppercased as last resort. */
-private fun languagesLabel(csv: String?): String? {
-    if (csv.isNullOrBlank()) return null
-    val signLanguages = mapOf(
-        "ase" to "ASL", "bfi" to "BSL", "dse" to "DSL", "fsl" to "FSL",
-        "jsl" to "JSL", "kvk" to "KSL"
-    )
-    val parts = csv.split(",").mapNotNull { raw ->
+/**
+ * VRChat's language codes → each language's NATIVE name, exactly how VRChat's
+ * own site renders them (日本語, English, 한국어 — NOT localized to the device
+ * language, which made "English" show as 英語 on a Japanese-locale phone).
+ * Static map first (VRChat's known language tags incl. sign languages), then
+ * Locale-native resolution, then the uppercased code as last resort.
+ */
+private val vrcLanguageNames = mapOf(
+    "eng" to "English", "kor" to "한국어", "rus" to "Русский", "spa" to "Español",
+    "por" to "Português", "zho" to "中文", "deu" to "Deutsch", "jpn" to "日本語",
+    "fra" to "Français", "swe" to "Svenska", "nld" to "Nederlands", "pol" to "Polski",
+    "dan" to "Dansk", "nor" to "Norsk", "ita" to "Italiano", "tha" to "ภาษาไทย",
+    "fin" to "Suomi", "hun" to "Magyar", "ces" to "Čeština", "tur" to "Türkçe",
+    "ara" to "العربية", "ron" to "Română", "vie" to "Tiếng Việt", "ukr" to "Українська",
+    "heb" to "עברית", "ind" to "Bahasa Indonesia", "hmn" to "Hmong", "tgl" to "Tagalog",
+    "mlt" to "Malti",
+    // Sign languages — VRChat's tags; no Locale resolution exists for these.
+    "ase" to "ASL", "bfi" to "BSL", "dse" to "NGT", "fsl" to "LSF",
+    "jsl" to "JSL", "kvk" to "KVK", "tss" to "TSL", "sgn" to "Sign"
+)
+
+private fun languageNames(csv: String?): List<String> {
+    if (csv.isNullOrBlank()) return emptyList()
+    return csv.split(",").mapNotNull { raw ->
         val code = raw.trim().lowercase().removePrefix("language_")
         if (code.isBlank()) return@mapNotNull null
-        signLanguages[code] ?: run {
-            val resolved = try { java.util.Locale(code).displayLanguage } catch (_: Throwable) { "" }
-            // Locale echoes the code back when it can't resolve it — treat that
-            // as unresolved and fall back to the uppercased code.
+        vrcLanguageNames[code] ?: run {
+            // Native-name resolution: display the language IN ITSELF.
+            val loc = java.util.Locale(code)
+            val resolved = try { loc.getDisplayLanguage(loc) } catch (_: Throwable) { "" }
             if (resolved.isNotBlank() && !resolved.equals(code, ignoreCase = true)) resolved
             else code.uppercase()
         }
     }.distinct()
-    return parts.joinToString(", ").ifBlank { null }
 }
 
 /**
