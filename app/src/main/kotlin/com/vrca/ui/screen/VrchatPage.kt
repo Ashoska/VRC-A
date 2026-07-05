@@ -1024,16 +1024,19 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
     var joinLoading by remember { mutableStateOf(false) }
 
     // Expanding an event/announcement card checks VRChat for changes (interested
-    // count, edited times/description/thumbnail/languages) right then — the
-    // enricher's per-group debounce (30s here, shared with the 60s tab loop) is
-    // the rate-limit guard so repeated expand/collapse can't spam the API.
+    // count, edited times/description/thumbnail/languages) right then. 15s
+    // per-group cooldown — deliberately SHORTER than the 60s tab loop's stamp
+    // interval, because the loop constantly re-stamps the shared debounce map; a
+    // 30s expand cooldown was silently no-oping half the time ("re-expanding
+    // doesn't update"). Within the cooldown the data is at most 15s old anyway.
+    // The global mutex + 2.5s spacing in the enricher still bounds spam.
     LaunchedEffect(expanded) {
         if (!expanded) return@LaunchedEffect
         if (!group.groupId.startsWith("event_grp_") &&
             !group.groupId.startsWith("announcement_grp_")) return@LaunchedEffect
         val refIds = group.events.mapNotNull { it.groupRefId }.distinct().take(2)
         for (gid in refIds) {
-            runCatching { com.vrca.vrchat.GroupAlertEnricher.enrich(ctx, gid, minIntervalMs = 30_000) }
+            runCatching { com.vrca.vrchat.GroupAlertEnricher.enrich(ctx, gid, minIntervalMs = 15_000) }
         }
     }
 
@@ -1264,9 +1267,15 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
                                 }
                             }
                         } else if (event.body.isNotBlank() || event.imageUrl != null) {
-                            // key() so per-event remember state (read-more, action
-                            // spinners) tracks the EVENT, not the list position.
-                            key(event.id) {
+                            // Keyed on the event's FULL data, not just its id: this
+                            // content sits inside AnimatedVisibility, which (proven
+                            // on-device — the cycle-mute saga) can skip repainting
+                            // children whose params changed. Keying on the data
+                            // forces recreation whenever enrichment updates ANY
+                            // field (interested count, times, banner, languages) —
+                            // without this, an enrichment sweep updated the state
+                            // but the expanded card never visually changed.
+                            key(event.id, event) {
                                 AlertEventBody(
                                     event = event,
                                     nowMs = nowMs,
