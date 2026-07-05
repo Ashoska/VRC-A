@@ -853,12 +853,12 @@ class VrcaViewModel(
                 }
             }
         }
-        val presetSavers = listOf<suspend (String, Int, String?) -> Unit>(
-            userPreferencesRepository::saveCyclePreset1,
-            userPreferencesRepository::saveCyclePreset2,
-            userPreferencesRepository::saveCyclePreset3,
-            userPreferencesRepository::saveCyclePreset4,
-            userPreferencesRepository::saveCyclePreset5
+        val presetSavers = listOf<suspend (String, Int, Boolean, String?) -> Unit>(
+            { m, iv, sh, n -> userPreferencesRepository.saveCyclePreset1(m, iv, sh, n) },
+            { m, iv, sh, n -> userPreferencesRepository.saveCyclePreset2(m, iv, sh, n) },
+            { m, iv, sh, n -> userPreferencesRepository.saveCyclePreset3(m, iv, sh, n) },
+            { m, iv, sh, n -> userPreferencesRepository.saveCyclePreset4(m, iv, sh, n) },
+            { m, iv, sh, n -> userPreferencesRepository.saveCyclePreset5(m, iv, sh, n) }
         )
         for (i in 1..5) {
             snap.getString("cyclePreset$i")?.trim()?.let { remote ->
@@ -867,7 +867,8 @@ class VrcaViewModel(
                 if (remote != baseline && remote != local) {
                     cyclePresetMessages[i - 1] = remote
                     val interval = cyclePresetIntervals.getOrElse(i - 1) { 10 }
-                    presetSavers[i - 1](remote, interval, null)
+                    val shuffle = cyclePresetShuffle.getOrElse(i - 1) { false }
+                    presetSavers[i - 1](remote, interval, shuffle, null)
                     lastSyncedValues["cyclePreset$i"] = remote
                 }
             }
@@ -1552,12 +1553,12 @@ class VrcaViewModel(
                 }
                 lastSyncedValues["afkPreset$i"] = trimmed
             }
-            val presetSavers = listOf<suspend (String, Int, String?) -> Unit>(
-                userPreferencesRepository::saveCyclePreset1,
-                userPreferencesRepository::saveCyclePreset2,
-                userPreferencesRepository::saveCyclePreset3,
-                userPreferencesRepository::saveCyclePreset4,
-                userPreferencesRepository::saveCyclePreset5
+            val presetSavers = listOf<suspend (String, Int, Boolean, String?) -> Unit>(
+                { m, iv, sh, n -> userPreferencesRepository.saveCyclePreset1(m, iv, sh, n) },
+                { m, iv, sh, n -> userPreferencesRepository.saveCyclePreset2(m, iv, sh, n) },
+                { m, iv, sh, n -> userPreferencesRepository.saveCyclePreset3(m, iv, sh, n) },
+                { m, iv, sh, n -> userPreferencesRepository.saveCyclePreset4(m, iv, sh, n) },
+                { m, iv, sh, n -> userPreferencesRepository.saveCyclePreset5(m, iv, sh, n) }
             )
             for (i in 1..5) {
                 val remoteMsg = snap.getString("cyclePreset$i") ?: continue
@@ -1568,7 +1569,8 @@ class VrcaViewModel(
                     if (baseline == null || trimmed != baseline) {
                         cyclePresetMessages[i - 1] = trimmed
                         val interval = cyclePresetIntervals.getOrElse(i - 1) { 10 }
-                        presetSavers[i - 1](trimmed, interval, null)
+                        val shuffle = cyclePresetShuffle.getOrElse(i - 1) { false }
+                        presetSavers[i - 1](trimmed, interval, shuffle, null)
                     }
                 }
                 lastSyncedValues["cyclePreset$i"] = trimmed
@@ -1988,10 +1990,14 @@ class VrcaViewModel(
     // (NOT synced to Firestore) — a muted line stays in the editor + the synced
     // cycleLinesText but is skipped by the sender. Defaults to enabled.
     val cycleLineEnabled = mutableStateListOf<Boolean>()
-    // Bumped on every per-line mute change. The cycle-line list UI reads this so the
-    // eye/dim state repaints IMMEDIATELY — an index set on a SnapshotStateList wasn't
-    // reliably invalidating the parent loop on-device (the eye updated only after some
-    // other interaction). Reading a plain Int state in the loop forces the recompose.
+    // Legacy mute-repaint counter. Reading a version Int INSIDE the Cycle card's
+    // content lambda still didn't repaint on-device (the content lambda lives in a
+    // separate AnimatedVisibility sub-composition that a SnapshotStateList index-set
+    // didn't invalidate). The repaint is now driven where it actually works: the
+    // Cycle CompactSectionCard's `summary` reads `cycleLineEnabled.count { !it }`
+    // EAGERLY in the PARENT composable's scope, so a mute toggle invalidates the
+    // parent -> the whole card (header + content) recomposes with fresh per-line
+    // state. This counter is kept (bumped, unread) as harmless belt-and-suspenders.
     var cycleMuteRev by mutableStateOf(0)
         private set
     // Random/shuffle rotation instead of sequential. Local-only.
@@ -2216,6 +2222,9 @@ class VrcaViewModel(
     )
     // Per-preset shuffle, mirrored from DataStore so each slot restores its own.
     private val cyclePresetShuffle = mutableStateListOf(false, false, false, false, false)
+    // Per-preset per-line mute CSV (aligned to the preset's non-empty saved lines),
+    // mirrored from DataStore so each slot restores which lines were hidden.
+    private val cyclePresetEnabled = mutableStateListOf("", "", "", "", "")
 
     init {
         // Restore the last-synced baseline from the previous session so the
@@ -2289,9 +2298,19 @@ class VrcaViewModel(
                 cyclePresetShuffle[2] = userPreferencesRepository.cyclePreset3Shuffle.first()
                 cyclePresetShuffle[3] = userPreferencesRepository.cyclePreset4Shuffle.first()
                 cyclePresetShuffle[4] = userPreferencesRepository.cyclePreset5Shuffle.first()
+                cyclePresetEnabled[0] = userPreferencesRepository.cyclePreset1Enabled.first()
+                cyclePresetEnabled[1] = userPreferencesRepository.cyclePreset2Enabled.first()
+                cyclePresetEnabled[2] = userPreferencesRepository.cyclePreset3Enabled.first()
+                cyclePresetEnabled[3] = userPreferencesRepository.cyclePreset4Enabled.first()
+                cyclePresetEnabled[4] = userPreferencesRepository.cyclePreset5Enabled.first()
                 spotifyPreset = userPreferencesRepository.spotifyPreset.first().coerceIn(1, 5)
                 timeMode = userPreferencesRepository.timeMode.first()
             }
+            // One-shot: park a pre-auto-save user's live content into a preset
+            // slot so tapping a chip can't load over (destroy) it. Must run
+            // AFTER the loads above (needs live content + slot contents) and
+            // BEFORE any UI interaction can select a preset.
+            runCatching { migrateLiveContentIntoPresetSlot() }
             initialDataLoaded = true
             // Auto-restore feature toggles after an unexpected process death (OS
             // memory pressure / Doze / OEM killer). A deliberate swipe disarms this
@@ -2967,18 +2986,26 @@ class VrcaViewModel(
         val s = selectedCyclePreset
         val idx = s - 1
         val messages = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(MAX_CYCLE_LINES).joinToString("\n")
+        // Mute CSV aligned to the SAME non-empty lines the preset saves (empty
+        // lines are dropped from `messages`, so the flags must skip them too) —
+        // otherwise the indices wouldn't line up when the preset reloads.
+        val enabledCsv = cycleLines.indices
+            .filter { cycleLines[it].trim().isNotEmpty() }
+            .take(MAX_CYCLE_LINES)
+            .joinToString(",") { if (cycleLineEnabled.getOrElse(it) { true }) "1" else "0" }
         val interval = cycleIntervalSeconds
         val shuffle = cycleShuffle
         cyclePresetMessages[idx] = messages
         cyclePresetIntervals[idx] = interval
         cyclePresetShuffle[idx] = shuffle
+        cyclePresetEnabled[idx] = enabledCsv
         viewModelScope.launch {
             when (s) {
-                1 -> userPreferencesRepository.saveCyclePreset1(messages, interval, shuffle)
-                2 -> userPreferencesRepository.saveCyclePreset2(messages, interval, shuffle)
-                3 -> userPreferencesRepository.saveCyclePreset3(messages, interval, shuffle)
-                4 -> userPreferencesRepository.saveCyclePreset4(messages, interval, shuffle)
-                else -> userPreferencesRepository.saveCyclePreset5(messages, interval, shuffle)
+                1 -> userPreferencesRepository.saveCyclePreset1(messages, interval, shuffle, enabledCsv = enabledCsv)
+                2 -> userPreferencesRepository.saveCyclePreset2(messages, interval, shuffle, enabledCsv = enabledCsv)
+                3 -> userPreferencesRepository.saveCyclePreset3(messages, interval, shuffle, enabledCsv = enabledCsv)
+                4 -> userPreferencesRepository.saveCyclePreset4(messages, interval, shuffle, enabledCsv = enabledCsv)
+                else -> userPreferencesRepository.saveCyclePreset5(messages, interval, shuffle, enabledCsv = enabledCsv)
             }
         }
     }
@@ -2999,6 +3026,19 @@ class VrcaViewModel(
         recentCyclePicks.clear()
         viewModelScope.launch { userPreferencesRepository.saveCycleShuffle(cycleShuffle) }
         setCycleLinesFromTextPreserve(messages)
+        // Restore THIS preset's saved hide state. A blank CSV (legacy presets
+        // saved before this feature) means all-visible — reset explicitly so a
+        // switch between identical-line presets can't inherit the prior slot's
+        // mute (setCycleLinesFromTextPreserve early-returns when lines match and
+        // applyCycleLineEnabledCsv keeps current flags on a blank CSV).
+        val presetEnabledCsv = cyclePresetEnabled.getOrElse(s - 1) { "" }
+        if (presetEnabledCsv.isBlank()) {
+            cycleLineEnabled.clear()
+            syncCycleEnabledSize()
+            rebuildCombinedPreviewOnly()
+        } else {
+            applyCycleLineEnabledCsv(presetEnabledCsv)
+        }
         // Persist the loaded lines as the live cycle (NOT via the auto-save path,
         // which would re-save into the same slot redundantly — fine either way).
         viewModelScope.launch { userPreferencesRepository.saveCycleMessages(cycleLines.take(MAX_CYCLE_LINES).joinToString("\n")) }
@@ -3075,6 +3115,10 @@ class VrcaViewModel(
         cycleMuteRev++
         recentCyclePicks.clear()
         persistCycleLineEnabled()
+        // Persist the hide state INTO the selected preset too — otherwise a
+        // preset never remembers which lines were hidden ("presets don't save
+        // hidden lines"). No-op at slot 0 (autoSave early-returns).
+        autoSaveSelectedCyclePreset()
         rebuildCombinedPreviewOnly()
     }
 
@@ -3237,6 +3281,76 @@ class VrcaViewModel(
     // =========================
     // Preset save/load
     // =========================
+    /**
+     * One-shot migration for users updating from the pre-auto-save preset
+     * system. They arrive at slot 0 (nothing selected) with their live Pinned
+     * message / cycle lines saved in NO preset slot — tapping any preset chip
+     * would load that slot over the live editor and silently destroy their
+     * content. Park the live content in a slot ONCE: prefer a slot already
+     * holding identical content (just select it — no write needed), else the
+     * first EMPTY slot (save + select). If every slot is full with distinct
+     * content, leave slot 0 selected and change nothing (never clobber a
+     * deliberately saved preset). Selecting here does NOT reload the editor —
+     * the editor already holds the content by construction. Guarded by the
+     * PRESET_SEED_MIGRATED DataStore flag so it runs at most once.
+     */
+    private suspend fun migrateLiveContentIntoPresetSlot() {
+        if (userPreferencesRepository.presetSeedMigrated.first()) return
+        // Pinned: live message → matching or first empty slot.
+        if (selectedAfkPreset == 0) {
+            val live = afkMessage.trim()
+            if (live.isNotEmpty()) {
+                val match = (1..3).firstOrNull { afkPresetTexts[it - 1].trim() == live }
+                val target = match ?: (1..3).firstOrNull { afkPresetTexts[it - 1].isBlank() }
+                if (target != null) {
+                    if (match == null) {
+                        afkPresetTexts[target - 1] = afkMessage
+                        when (target) {
+                            1 -> userPreferencesRepository.saveAfkPreset1(afkMessage)
+                            2 -> userPreferencesRepository.saveAfkPreset2(afkMessage)
+                            else -> userPreferencesRepository.saveAfkPreset3(afkMessage)
+                        }
+                    }
+                    selectedAfkPreset = target
+                    userPreferencesRepository.saveSelectedAfkPreset(target)
+                }
+            }
+        }
+        // Cycle: live lines (normalized like the auto-save) → matching or empty slot.
+        if (selectedCyclePreset == 0) {
+            val liveLines = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }
+                .take(MAX_CYCLE_LINES).joinToString("\n")
+            if (liveLines.isNotEmpty()) {
+                val match = (1..5).firstOrNull { cyclePresetMessages[it - 1].trim() == liveLines }
+                val target = match ?: (1..5).firstOrNull { cyclePresetMessages[it - 1].isBlank() }
+                if (target != null) {
+                    if (match == null) {
+                        // Mute CSV aligned to the non-empty lines (same as the auto-save)
+                        // so the parked preset keeps the user's live hide state.
+                        val liveEnabledCsv = cycleLines.indices
+                            .filter { cycleLines[it].trim().isNotEmpty() }
+                            .take(MAX_CYCLE_LINES)
+                            .joinToString(",") { if (cycleLineEnabled.getOrElse(it) { true }) "1" else "0" }
+                        cyclePresetMessages[target - 1] = liveLines
+                        cyclePresetIntervals[target - 1] = cycleIntervalSeconds
+                        cyclePresetShuffle[target - 1] = cycleShuffle
+                        cyclePresetEnabled[target - 1] = liveEnabledCsv
+                        when (target) {
+                            1 -> userPreferencesRepository.saveCyclePreset1(liveLines, cycleIntervalSeconds, cycleShuffle, enabledCsv = liveEnabledCsv)
+                            2 -> userPreferencesRepository.saveCyclePreset2(liveLines, cycleIntervalSeconds, cycleShuffle, enabledCsv = liveEnabledCsv)
+                            3 -> userPreferencesRepository.saveCyclePreset3(liveLines, cycleIntervalSeconds, cycleShuffle, enabledCsv = liveEnabledCsv)
+                            4 -> userPreferencesRepository.saveCyclePreset4(liveLines, cycleIntervalSeconds, cycleShuffle, enabledCsv = liveEnabledCsv)
+                            else -> userPreferencesRepository.saveCyclePreset5(liveLines, cycleIntervalSeconds, cycleShuffle, enabledCsv = liveEnabledCsv)
+                        }
+                    }
+                    selectedCyclePreset = target
+                    userPreferencesRepository.saveSelectedCyclePreset(target)
+                }
+            }
+        }
+        userPreferencesRepository.savePresetSeedMigrated(true)
+    }
+
     suspend fun saveAfkPreset(slot: Int, text: String) {
         if (isBanned) return
         val s = slot.coerceIn(1, 3)

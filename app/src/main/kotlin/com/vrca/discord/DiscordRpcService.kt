@@ -18,6 +18,7 @@ import android.os.Looper
 import android.util.Log
 import android.view.View
 import android.webkit.CookieManager
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
@@ -396,6 +397,31 @@ class DiscordRpcService : Service() {
                         Log.w(TAG, "WebView main-frame load error: ${error?.errorCode} ${error?.description}")
                         if (!hasNetwork()) parkOffline()
                     }
+
+                    override fun onRenderProcessGone(
+                        view: WebView?,
+                        detail: RenderProcessGoneDetail?
+                    ): Boolean {
+                        // The OS reclaimed this WebView's renderer process — common for a
+                        // long-running BACKGROUND WebView under memory pressure. If we do
+                        // NOT handle this (return true), the system may terminate our whole
+                        // service process; and even if it doesn't, the page is blank and the
+                        // RPC is dead until the 120s JS-freeze detector eventually reloads.
+                        // Handle it: destroy the dead WebView and recreate from scratch NOW
+                        // (fresh gateway), so a renderer reclaim recovers in seconds instead
+                        // of leaving the RPC silently gone for up to two minutes.
+                        Log.w(TAG, "WebView renderer gone (didCrash=${detail?.didCrash()}) — recreating WebView")
+                        shimReady = false
+                        stopPresenceUpdates()
+                        if (view === webView) webView = null
+                        try { view?.destroy() } catch (_: Throwable) {}
+                        DiscordRpcState.status = DiscordRpcStatus.RECONNECTING
+                        DiscordRpcState.failureMessage = "Discord connection lost — recovering..."
+                        // loadWebView re-checks network (parks if offline). Post so we're not
+                        // recreating while this callback is still on the WebView's stack.
+                        mainHandler.post { loadWebView() }
+                        return true
+                    }
                 }
 
                 loadUrl("https://discord.com/channels/@me")
@@ -509,10 +535,18 @@ class DiscordRpcService : Service() {
             scope.launch {
                 delay(2000L * sessionRecoveryCount)
                 mainHandler.post {
-                    webView?.let { wv ->
-                        CookieManager.getInstance().flush()
-                        wv.loadUrl("https://discord.com/channels/@me")
-                    }
+                    CookieManager.getInstance().flush()
+                    // FULL WebView recreation (loadWebView), NOT a same-page loadUrl on
+                    // the existing WebView. Discord is a SPA already sitting at
+                    // /channels/@me, so a loadUrl to the same route can soft-navigate
+                    // WITHOUT tearing down and reopening the gateway WebSocket — the shim
+                    // then recaptures the SAME half-dead gateway and presence pushes never
+                    // resume (the user-reported "RPC doesn't start sending to Discord after
+                    // reconnection; only fully reopening the app fixes it"). Recreating the
+                    // WebView from scratch is exactly what reopening the app does: fresh
+                    // Discord JS -> fresh gateway -> shim recapture -> startPresenceUpdates
+                    // pushes again, so recovery behaves "like nothing happened".
+                    loadWebView()
                 }
             }
         } else {
@@ -679,6 +713,20 @@ class DiscordRpcService : Service() {
                                     Log.w(TAG, "WebView cacheDir sweep failed", e)
                                 }
                                 mainHandler.post {
+                                    // Tear down the RPC state BEFORE reloading. The reload
+                                    // destroys the page's shim (VRCA_gatewayHealth /
+                                    // VRCA_setActivity) and the gateway — if shimReady stays
+                                    // true, the session monitor probes the reloading page,
+                                    // gets `no_probe`/`no_gateway`, and (pre-fix) treated it
+                                    // as healthy, leaving a CONNECTED-but-dead RPC only a
+                                    // toggle could clear. Reset like a planned reconnect (but
+                                    // do NOT consume a sessionRecovery attempt — this is
+                                    // maintenance, not a failure); onPageFinished re-injects
+                                    // the shim and resumes presence + the monitor.
+                                    shimReady = false
+                                    stopPresenceUpdates()
+                                    DiscordRpcState.status = DiscordRpcStatus.RECONNECTING
+                                    DiscordRpcState.failureMessage = "Refreshing Discord connection..."
                                     try {
                                         webView?.reload()
                                     } catch (_: Throwable) {
@@ -749,7 +797,7 @@ class DiscordRpcService : Service() {
                         lastJsResponseMs = System.currentTimeMillis()
                         if (!shimReady) return@evaluateJavascript
                         when (result?.trim()?.replace("\"", "") ?: "null") {
-                            "alive", "connecting", "no_probe" -> {
+                            "alive", "connecting" -> {
                                 if (deadHealthChecks != 0) deadHealthChecks = 0
                                 if (degradedHealthChecks != 0) degradedHealthChecks = 0
                                 if (noGatewayChecks != 0) noGatewayChecks = 0
@@ -765,7 +813,15 @@ class DiscordRpcService : Service() {
                                     sessionRecoveryCount = 0
                                 }
                             }
-                            "no_gateway" -> {
+                            // `no_probe` = window.VRCA_gatewayHealth is UNDEFINED. Because this
+                            // branch only runs while shimReady==true, an undefined probe means
+                            // the shim was destroyed out from under us (a page reload — e.g.
+                            // cache maintenance — that blew away the injected functions). This
+                            // was previously grouped with "alive", so a reloaded/dead page kept
+                            // reporting CONNECTED and never recovered on its own (only a toggle
+                            // fixed it). Treat it exactly like a lost gateway: re-inject, then
+                            // reload after the threshold.
+                            "no_gateway", "no_probe" -> {
                                 healthySinceMs = 0L
                                 deadHealthChecks = 0
                                 degradedHealthChecks = 0
@@ -1259,6 +1315,13 @@ private const val MODULE_FINDER_JS = """
                 var gw = window._vrca_gatewayWs;
                 if (!gw || gw.readyState !== 1) return 'no_gateway';
                 var activity = JSON.parse(jsonStr);
+                // Each call supersedes any in-flight image resolution. Bump a
+                // generation token so a SLOW external-assets resolve for a PREVIOUS
+                // world can't land late and overwrite _vrca_activity with the stale
+                // world — the rapid-world-switch flicker / wrong-world / re-send
+                // churn (worse the faster the user hops instances).
+                window._vrca_activityGen = (window._vrca_activityGen || 0) + 1;
+                var myGen = window._vrca_activityGen;
                 var imageUrl = activity.assets && activity.assets.large_image;
                 if (imageUrl && imageUrl.indexOf('http') === 0) {
                     var cached = window._vrca_asset_cache[imageUrl];
@@ -1285,6 +1348,9 @@ private const val MODULE_FINDER_JS = """
                     var retries = 0;
                     var tryResolve = function() {
                         VRCA_resolveAsset(imageUrl).then(function(resolved) {
+                            // Superseded by a newer world? Abandon — do not overwrite
+                            // the current activity or keep retrying for a stale world.
+                            if (myGen !== window._vrca_activityGen) return;
                             if (resolved) {
                                 activity.assets.large_image = resolved;
                                 window._vrca_activity = activity;
@@ -1310,6 +1376,9 @@ private const val MODULE_FINDER_JS = """
 
         window.VRCA_clearActivity = function() {
             try {
+                // Supersede any in-flight image resolution so it can't re-add an
+                // activity after we've cleared it.
+                window._vrca_activityGen = (window._vrca_activityGen || 0) + 1;
                 window._vrca_activity = null;
                 var gw = window._vrca_gatewayWs;
                 if (!gw || gw.readyState !== 1) return 'no_gateway';

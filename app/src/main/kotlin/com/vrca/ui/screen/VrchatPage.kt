@@ -56,15 +56,23 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Login
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Android
+import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.EventBusy
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Public
+import androidx.compose.foundation.layout.aspectRatio
+import com.vrca.vrchat.AlertImageStore
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -153,6 +161,31 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
         while (true) {
             delay(1_000)
             nowMs = System.currentTimeMillis()
+        }
+    }
+
+    // Live refresh for on-screen event/announcement alerts: while this tab is
+    // composed, periodically re-sweep the groups behind them so the interested
+    // count, an edited start time/description, and a late banner UPDATE IN PLACE
+    // — the card no longer freezes at fire-time data. First pass runs shortly
+    // after entering the tab (stale alerts from a previous session catch up),
+    // then every 60s; the enricher is debounced per group and skips groups whose
+    // alerts were dismissed. Only rich event/announcement groups are swept —
+    // bounded to a handful of groups → ~2 REST calls each per cycle, on-tab only.
+    LaunchedEffect(Unit) {
+        delay(5_000)
+        while (true) {
+            val groupIds = InAppAlertState.groups.value
+                .asSequence()
+                .filter { it.groupId.startsWith("event_grp_") || it.groupId.startsWith("announcement_grp_") }
+                .flatMap { g -> g.events.asSequence().mapNotNull { it.groupRefId } }
+                .distinct()
+                .take(6)
+                .toList()
+            for (gid in groupIds) {
+                runCatching { com.vrca.vrchat.GroupAlertEnricher.enrich(ctx, gid, minIntervalMs = 55_000) }
+            }
+            delay(60_000)
         }
     }
 
@@ -480,7 +513,10 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
                 InstanceTarget(
                     location = e.location,
                     label = e.worldName.ifBlank { "Instance" },
-                    timeLines = lines
+                    timeLines = lines,
+                    // Stored world thumb (persisted via AlertImageStore for the
+                    // entry's 24h lifetime) renders instantly while live info loads.
+                    imageUrl = e.imageUrl
                 )
             }
         }
@@ -801,15 +837,21 @@ private fun LazyListScope.inAppAlertSection(
 }
 
 private fun formatRelativeTime(timestampMs: Long, nowMs: Long = System.currentTimeMillis()): String {
+    // Future-aware: a FUTURE timestamp (delta < 0) renders "in Xd" instead of
+    // clamping to "just now". Group calendar events use their scheduled start
+    // (normally upcoming) as the display timestamp, so without this an event
+    // tomorrow would read "just now" and never advance.
     val delta = nowMs - timestampMs
-    val sec = delta / 1000L
-    return when {
-        sec < 5 -> "just now"
-        sec < 60 -> "${sec}s ago"
-        sec < 3600 -> "${sec / 60}m ago"
-        sec < 86400 -> "${sec / 3600}h ago"
-        else -> "${sec / 86400}d ago"
+    val future = delta < 0
+    val sec = kotlin.math.abs(delta) / 1000L
+    val rel = when {
+        sec < 5 -> return "just now"
+        sec < 60 -> "${sec}s"
+        sec < 3600 -> "${sec / 60}m"
+        sec < 86400 -> "${sec / 3600}h"
+        else -> "${sec / 86400}d"
     }
+    return if (future) "in $rel" else "$rel ago"
 }
 
 private fun wordDiff(before: String, after: String): Pair<androidx.compose.ui.text.AnnotatedString, androidx.compose.ui.text.AnnotatedString> {
@@ -966,7 +1008,7 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
     // opens in the body instead.
     val inviteMeTargets = group.events
         .filter { it.actionType == NotificationActionReceiver.ACTION_INVITE_ME && !it.actionData.isNullOrBlank() }
-        .map { InstanceTarget(it.actionData!!, it.eventTitle ?: it.body) }
+        .map { InstanceTarget(it.actionData!!, it.eventTitle ?: it.body, imageUrl = it.imageUrl.orEmpty()) }
         .distinctBy { it.location }
     val inviteUserData = group.events
         .firstOrNull { it.actionType == NotificationActionReceiver.ACTION_INVITE_USER && !it.actionData.isNullOrBlank() }
@@ -975,6 +1017,28 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
     val showPerEventOpen = sharedOpenUrl == null
     val headerOpenUrl = sharedOpenUrl
         ?: group.url?.takeIf { group.events.none { e -> e.url != null } }
+    // "Join event": lists the hosting group's currently-open instances in the
+    // same picker the multi-invite flow uses. null = closed; empty = fetched,
+    // group has nothing open right now.
+    var joinTargets by remember { mutableStateOf<List<InstanceTarget>?>(null) }
+    var joinLoading by remember { mutableStateOf(false) }
+
+    // Expanding an event/announcement card checks VRChat for changes (interested
+    // count, edited times/description/thumbnail/languages) right then. 15s
+    // per-group cooldown — deliberately SHORTER than the 60s tab loop's stamp
+    // interval, because the loop constantly re-stamps the shared debounce map; a
+    // 30s expand cooldown was silently no-oping half the time ("re-expanding
+    // doesn't update"). Within the cooldown the data is at most 15s old anyway.
+    // The global mutex + 2.5s spacing in the enricher still bounds spam.
+    LaunchedEffect(expanded) {
+        if (!expanded) return@LaunchedEffect
+        if (!group.groupId.startsWith("event_grp_") &&
+            !group.groupId.startsWith("announcement_grp_")) return@LaunchedEffect
+        val refIds = group.events.mapNotNull { it.groupRefId }.distinct().take(2)
+        for (gid in refIds) {
+            runCatching { com.vrca.vrchat.GroupAlertEnricher.enrich(ctx, gid, minIntervalMs = 15_000) }
+        }
+    }
 
     fun doInstantAction(actionType: String, data: String) {
         actionSending = true
@@ -985,11 +1049,29 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
         }
     }
 
+    fun openJoinPicker(groupRefId: String, eventLabel: String) {
+        if (joinLoading) return
+        joinLoading = true
+        scope.launch {
+            val locations = VrchatAuthManager.fetchGroupInstances(ctx, groupRefId)
+            joinTargets = locations.map { InstanceTarget(it, eventLabel) }
+            joinLoading = false
+        }
+    }
+
     if (showInstancePicker) {
         InstanceListDialog(
             title = group.title,
             targets = inviteMeTargets,
             onDismiss = { showInstancePicker = false }
+        )
+    }
+    joinTargets?.let { targets ->
+        InstanceListDialog(
+            title = "Join event · ${group.title}",
+            targets = targets,
+            onDismiss = { joinTargets = null },
+            emptyText = "This group has no open instances right now. The host may not have opened one yet — try Open in VRChat instead."
         )
     }
 
@@ -1015,7 +1097,9 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
                             shape = MaterialTheme.shapes.small
                         )
                 )
-                // Title block is the expand tap target.
+                // Title block is the expand tap target. (Opening the group page
+                // lives on the "Group" chip inside the event body, per feedback —
+                // NOT on the title.)
                 Column(
                     Modifier
                         .weight(1f)
@@ -1182,47 +1266,480 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
                                     }
                                 }
                             }
-                        } else if (event.body.isNotBlank()) {
-                            Surface(
-                                color = MaterialTheme.colorScheme.surface,
-                                shape = MaterialTheme.shapes.small,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Column(Modifier.padding(12.dp)) {
-                                    if (!event.eventTitle.isNullOrBlank()) {
-                                        Text(
-                                            event.eventTitle,
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                        Spacer(Modifier.height(3.dp))
+                        } else if (event.body.isNotBlank() || event.imageUrl != null) {
+                            // Keyed on the event's FULL data, not just its id: this
+                            // content sits inside AnimatedVisibility, which (proven
+                            // on-device — the cycle-mute saga) can skip repainting
+                            // children whose params changed. Keying on the data
+                            // forces recreation whenever enrichment updates ANY
+                            // field (interested count, times, banner, languages) —
+                            // without this, an enrichment sweep updated the state
+                            // but the expanded card never visually changed.
+                            key(event.id, event) {
+                                AlertEventBody(
+                                    event = event,
+                                    nowMs = nowMs,
+                                    groupKey = group.groupId,
+                                    showOpen = showPerEventOpen && event.url != null,
+                                    joinLoading = joinLoading,
+                                    onJoinEvent = { grpId ->
+                                        openJoinPicker(grpId, event.eventTitle ?: group.title)
                                     }
-                                    Text(
-                                        event.body,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    Spacer(Modifier.height(6.dp))
-                                    Text(
-                                        formatRelativeTime(event.timestampMs, nowMs),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.outline
-                                    )
-                                    // Per-event open only for distinct-url groups
-                                    // (group posts/events); shared opens are in the header.
-                                    if (showPerEventOpen && event.url != null) {
-                                        Spacer(Modifier.height(8.dp))
-                                        CompactAlertButton(
-                                            label = "Open in VRChat",
-                                            icon = Icons.Filled.OpenInNew,
-                                            prominent = false,
-                                            enabled = true,
-                                            onClick = { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(event.url!!))) }
-                                        )
-                                    }
-                                }
+                                )
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * One event/announcement inside an alert group — the RICH renderer. Shows the
+ * banner (from AlertImageStore's dismissal-scoped disk cache, so opening the menu
+ * never re-downloads), category/access/platform/interested chips, a live status
+ * chip (countdown → "Live now" → "Ended"), Starts/Ends/Posted lines, the body
+ * (with read-more for long announcements), tappable "Visit link" buttons for URLs
+ * in the body, and phase-appropriate actions: Add/Remove Calendar before start,
+ * Join event while live. Plain events (no rich metadata) render exactly like the
+ * old simple card.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AlertEventBody(
+    event: InAppAlertEvent,
+    nowMs: Long,
+    groupKey: String,
+    showOpen: Boolean,
+    joinLoading: Boolean,
+    onJoinEvent: (String) -> Unit
+) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var calSending by remember { mutableStateOf(false) }
+    var bodyExpanded by remember { mutableStateOf(false) }
+
+    // Rich display needs only a known start time; the calendar ACTION additionally
+    // needs the cal_/grp_ ids (checked at the button below).
+    val isRichEvent = event.startsAtMs > 0L
+    val phase = eventPhase(event.startsAtMs, event.endsAtMs, nowMs)
+    val bodyUrls = remember(event.body) { extractBodyUrls(event.body) }
+    val longBody = event.body.length > 320
+    val displayBody = if (longBody && !bodyExpanded) event.body.take(300).trimEnd() + "…" else event.body
+    val langCodes = remember(event.languages) { languageCodes(event.languages) }
+    val startingSoon = event.startsAtMs - nowMs < 2L * 60 * 60 * 1000
+    val (phaseLabel, phaseColor) = when (phase) {
+        EventPhase.UPCOMING -> "Starts ${formatRelativeTime(event.startsAtMs, nowMs)}" to
+            (if (startingSoon) Color(0xFFFFB300) else MaterialTheme.colorScheme.primary)
+        EventPhase.LIVE -> "Live now" to Color(0xFF4CAF50)
+        EventPhase.ENDED -> "Ended" to MaterialTheme.colorScheme.outline
+    }
+    // The status/category/access chips render either ON the banner's bottom scrim
+    // (solid dark chips, identity-card style) or as a normal row when there's no
+    // banner — same content, one definition.
+    val richChips: @Composable (Boolean) -> Unit = { solid ->
+        EventMetaChip(phaseLabel, phaseColor, bold = true, solid = solid)
+        event.category?.let {
+            EventMetaChip(prettyEventCategory(it), MaterialTheme.colorScheme.tertiary, solid = solid)
+        }
+        event.accessType?.let {
+            val label = it.replaceFirstChar { c -> c.uppercase() }
+            val color = when (it.lowercase()) {
+                "public" -> Color(0xFF4CAF50)
+                "group" -> Color(0xFFAB47BC)
+                else -> MaterialTheme.colorScheme.outline
+            }
+            EventMetaChip(
+                label, color, solid = solid,
+                onClick = event.groupRefId?.let { gid ->
+                    {
+                        ctx.startActivity(
+                            Intent(Intent.ACTION_VIEW,
+                                Uri.parse("https://vrchat.com/home/group/$gid"))
+                        )
+                    }
+                }
+            )
+        }
+    }
+
+    Surface(
+        color = MaterialTheme.colorScheme.surface,
+        shape = MaterialTheme.shapes.small,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column {
+            // Banner at the image's OWN ratio (FillWidth + wrapped height) so the
+            // WHOLE picture shows — any fixed-ratio Crop box cut edges because
+            // creators upload arbitrary ratios (tester-confirmed twice). Overlays
+            // ride the banner like the identity header card: language chips
+            // top-right (native names, as VRChat renders them), status/category/
+            // access chips + platform symbols on a bottom scrim. Cached file
+            // first; Coil's session-authed loader is the network fallback.
+            if (!event.imageUrl.isNullOrBlank()) {
+                val model: Any = AlertImageStore.resolve(ctx, event.imageUrl) ?: event.imageUrl
+                Box(Modifier.fillMaxWidth().clip(MaterialTheme.shapes.small)) {
+                    coil.compose.AsyncImage(
+                        model = model,
+                        imageLoader = com.vrca.admin.VrchatImageLoader.get(ctx),
+                        contentDescription = null,
+                        contentScale = ContentScale.FillWidth,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (langCodes.isNotEmpty()) {
+                        // Right-aligned STACK (not a row): native sign-language
+                        // names ("American Sign Language", 日本手話) are long, so a
+                        // horizontal row overflowed the banner on 2-3 languages.
+                        Column(
+                            Modifier.align(Alignment.TopEnd).padding(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(3.dp),
+                            horizontalAlignment = Alignment.End
+                        ) {
+                            for (code in langCodes.take(3)) LanguageChip(code, overlay = true)
+                        }
+                    }
+                    if (isRichEvent) {
+                        Box(
+                            Modifier
+                                .align(Alignment.BottomCenter)
+                                .fillMaxWidth()
+                                .background(
+                                    Brush.verticalGradient(
+                                        listOf(Color.Transparent, Color.Black.copy(alpha = 0.72f))
+                                    )
+                                )
+                        ) {
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                richChips(true)
+                                Spacer(Modifier.weight(1f))
+                                PlatformSymbols(event.platforms, overlay = true)
+                            }
+                        }
+                    }
+                }
+            }
+            Column(Modifier.padding(12.dp)) {
+                if (!event.eventTitle.isNullOrBlank()) {
+                    Text(
+                        event.eventTitle,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(Modifier.height(3.dp))
+                }
+                // No banner to overlay on → ONE wrapping flow with everything
+                // together (status/category/access chips, platform symbols,
+                // language chips) so nothing sits disconnected on its own line
+                // with weird gaps, then a thin divider separating this meta
+                // block from the description. The access chip is the tap target
+                // for the group's web page either way.
+                if (isRichEvent && event.imageUrl.isNullOrBlank()) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        // The status/category/access chips are ONE inseparable
+                        // unit — a bare FlowRow split them mid-sequence ("Group"
+                        // wrapped off the row on its own, tester-reported).
+                        // Platform symbols and each language chip wrap as their
+                        // own units when space runs out.
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            richChips(false)
+                        }
+                        PlatformSymbols(event.platforms, overlay = false)
+                        for (code in langCodes.take(4)) LanguageChip(code, overlay = false)
+                    }
+                    Divider(
+                        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f),
+                        modifier = Modifier.padding(vertical = 8.dp)
+                    )
+                }
+                if (displayBody.isNotBlank() && displayBody != event.eventTitle) {
+                    Text(
+                        displayBody,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (longBody) {
+                        Text(
+                            if (bodyExpanded) "Show less" else "Read more",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier
+                                .padding(top = 4.dp)
+                                .clickable { bodyExpanded = !bodyExpanded }
+                        )
+                    }
+                }
+                if (isRichEvent) {
+                    // One compact timing line ("Jul 5 · 3:05 PM → Jul 8 · 5:05 PM")
+                    // and one muted meta line (posted · interested · platforms) —
+                    // replaces the old stacked Starts/Ends/Posted block that read
+                    // as bolted-on.
+                    Spacer(Modifier.height(6.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Filled.Schedule, null,
+                            modifier = Modifier.size(13.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            buildString {
+                                append(eventDateTime(event.startsAtMs))
+                                if (event.endsAtMs > 0) append("  →  ${eventDateTime(event.endsAtMs)}")
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    val metaParts = buildList {
+                        if (event.interestedCount >= 0) add("${event.interestedCount} interested")
+                        if (event.createdAtMs > 0) add("Posted ${eventDate(event.createdAtMs)}")
+                    }
+                    if (metaParts.isNotEmpty()) {
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            metaParts.joinToString(" · "),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.outline
+                        )
+                    }
+                } else {
+                    // Plain alerts keep the relative-time footer. Rich events don't
+                    // need it — the status chip + timing line already say when.
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        formatRelativeTime(event.timestampMs, nowMs),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.outline
+                    )
+                }
+                // "Visit link" buttons for URLs embedded in announcement bodies —
+                // tappable instead of raw blue text.
+                for (url in bodyUrls) {
+                    Spacer(Modifier.height(8.dp))
+                    CompactAlertButton(
+                        label = remember(url) {
+                            val host = try { Uri.parse(url).host ?: url } catch (_: Throwable) { url }
+                            "Visit $host"
+                        },
+                        icon = Icons.Filled.Link,
+                        prominent = false,
+                        enabled = true,
+                        onClick = { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+                    )
+                }
+                // Phase-appropriate calendar/join actions.
+                if (isRichEvent && event.groupRefId != null) {
+                    when (phase) {
+                        EventPhase.UPCOMING -> if (event.eventRefId != null) {
+                            val onCal = event.following == true
+                            Spacer(Modifier.height(8.dp))
+                            CompactAlertButton(
+                                label = when {
+                                    calSending -> if (onCal) "Removing..." else "Adding..."
+                                    onCal -> "Remove from Calendar"
+                                    else -> "Add to Calendar"
+                                },
+                                icon = if (onCal) Icons.Filled.EventBusy else Icons.Filled.CalendarMonth,
+                                prominent = !onCal,
+                                enabled = !calSending,
+                                onClick = {
+                                    calSending = true
+                                    val target = !onCal
+                                    scope.launch {
+                                        val r = VrchatAuthManager.setCalendarEventFollowing(
+                                            ctx, event.groupRefId, event.eventRefId!!, target
+                                        )
+                                        if (r.ok) {
+                                            InAppAlertState.enrichEvents(
+                                                ctx, groupKey,
+                                                match = { it.id == event.id },
+                                                transform = { it.copy(following = target) }
+                                            )
+                                            Toast.makeText(
+                                                ctx,
+                                                if (target) "Added to your VRChat calendar"
+                                                else "Removed from your VRChat calendar",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        } else {
+                                            Toast.makeText(
+                                                ctx,
+                                                r.error ?: "Couldn't update your calendar",
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                        }
+                                        calSending = false
+                                    }
+                                }
+                            )
+                        }
+                        EventPhase.LIVE -> {
+                            Spacer(Modifier.height(8.dp))
+                            CompactAlertButton(
+                                label = if (joinLoading) "Finding instances..." else "Join event",
+                                icon = Icons.AutoMirrored.Filled.Login,
+                                prominent = true,
+                                enabled = !joinLoading,
+                                onClick = { onJoinEvent(event.groupRefId) }
+                            )
+                        }
+                        EventPhase.ENDED -> { /* concluded — no action */ }
+                    }
+                }
+                if (showOpen && event.url != null) {
+                    Spacer(Modifier.height(8.dp))
+                    CompactAlertButton(
+                        label = "Open in VRChat",
+                        icon = Icons.Filled.OpenInNew,
+                        prominent = false,
+                        enabled = true,
+                        onClick = { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(event.url))) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Small tinted status/metadata chip on rich event alerts. [onClick] makes it a
+ *  tap target (the access chip opens the hosting group's web page). [solid]
+ *  renders the dark-translucent variant used ON the banner's bottom scrim,
+ *  where the usual 16%-alpha tint would be illegible. */
+@Composable
+private fun EventMetaChip(
+    label: String,
+    color: Color,
+    bold: Boolean = false,
+    solid: Boolean = false,
+    onClick: (() -> Unit)? = null
+) {
+    val container = if (solid) Color.Black.copy(alpha = 0.55f) else color.copy(alpha = 0.16f)
+    // Fixed height + centered single-line text so every chip is the SAME size
+    // regardless of script (CJK glyphs are taller than Latin — variable padding
+    // made mixed-language chip rows look ragged).
+    val content: @Composable () -> Unit = {
+        Box(
+            Modifier.height(22.dp).padding(horizontal = 7.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = if (bold) FontWeight.Bold else FontWeight.Medium,
+                color = color,
+                maxLines = 1
+            )
+        }
+    }
+    if (onClick != null) {
+        Surface(
+            onClick = onClick,
+            color = container,
+            shape = MaterialTheme.shapes.extraSmall
+        ) { content() }
+    } else {
+        Surface(
+            color = container,
+            shape = MaterialTheme.shapes.extraSmall
+        ) { content() }
+    }
+}
+
+/** Language chip — shows the NATIVE name ("日本語", "日本手話") like VRChat's
+ *  website. TAPPING it shows the name translated into the device language
+ *  ("Japanese", "Japanese Sign Language" — VRChat's in-client localization
+ *  style) in the same spot for 5 seconds, then reverts to the native name.
+ *  Re-tapping within the window restarts the 5s. Fixed 22dp height so mixed
+ *  Latin/CJK chips line up. Overlay variant sits on the banner's top-right. */
+@Composable
+private fun LanguageChip(code: String, overlay: Boolean) {
+    var tapCount by remember(code) { mutableStateOf(0) }
+    var translated by remember(code) { mutableStateOf(false) }
+    LaunchedEffect(tapCount) {
+        if (tapCount > 0) {
+            translated = true
+            delay(5_000)
+            translated = false
+        }
+    }
+    val label = if (translated) deviceLanguageName(code) else nativeLanguageName(code)
+    Surface(
+        onClick = { tapCount++ },
+        color = if (overlay) Color.Black.copy(alpha = 0.55f)
+            else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.12f),
+        shape = MaterialTheme.shapes.extraSmall
+    ) {
+        Box(
+            Modifier.height(22.dp).padding(horizontal = 7.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                color = if (overlay) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1
+            )
+        }
+    }
+}
+
+/** Platform support as highlighted circular brand symbols — Windows flag (blue),
+ *  Android robot (green), Apple mark (light) — matching VRChat's own platform
+ *  badges (per user reference; a monitor/phone glyph read as wrong). */
+@Composable
+private fun PlatformSymbols(csv: String?, overlay: Boolean) {
+    val platforms = csv?.split(",")?.mapNotNull { raw ->
+        when (raw.trim().lowercase()) {
+            "standalonewindows", "pc", "windows" -> "pc"
+            "android", "quest" -> "android"
+            "ios" -> "ios"
+            else -> null
+        }
+    }?.distinct().orEmpty()
+    if (platforms.isEmpty()) return
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        for (p in platforms) {
+            val tint = when (p) {
+                "pc" -> Color(0xFF2196F3)      // Windows blue
+                "android" -> Color(0xFF3DDC84) // Android brand green
+                else -> Color(0xFFE0E0E0)      // Apple light grey
+            }
+            Surface(
+                shape = CircleShape,
+                color = if (overlay) Color.Black.copy(alpha = 0.55f) else tint.copy(alpha = 0.18f),
+                modifier = Modifier.size(22.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    when (p) {
+                        "pc" -> Icon(
+                            androidx.compose.ui.res.painterResource(com.vrca.R.drawable.ic_platform_windows),
+                            contentDescription = "PC", tint = tint, modifier = Modifier.size(12.dp)
+                        )
+                        "android" -> Icon(
+                            Icons.Filled.Android,
+                            contentDescription = "Quest", tint = tint, modifier = Modifier.size(14.dp)
+                        )
+                        else -> Icon(
+                            androidx.compose.ui.res.painterResource(com.vrca.R.drawable.ic_platform_apple),
+                            contentDescription = "iOS", tint = tint, modifier = Modifier.size(12.dp)
+                        )
                     }
                 }
             }
@@ -1323,11 +1840,107 @@ private fun parseInstanceType(
 private data class InstanceTarget(
     val location: String,
     val label: String,
-    val timeLines: List<String> = emptyList()
+    val timeLines: List<String> = emptyList(),
+    // Known world thumbnail (from a stored alert/history entry) so the row can
+    // show the cached image INSTANTLY while the live info fetch is in flight.
+    val imageUrl: String = ""
 )
 
 private fun clockTime(ms: Long): String =
     java.text.SimpleDateFormat("h:mm a", java.util.Locale.US).format(java.util.Date(ms))
+
+/** "Jul 5 · 10:22 AM" — compact begin/end stamps on rich event alerts (the
+ *  Posted line carries the year; events are near-term so the timing line
+ *  stays short). */
+private fun eventDateTime(ms: Long): String =
+    java.text.SimpleDateFormat("MMM d · h:mm a", java.util.Locale.US).format(java.util.Date(ms))
+
+/** "Jul 4, 2026" — the Posted line. */
+private fun eventDate(ms: Long): String =
+    java.text.SimpleDateFormat("MMM d, yyyy", java.util.Locale.US).format(java.util.Date(ms))
+
+/** Where an event is in its lifecycle right now. */
+private enum class EventPhase { UPCOMING, LIVE, ENDED }
+
+private fun eventPhase(startsAtMs: Long, endsAtMs: Long, nowMs: Long): EventPhase = when {
+    startsAtMs <= 0L -> EventPhase.UPCOMING
+    nowMs < startsAtMs -> EventPhase.UPCOMING
+    endsAtMs > 0L -> if (nowMs <= endsAtMs) EventPhase.LIVE else EventPhase.ENDED
+    // No published end time: call it live for 4h after start, then ended.
+    else -> if (nowMs - startsAtMs <= 4L * 60 * 60 * 1000) EventPhase.LIVE else EventPhase.ENDED
+}
+
+/** Pull tappable links out of an announcement body ("Visit link" buttons). */
+private fun extractBodyUrls(body: String): List<String> =
+    Regex("https?://[^\\s)\\]}>\"']+").findAll(body)
+        .map { it.value.trimEnd('.', ',', ';', ':') }
+        .distinct()
+        .take(3)
+        .toList()
+
+/** VRChat calendar category ids → display names ("film_media" → "Film & Media"). */
+private fun prettyEventCategory(raw: String): String = when (raw.lowercase().trim()) {
+    "film_media", "film_and_media" -> "Film & Media"
+    else -> raw.split('_', ' ')
+        .filter { it.isNotBlank() }
+        .joinToString(" ") { part -> part.replaceFirstChar { it.uppercase() } }
+}
+
+/**
+ * VRChat's language codes → each language's NATIVE name, exactly how VRChat's
+ * own site renders them (日本語, English, 한국어 — NOT localized to the device
+ * language, which made "English" show as 英語 on a Japanese-locale phone).
+ * Static map first (VRChat's known language tags incl. sign languages), then
+ * Locale-native resolution, then the uppercased code as last resort.
+ */
+private val vrcLanguageNames = mapOf(
+    "eng" to "English", "kor" to "한국어", "rus" to "Русский", "spa" to "Español",
+    "por" to "Português", "zho" to "中文", "deu" to "Deutsch", "jpn" to "日本語",
+    "fra" to "Français", "swe" to "Svenska", "nld" to "Nederlands", "pol" to "Polski",
+    "dan" to "Dansk", "nor" to "Norsk", "ita" to "Italiano", "tha" to "ภาษาไทย",
+    "fin" to "Suomi", "hun" to "Magyar", "ces" to "Čeština", "tur" to "Türkçe",
+    "ara" to "العربية", "ron" to "Română", "vie" to "Tiếng Việt", "ukr" to "Українська",
+    "heb" to "עברית", "ind" to "Bahasa Indonesia", "hmn" to "Hmong", "tgl" to "Tagalog",
+    "mlt" to "Malti",
+    // Sign languages — VRChat's tags with the EXACT display names VRChat's own
+    // site uses (tester-confirmed: jsl renders as 日本手話, NOT "JSL" — never
+    // shorten these; no Locale resolution exists for them).
+    "ase" to "American Sign Language", "bfi" to "British Sign Language",
+    "dse" to "Nederlandse Gebarentaal", "fsl" to "Langue des Signes Française",
+    "jsl" to "日本手話", "kvk" to "한국수어"
+)
+
+private fun languageCodes(csv: String?): List<String> =
+    csv?.split(",")?.mapNotNull { raw ->
+        raw.trim().lowercase().removePrefix("language_").ifBlank { null }
+    }?.distinct().orEmpty()
+
+/** The language's NATIVE name ("日本語", "日本手話") — VRChat's website style. */
+private fun nativeLanguageName(code: String): String =
+    vrcLanguageNames[code] ?: run {
+        // Native-name resolution: display the language IN ITSELF.
+        val loc = java.util.Locale(code)
+        val resolved = try { loc.getDisplayLanguage(loc) } catch (_: Throwable) { "" }
+        if (resolved.isNotBlank() && !resolved.equals(code, ignoreCase = true)) resolved
+        else code.uppercase()
+    }
+
+// Sign languages can't be resolved through Locale, so their translated names are
+// English (the best universal fallback — spoken languages DO localize properly).
+private val signLanguageTranslatedNames = mapOf(
+    "ase" to "American Sign Language", "bfi" to "British Sign Language",
+    "dse" to "Dutch Sign Language", "fsl" to "French Sign Language",
+    "jsl" to "Japanese Sign Language", "kvk" to "Korean Sign Language"
+)
+
+/** The language's name translated into the DEVICE language ("Japanese" on an
+ *  English phone, 日本語 on a Japanese phone) — VRChat's in-client style. */
+private fun deviceLanguageName(code: String): String =
+    signLanguageTranslatedNames[code] ?: run {
+        val resolved = try { java.util.Locale(code).displayLanguage } catch (_: Throwable) { "" }
+        if (resolved.isNotBlank() && !resolved.equals(code, ignoreCase = true)) resolved
+        else code.uppercase()
+    }
 
 /**
  * A compact, app-styled picker that lists instances (world image, live occupancy, an
@@ -1340,7 +1953,8 @@ private fun clockTime(ms: Long): String =
 private fun InstanceListDialog(
     title: String,
     targets: List<InstanceTarget>,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    emptyText: String = "Nothing to show yet."
 ) {
     val ctx = LocalContext.current
     // Resolved instance info, filled in INCREMENTALLY (newest target first) so the
@@ -1361,6 +1975,16 @@ private fun InstanceListDialog(
             for (t in targets) {
                 val info = VrchatAuthManager.fetchInstanceInfo(ctx, t.location)
                 infos = infos + (t.location to info)
+                // Persist the world image so future opens render it INSTANTLY from
+                // disk instead of re-downloading (the "thumbnails reload every time
+                // you open the menu" jank): cache the bytes, and record the URL on
+                // whatever owns this location (a 24h history entry and/or an invite
+                // alert event) so the file stays referenced until that owner goes.
+                if (info.worldImageUrl.isNotBlank()) {
+                    AlertImageStore.ensureCached(ctx, info.worldImageUrl)
+                    InstanceHistoryStore.updateImage(ctx, t.location, info.worldImageUrl)
+                    InAppAlertState.setInviteTargetImage(ctx, t.location, info.worldImageUrl)
+                }
             }
             delay(15_000)
         }
@@ -1444,7 +2068,7 @@ private fun InstanceListDialog(
                 Spacer(Modifier.height(14.dp))
                 if (targets.isEmpty()) {
                     Text(
-                        "Nothing to show yet.",
+                        emptyText,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1510,10 +2134,14 @@ private fun InstanceRow(target: InstanceTarget, info: VrchatAuthManager.Instance
                         .background(typeColor.copy(alpha = 0.85f))
                 )
                 Spacer(Modifier.width(8.dp))
-                val img = info?.worldImageUrl.orEmpty()
+                // Live info's image first; else the STORED url from the alert /
+                // history entry so the thumb shows instantly while info resolves.
+                // Either way prefer the on-disk cached file over a network load.
+                val img = info?.worldImageUrl.orEmpty().ifBlank { target.imageUrl }
                 if (img.isNotBlank()) {
+                    val model: Any = AlertImageStore.resolve(ctx, img) ?: img
                     coil.compose.AsyncImage(
-                        model = img,
+                        model = model,
                         imageLoader = com.vrca.admin.VrchatImageLoader.get(ctx),
                         contentDescription = null,
                         contentScale = ContentScale.Crop,

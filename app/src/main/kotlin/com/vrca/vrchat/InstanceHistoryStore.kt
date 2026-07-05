@@ -53,7 +53,12 @@ object InstanceHistoryStore {
     data class Entry(
         val location: String,
         val worldName: String,
-        val sessions: List<Session> // chronological; newest last
+        val sessions: List<Session>, // chronological; newest last
+        // World thumbnail URL, learned the first time instance info resolves in the
+        // picker. The bytes persist in AlertImageStore until this entry ages out of
+        // the 24h window (the store's gc sees the reference vanish) — so reopening
+        // the history dialog shows images instantly instead of re-downloading.
+        val imageUrl: String = ""
     )
 
     /**
@@ -149,6 +154,19 @@ object InstanceHistoryStore {
     fun list(ctx: Context): List<Entry> =
         read(ctx).sortedByDescending { sortKey(it) }
 
+    /** Records the world image URL for [location] (no-op when the location isn't in
+     *  the 24h history). Called when the instance picker first resolves the info so
+     *  the image persists (via AlertImageStore) for the entry's lifetime. */
+    fun updateImage(ctx: Context, location: String, imageUrl: String) {
+        if (location.isBlank() || imageUrl.isBlank()) return
+        val entries = read(ctx).toMutableList()
+        val idx = entries.indexOfFirst { it.location == location }
+        if (idx < 0) return
+        if (entries[idx].imageUrl == imageUrl) return
+        entries[idx] = entries[idx].copy(imageUrl = imageUrl)
+        persist(ctx, entries)
+    }
+
     /** An entry sorts by its newest session: still-current floats to the top. */
     private fun sortKey(e: Entry): Long =
         e.sessions.maxOfOrNull { if (it.leftMs == 0L) Long.MAX_VALUE else it.leftMs } ?: 0L
@@ -176,7 +194,8 @@ object InstanceHistoryStore {
             out += Entry(
                 location = o.optString("loc"),
                 worldName = o.optString("world"),
-                sessions = sessions
+                sessions = sessions,
+                imageUrl = o.optString("img")
             )
         }
         return out
@@ -199,6 +218,7 @@ object InstanceHistoryStore {
                 put("loc", e.location)
                 put("world", e.worldName)
                 put("sessions", sArr)
+                put("img", e.imageUrl)
             })
         }
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

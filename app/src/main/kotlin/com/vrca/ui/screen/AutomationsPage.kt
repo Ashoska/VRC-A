@@ -44,6 +44,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -91,6 +92,19 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
     // Preset peek dialog state — set by long-pressing a preset chip.
     var peek by remember { mutableStateOf<PresetPeek?>(null) }
 
+    // Preset previews + selection are snapshotted in the PAGE scope for the
+    // same AnimatedVisibility-skip reason as the cycle mute flags below:
+    // reads inside a CompactSectionCard content lambda don't reliably
+    // retrigger it, so the auto-save writing into the selected slot left the
+    // chips (and the long-press peek) showing STALE content until the user
+    // tabbed out and back. Captured here, a preset edit changes the content
+    // lambda instance and the chips re-run; key() at the call site forces the
+    // repaint through.
+    val afkPresetPreviews = List(3) { vm.getAfkPresetPreview(it + 1) }
+    val selectedAfkSlot = vm.selectedAfkPreset
+    val cyclePresetPreviews = List(5) { vm.getCyclePresetPreview(it + 1) }
+    val selectedCycleSlot = vm.selectedCyclePreset
+
     PageContainer {
         // =========================
         // Pinned — collapsed = status ("'msg' · ON"), expanded = editor.
@@ -126,24 +140,29 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 (1..3).forEach { slot ->
-                    val content = vm.getAfkPresetPreview(slot)
-                    PresetChip(
-                        slot = slot,
-                        preview = content,
-                        equipped = slot == vm.selectedAfkPreset,
-                        enabled = !isBanned,
-                        onLoad = { vm.selectAfkPreset(slot) },
-                        onPeek = {
-                            peek = PresetPeek(
-                                title = "Pinned preset $slot",
-                                subtitle = if (content.isBlank()) "Empty" else "${content.length} characters",
-                                content = content,
-                                icon = Icons.Filled.PushPin,
-                                numbered = false,
-                                onLoad = { vm.selectAfkPreset(slot) }
-                            )
-                        }
-                    )
+                    val content = afkPresetPreviews[slot - 1]
+                    key(slot, content, slot == selectedAfkSlot) {
+                        PresetChip(
+                            slot = slot,
+                            preview = content,
+                            equipped = slot == selectedAfkSlot,
+                            enabled = !isBanned,
+                            onLoad = { vm.selectAfkPreset(slot) },
+                            onPeek = {
+                                // Read FRESH at press time — a composition-captured
+                                // value can be stale if the chip was skipped.
+                                val fresh = vm.getAfkPresetPreview(slot)
+                                peek = PresetPeek(
+                                    title = "Pinned preset $slot",
+                                    subtitle = if (fresh.isBlank()) "Empty" else "${fresh.length} characters",
+                                    content = fresh,
+                                    icon = Icons.Filled.PushPin,
+                                    numbered = false,
+                                    onLoad = { vm.selectAfkPreset(slot) }
+                                )
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -165,12 +184,25 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
         val activeRaw = remember(cycleTick, sending, vm.cycleLines.size) {
             if (sending) vm.cycleActiveRawIndex() else -1
         }
+        // Snapshot the per-line mute flags into a plain List HERE, in the page
+        // scope. This is the SAME mechanism the live `activeRaw` highlight uses:
+        // the value is captured by the CompactSectionCard content lambda below,
+        // so when a mute toggle changes it the lambda instance changes and
+        // AnimatedVisibility re-runs the rows. Reading cycleLineEnabled only
+        // INSIDE the content lambda (or inside a memoized provider on the row)
+        // did NOT work — nothing the content lambda *captures* changed on a mute
+        // toggle, so AnimatedVisibility skipped re-invoking content (the header
+        // summary updated, the rows did not). Each row gets a plain Boolean so
+        // its value param actually differs and it can't be skipped.
+        val cycleEnabledFlags: List<Boolean> = vm.cycleLineEnabled.toList()
         CompactSectionCard(
             title = "Cycle",
             icon = Icons.Filled.Loop,
             summary = buildString {
                 val live = vm.cycleLines.count { it.isNotBlank() }
+                val hidden = vm.cycleLineEnabled.count { !it }
                 append("$live lines · ${vm.cycleIntervalSeconds}s")
+                if (hidden > 0) append(" · $hidden hidden")
                 if (vm.cycleShuffle) append(" · shuffle")
                 if (cycleNow.isNotBlank()) append(" · now: “$cycleNow”")
             },
@@ -185,41 +217,32 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                 Text("No lines yet. Tap Add line.", style = MaterialTheme.typography.bodySmall)
             }
 
-            // Compact line rows: inline number, text field, a mute dot, and an
-            // overflow menu (move up/down, duplicate, delete) so all the new
-            // controls stay on one slim row. The currently-sending line is
-            // highlighted live while the cycle runs.
-            // Reading cycleMuteRev here makes the whole line list recompose the instant
-            // a mute toggles (a SnapshotStateList index set wasn't invalidating it).
-            @Suppress("UNUSED_EXPRESSION") vm.cycleMuteRev
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 vm.cycleLines.forEachIndexed { idx, _ ->
-                    val fieldValue =
-                        cycleLineFields[idx] ?: TextFieldValue(vm.cycleLines.getOrNull(idx).orEmpty())
-                    CycleLineRow(
-                        index = idx,
-                        count = vm.cycleLines.size,
-                        value = fieldValue,
-                        // Eager read in the parent loop so any mute toggle recomposes
-                        // the list immediately — the deferred-provider scoping looked
-                        // tidy but the snapshot read wasn't reliably invalidating the
-                        // row (the eye updated only after some other interaction).
-                        lineEnabled = vm.cycleLineEnabled.getOrElse(idx) { true },
-                        // Count the RESOLVED token length, not the literal "{world}".
-                        resolvedLength = vm.resolveTokens(fieldValue.text).length,
-                        isActive = idx == activeRaw,
-                        onValueChange = { v: TextFieldValue ->
-                            cycleLineFields[idx] = v
-                            vm.updateCycleLine(idx, v.text)
-                        },
-                        onToggleEnabled = { vm.setCycleLineEnabled(idx, it) },
-                        onDuplicate = { vm.duplicateCycleLine(idx) },
-                        onMoveUp = { vm.moveCycleLine(idx, idx - 1) },
-                        onMoveDown = { vm.moveCycleLine(idx, idx + 1) },
-                        onDelete = { vm.removeCycleLine(idx) },
-                        canDuplicate = vm.cycleLines.size < MAX_CYCLE_LINES,
-                        enabled = !isBanned
-                    )
+                    val lineEn = cycleEnabledFlags.getOrElse(idx) { true }
+                    key(idx, lineEn) {
+                        val fieldValue =
+                            cycleLineFields[idx] ?: TextFieldValue(vm.cycleLines.getOrNull(idx).orEmpty())
+                        CycleLineRow(
+                            index = idx,
+                            count = vm.cycleLines.size,
+                            value = fieldValue,
+                            lineEnabled = lineEn,
+                            resolvedLength = vm.resolveTokens(fieldValue.text).length,
+                            isActive = idx == activeRaw,
+                            onValueChange = { v: TextFieldValue ->
+                                cycleLineFields[idx] = v
+                                vm.updateCycleLine(idx, v.text)
+                            },
+                            onToggleEnabled = { vm.setCycleLineEnabled(idx, it) },
+                            onDuplicate = { vm.duplicateCycleLine(idx) },
+                            onMoveUp = { vm.moveCycleLine(idx, idx - 1) },
+                            onMoveDown = { vm.moveCycleLine(idx, idx + 1) },
+                            onDelete = { vm.removeCycleLine(idx) },
+                            canDuplicate = vm.cycleLines.size < MAX_CYCLE_LINES,
+                            enabled = !isBanned
+                        )
+                    }
                 }
             }
 
@@ -302,25 +325,28 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 (1..5).forEach { slot ->
-                    val firstLine = vm.getCyclePresetPreview(slot)
-                    val full = vm.getCyclePresetFull(slot)
-                    PresetChip(
-                        slot = slot,
-                        preview = firstLine,
-                        equipped = slot == vm.selectedCyclePreset,
-                        enabled = !isBanned,
-                        onLoad = { vm.selectCyclePreset(slot) },
-                        onPeek = {
-                            peek = PresetPeek(
-                                title = "Cycle preset $slot",
-                                subtitle = vm.getCyclePresetSubtitle(slot),
-                                content = full,
-                                icon = Icons.Filled.Loop,
-                                numbered = true,
-                                onLoad = { vm.selectCyclePreset(slot) }
-                            )
-                        }
-                    )
+                    val firstLine = cyclePresetPreviews[slot - 1]
+                    key(slot, firstLine, slot == selectedCycleSlot) {
+                        PresetChip(
+                            slot = slot,
+                            preview = firstLine,
+                            equipped = slot == selectedCycleSlot,
+                            enabled = !isBanned,
+                            onLoad = { vm.selectCyclePreset(slot) },
+                            onPeek = {
+                                // Read FRESH at press time — a composition-captured
+                                // value can be stale if the chip was skipped.
+                                peek = PresetPeek(
+                                    title = "Cycle preset $slot",
+                                    subtitle = vm.getCyclePresetSubtitle(slot),
+                                    content = vm.getCyclePresetFull(slot),
+                                    icon = Icons.Filled.Loop,
+                                    numbered = true,
+                                    onLoad = { vm.selectCyclePreset(slot) }
+                                )
+                            }
+                        )
+                    }
                 }
             }
         }

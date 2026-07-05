@@ -46,7 +46,12 @@ fun timeZoneRegion(id: String): String =
  * for a country name resolves to its city zones. Returns "" for non-country zones
  * (e.g. "Etc/UTC").
  */
-fun zoneCountryName(id: String): String = zoneToCountryName[id].orEmpty()
+fun zoneCountryName(id: String): String =
+    // Static map FIRST — guaranteed, no lazy/ICU dependency. The lazy ICU map was
+    // silently returning "" for common zones on some devices (the "searching Japan
+    // finds nothing" bug), so the popular countries resolve from pure Kotlin data
+    // that can never fail; the lazy map only fills in the long tail.
+    commonCountryZones[id] ?: zoneToCountryName[id].orEmpty()
 
 /**
  * zoneId → country display name, precomputed once. Built from THREE sources so an
