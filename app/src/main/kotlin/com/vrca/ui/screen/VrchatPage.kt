@@ -1462,24 +1462,17 @@ private fun AlertEventBody(
                 // for the group's web page either way.
                 if (isRichEvent && event.imageUrl.isNullOrBlank()) {
                     // TWO tight rows: (1) status/category/access chips + platform
-                    // symbols together on one line; (2) language chips right below.
-                    // Keeping languages in their OWN row (not the same FlowRow) is
-                    // what removes the big vertical gap the single-FlowRow wrap left.
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
-                            modifier = Modifier.fillMaxWidth()
+                    // symbols on ONE plain Row — a plain Row (not FlowRow) packs
+                    // them left, vertically centered, guaranteed on one line
+                    // (they're short); the earlier FlowRow / weight-Spacer pushed
+                    // the platforms to the far right and off the chips' baseline.
+                    // (2) language chips right below, only 3dp under the chips.
+                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            // Chips are ONE inseparable unit inside a Row (a bare
-                            // FlowRow split them, wrapping "Group" off on its own);
-                            // platforms sit right after them on the same line.
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                richChips(false)
-                            }
+                            richChips(false)
                             PlatformSymbols(event.platforms, overlay = false)
                         }
                         if (langCodes.isNotEmpty()) {
@@ -1711,7 +1704,7 @@ private fun LanguageChip(code: String, overlay: Boolean, translated: Boolean, on
         shape = MaterialTheme.shapes.extraSmall
     ) {
         Box(
-            Modifier.height(22.dp).padding(horizontal = 7.dp),
+            Modifier.height(20.dp).padding(horizontal = 7.dp),
             contentAlignment = Alignment.Center
         ) {
             Text(
