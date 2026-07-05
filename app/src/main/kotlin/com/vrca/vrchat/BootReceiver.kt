@@ -27,6 +27,9 @@ class BootReceiver : BroadcastReceiver() {
         // Re-arm the periodic watchdog after reboot.
         runCatching { PipelineWatchdogWorker.ensureScheduled(context) }
 
+        // Reboot clears AlarmManager — re-arm signed-up event reminders.
+        runCatching { EventReminderScheduler.rescheduleAll(context) }
+
         val deviceHash = context
             .getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
             .getString("device_id_hash", "") ?: ""

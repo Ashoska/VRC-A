@@ -1086,6 +1086,23 @@ object VrchatAuthManager {
         }
     }
 
+    /** A user's current display name (`GET /users/{id}` → `displayName`) — used to
+     *  resolve an event's organizer name for the alert card. Best-effort. */
+    suspend fun fetchUserDisplayName(context: Context, userId: String): String? = withContext(Dispatchers.IO) {
+        if (userId.isBlank() || !userId.startsWith("usr_")) return@withContext null
+        val cookieHeader = getCookieHeader(context) ?: return@withContext null
+        try {
+            val (code, body, rawCookies) = get("$BASE/users/$userId", null, cookieHeader)
+            if (code == 200) captureRolledCookies(context, rawCookies)
+            if (code == 200 && body.startsWith("{")) {
+                org.json.JSONObject(body).optString("displayName", "").takeIf { it.isNotBlank() }
+            } else null
+        } catch (e: Exception) {
+            Log.w(TAG, "fetchUserDisplayName($userId) failed", e)
+            null
+        }
+    }
+
     suspend fun fetchGroupName(context: Context, groupId: String): String? = withContext(Dispatchers.IO) {
         if (groupId.isBlank()) return@withContext null
         val cookieHeader = getCookieHeader(context) ?: return@withContext null

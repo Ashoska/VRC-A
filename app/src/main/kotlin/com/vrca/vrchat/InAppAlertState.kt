@@ -40,8 +40,16 @@ data class InAppAlertEvent(
     val accessType: String? = null,   // "public" / "group" / ...
     val languages: String? = null,    // CSV of language codes ("eng,jpn")
     // Whether the USER has this event on their VRChat calendar (null = unknown).
-    // Updated optimistically when the Add/Remove button succeeds.
-    val following: Boolean? = null
+    // Updated optimistically when the Add/Remove button succeeds. following==true
+    // = a "signed up" event (golden-pinned to the top of the notifications).
+    val following: Boolean? = null,
+    // Whether this event repeats (part of a recurring series). Best-effort from
+    // the calendar object; false when unknown.
+    val recurring: Boolean = false,
+    // The event's organizer (the user who created it, distinct from the group).
+    // Clickable -> their VRChat profile. Name resolved during enrichment.
+    val organizerId: String? = null,   // usr_...
+    val organizerName: String? = null
 )
 
 data class InAppAlertGroup(
@@ -70,7 +78,10 @@ data class AlertRichMeta(
     val platforms: String? = null,
     val accessType: String? = null,
     val languages: String? = null,
-    val following: Boolean? = null
+    val following: Boolean? = null,
+    val recurring: Boolean = false,
+    val organizerId: String? = null,
+    val organizerName: String? = null
 )
 
 // Kept for backward compat with callers that don't use grouping
@@ -303,6 +314,9 @@ object InAppAlertState {
                     put("languages", e.languages ?: "")
                     // -1 unknown / 0 false / 1 true
                     put("following", when (e.following) { null -> -1; false -> 0; true -> 1 })
+                    put("recurring", e.recurring)
+                    put("organizerId", e.organizerId ?: "")
+                    put("organizerName", e.organizerName ?: "")
                 })
             }
             arr.put(JSONObject().apply {
@@ -350,7 +364,10 @@ object InAppAlertState {
                     languages = eObj.optString("languages").ifBlank { null },
                     following = when (eObj.optInt("following", -1)) {
                         1 -> true; 0 -> false; else -> null
-                    }
+                    },
+                    recurring = eObj.optBoolean("recurring", false),
+                    organizerId = eObj.optString("organizerId").ifBlank { null },
+                    organizerName = eObj.optString("organizerName").ifBlank { null }
                 )
             }
             list += InAppAlertGroup(

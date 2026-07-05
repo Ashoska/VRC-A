@@ -58,6 +58,51 @@ object GroupAlertEnricher {
         else -> null
     }
 
+    /** Best-effort: whether the event repeats (part of a series). VRChat's exact
+     *  recurrence field isn't documented, so probe the likely names — any
+     *  non-empty/true value means recurring; absent → false (chip just won't show). */
+    fun extractRecurring(ev: JSONObject): Boolean {
+        if (ev.optBoolean("isRecurring", false)) return true
+        for (k in listOf("recurrence", "recurrenceRule", "repeatType", "recurringId",
+                "seriesId", "parentId", "parentCalendarEventId", "recurrenceId")) {
+            val v = ev.opt(k) ?: continue
+            if (v is Boolean && v) return true
+            if (v is String && v.isNotBlank() && v.lowercase() != "none" && v.lowercase() != "never") return true
+            if (v is JSONObject && v.length() > 0) return true
+        }
+        return false
+    }
+
+    /** The organizer's user id (`usr_...`) — the person who created the event,
+     *  distinct from the hosting group. Probes the likely owner fields. */
+    fun extractOrganizerId(ev: JSONObject): String? {
+        for (k in listOf("ownerId", "authorId", "creatorId", "hostId", "userId")) {
+            val v = ev.optString(k, "")
+            if (v.startsWith("usr_")) return v
+        }
+        // Nested owner/author object.
+        for (k in listOf("owner", "author", "creator", "host")) {
+            val o = ev.optJSONObject(k) ?: continue
+            val v = o.optString("id", "")
+            if (v.startsWith("usr_")) return v
+        }
+        return null
+    }
+
+    /** Organizer display name straight off the event object (a nested owner
+     *  object sometimes carries it), so we can skip the extra fetch. */
+    fun extractOrganizerName(ev: JSONObject): String? {
+        for (k in listOf("owner", "author", "creator", "host")) {
+            val o = ev.optJSONObject(k) ?: continue
+            val n = o.optString("displayName", "").ifBlank { o.optString("name", "") }
+            if (n.isNotBlank()) return n
+        }
+        return ev.optString("ownerDisplayName", "").ifBlank { null }
+    }
+
+    // Resolved organizer names, keyed by usr_ id (process-lifetime).
+    private val organizerNameCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
     fun jsonArrayToCsv(arr: JSONArray?): String? {
         if (arr == null || arr.length() == 0) return null
         val parts = (0 until arr.length()).mapNotNull { arr.optString(it).ifBlank { null } }
@@ -155,6 +200,14 @@ object GroupAlertEnricher {
                     val access = ev.optString("accessType", "")
                     val interested = extractInterestedCount(ev)
                     val following = extractEventFollowing(ev)
+                    val recurring = extractRecurring(ev)
+                    val organizerId = extractOrganizerId(ev)
+                    // Organizer name: prefer a name on the event object; else resolve
+                    // once via /users/{id} and cache (one call per unique organizer).
+                    val organizerName = extractOrganizerName(ev) ?: organizerId?.let { oid ->
+                        organizerNameCache[oid] ?: VrchatAuthManager.fetchUserDisplayName(ctx, oid)
+                            ?.also { organizerNameCache[oid] = it }
+                    }
                     val title = ev.optString("title", "").ifBlank { ev.optString("name", "") }
                     val desc = ev.optString("description", "").ifBlank { ev.optString("text", "") }
                     if (img != null) AlertImageStore.ensureCached(ctx, img)
@@ -182,6 +235,9 @@ object GroupAlertEnricher {
                                 // emptied list must CLEAR the chip, not keep stale.
                                 languages = if (ev.has("languages")) languagesCsv else e.languages,
                                 following = following ?: e.following,
+                                recurring = recurring || e.recurring,
+                                organizerId = organizerId ?: e.organizerId,
+                                organizerName = organizerName ?: e.organizerName,
                                 // Upgrade the display: the event's REAL name (drops the
                                 // "New event by X:" v2 boilerplate), timestamp = start,
                                 // body = clean description. Edits made on VRChat's side

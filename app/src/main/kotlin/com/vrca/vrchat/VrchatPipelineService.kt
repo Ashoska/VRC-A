@@ -3274,7 +3274,10 @@ class VrchatPipelineService : Service() {
             platforms = GroupAlertEnricher.jsonArrayToCsv(event.optJSONArray("platforms")),
             accessType = event.optString("accessType", "").ifBlank { null },
             languages = GroupAlertEnricher.jsonArrayToCsv(event.optJSONArray("languages")),
-            following = GroupAlertEnricher.extractEventFollowing(event)
+            following = GroupAlertEnricher.extractEventFollowing(event),
+            recurring = GroupAlertEnricher.extractRecurring(event),
+            organizerId = GroupAlertEnricher.extractOrganizerId(event),
+            organizerName = GroupAlertEnricher.extractOrganizerName(event)
         )
         // With structured timing available the body is just the description; the
         // text-timing fallback (buildCalendarEventBody) covers events with no
@@ -3712,7 +3715,10 @@ class VrchatPipelineService : Service() {
                         platforms = alertRich?.platforms,
                         accessType = alertRich?.accessType,
                         languages = alertRich?.languages,
-                        following = alertRich?.following
+                        following = alertRich?.following,
+                        recurring = alertRich?.recurring ?: false,
+                        organizerId = alertRich?.organizerId,
+                        organizerName = alertRich?.organizerName
                     ),
                     singleEvent = alertSingleEvent,
                     dedupByActionData = alertDedupByActionData
