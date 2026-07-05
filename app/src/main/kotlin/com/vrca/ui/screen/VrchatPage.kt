@@ -1328,6 +1328,22 @@ private fun AlertEventBody(
     val longBody = event.body.length > 320
     val displayBody = if (longBody && !bodyExpanded) event.body.take(300).trimEnd() + "…" else event.body
     val langCodes = remember(event.languages) { languageCodes(event.languages) }
+    // Exactly ONE language chip can show its device-language translation at a
+    // time: tapping a chip translates it and immediately reverts any other that
+    // was still in its 5s window. langTapTick restarts the 5s timer on every tap
+    // (including re-tapping the same chip).
+    var translatedLang by remember { mutableStateOf<String?>(null) }
+    var langTapTick by remember { mutableStateOf(0) }
+    LaunchedEffect(langTapTick) {
+        if (translatedLang != null) {
+            delay(5_000)
+            translatedLang = null
+        }
+    }
+    val onLangTap: (String) -> Unit = { code ->
+        translatedLang = code
+        langTapTick++
+    }
     val startingSoon = event.startsAtMs - nowMs < 2L * 60 * 60 * 1000
     val (phaseLabel, phaseColor) = when (phase) {
         EventPhase.UPCOMING -> "Starts ${formatRelativeTime(event.startsAtMs, nowMs)}" to
@@ -1393,10 +1409,14 @@ private fun AlertEventBody(
                         // horizontal row overflowed the banner on 2-3 languages.
                         Column(
                             Modifier.align(Alignment.TopEnd).padding(6.dp),
-                            verticalArrangement = Arrangement.spacedBy(3.dp),
+                            verticalArrangement = Arrangement.spacedBy(1.dp),
                             horizontalAlignment = Alignment.End
                         ) {
-                            for (code in langCodes.take(3)) LanguageChip(code, overlay = true)
+                            for (code in langCodes.take(3)) {
+                                LanguageChip(code, overlay = true,
+                                    translated = translatedLang == code,
+                                    onTap = { onLangTap(code) })
+                            }
                         }
                     }
                     if (isRichEvent) {
@@ -1441,24 +1461,40 @@ private fun AlertEventBody(
                 // block from the description. The access chip is the tap target
                 // for the group's web page either way.
                 if (isRichEvent && event.imageUrl.isNullOrBlank()) {
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        // The status/category/access chips are ONE inseparable
-                        // unit — a bare FlowRow split them mid-sequence ("Group"
-                        // wrapped off the row on its own, tester-reported).
-                        // Platform symbols and each language chip wrap as their
-                        // own units when space runs out.
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    // TWO tight rows: (1) status/category/access chips + platform
+                    // symbols together on one line; (2) language chips right below.
+                    // Keeping languages in their OWN row (not the same FlowRow) is
+                    // what removes the big vertical gap the single-FlowRow wrap left.
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            richChips(false)
+                            // Chips are ONE inseparable unit inside a Row (a bare
+                            // FlowRow split them, wrapping "Group" off on its own);
+                            // platforms sit right after them on the same line.
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                richChips(false)
+                            }
+                            PlatformSymbols(event.platforms, overlay = false)
                         }
-                        PlatformSymbols(event.platforms, overlay = false)
-                        for (code in langCodes.take(4)) LanguageChip(code, overlay = false)
+                        if (langCodes.isNotEmpty()) {
+                            FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                for (code in langCodes.take(6)) {
+                                    LanguageChip(code, overlay = false,
+                                        translated = translatedLang == code,
+                                        onTap = { onLangTap(code) })
+                                }
+                            }
+                        }
                     }
                     Divider(
                         color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f),
@@ -1660,25 +1696,16 @@ private fun EventMetaChip(
 }
 
 /** Language chip — shows the NATIVE name ("日本語", "日本手話") like VRChat's
- *  website. TAPPING it shows the name translated into the device language
- *  ("Japanese", "Japanese Sign Language" — VRChat's in-client localization
- *  style) in the same spot for 5 seconds, then reverts to the native name.
- *  Re-tapping within the window restarts the 5s. Fixed 22dp height so mixed
+ *  website; when [translated] it shows the device-language name ("Japanese",
+ *  "Japanese Sign Language" — VRChat's in-client localization style). Controlled:
+ *  the parent tracks which single chip is translated (tapping one reverts any
+ *  other still in its 5s window) and the 5s timer. Fixed 22dp height so mixed
  *  Latin/CJK chips line up. Overlay variant sits on the banner's top-right. */
 @Composable
-private fun LanguageChip(code: String, overlay: Boolean) {
-    var tapCount by remember(code) { mutableStateOf(0) }
-    var translated by remember(code) { mutableStateOf(false) }
-    LaunchedEffect(tapCount) {
-        if (tapCount > 0) {
-            translated = true
-            delay(5_000)
-            translated = false
-        }
-    }
+private fun LanguageChip(code: String, overlay: Boolean, translated: Boolean, onTap: () -> Unit) {
     val label = if (translated) deviceLanguageName(code) else nativeLanguageName(code)
     Surface(
-        onClick = { tapCount++ },
+        onClick = onTap,
         color = if (overlay) Color.Black.copy(alpha = 0.55f)
             else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.12f),
         shape = MaterialTheme.shapes.extraSmall
