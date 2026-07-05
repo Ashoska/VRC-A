@@ -59,9 +59,9 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.DesktopWindows
 import androidx.compose.material.icons.filled.EventBusy
-import androidx.compose.material.icons.filled.PhoneIphone
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Group
@@ -1305,6 +1305,7 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
  * Join event while live. Plain events (no rich metadata) render exactly like the
  * old simple card.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AlertEventBody(
     event: InAppAlertEvent,
@@ -1387,9 +1388,13 @@ private fun AlertEventBody(
                         modifier = Modifier.fillMaxWidth()
                     )
                     if (langNames.isNotEmpty()) {
-                        Row(
+                        // Right-aligned STACK (not a row): native sign-language
+                        // names ("American Sign Language", 日本手話) are long, so a
+                        // horizontal row overflowed the banner on 2-3 languages.
+                        Column(
                             Modifier.align(Alignment.TopEnd).padding(6.dp),
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            verticalArrangement = Arrangement.spacedBy(3.dp),
+                            horizontalAlignment = Alignment.End
                         ) {
                             for (lang in langNames.take(3)) LanguageChip(lang, overlay = true)
                         }
@@ -1429,28 +1434,26 @@ private fun AlertEventBody(
                     )
                     Spacer(Modifier.height(3.dp))
                 }
-                // No banner to overlay on → the same chips render as a normal row
-                // under the title (status/category/access + platform symbols),
-                // with the language chips on their own line when set. The access
-                // chip is the tap target for the group's web page either way.
+                // No banner to overlay on → ONE wrapping flow with everything
+                // together (status/category/access chips, platform symbols,
+                // language chips) so nothing sits disconnected on its own line
+                // with weird gaps, then a thin divider separating this meta
+                // block from the description. The access chip is the tap target
+                // for the group's web page either way.
                 if (isRichEvent && event.imageUrl.isNullOrBlank()) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
+                    FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        modifier = Modifier.padding(bottom = 6.dp)
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
                         richChips(false)
-                        Spacer(Modifier.weight(1f))
                         PlatformSymbols(event.platforms, overlay = false)
+                        for (lang in langNames.take(4)) LanguageChip(lang, overlay = false)
                     }
-                    if (langNames.isNotEmpty()) {
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            modifier = Modifier.padding(bottom = 6.dp)
-                        ) {
-                            for (lang in langNames.take(4)) LanguageChip(lang, overlay = false)
-                        }
-                    }
+                    Divider(
+                        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f),
+                        modifier = Modifier.padding(vertical = 8.dp)
+                    )
                 }
                 if (displayBody.isNotBlank() && displayBody != event.eventTitle) {
                     Text(
@@ -1615,14 +1618,22 @@ private fun EventMetaChip(
     onClick: (() -> Unit)? = null
 ) {
     val container = if (solid) Color.Black.copy(alpha = 0.55f) else color.copy(alpha = 0.16f)
+    // Fixed height + centered single-line text so every chip is the SAME size
+    // regardless of script (CJK glyphs are taller than Latin — variable padding
+    // made mixed-language chip rows look ragged).
     val content: @Composable () -> Unit = {
-        Text(
-            label,
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = if (bold) FontWeight.Bold else FontWeight.Medium,
-            color = color,
-            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
-        )
+        Box(
+            Modifier.height(22.dp).padding(horizontal = 7.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = if (bold) FontWeight.Bold else FontWeight.Medium,
+                color = color,
+                maxLines = 1
+            )
+        }
     }
     if (onClick != null) {
         Surface(
@@ -1638,8 +1649,10 @@ private fun EventMetaChip(
     }
 }
 
-/** Language chip — native name ("日本語", "English"), matching VRChat's own
- *  rendering. Overlay variant sits on the banner's top-right corner. */
+/** Language chip — native name ("日本語", "English", "日本手話"), matching
+ *  VRChat's own rendering. Same fixed 22dp height as EventMetaChip so mixed
+ *  Latin/CJK chips line up instead of rendering at different sizes. Overlay
+ *  variant sits on the banner's top-right corner. */
 @Composable
 private fun LanguageChip(label: String, overlay: Boolean) {
     Surface(
@@ -1647,43 +1660,64 @@ private fun LanguageChip(label: String, overlay: Boolean) {
             else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.12f),
         shape = MaterialTheme.shapes.extraSmall
     ) {
-        Text(
-            label,
-            style = MaterialTheme.typography.labelSmall,
-            color = if (overlay) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-        )
+        Box(
+            Modifier.height(22.dp).padding(horizontal = 7.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                color = if (overlay) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1
+            )
+        }
     }
 }
 
-/** Platform support as highlighted circular symbols (PC monitor / Android robot /
- *  iPhone), VRChat-style, instead of a text list. Sits next to the access chip. */
+/** Platform support as highlighted circular brand symbols — Windows flag (blue),
+ *  Android robot (green), Apple mark (light) — matching VRChat's own platform
+ *  badges (per user reference; a monitor/phone glyph read as wrong). */
 @Composable
 private fun PlatformSymbols(csv: String?, overlay: Boolean) {
-    val entries = csv?.split(",")?.mapNotNull { raw ->
+    val platforms = csv?.split(",")?.mapNotNull { raw ->
         when (raw.trim().lowercase()) {
-            "standalonewindows", "pc", "windows" ->
-                Triple(Icons.Filled.DesktopWindows, Color(0xFF64B5F6), "PC")
-            "android", "quest" ->
-                Triple(Icons.Filled.Android, Color(0xFF81C784), "Quest")
-            "ios" ->
-                Triple(Icons.Filled.PhoneIphone, Color(0xFFE0E0E0), "iOS")
+            "standalonewindows", "pc", "windows" -> "pc"
+            "android", "quest" -> "android"
+            "ios" -> "ios"
             else -> null
         }
-    }?.distinctBy { it.third }.orEmpty()
-    if (entries.isEmpty()) return
+    }?.distinct().orEmpty()
+    if (platforms.isEmpty()) return
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        for ((icon, tint, desc) in entries) {
+        for (p in platforms) {
+            val tint = when (p) {
+                "pc" -> Color(0xFF2196F3)      // Windows blue
+                "android" -> Color(0xFF3DDC84) // Android brand green
+                else -> Color(0xFFE0E0E0)      // Apple light grey
+            }
             Surface(
                 shape = CircleShape,
                 color = if (overlay) Color.Black.copy(alpha = 0.55f) else tint.copy(alpha = 0.18f),
-                modifier = Modifier.size(20.dp)
+                modifier = Modifier.size(22.dp)
             ) {
                 Box(contentAlignment = Alignment.Center) {
-                    Icon(icon, contentDescription = desc, tint = tint, modifier = Modifier.size(12.dp))
+                    when (p) {
+                        "pc" -> Icon(
+                            androidx.compose.ui.res.painterResource(com.vrca.R.drawable.ic_platform_windows),
+                            contentDescription = "PC", tint = tint, modifier = Modifier.size(12.dp)
+                        )
+                        "android" -> Icon(
+                            Icons.Filled.Android,
+                            contentDescription = "Quest", tint = tint, modifier = Modifier.size(14.dp)
+                        )
+                        else -> Icon(
+                            androidx.compose.ui.res.painterResource(com.vrca.R.drawable.ic_platform_apple),
+                            contentDescription = "iOS", tint = tint, modifier = Modifier.size(12.dp)
+                        )
+                    }
                 }
             }
         }
@@ -1845,9 +1879,12 @@ private val vrcLanguageNames = mapOf(
     "ara" to "العربية", "ron" to "Română", "vie" to "Tiếng Việt", "ukr" to "Українська",
     "heb" to "עברית", "ind" to "Bahasa Indonesia", "hmn" to "Hmong", "tgl" to "Tagalog",
     "mlt" to "Malti",
-    // Sign languages — VRChat's tags; no Locale resolution exists for these.
-    "ase" to "ASL", "bfi" to "BSL", "dse" to "NGT", "fsl" to "LSF",
-    "jsl" to "JSL", "kvk" to "KVK", "tss" to "TSL", "sgn" to "Sign"
+    // Sign languages — VRChat's tags with the EXACT display names VRChat's own
+    // site uses (tester-confirmed: jsl renders as 日本手話, NOT "JSL" — never
+    // shorten these; no Locale resolution exists for them).
+    "ase" to "American Sign Language", "bfi" to "British Sign Language",
+    "dse" to "Nederlandse Gebarentaal", "fsl" to "Langue des Signes Française",
+    "jsl" to "日本手話", "kvk" to "한국수어"
 )
 
 private fun languageNames(csv: String?): List<String> {
