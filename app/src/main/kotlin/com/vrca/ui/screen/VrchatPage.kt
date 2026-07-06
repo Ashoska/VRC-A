@@ -858,7 +858,7 @@ private fun LazyListScope.inAppAlertSection(
                             style = MaterialTheme.typography.labelLarge,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(horizontal = 4.dp, top = 6.dp, bottom = 2.dp)
+                            modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 6.dp, bottom = 2.dp)
                         )
                     }
                 }
