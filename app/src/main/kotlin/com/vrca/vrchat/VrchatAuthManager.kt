@@ -1155,6 +1155,27 @@ object VrchatAuthManager {
         }
     }
 
+    /**
+     * A single calendar event (`GET /calendar/{groupId}/{eventId}`). The single-
+     * event object carries the authenticated user's per-event state (whether they
+     * follow/are-signed-up) that the group calendar LIST omits — so this is how we
+     * detect an event the user added to their calendar IN-GAME. Returns the full
+     * object (also richer for organizer/recurrence).
+     */
+    suspend fun fetchCalendarEvent(context: Context, groupId: String, eventId: String): org.json.JSONObject? =
+        withContext(Dispatchers.IO) {
+            if (groupId.isBlank() || eventId.isBlank()) return@withContext null
+            val cookieHeader = getCookieHeader(context) ?: return@withContext null
+            try {
+                val (code, body, rawCookies) = get("$BASE/calendar/$groupId/$eventId", null, cookieHeader)
+                if (code == 200) captureRolledCookies(context, rawCookies)
+                if (code == 200 && body.startsWith("{")) org.json.JSONObject(body) else null
+            } catch (e: Exception) {
+                Log.w(TAG, "fetchCalendarEvent($groupId,$eventId) failed", e)
+                null
+            }
+        }
+
     // Group calendar events. VRChat exposes group events at
     // GET /groups/{groupId}/calendar — used to backfill events created while
     // the app was closed (they don't reliably appear in the per-user

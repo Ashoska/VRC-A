@@ -1989,11 +1989,19 @@ class VrchatPipelineService : Service() {
     private fun scheduleTargetedGroupSweep(groupId: String) {
         if (groupId.isBlank()) return
         serviceScope.launch {
-            delay(2500)
-            try {
-                GroupAlertEnricher.enrich(this@VrchatPipelineService, groupId)
-            } catch (e: Exception) {
-                Log.w(TAG, "Targeted group sweep failed for $groupId", e)
+            // A genuine new-event push warrants an immediate enrich, but VRChat's
+            // backend may not have indexed the event yet when we first fetch —
+            // retry a couple of times. minIntervalMs=0 FORCES each attempt past the
+            // per-group debounce (the global mutex + 2.5s spacing still bounds it),
+            // so a second event arriving right after the first still enriches
+            // instead of being silently debounced away.
+            for (delayMs in listOf(2500L, 6000L, 15000L)) {
+                delay(delayMs)
+                try {
+                    GroupAlertEnricher.enrich(this@VrchatPipelineService, groupId, minIntervalMs = 0)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Targeted group sweep failed for $groupId", e)
+                }
             }
         }
     }

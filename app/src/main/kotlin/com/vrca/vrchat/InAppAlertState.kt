@@ -219,6 +219,32 @@ object InAppAlertState {
         )
     }
 
+    /**
+     * Removes ONE event from a group (the per-event X on a multi-event card). If
+     * that empties the group, the whole group is removed. For a recurring series
+     * (collapsed to one visible entry) this removes ALL occurrences of that title,
+     * so dismissing the shown card actually clears the series rather than surfacing
+     * the next occurrence.
+     */
+    fun dismissEvent(ctx: Context, groupId: String, eventId: String) {
+        val cur = _groups.value.toMutableList()
+        val idx = cur.indexOfFirst { it.groupId == groupId }
+        if (idx < 0) return
+        val g = cur[idx]
+        val target = g.events.firstOrNull { it.id == eventId } ?: return
+        val remaining = if (target.recurring && !target.eventTitle.isNullOrBlank()) {
+            val t = target.eventTitle.trim().lowercase()
+            g.events.filter { !(it.recurring && it.eventTitle?.trim()?.lowercase() == t) }
+        } else {
+            g.events.filter { it.id != eventId }
+        }
+        if (remaining.isEmpty()) cur.removeAt(idx)
+        else cur[idx] = g.copy(events = remaining)
+        _groups.value = cur
+        persist(ctx)
+        AlertImageStore.gc(ctx)
+    }
+
     fun dismiss(ctx: Context, groupId: String) {
         val current = _groups.value.toMutableList()
         current.removeAll { it.groupId == groupId }

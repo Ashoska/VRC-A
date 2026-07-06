@@ -68,6 +68,37 @@ object GroupAlertEnricher {
         return null
     }
 
+    private fun normTitle(ev: JSONObject): String =
+        ev.optString("title", "").ifBlank { ev.optString("name", "") }
+            .trim().lowercase().replace(Regex("\\s+"), " ")
+
+    /**
+     * Collapse recurring occurrences (same title) to ONE representative per series
+     * — the nearest UPCOMING occurrence (or most-recent past if none upcoming).
+     * Returns (representative, isRecurringSeries). Single-title events pass through
+     * with isRecurringSeries=false. Keeps the enricher's per-event work (single
+     * fetch) bounded to ~1 per series instead of one per flooded occurrence.
+     */
+    private fun collapseEventsByTitle(events: JSONArray): List<Pair<JSONObject, Boolean>> {
+        val now = System.currentTimeMillis()
+        val byTitle = LinkedHashMap<String, MutableList<JSONObject>>()
+        for (i in 0 until events.length()) {
+            val ev = events.optJSONObject(i) ?: continue
+            val t = normTitle(ev).ifBlank { "id:${ev.optString("id", i.toString())}" }
+            byTitle.getOrPut(t) { mutableListOf() }.add(ev)
+        }
+        return byTitle.values.map { occ ->
+            if (occ.size == 1) occ[0] to false
+            else {
+                val rep = occ.filter { parseTimestampMs(it.optString("startsAt", "")) >= now }
+                    .minByOrNull { parseTimestampMs(it.optString("startsAt", "")) }
+                    ?: occ.maxByOrNull { parseTimestampMs(it.optString("startsAt", "")) }
+                    ?: occ[0]
+                rep to true
+            }
+        }
+    }
+
     /** Best-effort: whether the event repeats (part of a series). VRChat's exact
      *  recurrence field isn't documented, so probe the likely names — any
      *  non-empty/true value means recurring; absent → false (chip just won't show). */
@@ -194,12 +225,15 @@ object GroupAlertEnricher {
     private suspend fun enrichLocked(ctx: Context, groupId: String): Boolean {
         try {
             // ---- Calendar events: match alerts by the cal_ id ----
+            // Collapse recurring occurrences to ONE representative per series FIRST,
+            // so the per-representative single-event fetch (below) is bounded to
+            // ~1 call per series instead of one per flooded occurrence.
             val events = VrchatAuthManager.fetchGroupCalendarEvents(ctx, groupId, 20)
             if (events != null) {
-                for (j in 0 until events.length()) {
-                    val ev = events.optJSONObject(j) ?: continue
+                for ((ev, isRecurringSeries) in collapseEventsByTitle(events)) {
                     val evId = ev.optString("id", "").ifBlank { findIdWithPrefix(ev, "cal_").orEmpty() }
                     if (evId.isBlank()) continue
+                    val repTitle = normTitle(ev)
                     val startsMs = parseTimestampMs(ev.optString("startsAt", ""))
                     val endsMs = parseTimestampMs(ev.optString("endsAt", ""))
                     val createdMs = parseTimestampMs(ev.optString("createdAt", ""))
@@ -209,15 +243,23 @@ object GroupAlertEnricher {
                     val languagesCsv = jsonArrayToCsv(ev.optJSONArray("languages"))
                     val access = ev.optString("accessType", "")
                     val interested = extractInterestedCount(ev)
-                    val following = extractEventFollowing(ev)
-                    val recurring = extractRecurring(ev)
-                    val organizerId = extractOrganizerId(ev)
+                    // The group calendar LIST omits the user's per-event follow
+                    // state, so an event added IN-GAME wasn't detected. Fetch the
+                    // single event (which carries it) to get authoritative
+                    // following + richer organizer/recurrence. One call per
+                    // representative (after recurring-collapse, ~1 per series).
+                    val single = VrchatAuthManager.fetchCalendarEvent(ctx, groupId, evId)
+                    val src = single ?: ev
+                    val following = extractEventFollowing(src) ?: extractEventFollowing(ev)
+                    val recurring = isRecurringSeries || extractRecurring(src) || extractRecurring(ev)
+                    val organizerId = extractOrganizerId(src) ?: extractOrganizerId(ev)
                     // Organizer name: prefer a name on the event object; else resolve
                     // once via /users/{id} and cache (one call per unique organizer).
-                    val organizerName = extractOrganizerName(ev) ?: organizerId?.let { oid ->
-                        organizerNameCache[oid] ?: VrchatAuthManager.fetchUserDisplayName(ctx, oid)
-                            ?.also { organizerNameCache[oid] = it }
-                    }
+                    val organizerName = extractOrganizerName(src) ?: extractOrganizerName(ev)
+                        ?: organizerId?.let { oid ->
+                            organizerNameCache[oid] ?: VrchatAuthManager.fetchUserDisplayName(ctx, oid)
+                                ?.also { organizerNameCache[oid] = it }
+                        }
                     val title = ev.optString("title", "").ifBlank { ev.optString("name", "") }
                     val desc = ev.optString("description", "").ifBlank { ev.optString("text", "") }
                     if (img != null) AlertImageStore.ensureCached(ctx, img)
@@ -225,7 +267,13 @@ object GroupAlertEnricher {
                         ctx, "event_$groupId",
                         match = { e ->
                             e.eventRefId == evId ||
-                                (e.eventRefId == null && e.url?.contains(evId) == true)
+                                (e.eventRefId == null && e.url?.contains(evId) == true) ||
+                                // A recurring representative updates ALL stored
+                                // occurrences of its series (matched by title) so
+                                // following/interested/etc. propagate to every one
+                                // and the display-collapse shows consistent data.
+                                (recurring && e.recurring && repTitle.isNotBlank() &&
+                                    (e.eventTitle?.trim()?.lowercase()?.replace(Regex("\\s+"), " ") ?: "") == repTitle)
                         },
                         transform = { e ->
                             e.copy(

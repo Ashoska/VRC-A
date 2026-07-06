@@ -1274,9 +1274,10 @@ private fun AlertGroupCard(
                     }
                     // Ago row + a TINY pin toggle (shown in both collapsed and
                     // expanded states). Tapping pins/unpins this group to the
-                    // "📌 Pinned" section. Gold when pinned. (Signed-up events are
-                    // auto-pinned above the manual Pinned section, so their toggle
-                    // still works but they display in the Going section.)
+                    // "📌 Pinned" section. Gold when pinned. HIDDEN for signed-up
+                    // (Added-to-Calendar) events — those auto-sort into the "Going"
+                    // section, so a manual pin on them just fought the auto-sort;
+                    // the pin returns once the event is removed from the calendar.
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         latest?.let {
                             Text(
@@ -1285,6 +1286,7 @@ private fun AlertGroupCard(
                                 color = MaterialTheme.colorScheme.outline
                             )
                         }
+                        if (!signedUp) {
                         Spacer(Modifier.width(6.dp))
                         Box(Modifier.size(20.dp).clip(CircleShape).clickable { onTogglePin() },
                             contentAlignment = Alignment.Center) {
@@ -1294,6 +1296,7 @@ private fun AlertGroupCard(
                                 modifier = Modifier.size(14.dp),
                                 tint = if (pinned) gold else MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                        }
                         }
                     }
                 }
@@ -1383,7 +1386,19 @@ private fun AlertGroupCard(
                     // events carry DISTINCT urls (e.g. separate group posts/events), so
                     // each can be opened individually. Shared opens and all invite
                     // actions live as compact symbols in the header instead.
+                    // key() on the set of event ids forces the AnimatedVisibility
+                    // content to repaint when a SECOND event fuses into the group
+                    // (the content lambda otherwise skips re-running — same class of
+                    // bug as the cycle-mute rows) so a newly-fused event shows up.
+                    val fuseKey = displayEvents.joinToString(",") { it.id }
+                    key(fuseKey) {
                     for ((idx, event) in displayEvents.withIndex()) {
+                        // Per-event dismiss (X) when the card fuses MULTIPLE events —
+                        // lets the user clear one without nuking the whole group.
+                        val onEventDismiss: (() -> Unit)? =
+                            if (displayEvents.size > 1) {
+                                { InAppAlertState.dismissEvent(ctx, group.groupId, event.id) }
+                            } else null
                         if (event.beforeText != null && event.afterText != null) {
                             Surface(
                                 color = MaterialTheme.colorScheme.surface,
@@ -1392,11 +1407,27 @@ private fun AlertGroupCard(
                             ) {
                                 Column(Modifier.padding(12.dp)) {
                                     if (eventCount > 1) {
-                                        Text(
-                                            "Change ${idx + 1}",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                "Change ${idx + 1}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            onEventDismiss?.let { d ->
+                                                Box(
+                                                    Modifier.size(20.dp).clip(CircleShape).clickable { d() },
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Icon(
+                                                        Icons.Filled.Close,
+                                                        contentDescription = "Remove this",
+                                                        modifier = Modifier.size(14.dp),
+                                                        tint = MaterialTheme.colorScheme.error
+                                                    )
+                                                }
+                                            }
+                                        }
                                         Spacer(Modifier.height(4.dp))
                                     }
                                     val (beforeDiff, afterDiff) = remember(event.beforeText, event.afterText) {
@@ -1458,10 +1489,12 @@ private fun AlertGroupCard(
                                     joinLoading = joinLoading,
                                     onJoinEvent = { grpId ->
                                         openJoinPicker(grpId, event.eventTitle ?: group.title)
-                                    }
+                                    },
+                                    onEventDismiss = onEventDismiss
                                 )
                             }
                         }
+                    }
                     }
                 }
             }
@@ -1487,7 +1520,8 @@ private fun AlertEventBody(
     groupKey: String,
     showOpen: Boolean,
     joinLoading: Boolean,
-    onJoinEvent: (String) -> Unit
+    onJoinEvent: (String) -> Unit,
+    onEventDismiss: (() -> Unit)? = null
 ) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1639,13 +1673,57 @@ private fun AlertEventBody(
                 }
             }
             Column(Modifier.padding(12.dp)) {
-                if (!event.eventTitle.isNullOrBlank()) {
-                    Text(
-                        event.eventTitle,
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Spacer(Modifier.height(3.dp))
+                // Title row + optional per-event dismiss X (multi-event cards).
+                if (!event.eventTitle.isNullOrBlank() || onEventDismiss != null) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            event.eventTitle.orEmpty(),
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        onEventDismiss?.let { d ->
+                            Box(
+                                Modifier.size(22.dp).clip(CircleShape).clickable { d() },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    Icons.Filled.Close,
+                                    contentDescription = "Remove this event",
+                                    modifier = Modifier.size(15.dp),
+                                    tint = MaterialTheme.colorScheme.error
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(2.dp))
+                }
+                // Organizer directly under the title, small + muted like the meta
+                // line ("N interested"), name tinted + clickable → their profile.
+                if (event.organizerId != null) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "Hosted by ",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            event.organizerName ?: "organizer",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.clickable {
+                                ctx.startActivity(
+                                    Intent(Intent.ACTION_VIEW,
+                                        Uri.parse("https://vrchat.com/home/user/${event.organizerId}"))
+                                )
+                            }
+                        )
+                    }
+                    Spacer(Modifier.height(4.dp))
                 }
                 // No banner to overlay on → ONE wrapping flow with everything
                 // together (status/category/access chips, platform symbols,
@@ -1726,31 +1804,6 @@ private fun AlertEventBody(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                    // Organizer (the person who made it) — compact one-liner, name
-                    // tinted + clickable to open their VRChat profile.
-                    if (event.organizerId != null) {
-                        Spacer(Modifier.height(2.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                "Hosted by ",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.outline
-                            )
-                            Text(
-                                event.organizerName ?: "organizer",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.primary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.clickable {
-                                    ctx.startActivity(
-                                        Intent(Intent.ACTION_VIEW,
-                                            Uri.parse("https://vrchat.com/home/user/${event.organizerId}"))
-                                    )
-                                }
-                            )
-                        }
-                    }
                     val metaParts = buildList {
                         if (event.interestedCount >= 0) add("${event.interestedCount} interested")
                         if (event.createdAtMs > 0) add("Posted ${eventDate(event.createdAtMs)}")
@@ -1817,8 +1870,14 @@ private fun AlertEventBody(
                                             InAppAlertState.enrichEvents(
                                                 ctx, groupKey,
                                                 match = { it.id == event.id },
+                                                // Adding to calendar auto-UNPINS: a signed-up
+                                                // event lives in the "★ Signed up Events"
+                                                // section (above Pinned), so keeping it
+                                                // manually pinned too caused it to flip
+                                                // between sections. following wins.
                                                 transform = { it.copy(following = target) }
                                             )
+                                            if (target) InAppAlertState.setPinned(ctx, groupKey, false)
                                             // Schedule / cancel the local reminder that
                                             // pings the phone ~10 min before it starts.
                                             if (target) {
@@ -1832,7 +1891,7 @@ private fun AlertEventBody(
                                             }
                                             Toast.makeText(
                                                 ctx,
-                                                if (target) "Added to your calendar — we'll remind you before it starts"
+                                                if (target) "Added to your VRChat calendar"
                                                 else "Removed from your VRChat calendar",
                                                 Toast.LENGTH_SHORT
                                             ).show()
