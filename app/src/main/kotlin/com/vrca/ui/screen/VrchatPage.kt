@@ -853,6 +853,7 @@ private fun LazyListScope.inAppAlertSection(
                 ).show()
             }
             val gold = Color(0xFFFFC64B)
+            val silver = Color(0xFFC7CDD9)
             if (signedUp.isNotEmpty()) {
                 item(key = "signedup_header") {
                     Text(
@@ -877,17 +878,23 @@ private fun LazyListScope.inAppAlertSection(
                             .padding(start = 4.dp, end = 4.dp, top = 6.dp, bottom = 2.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        Icon(
+                            Icons.Filled.PushPin, null,
+                            tint = silver,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
                         Text(
-                            "📌 Pinned (${pinnedGroups.size})",
+                            "Pinned (${pinnedGroups.size})",
                             style = MaterialTheme.typography.labelLarge,
                             fontWeight = FontWeight.Bold,
-                            color = gold,
+                            color = silver,
                             modifier = Modifier.weight(1f)
                         )
                         Icon(
                             if (pinExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
                             contentDescription = if (pinExpanded) "Collapse pinned" else "Expand pinned",
-                            tint = gold,
+                            tint = silver,
                             modifier = Modifier.size(18.dp)
                         )
                     }
@@ -1101,11 +1108,13 @@ private fun AlertGroupCard(
     onTogglePin: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
-    // Golden treatment for signed-up (Added to Calendar) OR manually-pinned groups:
-    // gold accent bar/border + a "★ Going" / "📌 Pinned" pill. Both are protected
-    // from dismissal.
+    // Accent treatment: signed-up (Added to Calendar) = GOLD, manually pinned =
+    // SILVER; both get an accent bar/border + a pill and are protected from
+    // dismissal. (No emoji anywhere — pin is the Material PushPin symbol.)
     val gold = Color(0xFFFFC64B)
+    val silver = Color(0xFFC7CDD9)
     val special = signedUp || pinned
+    val accent = if (signedUp) gold else silver
     val ctx = LocalContext.current
     var expanded by remember { mutableStateOf(false) }
     // Collapse recurring occurrences (VRChat auto-creates EVERY day of a repeat as
@@ -1209,12 +1218,12 @@ private fun AlertGroupCard(
             // Faint warm tint pushes a signed-up card toward gold without hurting
             // legibility; normal cards keep surfaceVariant.
             containerColor = if (special)
-                androidx.compose.ui.graphics.lerp(MaterialTheme.colorScheme.surfaceVariant, gold, 0.10f)
+                androidx.compose.ui.graphics.lerp(MaterialTheme.colorScheme.surfaceVariant, accent, 0.10f)
             else MaterialTheme.colorScheme.surfaceVariant
         ),
         elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp),
         modifier = if (special)
-            Modifier.border(1.dp, gold.copy(alpha = 0.6f), MaterialTheme.shapes.medium)
+            Modifier.border(1.dp, accent.copy(alpha = 0.6f), MaterialTheme.shapes.medium)
         else Modifier
     ) {
         Column(Modifier.padding(start = 14.dp, top = 10.dp, end = 8.dp, bottom = 12.dp)) {
@@ -1229,7 +1238,7 @@ private fun AlertGroupCard(
                         .padding(end = 10.dp, top = 2.dp)
                         .size(width = 3.dp, height = 30.dp)
                         .background(
-                            if (special) gold else MaterialTheme.colorScheme.primary,
+                            if (special) accent else MaterialTheme.colorScheme.primary,
                             shape = MaterialTheme.shapes.small
                         )
                 )
@@ -1252,14 +1261,32 @@ private fun AlertGroupCard(
                         )
                         if (special) {
                             Spacer(Modifier.width(6.dp))
-                            Surface(color = gold.copy(alpha = 0.20f), shape = MaterialTheme.shapes.extraSmall) {
-                                Text(
-                                    if (signedUp) "★ Going" else "📌 Pinned",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.Bold,
-                                    color = gold,
+                            Surface(color = accent.copy(alpha = 0.20f), shape = MaterialTheme.shapes.extraSmall) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
                                     modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
-                                )
+                                ) {
+                                    if (signedUp) {
+                                        Text(
+                                            "★ Going",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = accent
+                                        )
+                                    } else {
+                                        Icon(
+                                            Icons.Filled.PushPin, null,
+                                            modifier = Modifier.size(11.dp), tint = accent
+                                        )
+                                        Spacer(Modifier.width(3.dp))
+                                        Text(
+                                            "Pinned",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = accent
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -1294,7 +1321,7 @@ private fun AlertGroupCard(
                                 if (pinned) Icons.Filled.PushPin else Icons.Outlined.PushPin,
                                 contentDescription = if (pinned) "Unpin" else "Pin",
                                 modifier = Modifier.size(14.dp),
-                                tint = if (pinned) gold else MaterialTheme.colorScheme.onSurfaceVariant
+                                tint = if (pinned) silver else MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                         }
