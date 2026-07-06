@@ -51,11 +51,21 @@ object GroupAlertEnricher {
         return ev.optJSONObject("interested")?.optInt("count", -1) ?: -1
     }
 
-    /** Whether the USER has this event on their calendar, when the object says. */
-    fun extractEventFollowing(ev: JSONObject): Boolean? = when {
-        ev.has("isFollowing") -> ev.optBoolean("isFollowing")
-        ev.has("userInterest") -> !ev.isNull("userInterest")
-        else -> null
+    /** Whether the USER has this event on their calendar (signed up / interested) —
+     *  so an event added IN-GAME shows as signed-up and the button reads "Remove
+     *  from Calendar" instead of wrongly offering "Add". VRChat's exact field isn't
+     *  documented, so probe the likely BOOLEAN names (an int like `interested` is a
+     *  count, not the follow state, so only Boolean values count); `userInterest`
+     *  present-and-non-null is the fallback signal. null = the object didn't say. */
+    fun extractEventFollowing(ev: JSONObject): Boolean? {
+        for (k in listOf("isFollowing", "following", "isInterested", "isAttending", "hasJoined", "isGoing")) {
+            if (ev.has(k)) {
+                val v = ev.opt(k)
+                if (v is Boolean) return v
+            }
+        }
+        if (ev.has("userInterest")) return !ev.isNull("userInterest")
+        return null
     }
 
     /** Best-effort: whether the event repeats (part of a series). VRChat's exact

@@ -871,6 +871,33 @@ private fun LazyListScope.inAppAlertSection(
     }
 }
 
+/**
+ * Collapse recurring event occurrences into one entry per series. VRChat writes
+ * EVERY day of a repeating event as its own calendar event (a 50-occurrence flood
+ * for a daily repeat), so same-title events are folded to the nearest UPCOMING
+ * occurrence (or the most recent past one if none are upcoming). Single-title
+ * events pass through unchanged, so non-recurring alerts are untouched. Order is
+ * preserved by first appearance.
+ */
+private fun collapseRecurring(
+    events: List<InAppAlertEvent>,
+    nowMs: Long
+): List<InAppAlertEvent> {
+    if (events.size < 2) return events
+    val byKey = LinkedHashMap<String, MutableList<InAppAlertEvent>>()
+    for (e in events) {
+        val t = e.eventTitle?.trim()?.lowercase()
+        // Only fold when there's a real title to key on; otherwise keep unique by id.
+        val key = if (t.isNullOrBlank()) "id:${e.id}" else "t:$t"
+        byKey.getOrPut(key) { mutableListOf() }.add(e)
+    }
+    return byKey.values.map { occ ->
+        if (occ.size == 1) occ[0]
+        else occ.filter { it.startsAtMs > 0 && it.startsAtMs >= nowMs }.minByOrNull { it.startsAtMs }
+            ?: occ.maxByOrNull { it.startsAtMs } ?: occ[0]
+    }
+}
+
 private fun formatRelativeTime(timestampMs: Long, nowMs: Long = System.currentTimeMillis()): String {
     // Future-aware: a FUTURE timestamp (delta < 0) renders "in Xd" instead of
     // clamping to "just now". Group calendar events use their scheduled start
@@ -1030,10 +1057,18 @@ private fun AlertGroupCard(
     val gold = Color(0xFFFFC64B)
     val ctx = LocalContext.current
     var expanded by remember { mutableStateOf(false) }
-    val eventCount = group.events.size
+    // Collapse recurring occurrences (VRChat auto-creates EVERY day of a repeat as
+    // a separate calendar event — up to 50). Same-title events fold to the nearest
+    // UPCOMING occurrence so the card shows ONE, not 50. Retroactive: fixes cards
+    // that already flooded before the fire-time collapse landed.
+    val displayEvents = remember(group.events, nowMs) { collapseRecurring(group.events, nowMs) }
+    val eventCount = displayEvents.size
     val displayTitle = if (eventCount > 1) "${group.title} ($eventCount)" else group.title
 
-    val latest = group.events.lastOrNull()
+    // Preview off the SOONEST event, not the last (the last was the farthest-out
+    // occurrence → "in 48d"; the soonest is what the user cares about).
+    val latest = displayEvents.minByOrNull { if (it.startsAtMs > 0) it.startsAtMs else Long.MAX_VALUE }
+        ?: displayEvents.lastOrNull()
     val previewText = latest?.body?.takeIf { it.isNotBlank() }
         ?: latest?.eventTitle?.takeIf { it.isNotBlank() }
         ?: ""
@@ -1049,17 +1084,17 @@ private fun AlertGroupCard(
     // shared url (friend request + new friend, bio/name/rank history all point at the
     // same profile); groups with DISTINCT per-event urls (group posts) keep per-event
     // opens in the body instead.
-    val inviteMeTargets = group.events
+    val inviteMeTargets = displayEvents
         .filter { it.actionType == NotificationActionReceiver.ACTION_INVITE_ME && !it.actionData.isNullOrBlank() }
         .map { InstanceTarget(it.actionData!!, it.eventTitle ?: it.body, imageUrl = it.imageUrl.orEmpty()) }
         .distinctBy { it.location }
-    val inviteUserData = group.events
+    val inviteUserData = displayEvents
         .firstOrNull { it.actionType == NotificationActionReceiver.ACTION_INVITE_USER && !it.actionData.isNullOrBlank() }
         ?.actionData
-    val sharedOpenUrl = group.events.mapNotNull { it.url }.distinct().singleOrNull()
+    val sharedOpenUrl = displayEvents.mapNotNull { it.url }.distinct().singleOrNull()
     val showPerEventOpen = sharedOpenUrl == null
     val headerOpenUrl = sharedOpenUrl
-        ?: group.url?.takeIf { group.events.none { e -> e.url != null } }
+        ?: group.url?.takeIf { displayEvents.none { e -> e.url != null } }
     // "Join event": lists the hosting group's currently-open instances in the
     // same picker the multi-invite flow uses. null = closed; empty = fetched,
     // group has nothing open right now.
@@ -1245,21 +1280,26 @@ private fun AlertGroupCard(
                         )
                     }
                 }
-                // Dismiss.
-                Spacer(Modifier.width(6.dp))
-                Surface(
-                    onClick = onDismiss,
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.error.copy(alpha = 0.14f),
-                    modifier = Modifier.size(36.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            Icons.Filled.Close,
-                            contentDescription = "Dismiss",
-                            modifier = Modifier.size(20.dp),
-                            tint = MaterialTheme.colorScheme.error
-                        )
+                // Dismiss — HIDDEN for signed-up (pinned) cards so a user can't
+                // accidentally swipe away an event they're going to. Removing it
+                // from the calendar (Remove from Calendar) un-pins it, which brings
+                // the dismiss button back.
+                if (!signedUp) {
+                    Spacer(Modifier.width(6.dp))
+                    Surface(
+                        onClick = onDismiss,
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.error.copy(alpha = 0.14f),
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                Icons.Filled.Close,
+                                contentDescription = "Dismiss",
+                                modifier = Modifier.size(20.dp),
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                        }
                     }
                 }
             }
@@ -1276,7 +1316,7 @@ private fun AlertGroupCard(
                     // events carry DISTINCT urls (e.g. separate group posts/events), so
                     // each can be opened individually. Shared opens and all invite
                     // actions live as compact symbols in the header instead.
-                    for ((idx, event) in group.events.withIndex()) {
+                    for ((idx, event) in displayEvents.withIndex()) {
                         if (event.beforeText != null && event.afterText != null) {
                             Surface(
                                 color = MaterialTheme.colorScheme.surface,
@@ -1426,9 +1466,9 @@ private fun AlertEventBody(
         event.category?.let {
             EventMetaChip(prettyEventCategory(it), MaterialTheme.colorScheme.tertiary, solid = solid)
         }
-        if (event.recurring) {
-            EventMetaChip("↻ Repeats", MaterialTheme.colorScheme.secondary, solid = solid)
-        }
+        // Recurring indicator does NOT go here — it crowded the status row. On a
+        // banner it rides the image's empty TOP-LEFT corner; without a banner it
+        // joins the muted meta line (interested · posted · repeats). See below.
         event.accessType?.let {
             val label = it.replaceFirstChar { c -> c.uppercase() }
             val color = when (it.lowercase()) {
@@ -1473,6 +1513,22 @@ private fun AlertEventBody(
                         contentScale = ContentScale.FillWidth,
                         modifier = Modifier.fillMaxWidth()
                     )
+                    // Recurring indicator on the banner's empty TOP-LEFT corner
+                    // (keeps it off the crowded status row).
+                    if (event.recurring) {
+                        Surface(
+                            color = Color.Black.copy(alpha = 0.55f),
+                            shape = MaterialTheme.shapes.extraSmall,
+                            modifier = Modifier.align(Alignment.TopStart).padding(6.dp)
+                        ) {
+                            Text(
+                                "↻ Repeats",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
                     if (langCodes.isNotEmpty()) {
                         // Right-aligned STACK (not a row): native sign-language
                         // names ("American Sign Language", 日本手話) are long, so a
@@ -1631,6 +1687,9 @@ private fun AlertEventBody(
                     val metaParts = buildList {
                         if (event.interestedCount >= 0) add("${event.interestedCount} interested")
                         if (event.createdAtMs > 0) add("Posted ${eventDate(event.createdAtMs)}")
+                        // Recurring joins the muted meta line ONLY when there's no
+                        // banner to carry it in the top-left corner.
+                        if (event.recurring && event.imageUrl.isNullOrBlank()) add("↻ Repeats")
                     }
                     if (metaParts.isNotEmpty()) {
                         Spacer(Modifier.height(2.dp))

@@ -223,15 +223,18 @@ object InAppAlertState {
         AlertImageStore.gc(ctx)
     }
 
-    /** Clears every in-app alert group (the "Dismiss all" action). Returns the
-     *  group ids that were cleared so the caller can cancel their linked Android
-     *  notifications too. */
+    /** Clears in-app alert groups (the "Dismiss all" action) EXCEPT signed-up
+     *  events (any event with following==true) — those are pinned on purpose, so
+     *  Dismiss-all preserves them just like the per-card X is hidden for them.
+     *  Returns the group ids that were cleared so the caller can cancel their
+     *  linked Android notifications too. */
     fun dismissAll(ctx: Context): List<String> {
-        val ids = _groups.value.map { it.groupId }
-        _groups.value = emptyList()
+        val kept = _groups.value.filter { g -> g.events.any { it.following == true } }
+        val cleared = _groups.value.filter { g -> g.events.none { it.following == true } }
+        _groups.value = kept
         persist(ctx)
         AlertImageStore.gc(ctx)
-        return ids
+        return cleared.map { it.groupId }
     }
 
     /**
