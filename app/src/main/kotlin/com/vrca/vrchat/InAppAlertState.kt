@@ -58,7 +58,12 @@ data class InAppAlertGroup(
     val url: String? = null,
     val events: List<InAppAlertEvent>,
     val firstSeenMs: Long,
-    val lastUpdatedMs: Long
+    val lastUpdatedMs: Long,
+    // User pinned this group (long-press / pin button). Pinned groups float to a
+    // "📌 Pinned" section (below "Signed up Events"), can't be dismissed, and are
+    // preserved by Dismiss-all. Manual + universal (any notification type). Capped
+    // at MAX_PINNED. Persisted.
+    val pinned: Boolean = false
 )
 
 /**
@@ -223,14 +228,36 @@ object InAppAlertState {
         AlertImageStore.gc(ctx)
     }
 
+    // Manual-pin cap (signed-up/calendar events are separate and uncapped).
+    const val MAX_PINNED = 10
+
+    fun pinnedCount(): Int = _groups.value.count { it.pinned }
+
+    /**
+     * Toggle a group's manual pin. Returns false (no-op) when trying to pin past
+     * [MAX_PINNED] — the caller shows a "pinned is full" toast. Pinning/unpinning
+     * is universal (any alert type) and persisted.
+     */
+    fun setPinned(ctx: Context, groupId: String, pinned: Boolean): Boolean {
+        val cur = _groups.value.toMutableList()
+        val idx = cur.indexOfFirst { it.groupId == groupId }
+        if (idx < 0) return false
+        if (cur[idx].pinned == pinned) return true
+        if (pinned && pinnedCount() >= MAX_PINNED) return false
+        cur[idx] = cur[idx].copy(pinned = pinned)
+        _groups.value = cur
+        persist(ctx)
+        return true
+    }
+
     /** Clears in-app alert groups (the "Dismiss all" action) EXCEPT signed-up
-     *  events (any event with following==true) — those are pinned on purpose, so
-     *  Dismiss-all preserves them just like the per-card X is hidden for them.
-     *  Returns the group ids that were cleared so the caller can cancel their
-     *  linked Android notifications too. */
+     *  events (following==true) AND manually-pinned groups — both are kept on
+     *  purpose (their per-card X is hidden too). Returns the cleared group ids so
+     *  the caller can cancel their linked Android notifications. */
     fun dismissAll(ctx: Context): List<String> {
-        val kept = _groups.value.filter { g -> g.events.any { it.following == true } }
-        val cleared = _groups.value.filter { g -> g.events.none { it.following == true } }
+        fun keep(g: InAppAlertGroup) = g.pinned || g.events.any { it.following == true }
+        val kept = _groups.value.filter { keep(it) }
+        val cleared = _groups.value.filter { !keep(it) }
         _groups.value = kept
         persist(ctx)
         AlertImageStore.gc(ctx)
@@ -329,6 +356,7 @@ object InAppAlertState {
                 put("events", eventsArr)
                 put("firstSeen", g.firstSeenMs)
                 put("lastUpdated", g.lastUpdatedMs)
+                put("pinned", g.pinned)
             })
         }
         ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -379,7 +407,8 @@ object InAppAlertState {
                 url = obj.optString("url").ifBlank { null },
                 events = events,
                 firstSeenMs = obj.optLong("firstSeen"),
-                lastUpdatedMs = obj.optLong("lastUpdated")
+                lastUpdatedMs = obj.optLong("lastUpdated"),
+                pinned = obj.optBoolean("pinned", false)
             )
         }
         return list

@@ -68,6 +68,8 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Schedule
@@ -579,6 +581,14 @@ internal object AlertSectionState {
     val expanded = mutableStateOf(true)
 }
 
+/** Collapse state for the "📌 Pinned" sub-section — same process-scoped model as
+ *  [AlertSectionState]: it survives tab switches but resets to expanded on a cold
+ *  process start (a headless revival has no UI, so the reset is only ever seen on
+ *  a genuine reopen — the intended behavior). */
+internal object PinnedSectionState {
+    val expanded = mutableStateOf(true)
+}
+
 /* =========================
    Identity header helpers
    ========================= */
@@ -821,51 +831,88 @@ private fun LazyListScope.inAppAlertSection(
                 )
             }
         } else {
-            // "Signed up Events" (any event the user Added to Calendar) pin to the
-            // TOP under a golden sub-header; the rest follow. Keys stay the plain
-            // groupId (the two partitions are disjoint) so a card's expanded state
-            // survives a partition move. Cards are page-level items (no inner scroll
-            // region) so an unbounded history only composes what's on screen.
+            // THREE zones, top to bottom: "★ Signed up Events" (any event the user
+            // Added to Calendar — auto, uncapped), "📌 Pinned" (manual pin, capped
+            // 10, collapsible), then "Other notifications". Partitions are disjoint
+            // (signed-up wins over pinned), keys stay the plain groupId so a card's
+            // expanded state survives a partition move. Cards are page-level items
+            // so an unbounded history only composes what's on screen.
             val signedUp = filtered.filter { g -> g.events.any { it.following == true } }
-            val rest = filtered.filter { g -> g.events.none { it.following == true } }
+            val pinnedGroups = filtered.filter { g -> g.pinned && g.events.none { it.following == true } }
+            val rest = filtered.filter { g -> !g.pinned && g.events.none { it.following == true } }
             val dismiss: (String) -> Unit = { gid ->
                 InAppAlertState.dismiss(ctx, gid)
                 val nm = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
                 nm.cancel(gid.hashCode())
             }
+            val togglePin: (InAppAlertGroup) -> Unit = { g ->
+                val ok = InAppAlertState.setPinned(ctx, g.groupId, !g.pinned)
+                if (!ok) Toast.makeText(
+                    ctx, "Pinned is full (max ${InAppAlertState.MAX_PINNED}) — unpin one first",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+            val gold = Color(0xFFFFC64B)
             if (signedUp.isNotEmpty()) {
                 item(key = "signedup_header") {
+                    Text(
+                        "★ Signed up Events",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = gold,
+                        modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 6.dp, bottom = 2.dp)
+                    )
+                }
+                items(signedUp, key = { it.groupId }) { group ->
+                    AlertGroupCard(group = group, nowMs = nowMs, signedUp = true, pinned = group.pinned,
+                        onTogglePin = { togglePin(group) }, onDismiss = { dismiss(group.groupId) })
+                }
+            }
+            if (pinnedGroups.isNotEmpty()) {
+                item(key = "pinned_header") {
+                    val pinExpanded = PinnedSectionState.expanded.value
                     Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
+                        Modifier.fillMaxWidth()
+                            .clickable { PinnedSectionState.expanded.value = !pinExpanded }
+                            .padding(start = 4.dp, end = 4.dp, top = 6.dp, bottom = 2.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            "★ Signed up Events",
+                            "📌 Pinned (${pinnedGroups.size})",
                             style = MaterialTheme.typography.labelLarge,
                             fontWeight = FontWeight.Bold,
-                            color = Color(0xFFFFC64B)
+                            color = gold,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Icon(
+                            if (pinExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                            contentDescription = if (pinExpanded) "Collapse pinned" else "Expand pinned",
+                            tint = gold,
+                            modifier = Modifier.size(18.dp)
                         )
                     }
                 }
-                items(signedUp, key = { it.groupId }) { group ->
-                    AlertGroupCard(group = group, nowMs = nowMs, signedUp = true,
-                        onDismiss = { dismiss(group.groupId) })
-                }
-                if (rest.isNotEmpty()) {
-                    item(key = "rest_header") {
-                        Text(
-                            "Other notifications",
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 6.dp, bottom = 2.dp)
-                        )
+                if (PinnedSectionState.expanded.value) {
+                    items(pinnedGroups, key = { it.groupId }) { group ->
+                        AlertGroupCard(group = group, nowMs = nowMs, pinned = true,
+                            onTogglePin = { togglePin(group) }, onDismiss = { dismiss(group.groupId) })
                     }
                 }
             }
+            if ((signedUp.isNotEmpty() || pinnedGroups.isNotEmpty()) && rest.isNotEmpty()) {
+                item(key = "rest_header") {
+                    Text(
+                        "Other notifications",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 6.dp, bottom = 2.dp)
+                    )
+                }
+            }
             items(rest, key = { it.groupId }) { group ->
-                AlertGroupCard(group = group, nowMs = nowMs, signedUp = false,
-                    onDismiss = { dismiss(group.groupId) })
+                AlertGroupCard(group = group, nowMs = nowMs, signedUp = false, pinned = false,
+                    onTogglePin = { togglePin(group) }, onDismiss = { dismiss(group.groupId) })
             }
         }
     }
@@ -1050,11 +1097,15 @@ private fun AlertGroupCard(
     group: InAppAlertGroup,
     nowMs: Long,
     signedUp: Boolean = false,
+    pinned: Boolean = false,
+    onTogglePin: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
-    // Golden treatment for events the user signed up for (Added to Calendar):
-    // a gold accent bar/border + a "★ Going" pill, so they read as special.
+    // Golden treatment for signed-up (Added to Calendar) OR manually-pinned groups:
+    // gold accent bar/border + a "★ Going" / "📌 Pinned" pill. Both are protected
+    // from dismissal.
     val gold = Color(0xFFFFC64B)
+    val special = signedUp || pinned
     val ctx = LocalContext.current
     var expanded by remember { mutableStateOf(false) }
     // Collapse recurring occurrences (VRChat auto-creates EVERY day of a repeat as
@@ -1157,12 +1208,12 @@ private fun AlertGroupCard(
         colors = CardDefaults.elevatedCardColors(
             // Faint warm tint pushes a signed-up card toward gold without hurting
             // legibility; normal cards keep surfaceVariant.
-            containerColor = if (signedUp)
+            containerColor = if (special)
                 androidx.compose.ui.graphics.lerp(MaterialTheme.colorScheme.surfaceVariant, gold, 0.10f)
             else MaterialTheme.colorScheme.surfaceVariant
         ),
         elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp),
-        modifier = if (signedUp)
+        modifier = if (special)
             Modifier.border(1.dp, gold.copy(alpha = 0.6f), MaterialTheme.shapes.medium)
         else Modifier
     ) {
@@ -1178,7 +1229,7 @@ private fun AlertGroupCard(
                         .padding(end = 10.dp, top = 2.dp)
                         .size(width = 3.dp, height = 30.dp)
                         .background(
-                            if (signedUp) gold else MaterialTheme.colorScheme.primary,
+                            if (special) gold else MaterialTheme.colorScheme.primary,
                             shape = MaterialTheme.shapes.small
                         )
                 )
@@ -1199,11 +1250,11 @@ private fun AlertGroupCard(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false)
                         )
-                        if (signedUp) {
+                        if (special) {
                             Spacer(Modifier.width(6.dp))
                             Surface(color = gold.copy(alpha = 0.20f), shape = MaterialTheme.shapes.extraSmall) {
                                 Text(
-                                    "★ Going",
+                                    if (signedUp) "★ Going" else "📌 Pinned",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.Bold,
                                     color = gold,
@@ -1221,12 +1272,29 @@ private fun AlertGroupCard(
                             overflow = TextOverflow.Ellipsis
                         )
                     }
-                    latest?.let {
-                        Text(
-                            formatRelativeTime(it.timestampMs, nowMs),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.outline
-                        )
+                    // Ago row + a TINY pin toggle (shown in both collapsed and
+                    // expanded states). Tapping pins/unpins this group to the
+                    // "📌 Pinned" section. Gold when pinned. (Signed-up events are
+                    // auto-pinned above the manual Pinned section, so their toggle
+                    // still works but they display in the Going section.)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        latest?.let {
+                            Text(
+                                formatRelativeTime(it.timestampMs, nowMs),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.outline
+                            )
+                        }
+                        Spacer(Modifier.width(6.dp))
+                        Box(Modifier.size(20.dp).clip(CircleShape).clickable { onTogglePin() },
+                            contentAlignment = Alignment.Center) {
+                            Icon(
+                                if (pinned) Icons.Filled.PushPin else Icons.Outlined.PushPin,
+                                contentDescription = if (pinned) "Unpin" else "Pin",
+                                modifier = Modifier.size(14.dp),
+                                tint = if (pinned) gold else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
                 }
                 // Action symbols (invite / open) sit to the LEFT of the collapse
@@ -1280,11 +1348,10 @@ private fun AlertGroupCard(
                         )
                     }
                 }
-                // Dismiss — HIDDEN for signed-up (pinned) cards so a user can't
-                // accidentally swipe away an event they're going to. Removing it
-                // from the calendar (Remove from Calendar) un-pins it, which brings
-                // the dismiss button back.
-                if (!signedUp) {
+                // Dismiss — HIDDEN for signed-up OR manually-pinned cards so a user
+                // can't accidentally swipe away something they pinned/are going to.
+                // Unpinning (or Remove-from-Calendar) brings the dismiss button back.
+                if (!special) {
                     Spacer(Modifier.width(6.dp))
                     Surface(
                         onClick = onDismiss,
