@@ -846,8 +846,19 @@ private fun LazyListScope.inAppAlertSection(
             for (g in filtered) {
                 val followed = g.events.filter { it.following == true }
                 val others = g.events.filter { it.following != true }
+                // Group the followed events by SERIES (normalized title) so a
+                // recurring event the user signed up for shows as ONE card — its ~50
+                // occurrences, each independently marked following, would otherwise
+                // each spawn its own "Going" card. The card's own recurring-collapse
+                // then picks the nearest upcoming occurrence and shows the count.
+                val bySeries = LinkedHashMap<String, MutableList<InAppAlertEvent>>()
                 for (ev in followed) {
-                    signedUpCards.add("su_${g.groupId}_${ev.id}" to g.copy(events = listOf(ev)))
+                    val t = ev.eventTitle?.trim()?.lowercase()?.replace(Regex("\\s+"), " ").orEmpty()
+                    val skey = if (t.isNotBlank()) "t:$t" else "id:${ev.id}"
+                    bySeries.getOrPut(skey) { mutableListOf() }.add(ev)
+                }
+                for ((skey, evs) in bySeries) {
+                    signedUpCards.add("su_${g.groupId}_$skey" to g.copy(events = evs))
                 }
                 if (others.isNotEmpty()) {
                     val rem = g.copy(events = others)
@@ -1904,24 +1915,28 @@ private fun AlertEventBody(
                                 onClick = {
                                     calSending = true
                                     val target = !onCal
-                                    // Guard against an in-flight sweep flipping this
-                                    // back before the server propagates the change.
-                                    InAppAlertState.recordFollowToggle(event.eventRefId!!, target)
+                                    // Record the user's decision PERSISTENTLY and per
+                                    // SERIES so a later enrich sweep can't flip it back
+                                    // (the server perpetually reports the creator's own
+                                    // events as followed) and so a recurring series is
+                                    // toggled as ONE thing. Optimistically apply it to
+                                    // every occurrence right now.
+                                    val followKey = InAppAlertState.followSeriesKey(
+                                        event.eventTitle, event.eventRefId
+                                    )
+                                    InAppAlertState.recordFollowToggle(ctx, followKey, target)
+                                    InAppAlertState.applyFollowToSeries(
+                                        ctx, groupKey, event.eventTitle, event.eventRefId, target
+                                    )
                                     scope.launch {
                                         val r = VrchatAuthManager.setCalendarEventFollowing(
                                             ctx, event.groupRefId, event.eventRefId!!, target
                                         )
                                         if (r.ok) {
-                                            InAppAlertState.enrichEvents(
-                                                ctx, groupKey,
-                                                match = { it.id == event.id },
-                                                // Adding to calendar auto-UNPINS: a signed-up
-                                                // event lives in the "★ Signed up Events"
-                                                // section (above Pinned), so keeping it
-                                                // manually pinned too caused it to flip
-                                                // between sections. following wins.
-                                                transform = { it.copy(following = target) }
-                                            )
+                                            // Adding to calendar auto-UNPINS: a signed-up
+                                            // event lives in the "★ Signed up Events"
+                                            // section (above Pinned), so keeping it manually
+                                            // pinned too caused it to flip between sections.
                                             if (target) InAppAlertState.setPinned(ctx, groupKey, false)
                                             // Schedule / cancel the local reminder that
                                             // pings the phone ~10 min before it starts.
@@ -1941,6 +1956,12 @@ private fun AlertEventBody(
                                                 Toast.LENGTH_SHORT
                                             ).show()
                                         } else {
+                                            // API rejected it — revert the optimistic
+                                            // override + display so the card reflects reality.
+                                            InAppAlertState.recordFollowToggle(ctx, followKey, onCal)
+                                            InAppAlertState.applyFollowToSeries(
+                                                ctx, groupKey, event.eventTitle, event.eventRefId, onCal
+                                            )
                                             Toast.makeText(
                                                 ctx,
                                                 r.error ?: "Couldn't update your calendar",

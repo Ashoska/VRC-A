@@ -250,10 +250,16 @@ object GroupAlertEnricher {
                     // representative (after recurring-collapse, ~1 per series).
                     val single = VrchatAuthManager.fetchCalendarEvent(ctx, groupId, evId)
                     val src = single ?: ev
-                    // A just-toggled follow state (Add/Remove tapped seconds ago)
-                    // wins over the server read, which may not have propagated yet
-                    // — otherwise removing an event flips straight back to joined.
-                    val following = InAppAlertState.recentFollowOverride(evId)
+                    // The user's explicit in-app follow decision is AUTHORITATIVE and
+                    // permanent — it wins over the server read, which for the user's
+                    // OWN events perpetually reports following=true (so removing an
+                    // event would otherwise flip straight back to joined every sweep).
+                    // Keyed per SERIES so a removed recurring event stays removed.
+                    val followKey = InAppAlertState.followSeriesKey(
+                        repTitle.ifBlank { ev.optString("title", "").ifBlank { ev.optString("name", "") } },
+                        evId
+                    )
+                    val following = InAppAlertState.followOverride(followKey)
                         ?: extractEventFollowing(src) ?: extractEventFollowing(ev)
                     val recurring = isRecurringSeries || extractRecurring(src) || extractRecurring(ev)
                     val organizerId = extractOrganizerId(src) ?: extractOrganizerId(ev)

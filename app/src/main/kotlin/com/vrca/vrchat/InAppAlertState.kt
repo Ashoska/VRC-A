@@ -111,6 +111,7 @@ object InAppAlertState {
     val groups: StateFlow<List<InAppAlertGroup>> = _groups
 
     fun load(ctx: Context) {
+        loadFollowOverrides(ctx)
         val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val raw = prefs.getString(KEY_GROUPS, null)
         if (raw != null) {
@@ -274,25 +275,58 @@ object InAppAlertState {
     // Manual-pin cap (signed-up/calendar events are separate and uncapped).
     const val MAX_PINNED = 10
 
-    // Recently user-toggled follow states (eventId -> target, whenMs). When the
-    // user taps Add/Remove-from-Calendar, an enrich sweep already in flight can
-    // read the SERVER's not-yet-propagated old value and flip the card back — the
-    // "remove just switches back to joined" bug. For a short window the LOCAL
-    // target wins over any server read; after it, the (now-propagated) server
-    // value is trusted again.
-    private val recentToggles = java.util.concurrent.ConcurrentHashMap<String, Pair<Boolean, Long>>()
-    private const val TOGGLE_OVERRIDE_MS = 15_000L
+    // PERSISTENT per-SERIES follow decisions, keyed by [followSeriesKey] (normalized
+    // title, or id:<evId> when titleless). When the user taps Add/Remove-from-Calendar
+    // that decision is AUTHORITATIVE and permanent — it overrides ANY server read
+    // until the user toggles again. A short time window is NOT enough: these are
+    // often the user's OWN events, and VRChat reports the creator as perpetually
+    // interested/following, so a 60s enrich sweep re-reads `following=true` and
+    // re-adds a just-removed event forever (the "remove just switches back to
+    // joined" bug). Keying per SERIES (not per occurrence id) also stops a recurring
+    // event's ~50 occurrences — each independently reporting following — from each
+    // spawning its own "Signed up" card. Survives restart via SharedPreferences.
+    private val followOverrides = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    private const val FOLLOW_OVERRIDE_PREFS = "vrca_follow_overrides"
 
-    fun recordFollowToggle(eventId: String, target: Boolean) {
-        if (eventId.isNotBlank()) recentToggles[eventId] = target to System.currentTimeMillis()
+    /** Stable per-SERIES key: the normalized title (recurring occurrences share it),
+     *  or id:<evId> when there's no title. Used by the toggle store, the enricher,
+     *  and the display split so all three agree on what "this event" is. */
+    fun followSeriesKey(title: String?, evId: String?): String {
+        val t = title?.trim()?.lowercase()?.replace(Regex("\\s+"), " ").orEmpty()
+        return if (t.isNotBlank()) "t:$t" else "id:${evId.orEmpty()}"
     }
 
-    /** The local follow override for [eventId] if still within the window, else null. */
-    fun recentFollowOverride(eventId: String): Boolean? {
-        if (eventId.isBlank()) return null
-        val (t, ts) = recentToggles[eventId] ?: return null
-        return if (System.currentTimeMillis() - ts < TOGGLE_OVERRIDE_MS) t
-        else { recentToggles.remove(eventId); null }
+    private fun loadFollowOverrides(ctx: Context) {
+        if (followOverrides.isNotEmpty()) return
+        val p = ctx.getSharedPreferences(FOLLOW_OVERRIDE_PREFS, Context.MODE_PRIVATE)
+        for ((k, v) in p.all) if (v is Boolean) followOverrides[k] = v
+    }
+
+    /** Records (and persists) the user's explicit in-app follow decision for a series. */
+    fun recordFollowToggle(ctx: Context, key: String, target: Boolean) {
+        if (key.isBlank() || key == "id:") return
+        followOverrides[key] = target
+        ctx.getSharedPreferences(FOLLOW_OVERRIDE_PREFS, Context.MODE_PRIVATE)
+            .edit().putBoolean(key, target).apply()
+    }
+
+    /** The user's persistent follow decision for [key], or null if they never set one
+     *  in-app (then the server value is trusted). */
+    fun followOverride(key: String): Boolean? = followOverrides[key]
+
+    /** Applies a follow decision to EVERY event in [groupKey] sharing this series
+     *  (matched by normalized title, or the single event by id when titleless) so the
+     *  optimistic UI update covers all of a recurring series' occurrences at once. */
+    fun applyFollowToSeries(ctx: Context, groupKey: String, title: String?, evId: String?, following: Boolean) {
+        val t = title?.trim()?.lowercase()?.replace(Regex("\\s+"), " ").orEmpty()
+        enrichEvents(
+            ctx, groupKey,
+            match = { e ->
+                if (t.isNotBlank()) (e.eventTitle?.trim()?.lowercase()?.replace(Regex("\\s+"), " ") ?: "") == t
+                else e.eventRefId == evId || e.id == evId
+            },
+            transform = { it.copy(following = following) }
+        )
     }
 
     fun pinnedCount(): Int = _groups.value.count { it.pinned }
