@@ -129,18 +129,21 @@ object GroupAlertEnricher {
         return false
     }
 
-    /** The organizer's user id (`usr_...`) — the person who created the event,
-     *  distinct from the hosting group. Probes the likely owner fields. */
+    /** The organizer id — a `usr_` (a person) OR a `grp_` (the owning group).
+     *  CONFIRMED: a group calendar event's `ownerId` is the GROUP (`grp_…`), which
+     *  VRChat's site shows as the event's host ("Test | Group"); a personal event
+     *  would carry a `usr_`. The caller resolves the name + links to the right page
+     *  (group vs user) by the prefix. */
     fun extractOrganizerId(ev: JSONObject): String? {
         for (k in listOf("ownerId", "authorId", "creatorId", "hostId", "userId")) {
             val v = ev.optString(k, "")
-            if (v.startsWith("usr_")) return v
+            if (v.startsWith("usr_") || v.startsWith("grp_")) return v
         }
         // Nested owner/author object.
         for (k in listOf("owner", "author", "creator", "host")) {
             val o = ev.optJSONObject(k) ?: continue
             val v = o.optString("id", "")
-            if (v.startsWith("usr_")) return v
+            if (v.startsWith("usr_") || v.startsWith("grp_")) return v
         }
         return null
     }
@@ -277,15 +280,10 @@ object GroupAlertEnricher {
                     val following = InAppAlertState.followOverride(followKey)
                         ?: extractEventFollowing(src) ?: extractEventFollowing(ev)
                     val recurring = isRecurringSeries || extractRecurring(src) || extractRecurring(ev)
-                    val organizerId = extractOrganizerId(src) ?: extractOrganizerId(ev)
-                    // Organizer name: prefer a name on the event object; else resolve
-                    // once via /users/{id} and cache (one call per unique organizer).
-                    val organizerName = extractOrganizerName(src) ?: extractOrganizerName(ev)
-                        ?: organizerId?.let { oid ->
-                            organizerNameCache[oid] ?: VrchatAuthManager.fetchUserDisplayName(ctx, oid)
-                                ?.also { organizerNameCache[oid] = it }
-                        }
-                    VrcaEventDiag.recordOrganizer(organizerId, organizerName)
+                    // Host/organizer is deliberately NOT shown on notifications, so
+                    // we don't extract or resolve it (avoids a per-event REST call).
+                    val organizerId: String? = null
+                    val organizerName: String? = null
                     val title = ev.optString("title", "").ifBlank { ev.optString("name", "") }
                     val desc = ev.optString("description", "").ifBlank { ev.optString("text", "") }
                     if (img != null) AlertImageStore.ensureCached(ctx, img)
@@ -345,27 +343,13 @@ object GroupAlertEnricher {
                     val title = post.optString("title", "")
                     val norm = normalizeAnnBody(text.ifBlank { title })
                     if (norm.isBlank()) continue
-                    // CONFIRMED field: a post's creator is `authorId` (a usr_ id) —
-                    // unlike calendar events, whose ownerId is the GROUP. Resolve the
-                    // name once (cached) so the card shows "Posted by <name>".
-                    val authorId = post.optString("authorId", "").takeIf { it.startsWith("usr_") }
-                    val authorName = authorId?.let { aid ->
-                        organizerNameCache[aid] ?: VrchatAuthManager.fetchUserDisplayName(ctx, aid)
-                            ?.also { organizerNameCache[aid] = it }
-                    }
                     val img = post.optString("imageUrl", "").takeIf { it.startsWith("http") }
                     if (img != null) AlertImageStore.ensureCached(ctx, img)
-                    // Match the fired announcement even once it already has an image
-                    // (author may enrich on a later sweep than the banner did).
+                    // Enrich the banner only (host/author is deliberately not shown).
                     InAppAlertState.enrichEvents(
                         ctx, "announcement_$groupId",
-                        match = { e -> normalizeAnnBody(e.body) == norm },
-                        transform = { e -> e.copy(
-                            imageUrl = img ?: e.imageUrl,
-                            groupRefId = e.groupRefId ?: groupId,
-                            organizerId = authorId ?: e.organizerId,
-                            organizerName = authorName ?: e.organizerName
-                        ) }
+                        match = { e -> e.imageUrl == null && normalizeAnnBody(e.body) == norm },
+                        transform = { e -> e.copy(imageUrl = img ?: e.imageUrl, groupRefId = e.groupRefId ?: groupId) }
                     )
                 }
             }
