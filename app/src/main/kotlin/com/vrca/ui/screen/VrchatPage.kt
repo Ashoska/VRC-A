@@ -831,19 +831,29 @@ private fun LazyListScope.inAppAlertSection(
                 )
             }
         } else {
-            // THREE zones, top to bottom: "★ Signed up Events" (any event the user
-            // Added to Calendar — auto, uncapped), "📌 Pinned" (manual pin, capped
-            // 10, collapsible), then "Other notifications". Partitions are disjoint
-            // (signed-up wins over pinned), keys stay the plain groupId so a card's
-            // expanded state survives a partition move. Cards are page-level items
-            // so an unbounded history only composes what's on screen.
-            val signedUp = filtered.filter { g -> g.events.any { it.following == true } }
-            val pinnedGroups = filtered.filter { g -> g.pinned && g.events.none { it.following == true } }
-            val rest = filtered.filter { g -> !g.pinned && g.events.none { it.following == true } }
-            val dismiss: (String) -> Unit = { gid ->
-                InAppAlertState.dismiss(ctx, gid)
-                val nm = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
-                nm.cancel(gid.hashCode())
+            // THREE zones. Splitting is at the EVENT level, not the group: a group
+            // can have SOME events the user signed up for and some they didn't, so
+            // each FOLLOWED event becomes its OWN card in "Signed up Events" (real
+            // groupId kept for its actions; unique display key), while the remaining
+            // (unfollowed) events stay grouped together in Pinned (if the group is
+            // manually pinned) or Other notifications. Un-following an event drops it
+            // back into the remainder group automatically.
+            val gold = Color(0xFFFFC64B)
+            val silver = Color(0xFFC7CDD9)
+            val signedUpCards = ArrayList<Pair<String, InAppAlertGroup>>()
+            val pinnedCards = ArrayList<Pair<String, InAppAlertGroup>>()
+            val restCards = ArrayList<Pair<String, InAppAlertGroup>>()
+            for (g in filtered) {
+                val followed = g.events.filter { it.following == true }
+                val others = g.events.filter { it.following != true }
+                for (ev in followed) {
+                    signedUpCards.add("su_${g.groupId}_${ev.id}" to g.copy(events = listOf(ev)))
+                }
+                if (others.isNotEmpty()) {
+                    val rem = g.copy(events = others)
+                    if (g.pinned) pinnedCards.add("pin_${g.groupId}" to rem)
+                    else restCards.add(g.groupId to rem)
+                }
             }
             val togglePin: (InAppAlertGroup) -> Unit = { g ->
                 val ok = InAppAlertState.setPinned(ctx, g.groupId, !g.pinned)
@@ -852,9 +862,14 @@ private fun LazyListScope.inAppAlertSection(
                     Toast.LENGTH_SHORT
                 ).show()
             }
-            val gold = Color(0xFFFFC64B)
-            val silver = Color(0xFFC7CDD9)
-            if (signedUp.isNotEmpty()) {
+            // Dismiss a remainder card: remove ONLY its (unfollowed) events, so the
+            // followed events shown separately in "Signed up Events" survive.
+            val dismissCard: (InAppAlertGroup) -> Unit = { g ->
+                InAppAlertState.dismissEvents(ctx, g.groupId, g.events.map { it.id })
+                val nm = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+                nm.cancel(g.groupId.hashCode())
+            }
+            if (signedUpCards.isNotEmpty()) {
                 item(key = "signedup_header") {
                     Text(
                         "★ Signed up Events",
@@ -864,12 +879,12 @@ private fun LazyListScope.inAppAlertSection(
                         modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 6.dp, bottom = 2.dp)
                     )
                 }
-                items(signedUp, key = { it.groupId }) { group ->
-                    AlertGroupCard(group = group, nowMs = nowMs, signedUp = true, pinned = group.pinned,
-                        onTogglePin = { togglePin(group) }, onDismiss = { dismiss(group.groupId) })
+                items(signedUpCards, key = { it.first }) { (_, group) ->
+                    AlertGroupCard(group = group, nowMs = nowMs, signedUp = true,
+                        onTogglePin = {}, onDismiss = {})
                 }
             }
-            if (pinnedGroups.isNotEmpty()) {
+            if (pinnedCards.isNotEmpty()) {
                 item(key = "pinned_header") {
                     val pinExpanded = PinnedSectionState.expanded.value
                     Row(
@@ -885,7 +900,7 @@ private fun LazyListScope.inAppAlertSection(
                         )
                         Spacer(Modifier.width(4.dp))
                         Text(
-                            "Pinned (${pinnedGroups.size})",
+                            "Pinned (${pinnedCards.size})",
                             style = MaterialTheme.typography.labelLarge,
                             fontWeight = FontWeight.Bold,
                             color = silver,
@@ -900,13 +915,13 @@ private fun LazyListScope.inAppAlertSection(
                     }
                 }
                 if (PinnedSectionState.expanded.value) {
-                    items(pinnedGroups, key = { it.groupId }) { group ->
+                    items(pinnedCards, key = { it.first }) { (_, group) ->
                         AlertGroupCard(group = group, nowMs = nowMs, pinned = true,
-                            onTogglePin = { togglePin(group) }, onDismiss = { dismiss(group.groupId) })
+                            onTogglePin = { togglePin(group) }, onDismiss = { dismissCard(group) })
                     }
                 }
             }
-            if ((signedUp.isNotEmpty() || pinnedGroups.isNotEmpty()) && rest.isNotEmpty()) {
+            if ((signedUpCards.isNotEmpty() || pinnedCards.isNotEmpty()) && restCards.isNotEmpty()) {
                 item(key = "rest_header") {
                     Text(
                         "Other notifications",
@@ -917,9 +932,9 @@ private fun LazyListScope.inAppAlertSection(
                     )
                 }
             }
-            items(rest, key = { it.groupId }) { group ->
+            items(restCards, key = { it.first }) { (_, group) ->
                 AlertGroupCard(group = group, nowMs = nowMs, signedUp = false, pinned = false,
-                    onTogglePin = { togglePin(group) }, onDismiss = { dismiss(group.groupId) })
+                    onTogglePin = { togglePin(group) }, onDismiss = { dismissCard(group) })
             }
         }
     }
@@ -1889,6 +1904,9 @@ private fun AlertEventBody(
                                 onClick = {
                                     calSending = true
                                     val target = !onCal
+                                    // Guard against an in-flight sweep flipping this
+                                    // back before the server propagates the change.
+                                    InAppAlertState.recordFollowToggle(event.eventRefId!!, target)
                                     scope.launch {
                                         val r = VrchatAuthManager.setCalendarEventFollowing(
                                             ctx, event.groupRefId, event.eventRefId!!, target

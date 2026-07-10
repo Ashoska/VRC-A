@@ -245,6 +245,23 @@ object InAppAlertState {
         AlertImageStore.gc(ctx)
     }
 
+    /** Removes a SUBSET of events from a group (used when a group is split across
+     *  sections — dismissing the "normal" remainder must not delete the followed
+     *  events shown in the signed-up section). Empties → removes the group. */
+    fun dismissEvents(ctx: Context, groupId: String, eventIds: Collection<String>) {
+        val ids = eventIds.toSet()
+        if (ids.isEmpty()) return
+        val cur = _groups.value.toMutableList()
+        val idx = cur.indexOfFirst { it.groupId == groupId }
+        if (idx < 0) return
+        val g = cur[idx]
+        val remaining = g.events.filter { it.id !in ids }
+        if (remaining.isEmpty()) cur.removeAt(idx) else cur[idx] = g.copy(events = remaining)
+        _groups.value = cur
+        persist(ctx)
+        AlertImageStore.gc(ctx)
+    }
+
     fun dismiss(ctx: Context, groupId: String) {
         val current = _groups.value.toMutableList()
         current.removeAll { it.groupId == groupId }
@@ -256,6 +273,27 @@ object InAppAlertState {
 
     // Manual-pin cap (signed-up/calendar events are separate and uncapped).
     const val MAX_PINNED = 10
+
+    // Recently user-toggled follow states (eventId -> target, whenMs). When the
+    // user taps Add/Remove-from-Calendar, an enrich sweep already in flight can
+    // read the SERVER's not-yet-propagated old value and flip the card back — the
+    // "remove just switches back to joined" bug. For a short window the LOCAL
+    // target wins over any server read; after it, the (now-propagated) server
+    // value is trusted again.
+    private val recentToggles = java.util.concurrent.ConcurrentHashMap<String, Pair<Boolean, Long>>()
+    private const val TOGGLE_OVERRIDE_MS = 15_000L
+
+    fun recordFollowToggle(eventId: String, target: Boolean) {
+        if (eventId.isNotBlank()) recentToggles[eventId] = target to System.currentTimeMillis()
+    }
+
+    /** The local follow override for [eventId] if still within the window, else null. */
+    fun recentFollowOverride(eventId: String): Boolean? {
+        if (eventId.isBlank()) return null
+        val (t, ts) = recentToggles[eventId] ?: return null
+        return if (System.currentTimeMillis() - ts < TOGGLE_OVERRIDE_MS) t
+        else { recentToggles.remove(eventId); null }
+    }
 
     fun pinnedCount(): Int = _groups.value.count { it.pinned }
 
