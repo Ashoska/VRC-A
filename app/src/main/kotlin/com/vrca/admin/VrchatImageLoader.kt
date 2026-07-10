@@ -56,7 +56,7 @@ object VrchatImageLoader {
             // images visible at once; older ones evict instead of ballooning RAM.
             .memoryCache {
                 coil.memory.MemoryCache.Builder(app)
-                    .maxSizeBytes(12L * 1024 * 1024)
+                    .maxSizeBytes(12 * 1024 * 1024)
                     .build()
             }
             // Coil's DEFAULT disk cache is 2% of FREE disk space (hundreds of MB
