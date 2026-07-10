@@ -111,7 +111,6 @@ object InAppAlertState {
     val groups: StateFlow<List<InAppAlertGroup>> = _groups
 
     fun load(ctx: Context) {
-        loadFollowOverrides(ctx)
         val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val raw = prefs.getString(KEY_GROUPS, null)
         if (raw != null) {
@@ -275,18 +274,20 @@ object InAppAlertState {
     // Manual-pin cap (signed-up/calendar events are separate and uncapped).
     const val MAX_PINNED = 10
 
-    // PERSISTENT per-SERIES follow decisions, keyed by [followSeriesKey] (normalized
-    // title, or id:<evId> when titleless). When the user taps Add/Remove-from-Calendar
-    // that decision is AUTHORITATIVE and permanent — it overrides ANY server read
-    // until the user toggles again. A short time window is NOT enough: these are
-    // often the user's OWN events, and VRChat reports the creator as perpetually
-    // interested/following, so a 60s enrich sweep re-reads `following=true` and
-    // re-adds a just-removed event forever (the "remove just switches back to
-    // joined" bug). Keying per SERIES (not per occurrence id) also stops a recurring
-    // event's ~50 occurrences — each independently reporting following — from each
-    // spawning its own "Signed up" card. Survives restart via SharedPreferences.
-    private val followOverrides = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
-    private const val FOLLOW_OVERRIDE_PREFS = "vrca_follow_overrides"
+    // SHORT-WINDOW per-SERIES follow override, keyed by [followSeriesKey]. When the
+    // user taps Add/Remove-from-Calendar the local decision wins over the server read
+    // for [FOLLOW_OVERRIDE_MS] only — just long enough to cover VRChat's follow
+    // propagation delay so an in-flight enrich can't flip a just-toggled event back.
+    // After the window the SERVER's `userInterest.isFollowing` is authoritative, so a
+    // follow/unfollow made on the WEBSITE or in the VRCHAT CLIENT is picked up by the
+    // 10s expanded poll / 60s tab loop. (It is NOT permanent: that permanence was a
+    // workaround for the old extractEventFollowing bug — which reported every event
+    // as followed — and permanence blocked external follow changes from ever showing.
+    // With the follow field now read correctly there is no flip-back to guard against
+    // beyond the propagation window, and the override is deliberately per SERIES so a
+    // recurring event's occurrences toggle together.)
+    private val followOverrides = java.util.concurrent.ConcurrentHashMap<String, Pair<Boolean, Long>>()
+    private const val FOLLOW_OVERRIDE_MS = 30_000L
 
     /** Stable per-SERIES key: the normalized title (recurring occurrences share it),
      *  or id:<evId> when there's no title. Used by the toggle store, the enricher,
@@ -296,23 +297,19 @@ object InAppAlertState {
         return if (t.isNotBlank()) "t:$t" else "id:${evId.orEmpty()}"
     }
 
-    private fun loadFollowOverrides(ctx: Context) {
-        if (followOverrides.isNotEmpty()) return
-        val p = ctx.getSharedPreferences(FOLLOW_OVERRIDE_PREFS, Context.MODE_PRIVATE)
-        for ((k, v) in p.all) if (v is Boolean) followOverrides[k] = v
-    }
-
-    /** Records (and persists) the user's explicit in-app follow decision for a series. */
+    /** Records the user's in-app follow decision for a series (short-window override). */
     fun recordFollowToggle(ctx: Context, key: String, target: Boolean) {
         if (key.isBlank() || key == "id:") return
-        followOverrides[key] = target
-        ctx.getSharedPreferences(FOLLOW_OVERRIDE_PREFS, Context.MODE_PRIVATE)
-            .edit().putBoolean(key, target).apply()
+        followOverrides[key] = target to System.currentTimeMillis()
     }
 
-    /** The user's persistent follow decision for [key], or null if they never set one
-     *  in-app (then the server value is trusted). */
-    fun followOverride(key: String): Boolean? = followOverrides[key]
+    /** The in-app follow override for [key] if still within the propagation window,
+     *  else null (server value is then authoritative → external changes flow through). */
+    fun followOverride(key: String): Boolean? {
+        val (target, ts) = followOverrides[key] ?: return null
+        return if (System.currentTimeMillis() - ts < FOLLOW_OVERRIDE_MS) target
+        else { followOverrides.remove(key); null }
+    }
 
     /** Applies a follow decision to EVERY event in [groupKey] sharing this series
      *  (matched by normalized title, or the single event by id when titleless) so the
