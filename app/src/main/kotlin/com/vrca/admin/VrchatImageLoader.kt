@@ -47,11 +47,22 @@ object VrchatImageLoader {
             .build()
         return ImageLoader.Builder(app)
             .okHttpClient(client)
+            // Coil's DEFAULT memory cache is 25% of app RAM — full-resolution
+            // bitmaps for event banners + world/instance thumbnails accumulate
+            // there, and on a phone already running the foreground services + the
+            // Discord WebView that spike was a real OEM low-memory KILL trigger
+            // (users reported more frequent background kills after the event UI).
+            // Cap it hard at 12 MB of decoded bitmaps — plenty for the handful of
+            // images visible at once; older ones evict instead of ballooning RAM.
+            .memoryCache {
+                coil.memory.MemoryCache.Builder(app)
+                    .maxSizeBytes(12 * 1024 * 1024)
+                    .build()
+            }
             // Coil's DEFAULT disk cache is 2% of FREE disk space (hundreds of MB
             // on a modern phone) at cacheDir/image_cache — a silent contributor
-            // to the app's "Cache" size. Cap it explicitly: the public build only
-            // loads the user's own avatar + banner, so 10 MB is generous. The LRU
-            // journal trims any oversized pre-existing cache down to the cap.
+            // to the app's "Cache" size. Cap it explicitly. The LRU journal trims
+            // any oversized pre-existing cache down to the cap.
             .diskCache {
                 coil.disk.DiskCache.Builder()
                     .directory(app.cacheDir.resolve("image_cache"))

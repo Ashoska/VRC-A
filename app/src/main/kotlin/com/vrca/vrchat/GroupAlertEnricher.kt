@@ -51,12 +51,116 @@ object GroupAlertEnricher {
         return ev.optJSONObject("interested")?.optInt("count", -1) ?: -1
     }
 
-    /** Whether the USER has this event on their calendar, when the object says. */
-    fun extractEventFollowing(ev: JSONObject): Boolean? = when {
-        ev.has("isFollowing") -> ev.optBoolean("isFollowing")
-        ev.has("userInterest") -> !ev.isNull("userInterest")
-        else -> null
+    /** Whether the USER has this event on their calendar (signed up / interested) —
+     *  so an event added IN-GAME shows as signed-up and the button reads "Remove
+     *  from Calendar" instead of wrongly offering "Add". VRChat's exact field isn't
+     *  documented, so probe the likely BOOLEAN names (an int like `interested` is a
+     *  count, not the follow state, so only Boolean values count); `userInterest`
+     *  present-and-non-null is the fallback signal. null = the object didn't say. */
+    fun extractEventFollowing(ev: JSONObject): Boolean? {
+        // CONFIRMED from a real /calendar/{g}/{e} response: the user's follow state
+        // is the NESTED `userInterest.isFollowing` boolean (userInterest is always a
+        // non-null object with createdAt/updatedAt, so the old "userInterest present
+        // => following" test reported EVERY event as signed-up).
+        ev.optJSONObject("userInterest")?.let { ui ->
+            if (ui.has("isFollowing")) return ui.optBoolean("isFollowing", false)
+        }
+        for (k in listOf("isFollowing", "following", "isInterested", "isAttending", "hasJoined", "isGoing")) {
+            if (ev.has(k)) {
+                val v = ev.opt(k)
+                if (v is Boolean) return v
+            }
+        }
+        return null
     }
+
+    private fun normTitle(ev: JSONObject): String =
+        ev.optString("title", "").ifBlank { ev.optString("name", "") }
+            .trim().lowercase().replace(Regex("\\s+"), " ")
+
+    /**
+     * Collapse recurring occurrences (same title) to ONE representative per series
+     * — the nearest UPCOMING occurrence (or most-recent past if none upcoming).
+     * Returns (representative, isRecurringSeries). Single-title events pass through
+     * with isRecurringSeries=false. Keeps the enricher's per-event work (single
+     * fetch) bounded to ~1 per series instead of one per flooded occurrence.
+     */
+    private fun collapseEventsByTitle(events: JSONArray): List<Pair<JSONObject, Boolean>> {
+        val now = System.currentTimeMillis()
+        val byTitle = LinkedHashMap<String, MutableList<JSONObject>>()
+        for (i in 0 until events.length()) {
+            val ev = events.optJSONObject(i) ?: continue
+            // CONFIRMED field: `seriesId` groups every occurrence of a repeating
+            // event exactly (title can drift). Key on it when present so a flooded
+            // series collapses to ONE representative -> ONE single-event fetch,
+            // instead of the app grabbing info for all ~50 occurrences.
+            val series = ev.optString("seriesId", "").takeIf { it.isNotBlank() && it != "null" }
+            val t = series?.let { "s:$it" }
+                ?: normTitle(ev).ifBlank { "id:${ev.optString("id", i.toString())}" }
+            byTitle.getOrPut(t) { mutableListOf() }.add(ev)
+        }
+        return byTitle.values.map { occ ->
+            if (occ.size == 1) occ[0] to false
+            else {
+                val rep = occ.filter { parseTimestampMs(it.optString("startsAt", "")) >= now }
+                    .minByOrNull { parseTimestampMs(it.optString("startsAt", "")) }
+                    ?: occ.maxByOrNull { parseTimestampMs(it.optString("startsAt", "")) }
+                    ?: occ[0]
+                rep to true
+            }
+        }
+    }
+
+    /** Best-effort: whether the event repeats (part of a series). VRChat's exact
+     *  recurrence field isn't documented, so probe the likely names — any
+     *  non-empty/true value means recurring; absent → false (chip just won't show). */
+    fun extractRecurring(ev: JSONObject): Boolean {
+        if (ev.optBoolean("isRecurring", false)) return true
+        // CONFIRMED: a recurring occurrence has occurrenceKind=="occurrence" (a
+        // one-off is "single") and a non-null seriesId.
+        if (ev.optString("occurrenceKind", "").equals("occurrence", true)) return true
+        for (k in listOf("recurrence", "recurrenceRule", "repeatType", "recurringId",
+                "seriesId", "parentId", "parentCalendarEventId", "recurrenceId")) {
+            val v = ev.opt(k) ?: continue
+            if (v is Boolean && v) return true
+            if (v is String && v.isNotBlank() && v.lowercase() != "none" && v.lowercase() != "never") return true
+            if (v is JSONObject && v.length() > 0) return true
+        }
+        return false
+    }
+
+    /** The organizer id — a `usr_` (a person) OR a `grp_` (the owning group).
+     *  CONFIRMED: a group calendar event's `ownerId` is the GROUP (`grp_…`), which
+     *  VRChat's site shows as the event's host ("Test | Group"); a personal event
+     *  would carry a `usr_`. The caller resolves the name + links to the right page
+     *  (group vs user) by the prefix. */
+    fun extractOrganizerId(ev: JSONObject): String? {
+        for (k in listOf("ownerId", "authorId", "creatorId", "hostId", "userId")) {
+            val v = ev.optString(k, "")
+            if (v.startsWith("usr_") || v.startsWith("grp_")) return v
+        }
+        // Nested owner/author object.
+        for (k in listOf("owner", "author", "creator", "host")) {
+            val o = ev.optJSONObject(k) ?: continue
+            val v = o.optString("id", "")
+            if (v.startsWith("usr_") || v.startsWith("grp_")) return v
+        }
+        return null
+    }
+
+    /** Organizer display name straight off the event object (a nested owner
+     *  object sometimes carries it), so we can skip the extra fetch. */
+    fun extractOrganizerName(ev: JSONObject): String? {
+        for (k in listOf("owner", "author", "creator", "host")) {
+            val o = ev.optJSONObject(k) ?: continue
+            val n = o.optString("displayName", "").ifBlank { o.optString("name", "") }
+            if (n.isNotBlank()) return n
+        }
+        return ev.optString("ownerDisplayName", "").ifBlank { null }
+    }
+
+    // Resolved organizer names, keyed by usr_ id (process-lifetime).
+    private val organizerNameCache = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     fun jsonArrayToCsv(arr: JSONArray?): String? {
         if (arr == null || arr.length() == 0) return null
@@ -139,12 +243,15 @@ object GroupAlertEnricher {
     private suspend fun enrichLocked(ctx: Context, groupId: String): Boolean {
         try {
             // ---- Calendar events: match alerts by the cal_ id ----
+            // Collapse recurring occurrences to ONE representative per series FIRST,
+            // so the per-representative single-event fetch (below) is bounded to
+            // ~1 call per series instead of one per flooded occurrence.
             val events = VrchatAuthManager.fetchGroupCalendarEvents(ctx, groupId, 20)
             if (events != null) {
-                for (j in 0 until events.length()) {
-                    val ev = events.optJSONObject(j) ?: continue
+                for ((ev, isRecurringSeries) in collapseEventsByTitle(events)) {
                     val evId = ev.optString("id", "").ifBlank { findIdWithPrefix(ev, "cal_").orEmpty() }
                     if (evId.isBlank()) continue
+                    val repTitle = normTitle(ev)
                     val startsMs = parseTimestampMs(ev.optString("startsAt", ""))
                     val endsMs = parseTimestampMs(ev.optString("endsAt", ""))
                     val createdMs = parseTimestampMs(ev.optString("createdAt", ""))
@@ -154,7 +261,29 @@ object GroupAlertEnricher {
                     val languagesCsv = jsonArrayToCsv(ev.optJSONArray("languages"))
                     val access = ev.optString("accessType", "")
                     val interested = extractInterestedCount(ev)
-                    val following = extractEventFollowing(ev)
+                    // The group calendar LIST omits the user's per-event follow
+                    // state, so an event added IN-GAME wasn't detected. Fetch the
+                    // single event (which carries it) to get authoritative
+                    // following + richer organizer/recurrence. One call per
+                    // representative (after recurring-collapse, ~1 per series).
+                    val single = VrchatAuthManager.fetchCalendarEvent(ctx, groupId, evId)
+                    val src = single ?: ev
+                    // The user's explicit in-app follow decision is AUTHORITATIVE and
+                    // permanent — it wins over the server read, which for the user's
+                    // OWN events perpetually reports following=true (so removing an
+                    // event would otherwise flip straight back to joined every sweep).
+                    // Keyed per SERIES so a removed recurring event stays removed.
+                    val followKey = InAppAlertState.followSeriesKey(
+                        repTitle.ifBlank { ev.optString("title", "").ifBlank { ev.optString("name", "") } },
+                        evId
+                    )
+                    val following = InAppAlertState.followOverride(followKey)
+                        ?: extractEventFollowing(src) ?: extractEventFollowing(ev)
+                    val recurring = isRecurringSeries || extractRecurring(src) || extractRecurring(ev)
+                    // Host/organizer is deliberately NOT shown on notifications, so
+                    // we don't extract or resolve it (avoids a per-event REST call).
+                    val organizerId: String? = null
+                    val organizerName: String? = null
                     val title = ev.optString("title", "").ifBlank { ev.optString("name", "") }
                     val desc = ev.optString("description", "").ifBlank { ev.optString("text", "") }
                     if (img != null) AlertImageStore.ensureCached(ctx, img)
@@ -162,7 +291,13 @@ object GroupAlertEnricher {
                         ctx, "event_$groupId",
                         match = { e ->
                             e.eventRefId == evId ||
-                                (e.eventRefId == null && e.url?.contains(evId) == true)
+                                (e.eventRefId == null && e.url?.contains(evId) == true) ||
+                                // A recurring representative updates ALL stored
+                                // occurrences of its series (matched by title) so
+                                // following/interested/etc. propagate to every one
+                                // and the display-collapse shows consistent data.
+                                (recurring && e.recurring && repTitle.isNotBlank() &&
+                                    (e.eventTitle?.trim()?.lowercase()?.replace(Regex("\\s+"), " ") ?: "") == repTitle)
                         },
                         transform = { e ->
                             e.copy(
@@ -182,6 +317,9 @@ object GroupAlertEnricher {
                                 // emptied list must CLEAR the chip, not keep stale.
                                 languages = if (ev.has("languages")) languagesCsv else e.languages,
                                 following = following ?: e.following,
+                                recurring = recurring || e.recurring,
+                                organizerId = organizerId ?: e.organizerId,
+                                organizerName = organizerName ?: e.organizerName,
                                 // Upgrade the display: the event's REAL name (drops the
                                 // "New event by X:" v2 boilerplate), timestamp = start,
                                 // body = clean description. Edits made on VRChat's side
@@ -201,16 +339,17 @@ object GroupAlertEnricher {
             if (posts != null) {
                 for (j in 0 until posts.length()) {
                     val post = posts.optJSONObject(j) ?: continue
-                    val img = post.optString("imageUrl", "").takeIf { it.startsWith("http") } ?: continue
                     val text = post.optString("text", "")
                     val title = post.optString("title", "")
                     val norm = normalizeAnnBody(text.ifBlank { title })
                     if (norm.isBlank()) continue
-                    AlertImageStore.ensureCached(ctx, img)
+                    val img = post.optString("imageUrl", "").takeIf { it.startsWith("http") }
+                    if (img != null) AlertImageStore.ensureCached(ctx, img)
+                    // Enrich the banner only (host/author is deliberately not shown).
                     InAppAlertState.enrichEvents(
                         ctx, "announcement_$groupId",
                         match = { e -> e.imageUrl == null && normalizeAnnBody(e.body) == norm },
-                        transform = { e -> e.copy(imageUrl = img, groupRefId = e.groupRefId ?: groupId) }
+                        transform = { e -> e.copy(imageUrl = img ?: e.imageUrl, groupRefId = e.groupRefId ?: groupId) }
                     )
                 }
             }

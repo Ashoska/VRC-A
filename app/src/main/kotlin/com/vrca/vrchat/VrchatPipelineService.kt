@@ -1989,11 +1989,19 @@ class VrchatPipelineService : Service() {
     private fun scheduleTargetedGroupSweep(groupId: String) {
         if (groupId.isBlank()) return
         serviceScope.launch {
-            delay(2500)
-            try {
-                GroupAlertEnricher.enrich(this@VrchatPipelineService, groupId)
-            } catch (e: Exception) {
-                Log.w(TAG, "Targeted group sweep failed for $groupId", e)
+            // A genuine new-event push warrants an immediate enrich, but VRChat's
+            // backend may not have indexed the event yet when we first fetch —
+            // retry a couple of times. minIntervalMs=0 FORCES each attempt past the
+            // per-group debounce (the global mutex + 2.5s spacing still bounds it),
+            // so a second event arriving right after the first still enriches
+            // instead of being silently debounced away.
+            for (delayMs in listOf(2500L, 6000L, 15000L)) {
+                delay(delayMs)
+                try {
+                    GroupAlertEnricher.enrich(this@VrchatPipelineService, groupId, minIntervalMs = 0)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Targeted group sweep failed for $groupId", e)
+                }
             }
         }
     }
@@ -3274,7 +3282,10 @@ class VrchatPipelineService : Service() {
             platforms = GroupAlertEnricher.jsonArrayToCsv(event.optJSONArray("platforms")),
             accessType = event.optString("accessType", "").ifBlank { null },
             languages = GroupAlertEnricher.jsonArrayToCsv(event.optJSONArray("languages")),
-            following = GroupAlertEnricher.extractEventFollowing(event)
+            following = GroupAlertEnricher.extractEventFollowing(event),
+            recurring = GroupAlertEnricher.extractRecurring(event),
+            organizerId = GroupAlertEnricher.extractOrganizerId(event),
+            organizerName = GroupAlertEnricher.extractOrganizerName(event)
         )
         // With structured timing available the body is just the description; the
         // text-timing fallback (buildCalendarEventBody) covers events with no
@@ -3712,7 +3723,10 @@ class VrchatPipelineService : Service() {
                         platforms = alertRich?.platforms,
                         accessType = alertRich?.accessType,
                         languages = alertRich?.languages,
-                        following = alertRich?.following
+                        following = alertRich?.following,
+                        recurring = alertRich?.recurring ?: false,
+                        organizerId = alertRich?.organizerId,
+                        organizerName = alertRich?.organizerName
                     ),
                     singleEvent = alertSingleEvent,
                     dedupByActionData = alertDedupByActionData

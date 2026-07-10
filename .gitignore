@@ -31,4 +31,8 @@ google-services.json
 
 # Android Profiling
 *.hprof
-.claude/
+# Ignore local Claude settings, but track the shared SessionStart hook + settings
+# so Claude Code on the web sessions install the Android SDK automatically.
+.claude/*
+!.claude/settings.json
+!.claude/hooks/

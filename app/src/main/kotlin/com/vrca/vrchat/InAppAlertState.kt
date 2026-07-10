@@ -40,8 +40,16 @@ data class InAppAlertEvent(
     val accessType: String? = null,   // "public" / "group" / ...
     val languages: String? = null,    // CSV of language codes ("eng,jpn")
     // Whether the USER has this event on their VRChat calendar (null = unknown).
-    // Updated optimistically when the Add/Remove button succeeds.
-    val following: Boolean? = null
+    // Updated optimistically when the Add/Remove button succeeds. following==true
+    // = a "signed up" event (golden-pinned to the top of the notifications).
+    val following: Boolean? = null,
+    // Whether this event repeats (part of a recurring series). Best-effort from
+    // the calendar object; false when unknown.
+    val recurring: Boolean = false,
+    // The event's organizer (the user who created it, distinct from the group).
+    // Clickable -> their VRChat profile. Name resolved during enrichment.
+    val organizerId: String? = null,   // usr_...
+    val organizerName: String? = null
 )
 
 data class InAppAlertGroup(
@@ -50,7 +58,12 @@ data class InAppAlertGroup(
     val url: String? = null,
     val events: List<InAppAlertEvent>,
     val firstSeenMs: Long,
-    val lastUpdatedMs: Long
+    val lastUpdatedMs: Long,
+    // User pinned this group (long-press / pin button). Pinned groups float to a
+    // "📌 Pinned" section (below "Signed up Events"), can't be dismissed, and are
+    // preserved by Dismiss-all. Manual + universal (any notification type). Capped
+    // at MAX_PINNED. Persisted.
+    val pinned: Boolean = false
 )
 
 /**
@@ -70,7 +83,10 @@ data class AlertRichMeta(
     val platforms: String? = null,
     val accessType: String? = null,
     val languages: String? = null,
-    val following: Boolean? = null
+    val following: Boolean? = null,
+    val recurring: Boolean = false,
+    val organizerId: String? = null,
+    val organizerName: String? = null
 )
 
 // Kept for backward compat with callers that don't use grouping
@@ -203,6 +219,49 @@ object InAppAlertState {
         )
     }
 
+    /**
+     * Removes ONE event from a group (the per-event X on a multi-event card). If
+     * that empties the group, the whole group is removed. For a recurring series
+     * (collapsed to one visible entry) this removes ALL occurrences of that title,
+     * so dismissing the shown card actually clears the series rather than surfacing
+     * the next occurrence.
+     */
+    fun dismissEvent(ctx: Context, groupId: String, eventId: String) {
+        val cur = _groups.value.toMutableList()
+        val idx = cur.indexOfFirst { it.groupId == groupId }
+        if (idx < 0) return
+        val g = cur[idx]
+        val target = g.events.firstOrNull { it.id == eventId } ?: return
+        val remaining = if (target.recurring && !target.eventTitle.isNullOrBlank()) {
+            val t = target.eventTitle.trim().lowercase()
+            g.events.filter { !(it.recurring && it.eventTitle?.trim()?.lowercase() == t) }
+        } else {
+            g.events.filter { it.id != eventId }
+        }
+        if (remaining.isEmpty()) cur.removeAt(idx)
+        else cur[idx] = g.copy(events = remaining)
+        _groups.value = cur
+        persist(ctx)
+        AlertImageStore.gc(ctx)
+    }
+
+    /** Removes a SUBSET of events from a group (used when a group is split across
+     *  sections — dismissing the "normal" remainder must not delete the followed
+     *  events shown in the signed-up section). Empties → removes the group. */
+    fun dismissEvents(ctx: Context, groupId: String, eventIds: Collection<String>) {
+        val ids = eventIds.toSet()
+        if (ids.isEmpty()) return
+        val cur = _groups.value.toMutableList()
+        val idx = cur.indexOfFirst { it.groupId == groupId }
+        if (idx < 0) return
+        val g = cur[idx]
+        val remaining = g.events.filter { it.id !in ids }
+        if (remaining.isEmpty()) cur.removeAt(idx) else cur[idx] = g.copy(events = remaining)
+        _groups.value = cur
+        persist(ctx)
+        AlertImageStore.gc(ctx)
+    }
+
     fun dismiss(ctx: Context, groupId: String) {
         val current = _groups.value.toMutableList()
         current.removeAll { it.groupId == groupId }
@@ -212,15 +271,92 @@ object InAppAlertState {
         AlertImageStore.gc(ctx)
     }
 
-    /** Clears every in-app alert group (the "Dismiss all" action). Returns the
-     *  group ids that were cleared so the caller can cancel their linked Android
-     *  notifications too. */
+    // Manual-pin cap (signed-up/calendar events are separate and uncapped).
+    const val MAX_PINNED = 10
+
+    // SHORT-WINDOW per-SERIES follow override, keyed by [followSeriesKey]. When the
+    // user taps Add/Remove-from-Calendar the local decision wins over the server read
+    // for [FOLLOW_OVERRIDE_MS] only — just long enough to cover VRChat's follow
+    // propagation delay so an in-flight enrich can't flip a just-toggled event back.
+    // After the window the SERVER's `userInterest.isFollowing` is authoritative, so a
+    // follow/unfollow made on the WEBSITE or in the VRCHAT CLIENT is picked up by the
+    // 10s expanded poll / 60s tab loop. (It is NOT permanent: that permanence was a
+    // workaround for the old extractEventFollowing bug — which reported every event
+    // as followed — and permanence blocked external follow changes from ever showing.
+    // With the follow field now read correctly there is no flip-back to guard against
+    // beyond the propagation window, and the override is deliberately per SERIES so a
+    // recurring event's occurrences toggle together.)
+    private val followOverrides = java.util.concurrent.ConcurrentHashMap<String, Pair<Boolean, Long>>()
+    private const val FOLLOW_OVERRIDE_MS = 30_000L
+
+    /** Stable per-SERIES key: the normalized title (recurring occurrences share it),
+     *  or id:<evId> when there's no title. Used by the toggle store, the enricher,
+     *  and the display split so all three agree on what "this event" is. */
+    fun followSeriesKey(title: String?, evId: String?): String {
+        val t = title?.trim()?.lowercase()?.replace(Regex("\\s+"), " ").orEmpty()
+        return if (t.isNotBlank()) "t:$t" else "id:${evId.orEmpty()}"
+    }
+
+    /** Records the user's in-app follow decision for a series (short-window override). */
+    fun recordFollowToggle(ctx: Context, key: String, target: Boolean) {
+        if (key.isBlank() || key == "id:") return
+        followOverrides[key] = target to System.currentTimeMillis()
+    }
+
+    /** The in-app follow override for [key] if still within the propagation window,
+     *  else null (server value is then authoritative → external changes flow through). */
+    fun followOverride(key: String): Boolean? {
+        val (target, ts) = followOverrides[key] ?: return null
+        return if (System.currentTimeMillis() - ts < FOLLOW_OVERRIDE_MS) target
+        else { followOverrides.remove(key); null }
+    }
+
+    /** Applies a follow decision to EVERY event in [groupKey] sharing this series
+     *  (matched by normalized title, or the single event by id when titleless) so the
+     *  optimistic UI update covers all of a recurring series' occurrences at once. */
+    fun applyFollowToSeries(ctx: Context, groupKey: String, title: String?, evId: String?, following: Boolean) {
+        val t = title?.trim()?.lowercase()?.replace(Regex("\\s+"), " ").orEmpty()
+        enrichEvents(
+            ctx, groupKey,
+            match = { e ->
+                if (t.isNotBlank()) (e.eventTitle?.trim()?.lowercase()?.replace(Regex("\\s+"), " ") ?: "") == t
+                else e.eventRefId == evId || e.id == evId
+            },
+            transform = { it.copy(following = following) }
+        )
+    }
+
+    fun pinnedCount(): Int = _groups.value.count { it.pinned }
+
+    /**
+     * Toggle a group's manual pin. Returns false (no-op) when trying to pin past
+     * [MAX_PINNED] — the caller shows a "pinned is full" toast. Pinning/unpinning
+     * is universal (any alert type) and persisted.
+     */
+    fun setPinned(ctx: Context, groupId: String, pinned: Boolean): Boolean {
+        val cur = _groups.value.toMutableList()
+        val idx = cur.indexOfFirst { it.groupId == groupId }
+        if (idx < 0) return false
+        if (cur[idx].pinned == pinned) return true
+        if (pinned && pinnedCount() >= MAX_PINNED) return false
+        cur[idx] = cur[idx].copy(pinned = pinned)
+        _groups.value = cur
+        persist(ctx)
+        return true
+    }
+
+    /** Clears in-app alert groups (the "Dismiss all" action) EXCEPT signed-up
+     *  events (following==true) AND manually-pinned groups — both are kept on
+     *  purpose (their per-card X is hidden too). Returns the cleared group ids so
+     *  the caller can cancel their linked Android notifications. */
     fun dismissAll(ctx: Context): List<String> {
-        val ids = _groups.value.map { it.groupId }
-        _groups.value = emptyList()
+        fun keep(g: InAppAlertGroup) = g.pinned || g.events.any { it.following == true }
+        val kept = _groups.value.filter { keep(it) }
+        val cleared = _groups.value.filter { !keep(it) }
+        _groups.value = kept
         persist(ctx)
         AlertImageStore.gc(ctx)
-        return ids
+        return cleared.map { it.groupId }
     }
 
     /**
@@ -303,6 +439,9 @@ object InAppAlertState {
                     put("languages", e.languages ?: "")
                     // -1 unknown / 0 false / 1 true
                     put("following", when (e.following) { null -> -1; false -> 0; true -> 1 })
+                    put("recurring", e.recurring)
+                    put("organizerId", e.organizerId ?: "")
+                    put("organizerName", e.organizerName ?: "")
                 })
             }
             arr.put(JSONObject().apply {
@@ -312,6 +451,7 @@ object InAppAlertState {
                 put("events", eventsArr)
                 put("firstSeen", g.firstSeenMs)
                 put("lastUpdated", g.lastUpdatedMs)
+                put("pinned", g.pinned)
             })
         }
         ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -350,7 +490,10 @@ object InAppAlertState {
                     languages = eObj.optString("languages").ifBlank { null },
                     following = when (eObj.optInt("following", -1)) {
                         1 -> true; 0 -> false; else -> null
-                    }
+                    },
+                    recurring = eObj.optBoolean("recurring", false),
+                    organizerId = eObj.optString("organizerId").ifBlank { null },
+                    organizerName = eObj.optString("organizerName").ifBlank { null }
                 )
             }
             list += InAppAlertGroup(
@@ -359,7 +502,8 @@ object InAppAlertState {
                 url = obj.optString("url").ifBlank { null },
                 events = events,
                 firstSeenMs = obj.optLong("firstSeen"),
-                lastUpdatedMs = obj.optLong("lastUpdated")
+                lastUpdatedMs = obj.optLong("lastUpdated"),
+                pinned = obj.optBoolean("pinned", false)
             )
         }
         return list

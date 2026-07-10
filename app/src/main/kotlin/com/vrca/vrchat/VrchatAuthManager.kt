@@ -1086,6 +1086,23 @@ object VrchatAuthManager {
         }
     }
 
+    /** A user's current display name (`GET /users/{id}` → `displayName`) — used to
+     *  resolve an event's organizer name for the alert card. Best-effort. */
+    suspend fun fetchUserDisplayName(context: Context, userId: String): String? = withContext(Dispatchers.IO) {
+        if (userId.isBlank() || !userId.startsWith("usr_")) return@withContext null
+        val cookieHeader = getCookieHeader(context) ?: return@withContext null
+        try {
+            val (code, body, rawCookies) = get("$BASE/users/$userId", null, cookieHeader)
+            if (code == 200) captureRolledCookies(context, rawCookies)
+            if (code == 200 && body.startsWith("{")) {
+                org.json.JSONObject(body).optString("displayName", "").takeIf { it.isNotBlank() }
+            } else null
+        } catch (e: Exception) {
+            Log.w(TAG, "fetchUserDisplayName($userId) failed", e)
+            null
+        }
+    }
+
     suspend fun fetchGroupName(context: Context, groupId: String): String? = withContext(Dispatchers.IO) {
         if (groupId.isBlank()) return@withContext null
         val cookieHeader = getCookieHeader(context) ?: return@withContext null
@@ -1127,16 +1144,83 @@ object VrchatAuthManager {
             captureRolledCookies(context, rawCookies)
             // VRChat wraps posts in an object: {"posts":[...],"total":N}.
             // Older/edge responses may return a bare array — handle both.
-            when {
+            val arr = when {
                 body.startsWith("[") -> org.json.JSONArray(body)
                 body.startsWith("{") -> org.json.JSONObject(body).optJSONArray("posts")
                 else -> null
             }
+            // Debug: raw first post reveals VRChat's REAL author field name.
+            arr?.optJSONObject(0)?.let { VrcaEventDiag.recordPost(it.toString()) }
+            arr
         } catch (e: Exception) {
             Log.w(TAG, "fetchGroupPosts($groupId) failed", e)
             null
         }
     }
+
+    /**
+     * DIAGNOSTIC: probe candidate endpoints for "the authenticated user's signed-up
+     * / followed calendar events" (VRChat's personal calendar list). None is
+     * documented, so try the likely shapes and dump each one's HTTP code + a body
+     * snippet into [VrcaEventDiag] so the real endpoint can be identified from a
+     * device and then wired in for real. Read-only, best-effort, no side effects.
+     */
+    suspend fun probeSignedUpEventsEndpoints(context: Context): Unit = withContext(Dispatchers.IO) {
+        val userId = getStoredUserId(context)
+        val cookieHeader = getCookieHeader(context) ?: run {
+            VrcaEventDiag.recordSignedUpProbe("Not signed in to VRChat"); return@withContext
+        }
+        val candidates = listOfNotNull(
+            "$BASE/calendar",
+            "$BASE/calendar?n=20",
+            "$BASE/calendar/following?n=20",
+            userId?.let { "$BASE/users/$it/calendar?n=20" },
+            userId?.let { "$BASE/users/$it/events?n=20" },
+            userId?.let { "$BASE/users/$it/calendar/events?n=20" },
+            "$BASE/auth/user/calendar?n=20",
+            "$BASE/auth/user/events?n=20"
+        )
+        val sb = StringBuilder()
+        for (url in candidates) {
+            val short = url.removePrefix("$BASE/")
+            try {
+                val (code, body, rawCookies) = get(url, null, cookieHeader)
+                if (code == 200) captureRolledCookies(context, rawCookies)
+                val snip = body.take(280).replace("\n", " ")
+                sb.append("GET $short -> $code : $snip\n\n")
+            } catch (e: Exception) {
+                sb.append("GET $short -> ERR ${e.message}\n\n")
+            }
+            kotlinx.coroutines.delay(300)
+        }
+        VrcaEventDiag.recordSignedUpProbe(sb.toString().trim())
+    }
+
+    /**
+     * A single calendar event (`GET /calendar/{groupId}/{eventId}`). The single-
+     * event object carries the authenticated user's per-event state (whether they
+     * follow/are-signed-up) that the group calendar LIST omits — so this is how we
+     * detect an event the user added to their calendar IN-GAME. Returns the full
+     * object (also richer for organizer/recurrence).
+     */
+    suspend fun fetchCalendarEvent(context: Context, groupId: String, eventId: String): org.json.JSONObject? =
+        withContext(Dispatchers.IO) {
+            if (groupId.isBlank() || eventId.isBlank()) return@withContext null
+            val cookieHeader = getCookieHeader(context) ?: return@withContext null
+            try {
+                val (code, body, rawCookies) = get("$BASE/calendar/$groupId/$eventId", null, cookieHeader)
+                if (code == 200) captureRolledCookies(context, rawCookies)
+                if (code == 200 && body.startsWith("{")) {
+                    // Debug: raw event object reveals VRChat's REAL organizer /
+                    // follow field names (both are currently inferred).
+                    VrcaEventDiag.recordCalendarEvent(body)
+                    org.json.JSONObject(body)
+                } else null
+            } catch (e: Exception) {
+                Log.w(TAG, "fetchCalendarEvent($groupId,$eventId) failed", e)
+                null
+            }
+        }
 
     // Group calendar events. VRChat exposes group events at
     // GET /groups/{groupId}/calendar — used to backfill events created while
@@ -1239,11 +1323,12 @@ object VrchatAuthManager {
         val cookieHeader = getCookieHeader(context)
             ?: return@withContext InviteResult(false, "Not signed in to VRChat")
         try {
-            val (code, respBody, rawCookies) = post(
-                "$BASE/calendar/$groupId/$eventId/follow",
-                "{\"isFollowing\":$following}",
-                cookieHeader
-            )
+            val url = "$BASE/calendar/$groupId/$eventId/follow"
+            val reqBody = "{\"isFollowing\":$following}"
+            val (code, respBody, rawCookies) = post(url, reqBody, cookieHeader)
+            // Surface the exact request/response for Settings -> Debug — this
+            // endpoint is inferred, so the raw result is how we confirm it.
+            VrcaEventDiag.recordFollowCall(url, reqBody, code, respBody)
             if (code in 200..299) {
                 captureRolledCookies(context, rawCookies)
                 InviteResult(true)

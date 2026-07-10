@@ -74,6 +74,11 @@
             android:name=".vrchat.NotificationActionReceiver"
             android:exported="false" />
 
+        <!-- Local reminder for events the user signed up for (Add to Calendar) -->
+        <receiver
+            android:name=".vrchat.EventReminderReceiver"
+            android:exported="false" />
+
         <activity
             android:name=".app.MainActivity"
             android:exported="true"

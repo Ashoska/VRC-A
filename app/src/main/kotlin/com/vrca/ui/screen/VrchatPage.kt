@@ -10,6 +10,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -67,6 +68,8 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Schedule
@@ -578,6 +581,14 @@ internal object AlertSectionState {
     val expanded = mutableStateOf(true)
 }
 
+/** Collapse state for the "📌 Pinned" sub-section — same process-scoped model as
+ *  [AlertSectionState]: it survives tab switches but resets to expanded on a cold
+ *  process start (a headless revival has no UI, so the reset is only ever seen on
+ *  a genuine reopen — the intended behavior). */
+internal object PinnedSectionState {
+    val expanded = mutableStateOf(true)
+}
+
 /* =========================
    Identity header helpers
    ========================= */
@@ -820,19 +831,150 @@ private fun LazyListScope.inAppAlertSection(
                 )
             }
         } else {
-            // Cards are page-level items now (no inner scroll region / height
-            // cap) — the whole tab is one LazyColumn, so an unbounded alert
-            // history only composes the cards actually on screen. Keyed by group
-            // identity so each card's expanded state stays with ITS group even as
-            // new alerts prepend to the list.
-            items(filtered, key = { it.groupId }) { group ->
-                AlertGroupCard(group = group, nowMs = nowMs, onDismiss = {
-                    InAppAlertState.dismiss(ctx, group.groupId)
-                    val nm = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
-                    nm.cancel(group.groupId.hashCode())
-                })
+            // THREE zones. Splitting is at the EVENT level, not the group: a group
+            // can have SOME events the user signed up for and some they didn't, so
+            // each FOLLOWED event becomes its OWN card in "Signed up Events" (real
+            // groupId kept for its actions; unique display key), while the remaining
+            // (unfollowed) events stay grouped together in Pinned (if the group is
+            // manually pinned) or Other notifications. Un-following an event drops it
+            // back into the remainder group automatically.
+            val gold = Color(0xFFFFC64B)
+            val silver = Color(0xFFC7CDD9)
+            val signedUpCards = ArrayList<Pair<String, InAppAlertGroup>>()
+            val pinnedCards = ArrayList<Pair<String, InAppAlertGroup>>()
+            val restCards = ArrayList<Pair<String, InAppAlertGroup>>()
+            for (g in filtered) {
+                val followed = g.events.filter { it.following == true }
+                val others = g.events.filter { it.following != true }
+                // Group the followed events by SERIES (normalized title) so a
+                // recurring event the user signed up for shows as ONE card — its ~50
+                // occurrences, each independently marked following, would otherwise
+                // each spawn its own "Going" card. The card's own recurring-collapse
+                // then picks the nearest upcoming occurrence and shows the count.
+                val bySeries = LinkedHashMap<String, MutableList<InAppAlertEvent>>()
+                for (ev in followed) {
+                    val t = ev.eventTitle?.trim()?.lowercase()?.replace(Regex("\\s+"), " ").orEmpty()
+                    val skey = if (t.isNotBlank()) "t:$t" else "id:${ev.id}"
+                    bySeries.getOrPut(skey) { mutableListOf() }.add(ev)
+                }
+                for ((skey, evs) in bySeries) {
+                    signedUpCards.add("su_${g.groupId}_$skey" to g.copy(events = evs))
+                }
+                if (others.isNotEmpty()) {
+                    val rem = g.copy(events = others)
+                    if (g.pinned) pinnedCards.add("pin_${g.groupId}" to rem)
+                    else restCards.add(g.groupId to rem)
+                }
+            }
+            val togglePin: (InAppAlertGroup) -> Unit = { g ->
+                val ok = InAppAlertState.setPinned(ctx, g.groupId, !g.pinned)
+                if (!ok) Toast.makeText(
+                    ctx, "Pinned is full (max ${InAppAlertState.MAX_PINNED}) — unpin one first",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+            // Dismiss a remainder card: remove ONLY its (unfollowed) events, so the
+            // followed events shown separately in "Signed up Events" survive.
+            val dismissCard: (InAppAlertGroup) -> Unit = { g ->
+                InAppAlertState.dismissEvents(ctx, g.groupId, g.events.map { it.id })
+                val nm = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+                nm.cancel(g.groupId.hashCode())
+            }
+            if (signedUpCards.isNotEmpty()) {
+                item(key = "signedup_header") {
+                    Text(
+                        "★ Signed up Events",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = gold,
+                        modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 6.dp, bottom = 2.dp)
+                    )
+                }
+                items(signedUpCards, key = { it.first }) { (_, group) ->
+                    AlertGroupCard(group = group, nowMs = nowMs, signedUp = true,
+                        onTogglePin = {}, onDismiss = {})
+                }
+            }
+            if (pinnedCards.isNotEmpty()) {
+                item(key = "pinned_header") {
+                    val pinExpanded = PinnedSectionState.expanded.value
+                    Row(
+                        Modifier.fillMaxWidth()
+                            .clickable { PinnedSectionState.expanded.value = !pinExpanded }
+                            .padding(start = 4.dp, end = 4.dp, top = 6.dp, bottom = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Filled.PushPin, null,
+                            tint = silver,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            "Pinned (${pinnedCards.size})",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = silver,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Icon(
+                            if (pinExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                            contentDescription = if (pinExpanded) "Collapse pinned" else "Expand pinned",
+                            tint = silver,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+                if (PinnedSectionState.expanded.value) {
+                    items(pinnedCards, key = { it.first }) { (_, group) ->
+                        AlertGroupCard(group = group, nowMs = nowMs, pinned = true,
+                            onTogglePin = { togglePin(group) }, onDismiss = { dismissCard(group) })
+                    }
+                }
+            }
+            if ((signedUpCards.isNotEmpty() || pinnedCards.isNotEmpty()) && restCards.isNotEmpty()) {
+                item(key = "rest_header") {
+                    Text(
+                        "Other notifications",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 6.dp, bottom = 2.dp)
+                    )
+                }
+            }
+            items(restCards, key = { it.first }) { (_, group) ->
+                AlertGroupCard(group = group, nowMs = nowMs, signedUp = false, pinned = false,
+                    onTogglePin = { togglePin(group) }, onDismiss = { dismissCard(group) })
             }
         }
+    }
+}
+
+/**
+ * Collapse recurring event occurrences into one entry per series. VRChat writes
+ * EVERY day of a repeating event as its own calendar event (a 50-occurrence flood
+ * for a daily repeat), so same-title events are folded to the nearest UPCOMING
+ * occurrence (or the most recent past one if none are upcoming). Single-title
+ * events pass through unchanged, so non-recurring alerts are untouched. Order is
+ * preserved by first appearance.
+ */
+private fun collapseRecurring(
+    events: List<InAppAlertEvent>,
+    nowMs: Long
+): List<InAppAlertEvent> {
+    if (events.size < 2) return events
+    val byKey = LinkedHashMap<String, MutableList<InAppAlertEvent>>()
+    for (e in events) {
+        val t = e.eventTitle?.trim()?.lowercase()
+        // Only fold when there's a real title to key on; otherwise keep unique by id.
+        val key = if (t.isNullOrBlank()) "id:${e.id}" else "t:$t"
+        byKey.getOrPut(key) { mutableListOf() }.add(e)
+    }
+    return byKey.values.map { occ ->
+        if (occ.size == 1) occ[0]
+        else occ.filter { it.startsAtMs > 0 && it.startsAtMs >= nowMs }.minByOrNull { it.startsAtMs }
+            ?: occ.maxByOrNull { it.startsAtMs } ?: occ[0]
     }
 }
 
@@ -984,13 +1126,35 @@ private fun wordDiff(before: String, after: String): Pair<androidx.compose.ui.te
 }
 
 @Composable
-private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () -> Unit) {
+private fun AlertGroupCard(
+    group: InAppAlertGroup,
+    nowMs: Long,
+    signedUp: Boolean = false,
+    pinned: Boolean = false,
+    onTogglePin: () -> Unit = {},
+    onDismiss: () -> Unit
+) {
+    // Accent treatment: signed-up (Added to Calendar) = GOLD, manually pinned =
+    // SILVER; both get an accent bar/border + a pill and are protected from
+    // dismissal. (No emoji anywhere — pin is the Material PushPin symbol.)
+    val gold = Color(0xFFFFC64B)
+    val silver = Color(0xFFC7CDD9)
+    val special = signedUp || pinned
+    val accent = if (signedUp) gold else silver
     val ctx = LocalContext.current
     var expanded by remember { mutableStateOf(false) }
-    val eventCount = group.events.size
+    // Collapse recurring occurrences (VRChat auto-creates EVERY day of a repeat as
+    // a separate calendar event — up to 50). Same-title events fold to the nearest
+    // UPCOMING occurrence so the card shows ONE, not 50. Retroactive: fixes cards
+    // that already flooded before the fire-time collapse landed.
+    val displayEvents = remember(group.events, nowMs) { collapseRecurring(group.events, nowMs) }
+    val eventCount = displayEvents.size
     val displayTitle = if (eventCount > 1) "${group.title} ($eventCount)" else group.title
 
-    val latest = group.events.lastOrNull()
+    // Preview off the SOONEST event, not the last (the last was the farthest-out
+    // occurrence → "in 48d"; the soonest is what the user cares about).
+    val latest = displayEvents.minByOrNull { if (it.startsAtMs > 0) it.startsAtMs else Long.MAX_VALUE }
+        ?: displayEvents.lastOrNull()
     val previewText = latest?.body?.takeIf { it.isNotBlank() }
         ?: latest?.eventTitle?.takeIf { it.isNotBlank() }
         ?: ""
@@ -1006,17 +1170,17 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
     // shared url (friend request + new friend, bio/name/rank history all point at the
     // same profile); groups with DISTINCT per-event urls (group posts) keep per-event
     // opens in the body instead.
-    val inviteMeTargets = group.events
+    val inviteMeTargets = displayEvents
         .filter { it.actionType == NotificationActionReceiver.ACTION_INVITE_ME && !it.actionData.isNullOrBlank() }
         .map { InstanceTarget(it.actionData!!, it.eventTitle ?: it.body, imageUrl = it.imageUrl.orEmpty()) }
         .distinctBy { it.location }
-    val inviteUserData = group.events
+    val inviteUserData = displayEvents
         .firstOrNull { it.actionType == NotificationActionReceiver.ACTION_INVITE_USER && !it.actionData.isNullOrBlank() }
         ?.actionData
-    val sharedOpenUrl = group.events.mapNotNull { it.url }.distinct().singleOrNull()
+    val sharedOpenUrl = displayEvents.mapNotNull { it.url }.distinct().singleOrNull()
     val showPerEventOpen = sharedOpenUrl == null
     val headerOpenUrl = sharedOpenUrl
-        ?: group.url?.takeIf { group.events.none { e -> e.url != null } }
+        ?: group.url?.takeIf { displayEvents.none { e -> e.url != null } }
     // "Join event": lists the hosting group's currently-open instances in the
     // same picker the multi-invite flow uses. null = closed; empty = fetched,
     // group has nothing open right now.
@@ -1035,8 +1199,16 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
         if (!group.groupId.startsWith("event_grp_") &&
             !group.groupId.startsWith("announcement_grp_")) return@LaunchedEffect
         val refIds = group.events.mapNotNull { it.groupRefId }.distinct().take(2)
-        for (gid in refIds) {
-            runCatching { com.vrca.vrchat.GroupAlertEnricher.enrich(ctx, gid, minIntervalMs = 15_000) }
+        // While the card stays expanded, keep the changeable info (interested
+        // count, timing, banner, follow state, edits) fresh on a 10s cadence —
+        // the effect is cancelled the moment it collapses, so the loop stops with
+        // it. The ~9s per-group min lets each 10s tick through while the 55s tab
+        // loop mostly no-ops for this group; the global mutex still bounds spam.
+        while (true) {
+            for (gid in refIds) {
+                runCatching { com.vrca.vrchat.GroupAlertEnricher.enrich(ctx, gid, minIntervalMs = 9_000) }
+            }
+            kotlinx.coroutines.delay(10_000)
         }
     }
 
@@ -1077,9 +1249,16 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
 
     ElevatedCard(
         colors = CardDefaults.elevatedCardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
+            // Faint warm tint pushes a signed-up card toward gold without hurting
+            // legibility; normal cards keep surfaceVariant.
+            containerColor = if (special)
+                androidx.compose.ui.graphics.lerp(MaterialTheme.colorScheme.surfaceVariant, accent, 0.10f)
+            else MaterialTheme.colorScheme.surfaceVariant
         ),
-        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp)
+        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp),
+        modifier = if (special)
+            Modifier.border(1.dp, accent.copy(alpha = 0.6f), MaterialTheme.shapes.medium)
+        else Modifier
     ) {
         Column(Modifier.padding(start = 14.dp, top = 10.dp, end = 8.dp, bottom = 12.dp)) {
             // Header: accent bar + title/preview (tap to expand) on the left,
@@ -1093,7 +1272,7 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
                         .padding(end = 10.dp, top = 2.dp)
                         .size(width = 3.dp, height = 30.dp)
                         .background(
-                            MaterialTheme.colorScheme.primary,
+                            if (special) accent else MaterialTheme.colorScheme.primary,
                             shape = MaterialTheme.shapes.small
                         )
                 )
@@ -1105,11 +1284,46 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
                         .weight(1f)
                         .clickable { expanded = !expanded }
                 ) {
-                    Text(
-                        displayTitle,
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            displayTitle,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        if (special) {
+                            Spacer(Modifier.width(6.dp))
+                            Surface(color = accent.copy(alpha = 0.20f), shape = MaterialTheme.shapes.extraSmall) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
+                                ) {
+                                    if (signedUp) {
+                                        Text(
+                                            "★ Going",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = accent
+                                        )
+                                    } else {
+                                        Icon(
+                                            Icons.Filled.PushPin, null,
+                                            modifier = Modifier.size(11.dp), tint = accent
+                                        )
+                                        Spacer(Modifier.width(3.dp))
+                                        Text(
+                                            "Pinned",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = accent
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if (!expanded && previewText.isNotBlank()) {
                         Text(
                             previewText,
@@ -1119,12 +1333,32 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
                             overflow = TextOverflow.Ellipsis
                         )
                     }
-                    latest?.let {
-                        Text(
-                            formatRelativeTime(it.timestampMs, nowMs),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.outline
-                        )
+                    // Ago row + a TINY pin toggle (shown in both collapsed and
+                    // expanded states). Tapping pins/unpins this group to the
+                    // "📌 Pinned" section. Gold when pinned. HIDDEN for signed-up
+                    // (Added-to-Calendar) events — those auto-sort into the "Going"
+                    // section, so a manual pin on them just fought the auto-sort;
+                    // the pin returns once the event is removed from the calendar.
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        latest?.let {
+                            Text(
+                                formatRelativeTime(it.timestampMs, nowMs),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.outline
+                            )
+                        }
+                        if (!signedUp) {
+                        Spacer(Modifier.width(6.dp))
+                        Box(Modifier.size(20.dp).clip(CircleShape).clickable { onTogglePin() },
+                            contentAlignment = Alignment.Center) {
+                            Icon(
+                                if (pinned) Icons.Filled.PushPin else Icons.Outlined.PushPin,
+                                contentDescription = if (pinned) "Unpin" else "Pin",
+                                modifier = Modifier.size(14.dp),
+                                tint = if (pinned) silver else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        }
                     }
                 }
                 // Action symbols (invite / open) sit to the LEFT of the collapse
@@ -1178,21 +1412,25 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
                         )
                     }
                 }
-                // Dismiss.
-                Spacer(Modifier.width(6.dp))
-                Surface(
-                    onClick = onDismiss,
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.error.copy(alpha = 0.14f),
-                    modifier = Modifier.size(36.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            Icons.Filled.Close,
-                            contentDescription = "Dismiss",
-                            modifier = Modifier.size(20.dp),
-                            tint = MaterialTheme.colorScheme.error
-                        )
+                // Dismiss — HIDDEN for signed-up OR manually-pinned cards so a user
+                // can't accidentally swipe away something they pinned/are going to.
+                // Unpinning (or Remove-from-Calendar) brings the dismiss button back.
+                if (!special) {
+                    Spacer(Modifier.width(6.dp))
+                    Surface(
+                        onClick = onDismiss,
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.error.copy(alpha = 0.14f),
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                Icons.Filled.Close,
+                                contentDescription = "Dismiss",
+                                modifier = Modifier.size(20.dp),
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                        }
                     }
                 }
             }
@@ -1209,7 +1447,19 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
                     // events carry DISTINCT urls (e.g. separate group posts/events), so
                     // each can be opened individually. Shared opens and all invite
                     // actions live as compact symbols in the header instead.
-                    for ((idx, event) in group.events.withIndex()) {
+                    // key() on the set of event ids forces the AnimatedVisibility
+                    // content to repaint when a SECOND event fuses into the group
+                    // (the content lambda otherwise skips re-running — same class of
+                    // bug as the cycle-mute rows) so a newly-fused event shows up.
+                    val fuseKey = displayEvents.joinToString(",") { it.id }
+                    key(fuseKey) {
+                    for ((idx, event) in displayEvents.withIndex()) {
+                        // Per-event dismiss (X) when the card fuses MULTIPLE events —
+                        // lets the user clear one without nuking the whole group.
+                        val onEventDismiss: (() -> Unit)? =
+                            if (displayEvents.size > 1) {
+                                { InAppAlertState.dismissEvent(ctx, group.groupId, event.id) }
+                            } else null
                         if (event.beforeText != null && event.afterText != null) {
                             Surface(
                                 color = MaterialTheme.colorScheme.surface,
@@ -1218,11 +1468,27 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
                             ) {
                                 Column(Modifier.padding(12.dp)) {
                                     if (eventCount > 1) {
-                                        Text(
-                                            "Change ${idx + 1}",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                "Change ${idx + 1}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            onEventDismiss?.let { d ->
+                                                Box(
+                                                    Modifier.size(20.dp).clip(CircleShape).clickable { d() },
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Icon(
+                                                        Icons.Filled.Close,
+                                                        contentDescription = "Remove this",
+                                                        modifier = Modifier.size(14.dp),
+                                                        tint = MaterialTheme.colorScheme.error
+                                                    )
+                                                }
+                                            }
+                                        }
                                         Spacer(Modifier.height(4.dp))
                                     }
                                     val (beforeDiff, afterDiff) = remember(event.beforeText, event.afterText) {
@@ -1284,10 +1550,12 @@ private fun AlertGroupCard(group: InAppAlertGroup, nowMs: Long, onDismiss: () ->
                                     joinLoading = joinLoading,
                                     onJoinEvent = { grpId ->
                                         openJoinPicker(grpId, event.eventTitle ?: group.title)
-                                    }
+                                    },
+                                    onEventDismiss = onEventDismiss
                                 )
                             }
                         }
+                    }
                     }
                 }
             }
@@ -1313,7 +1581,8 @@ private fun AlertEventBody(
     groupKey: String,
     showOpen: Boolean,
     joinLoading: Boolean,
-    onJoinEvent: (String) -> Unit
+    onJoinEvent: (String) -> Unit,
+    onEventDismiss: (() -> Unit)? = null
 ) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1359,6 +1628,9 @@ private fun AlertEventBody(
         event.category?.let {
             EventMetaChip(prettyEventCategory(it), MaterialTheme.colorScheme.tertiary, solid = solid)
         }
+        // Recurring indicator does NOT go here — it crowded the status row. On a
+        // banner it rides the image's empty TOP-LEFT corner; without a banner it
+        // joins the muted meta line (interested · posted · repeats). See below.
         event.accessType?.let {
             val label = it.replaceFirstChar { c -> c.uppercase() }
             val color = when (it.lowercase()) {
@@ -1403,6 +1675,22 @@ private fun AlertEventBody(
                         contentScale = ContentScale.FillWidth,
                         modifier = Modifier.fillMaxWidth()
                     )
+                    // Recurring indicator on the banner's empty TOP-LEFT corner
+                    // (keeps it off the crowded status row).
+                    if (event.recurring) {
+                        Surface(
+                            color = Color.Black.copy(alpha = 0.55f),
+                            shape = MaterialTheme.shapes.extraSmall,
+                            modifier = Modifier.align(Alignment.TopStart).padding(6.dp)
+                        ) {
+                            Text(
+                                "↻ Repeats",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
                     if (langCodes.isNotEmpty()) {
                         // Right-aligned STACK (not a row): native sign-language
                         // names ("American Sign Language", 日本手話) are long, so a
@@ -1446,14 +1734,34 @@ private fun AlertEventBody(
                 }
             }
             Column(Modifier.padding(12.dp)) {
-                if (!event.eventTitle.isNullOrBlank()) {
-                    Text(
-                        event.eventTitle,
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Spacer(Modifier.height(3.dp))
+                // Title row + optional per-event dismiss X (multi-event cards).
+                if (!event.eventTitle.isNullOrBlank() || onEventDismiss != null) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            event.eventTitle.orEmpty(),
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        onEventDismiss?.let { d ->
+                            Box(
+                                Modifier.size(22.dp).clip(CircleShape).clickable { d() },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    Icons.Filled.Close,
+                                    contentDescription = "Remove this event",
+                                    modifier = Modifier.size(15.dp),
+                                    tint = MaterialTheme.colorScheme.error
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(2.dp))
                 }
+                // (No host/organizer line — deliberately not shown on notifications.)
                 // No banner to overlay on → ONE wrapping flow with everything
                 // together (status/category/access chips, platform symbols,
                 // language chips) so nothing sits disconnected on its own line
@@ -1536,6 +1844,9 @@ private fun AlertEventBody(
                     val metaParts = buildList {
                         if (event.interestedCount >= 0) add("${event.interestedCount} interested")
                         if (event.createdAtMs > 0) add("Posted ${eventDate(event.createdAtMs)}")
+                        // Recurring joins the muted meta line ONLY when there's no
+                        // banner to carry it in the top-left corner.
+                        if (event.recurring && event.imageUrl.isNullOrBlank()) add("↻ Repeats")
                     }
                     if (metaParts.isNotEmpty()) {
                         Spacer(Modifier.height(2.dp))
@@ -1588,16 +1899,40 @@ private fun AlertEventBody(
                                 onClick = {
                                     calSending = true
                                     val target = !onCal
+                                    // Record the user's decision PERSISTENTLY and per
+                                    // SERIES so a later enrich sweep can't flip it back
+                                    // (the server perpetually reports the creator's own
+                                    // events as followed) and so a recurring series is
+                                    // toggled as ONE thing. Optimistically apply it to
+                                    // every occurrence right now.
+                                    val followKey = InAppAlertState.followSeriesKey(
+                                        event.eventTitle, event.eventRefId
+                                    )
+                                    InAppAlertState.recordFollowToggle(ctx, followKey, target)
+                                    InAppAlertState.applyFollowToSeries(
+                                        ctx, groupKey, event.eventTitle, event.eventRefId, target
+                                    )
                                     scope.launch {
                                         val r = VrchatAuthManager.setCalendarEventFollowing(
                                             ctx, event.groupRefId, event.eventRefId!!, target
                                         )
                                         if (r.ok) {
-                                            InAppAlertState.enrichEvents(
-                                                ctx, groupKey,
-                                                match = { it.id == event.id },
-                                                transform = { it.copy(following = target) }
-                                            )
+                                            // Adding to calendar auto-UNPINS: a signed-up
+                                            // event lives in the "★ Signed up Events"
+                                            // section (above Pinned), so keeping it manually
+                                            // pinned too caused it to flip between sections.
+                                            if (target) InAppAlertState.setPinned(ctx, groupKey, false)
+                                            // Schedule / cancel the local reminder that
+                                            // pings the phone ~10 min before it starts.
+                                            if (target) {
+                                                com.vrca.vrchat.EventReminderScheduler.schedule(
+                                                    ctx, event.eventRefId!!,
+                                                    event.eventTitle ?: "Your event",
+                                                    event.startsAtMs, event.url
+                                                )
+                                            } else {
+                                                com.vrca.vrchat.EventReminderScheduler.cancel(ctx, event.eventRefId!!)
+                                            }
                                             Toast.makeText(
                                                 ctx,
                                                 if (target) "Added to your VRChat calendar"
@@ -1605,6 +1940,12 @@ private fun AlertEventBody(
                                                 Toast.LENGTH_SHORT
                                             ).show()
                                         } else {
+                                            // API rejected it — revert the optimistic
+                                            // override + display so the card reflects reality.
+                                            InAppAlertState.recordFollowToggle(ctx, followKey, onCal)
+                                            InAppAlertState.applyFollowToSeries(
+                                                ctx, groupKey, event.eventTitle, event.eventRefId, onCal
+                                            )
                                             Toast.makeText(
                                                 ctx,
                                                 r.error ?: "Couldn't update your calendar",
@@ -1674,18 +2015,15 @@ private fun EventMetaChip(
             )
         }
     }
-    if (onClick != null) {
-        Surface(
-            onClick = onClick,
-            color = container,
-            shape = MaterialTheme.shapes.extraSmall
-        ) { content() }
-    } else {
-        Surface(
-            color = container,
-            shape = MaterialTheme.shapes.extraSmall
-        ) { content() }
-    }
+    // Modifier.clickable (NOT Surface(onClick=...)): a clickable Surface enforces
+    // Material3's 48dp minimum interactive size, which padded each tappable chip
+    // to 48dp tall and blew a huge invisible gap between the chip rows. clickable
+    // keeps the chip its true 22dp height.
+    Surface(
+        color = container,
+        shape = MaterialTheme.shapes.extraSmall,
+        modifier = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
+    ) { content() }
 }
 
 /** Language chip — shows the NATIVE name ("日本語", "日本手話") like VRChat's
@@ -1698,10 +2036,12 @@ private fun EventMetaChip(
 private fun LanguageChip(code: String, overlay: Boolean, translated: Boolean, onTap: () -> Unit) {
     val label = if (translated) deviceLanguageName(code) else nativeLanguageName(code)
     Surface(
-        onClick = onTap,
+        // Modifier.clickable, not Surface(onClick=): avoids the 48dp minimum
+        // interactive size that padded these chips and blew the row gap open.
         color = if (overlay) Color.Black.copy(alpha = 0.55f)
             else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.12f),
-        shape = MaterialTheme.shapes.extraSmall
+        shape = MaterialTheme.shapes.extraSmall,
+        modifier = Modifier.clickable(onClick = onTap)
     ) {
         Box(
             Modifier.height(20.dp).padding(horizontal = 7.dp),
