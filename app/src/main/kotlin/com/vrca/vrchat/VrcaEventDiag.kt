@@ -34,6 +34,11 @@ object VrcaEventDiag {
     @Volatile var lastOrganizerResolved: String? = null
         private set
 
+    // Result of probing candidate "my signed-up / followed events" endpoints —
+    // each candidate's HTTP code + body snippet, so the real one can be picked.
+    @Volatile var lastSignedUpProbe: String? = null
+        private set
+
     private fun clip(s: String?, max: Int = 4000): String? =
         if (s == null) null else if (s.length <= max) s else s.take(max) + "…(${s.length} chars)"
 
@@ -45,4 +50,5 @@ object VrcaEventDiag {
     fun recordFollowCall(url: String, body: String, code: Int, response: String) {
         lastFollowCall = "POST $url\nbody: $body\nHTTP $code\nresp: ${clip(response, 1200)}"
     }
+    fun recordSignedUpProbe(text: String) { lastSignedUpProbe = clip(text, 4000) }
 }

@@ -320,6 +320,8 @@ internal fun SettingsPage(
                         // these. Refresh button re-reads the captured values. --
                         Divider(Modifier.padding(vertical = 4.dp))
                         var diagTick by remember { mutableStateOf(0) }
+                        val diagScope = androidx.compose.runtime.rememberCoroutineScope()
+                        var probing by remember { mutableStateOf(false) }
                         Row(
                             Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -328,9 +330,25 @@ internal fun SettingsPage(
                             Text("Event/calendar diagnostics", style = MaterialTheme.typography.labelMedium)
                             TextButton(onClick = { diagTick++ }) { Text("Refresh") }
                         }
+                        TextButton(
+                            enabled = !probing,
+                            onClick = {
+                                probing = true
+                                diagScope.launch {
+                                    com.vrca.vrchat.VrchatAuthManager.probeSignedUpEventsEndpoints(ctx)
+                                    probing = false
+                                    diagTick++
+                                }
+                            }
+                        ) { Text(if (probing) "Probing signed-up events..." else "Probe signed-up events") }
                         key(diagTick) {
                             SelectionContainer {
                                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text("Signed-up events probe:", style = MaterialTheme.typography.labelSmall)
+                                    Text(
+                                        com.vrca.vrchat.VrcaEventDiag.lastSignedUpProbe ?: "(tap 'Probe signed-up events')",
+                                        fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall
+                                    )
                                     Text("Organizer resolved:", style = MaterialTheme.typography.labelSmall)
                                     Text(
                                         com.vrca.vrchat.VrcaEventDiag.lastOrganizerResolved ?: "(none captured)",

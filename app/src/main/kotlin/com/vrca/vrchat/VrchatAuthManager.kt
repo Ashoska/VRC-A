@@ -1159,6 +1159,44 @@ object VrchatAuthManager {
     }
 
     /**
+     * DIAGNOSTIC: probe candidate endpoints for "the authenticated user's signed-up
+     * / followed calendar events" (VRChat's personal calendar list). None is
+     * documented, so try the likely shapes and dump each one's HTTP code + a body
+     * snippet into [VrcaEventDiag] so the real endpoint can be identified from a
+     * device and then wired in for real. Read-only, best-effort, no side effects.
+     */
+    suspend fun probeSignedUpEventsEndpoints(context: Context): Unit = withContext(Dispatchers.IO) {
+        val userId = getStoredUserId(context)
+        val cookieHeader = getCookieHeader(context) ?: run {
+            VrcaEventDiag.recordSignedUpProbe("Not signed in to VRChat"); return@withContext
+        }
+        val candidates = listOfNotNull(
+            "$BASE/calendar",
+            "$BASE/calendar?n=20",
+            "$BASE/calendar/following?n=20",
+            userId?.let { "$BASE/users/$it/calendar?n=20" },
+            userId?.let { "$BASE/users/$it/events?n=20" },
+            userId?.let { "$BASE/users/$it/calendar/events?n=20" },
+            "$BASE/auth/user/calendar?n=20",
+            "$BASE/auth/user/events?n=20"
+        )
+        val sb = StringBuilder()
+        for (url in candidates) {
+            val short = url.removePrefix("$BASE/")
+            try {
+                val (code, body, rawCookies) = get(url, null, cookieHeader)
+                if (code == 200) captureRolledCookies(context, rawCookies)
+                val snip = body.take(280).replace("\n", " ")
+                sb.append("GET $short -> $code : $snip\n\n")
+            } catch (e: Exception) {
+                sb.append("GET $short -> ERR ${e.message}\n\n")
+            }
+            kotlinx.coroutines.delay(300)
+        }
+        VrcaEventDiag.recordSignedUpProbe(sb.toString().trim())
+    }
+
+    /**
      * A single calendar event (`GET /calendar/{groupId}/{eventId}`). The single-
      * event object carries the authenticated user's per-event state (whether they
      * follow/are-signed-up) that the group calendar LIST omits — so this is how we
