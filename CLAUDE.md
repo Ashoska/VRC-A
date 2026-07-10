@@ -38,6 +38,10 @@ Display name embedded in UI strings: "Ashoska Mitsu Sisko".
 ./gradlew build
 ```
 
+### Web-session build environment + testing policy
+- **Android SDK in Claude Code on the web**: the remote container starts WITHOUT the Android SDK, so `./gradlew` can't compile until it's installed. A committed **SessionStart hook** (`.claude/hooks/session-start.sh`, registered in `.claude/settings.json`) installs it automatically at session start (cmdline-tools + `platform-tools`, `platforms;android-34`, `build-tools;34.0.0`), accepts licenses, and points Gradle at it (`local.properties` `sdk.dir` + `ANDROID_HOME`). It is remote-only (`CLAUDE_CODE_REMOTE`), idempotent (skips when present, ~15s cold), and installs to `$HOME/android-sdk`. `.gitignore` tracks only `.claude/settings.json` + `.claude/hooks/` (personal `.claude` files stay ignored). **Always `./gradlew compilePublicAppDebugKotlin` (or `assemblePublicAppDebug`) before pushing** — this is what catches API/signature nits (e.g. `HorizontalDivider` vs `Divider`, `MemoryCache.maxSizeBytes` taking `Int`) that would otherwise only fail in CI.
+- **No permanent unit tests (user preference)**: do NOT add lasting test files to the repo — the user considers them unneeded clutter for logic that rarely changes. Instead, when adding a new feature or when the user asks to verify already-implemented logic, write a **throwaway** test/harness (e.g. temporarily under `app/src/test`), run it via `./gradlew testPublicAppDebugUnitTest` to confirm the pure-logic behavior, then **delete it before committing**. This covers only Android-independent logic (ad detection, `TitleCleaner`, bio diff, `followSeriesKey`/recurring collapse, timezone resolution, notification dedup/fingerprints); UI, notifications firing, and the VRChat/Discord/OSC/Firestore integrations can only be verified on the user's real device.
+
 ## Architecture & Stack
 - Language: Kotlin
 - UI: Jetpack Compose
