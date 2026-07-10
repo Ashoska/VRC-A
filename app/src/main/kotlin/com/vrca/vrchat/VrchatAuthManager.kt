@@ -1144,11 +1144,14 @@ object VrchatAuthManager {
             captureRolledCookies(context, rawCookies)
             // VRChat wraps posts in an object: {"posts":[...],"total":N}.
             // Older/edge responses may return a bare array — handle both.
-            when {
+            val arr = when {
                 body.startsWith("[") -> org.json.JSONArray(body)
                 body.startsWith("{") -> org.json.JSONObject(body).optJSONArray("posts")
                 else -> null
             }
+            // Debug: raw first post reveals VRChat's REAL author field name.
+            arr?.optJSONObject(0)?.let { VrcaEventDiag.recordPost(it.toString()) }
+            arr
         } catch (e: Exception) {
             Log.w(TAG, "fetchGroupPosts($groupId) failed", e)
             null
@@ -1169,7 +1172,12 @@ object VrchatAuthManager {
             try {
                 val (code, body, rawCookies) = get("$BASE/calendar/$groupId/$eventId", null, cookieHeader)
                 if (code == 200) captureRolledCookies(context, rawCookies)
-                if (code == 200 && body.startsWith("{")) org.json.JSONObject(body) else null
+                if (code == 200 && body.startsWith("{")) {
+                    // Debug: raw event object reveals VRChat's REAL organizer /
+                    // follow field names (both are currently inferred).
+                    VrcaEventDiag.recordCalendarEvent(body)
+                    org.json.JSONObject(body)
+                } else null
             } catch (e: Exception) {
                 Log.w(TAG, "fetchCalendarEvent($groupId,$eventId) failed", e)
                 null
@@ -1277,11 +1285,12 @@ object VrchatAuthManager {
         val cookieHeader = getCookieHeader(context)
             ?: return@withContext InviteResult(false, "Not signed in to VRChat")
         try {
-            val (code, respBody, rawCookies) = post(
-                "$BASE/calendar/$groupId/$eventId/follow",
-                "{\"isFollowing\":$following}",
-                cookieHeader
-            )
+            val url = "$BASE/calendar/$groupId/$eventId/follow"
+            val reqBody = "{\"isFollowing\":$following}"
+            val (code, respBody, rawCookies) = post(url, reqBody, cookieHeader)
+            // Surface the exact request/response for Settings -> Debug — this
+            // endpoint is inferred, so the raw result is how we confirm it.
+            VrcaEventDiag.recordFollowCall(url, reqBody, code, respBody)
             if (code in 200..299) {
                 captureRolledCookies(context, rawCookies)
                 InviteResult(true)

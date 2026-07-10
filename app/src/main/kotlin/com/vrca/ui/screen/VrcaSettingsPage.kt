@@ -34,6 +34,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -311,6 +313,47 @@ internal fun SettingsPage(
 
                         Text("Last sent to VRChat (ms): ${vm.lastSentToVrchatAtMs}",
                             style = MaterialTheme.typography.bodySmall)
+
+                        // -- Group event / calendar diagnostics (inferred VRChat
+                        // fields: organizer, follow flag, follow endpoint). Open an
+                        // event card in the VRChat tab, tap Add/Remove, then copy
+                        // these. Refresh button re-reads the captured values. --
+                        HorizontalDivider(Modifier.padding(vertical = 4.dp))
+                        var diagTick by remember { mutableStateOf(0) }
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Event/calendar diagnostics", style = MaterialTheme.typography.labelMedium)
+                            TextButton(onClick = { diagTick++ }) { Text("Refresh") }
+                        }
+                        key(diagTick) {
+                            SelectionContainer {
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text("Organizer resolved:", style = MaterialTheme.typography.labelSmall)
+                                    Text(
+                                        com.vrca.vrchat.VrcaEventDiag.lastOrganizerResolved ?: "(none captured)",
+                                        fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall
+                                    )
+                                    Text("Last follow call (Add/Remove):", style = MaterialTheme.typography.labelSmall)
+                                    Text(
+                                        com.vrca.vrchat.VrcaEventDiag.lastFollowCall ?: "(none captured)",
+                                        fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall
+                                    )
+                                    Text("Last calendar event JSON:", style = MaterialTheme.typography.labelSmall)
+                                    Text(
+                                        com.vrca.vrchat.VrcaEventDiag.lastCalendarEventJson ?: "(none captured)",
+                                        fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall
+                                    )
+                                    Text("Last group post JSON:", style = MaterialTheme.typography.labelSmall)
+                                    Text(
+                                        com.vrca.vrchat.VrcaEventDiag.lastPostJson ?: "(none captured)",
+                                        fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }

@@ -270,6 +270,7 @@ object GroupAlertEnricher {
                             organizerNameCache[oid] ?: VrchatAuthManager.fetchUserDisplayName(ctx, oid)
                                 ?.also { organizerNameCache[oid] = it }
                         }
+                    VrcaEventDiag.recordOrganizer(organizerId, organizerName)
                     val title = ev.optString("title", "").ifBlank { ev.optString("name", "") }
                     val desc = ev.optString("description", "").ifBlank { ev.optString("text", "") }
                     if (img != null) AlertImageStore.ensureCached(ctx, img)

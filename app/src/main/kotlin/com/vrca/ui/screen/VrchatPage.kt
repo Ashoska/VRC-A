@@ -1754,26 +1754,30 @@ private fun AlertEventBody(
                     Spacer(Modifier.height(2.dp))
                 }
                 // Organizer directly under the title, small + muted like the meta
-                // line ("N interested"), name tinted + clickable → their profile.
-                if (event.organizerId != null) {
+                // line ("N interested"), name tinted. Shows whenever EITHER the id
+                // or the name resolved (they come from different probes, so a
+                // renamed id field shouldn't hide a name we did find); the name is
+                // clickable → their profile only when we have the id.
+                if (event.organizerId != null || event.organizerName != null) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
                             "Hosted by ",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        val nameMod = if (event.organizerId != null) Modifier.clickable {
+                            ctx.startActivity(
+                                Intent(Intent.ACTION_VIEW,
+                                    Uri.parse("https://vrchat.com/home/user/${event.organizerId}"))
+                            )
+                        } else Modifier
                         Text(
                             event.organizerName ?: "organizer",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.clickable {
-                                ctx.startActivity(
-                                    Intent(Intent.ACTION_VIEW,
-                                        Uri.parse("https://vrchat.com/home/user/${event.organizerId}"))
-                                )
-                            }
+                            modifier = nameMod
                         )
                     }
                     Spacer(Modifier.height(4.dp))
