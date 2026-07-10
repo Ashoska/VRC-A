@@ -1199,8 +1199,16 @@ private fun AlertGroupCard(
         if (!group.groupId.startsWith("event_grp_") &&
             !group.groupId.startsWith("announcement_grp_")) return@LaunchedEffect
         val refIds = group.events.mapNotNull { it.groupRefId }.distinct().take(2)
-        for (gid in refIds) {
-            runCatching { com.vrca.vrchat.GroupAlertEnricher.enrich(ctx, gid, minIntervalMs = 15_000) }
+        // While the card stays expanded, keep the changeable info (interested
+        // count, timing, banner, follow state, edits) fresh on a 10s cadence —
+        // the effect is cancelled the moment it collapses, so the loop stops with
+        // it. The ~9s per-group min lets each 10s tick through while the 55s tab
+        // loop mostly no-ops for this group; the global mutex still bounds spam.
+        while (true) {
+            for (gid in refIds) {
+                runCatching { com.vrca.vrchat.GroupAlertEnricher.enrich(ctx, gid, minIntervalMs = 9_000) }
+            }
+            kotlinx.coroutines.delay(10_000)
         }
     }
 
@@ -1761,7 +1769,7 @@ private fun AlertEventBody(
                 if (event.organizerId != null || event.organizerName != null) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            "Hosted by ",
+                            if (isRichEvent) "Hosted by " else "Posted by ",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )

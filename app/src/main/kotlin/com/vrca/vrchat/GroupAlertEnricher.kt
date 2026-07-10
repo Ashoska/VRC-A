@@ -58,13 +58,19 @@ object GroupAlertEnricher {
      *  count, not the follow state, so only Boolean values count); `userInterest`
      *  present-and-non-null is the fallback signal. null = the object didn't say. */
     fun extractEventFollowing(ev: JSONObject): Boolean? {
+        // CONFIRMED from a real /calendar/{g}/{e} response: the user's follow state
+        // is the NESTED `userInterest.isFollowing` boolean (userInterest is always a
+        // non-null object with createdAt/updatedAt, so the old "userInterest present
+        // => following" test reported EVERY event as signed-up).
+        ev.optJSONObject("userInterest")?.let { ui ->
+            if (ui.has("isFollowing")) return ui.optBoolean("isFollowing", false)
+        }
         for (k in listOf("isFollowing", "following", "isInterested", "isAttending", "hasJoined", "isGoing")) {
             if (ev.has(k)) {
                 val v = ev.opt(k)
                 if (v is Boolean) return v
             }
         }
-        if (ev.has("userInterest")) return !ev.isNull("userInterest")
         return null
     }
 
@@ -84,7 +90,13 @@ object GroupAlertEnricher {
         val byTitle = LinkedHashMap<String, MutableList<JSONObject>>()
         for (i in 0 until events.length()) {
             val ev = events.optJSONObject(i) ?: continue
-            val t = normTitle(ev).ifBlank { "id:${ev.optString("id", i.toString())}" }
+            // CONFIRMED field: `seriesId` groups every occurrence of a repeating
+            // event exactly (title can drift). Key on it when present so a flooded
+            // series collapses to ONE representative -> ONE single-event fetch,
+            // instead of the app grabbing info for all ~50 occurrences.
+            val series = ev.optString("seriesId", "").takeIf { it.isNotBlank() && it != "null" }
+            val t = series?.let { "s:$it" }
+                ?: normTitle(ev).ifBlank { "id:${ev.optString("id", i.toString())}" }
             byTitle.getOrPut(t) { mutableListOf() }.add(ev)
         }
         return byTitle.values.map { occ ->
@@ -104,6 +116,9 @@ object GroupAlertEnricher {
      *  non-empty/true value means recurring; absent → false (chip just won't show). */
     fun extractRecurring(ev: JSONObject): Boolean {
         if (ev.optBoolean("isRecurring", false)) return true
+        // CONFIRMED: a recurring occurrence has occurrenceKind=="occurrence" (a
+        // one-off is "single") and a non-null seriesId.
+        if (ev.optString("occurrenceKind", "").equals("occurrence", true)) return true
         for (k in listOf("recurrence", "recurrenceRule", "repeatType", "recurringId",
                 "seriesId", "parentId", "parentCalendarEventId", "recurrenceId")) {
             val v = ev.opt(k) ?: continue
@@ -326,16 +341,31 @@ object GroupAlertEnricher {
             if (posts != null) {
                 for (j in 0 until posts.length()) {
                     val post = posts.optJSONObject(j) ?: continue
-                    val img = post.optString("imageUrl", "").takeIf { it.startsWith("http") } ?: continue
                     val text = post.optString("text", "")
                     val title = post.optString("title", "")
                     val norm = normalizeAnnBody(text.ifBlank { title })
                     if (norm.isBlank()) continue
-                    AlertImageStore.ensureCached(ctx, img)
+                    // CONFIRMED field: a post's creator is `authorId` (a usr_ id) —
+                    // unlike calendar events, whose ownerId is the GROUP. Resolve the
+                    // name once (cached) so the card shows "Posted by <name>".
+                    val authorId = post.optString("authorId", "").takeIf { it.startsWith("usr_") }
+                    val authorName = authorId?.let { aid ->
+                        organizerNameCache[aid] ?: VrchatAuthManager.fetchUserDisplayName(ctx, aid)
+                            ?.also { organizerNameCache[aid] = it }
+                    }
+                    val img = post.optString("imageUrl", "").takeIf { it.startsWith("http") }
+                    if (img != null) AlertImageStore.ensureCached(ctx, img)
+                    // Match the fired announcement even once it already has an image
+                    // (author may enrich on a later sweep than the banner did).
                     InAppAlertState.enrichEvents(
                         ctx, "announcement_$groupId",
-                        match = { e -> e.imageUrl == null && normalizeAnnBody(e.body) == norm },
-                        transform = { e -> e.copy(imageUrl = img, groupRefId = e.groupRefId ?: groupId) }
+                        match = { e -> normalizeAnnBody(e.body) == norm },
+                        transform = { e -> e.copy(
+                            imageUrl = img ?: e.imageUrl,
+                            groupRefId = e.groupRefId ?: groupId,
+                            organizerId = authorId ?: e.organizerId,
+                            organizerName = authorName ?: e.organizerName
+                        ) }
                     )
                 }
             }
