@@ -35,7 +35,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Divider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -318,7 +318,7 @@ internal fun SettingsPage(
                         // fields: organizer, follow flag, follow endpoint). Open an
                         // event card in the VRChat tab, tap Add/Remove, then copy
                         // these. Refresh button re-reads the captured values. --
-                        HorizontalDivider(Modifier.padding(vertical = 4.dp))
+                        Divider(Modifier.padding(vertical = 4.dp))
                         var diagTick by remember { mutableStateOf(0) }
                         Row(
                             Modifier.fillMaxWidth(),
