@@ -308,22 +308,84 @@ internal fun HomePage(
                     "ManualSend" -> CompactSectionCard(
                         title = "Manual Send",
                         icon = Icons.Filled.Send,
-                        summary = "Type a manual message"
+                        summary = if (vm.manualLiveMode) "Live typing" else "Type a manual message"
                     ) {
+                        val budget = vm.manualCharBudget()
+                        val msgLen = vm.messageText.value.text.length
+                        val over = msgLen > budget
+
+                        // Instant / Live segmented toggle (compact, on-vibe).
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            listOf(false, true).forEach { live ->
+                                val selected = vm.manualLiveMode == live
+                                Surface(
+                                    shape = MaterialTheme.shapes.small,
+                                    color = if (selected) MaterialTheme.colorScheme.primary
+                                            else MaterialTheme.colorScheme.surfaceVariant,
+                                    contentColor = if (selected) MaterialTheme.colorScheme.onPrimary
+                                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clickable(enabled = !isBanned) { vm.setManualLiveModeFlag(live) }
+                                ) {
+                                    Text(
+                                        if (live) "Live" else "Instant",
+                                        textAlign = TextAlign.Center,
+                                        style = MaterialTheme.typography.labelLarge,
+                                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        // Scroll style is Live-only.
+                        if (vm.manualLiveMode) {
+                            ToggleRow(
+                                label = "Scroll",
+                                description = "Show the newest 4 lines; older lines scroll off the top.",
+                                checked = vm.manualScroll,
+                                enabled = !isBanned
+                            ) { vm.setManualScrollFlag(it) }
+                        }
+
                         OutlinedTextField(
                             value = vm.messageText.value,
                             onValueChange = { v: TextFieldValue -> vm.onMessageTextChange(v) },
                             modifier = Modifier.fillMaxWidth(),
                             minLines = 2,
                             label = { Text("Message") },
-                            enabled = !isBanned
+                            isError = over && !vm.manualLiveMode,
+                            enabled = !isBanned,
+                            supportingText = {
+                                Text(
+                                    "$msgLen / $budget" +
+                                        if (vm.manualLiveMode) "  ·  shows live as you type" else "",
+                                    color = if (over) MaterialTheme.colorScheme.error
+                                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
                         )
-                        Button(
-                            onClick = { vm.sendMessage() },
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = !isBanned
+
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Text("Send")
+                            if (!vm.manualLiveMode) {
+                                Button(
+                                    onClick = { vm.sendMessage() },
+                                    modifier = Modifier.weight(1f),
+                                    enabled = !isBanned && msgLen > 0 && !over
+                                ) { Text("Send") }
+                            }
+                            TextButton(
+                                onClick = { vm.clearManual() },
+                                modifier = Modifier.weight(1f),
+                                enabled = !isBanned
+                            ) { Text("Clear") }
                         }
                     }
                 }

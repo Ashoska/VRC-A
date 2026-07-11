@@ -322,7 +322,25 @@ object InAppAlertState {
                 if (t.isNotBlank()) (e.eventTitle?.trim()?.lowercase()?.replace(Regex("\\s+"), " ") ?: "") == t
                 else e.eventRefId == evId || e.id == evId
             },
-            transform = { it.copy(following = following) }
+            transform = { e ->
+                // Optimistically move the interested count with the user's OWN
+                // follow decision (mirrors the website's instant ±1) so
+                // "Remove from Calendar" visibly drops the count right away instead
+                // of waiting for the next enrich to read the server's authoritative
+                // interestedUserCount (which lags, or never runs if the card
+                // collapses immediately after). Only adjust on a genuine state
+                // change and only when we have a real count; the enrich reconciles
+                // any drift back to the server value.
+                val wasFollowing = e.following == true
+                val delta = when {
+                    following && !wasFollowing -> 1
+                    !following && wasFollowing -> -1
+                    else -> 0
+                }
+                val newCount = if (e.interestedCount >= 0)
+                    (e.interestedCount + delta).coerceAtLeast(0) else e.interestedCount
+                e.copy(following = following, interestedCount = newCount)
+            }
         )
     }
 

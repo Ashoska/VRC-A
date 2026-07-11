@@ -102,6 +102,16 @@ class VrcaViewModel(
 
         private const val SEND_FLOOR_MS = 500L
 
+        // Manual Send takeover: a manual message pauses the automated chatbox
+        // (Pinned/Cycle/Music/Time) for this long so people can read it. Extended
+        // on every manual send / live keystroke; in Live mode it counts from the
+        // last change so the message stays up 10s after the final line.
+        private const val MANUAL_HOLD_MS = 10_000L
+        // Live-typing push cadence (matches the Music 0.5s refresh).
+        private const val MANUAL_LIVE_TICK_MS = 500L
+        // Live scroll window: newest N lines stay visible, older ones scroll off.
+        private const val MANUAL_SCROLL_LINES = 4
+
         private const val META_STABLE_MS = 1_100L
         private const val META_CONFIRM_MOVE_MS = 900L
         private const val META_GIVE_UP_MS = 2_400L
@@ -1598,6 +1608,81 @@ class VrcaViewModel(
     var stashedMessage by mutableStateOf("")
         private set
 
+    // ---- Manual Send takeover state ----
+    // Instant (false, default): type + press Send, message shows above your head.
+    // Live (true): the chatbox updates every 0.5s as you type (like Music).
+    var manualLiveMode by mutableStateOf(false)
+        private set
+    // Live-only: newest 4 lines stay visible, older lines scroll off the top.
+    var manualScroll by mutableStateOf(false)
+        private set
+
+    // While now < manualHoldUntilMs the automated senders skip their tick so the
+    // manual message holds the VRChat chatbox. Any manual send / live keystroke
+    // pushes it forward; a manual send is NEVER gated by this (only the automated
+    // combined output is), so the user can always send again mid-window.
+    @Volatile private var manualHoldUntilMs: Long = 0L
+    // What the manual takeover is currently showing (drives the Home preview while
+    // the automated output is paused).
+    private var lastManualHoldText: String = ""
+    private var manualLiveJob: Job? = null
+    private var manualRevertJob: Job? = null
+    private var lastManualLiveSent: String? = null
+
+    private fun manualHoldActive(): Boolean = System.currentTimeMillis() < manualHoldUntilMs
+
+    /** VRChat's chatbox budget for a manual message (142 with the invisible
+     *  border on so the 2 control chars survive, else the full 144). */
+    fun manualCharBudget(): Int =
+        if (minimalChatboxBg) VRC_MAX_CHARS - MINIMAL_BG_RESERVED_CHARS else VRC_MAX_CHARS
+
+    fun setManualLiveModeFlag(enabled: Boolean) {
+        if (manualLiveMode == enabled) return
+        manualLiveMode = enabled
+        viewModelScope.launch { userPreferencesRepository.saveManualLiveMode(enabled) }
+        // Leaving Live mode stops the live loop + typing indicator; the current
+        // hold still expires normally and reverts the chatbox.
+        if (!enabled) {
+            manualLiveJob?.cancel(); manualLiveJob = null
+            lastManualLiveSent = null
+            remoteVrcaOsc.typing = false
+            localVrcaOsc.typing = false
+        }
+    }
+
+    fun setManualScrollFlag(enabled: Boolean) {
+        if (manualScroll == enabled) return
+        manualScroll = enabled
+        viewModelScope.launch { userPreferencesRepository.saveManualScroll(enabled) }
+    }
+
+    /**
+     * Live scroll formatter: keep the NEWEST lines that fit — up to
+     * [MANUAL_SCROLL_LINES], and never exceeding [budget] characters so nothing
+     * is lost at a line break (the "drop the 4th line" backstop). If even the
+     * single newest line is over budget, show its last [budget] chars (so a long
+     * unbroken line still shows what you're currently typing).
+     */
+    private fun formatManualScroll(text: String, budget: Int): String {
+        if (text.isEmpty()) return ""
+        val lines = text.split("\n")
+        val kept = ArrayDeque<String>()
+        var total = 0
+        // Walk from the newest line backwards, adding while it fits.
+        for (i in lines.indices.reversed()) {
+            if (kept.size >= MANUAL_SCROLL_LINES) break
+            val line = lines[i]
+            val add = line.length + if (kept.isEmpty()) 0 else 1 // +1 for the join '\n'
+            if (total + add > budget) {
+                if (kept.isEmpty()) return line.takeLast(budget) // newest line alone too long
+                break
+            }
+            kept.addFirst(line)
+            total += add
+        }
+        return kept.joinToString("\n")
+    }
+
     fun stashMessage(local: Boolean = false) {
         val osc = if (!local) remoteVrcaOsc else localVrcaOsc
         osc.typing = false
@@ -1893,31 +1978,124 @@ class VrcaViewModel(
             return
         }
 
-        if (messengerUiState.value.isRealtimeMsg) {
-            osc.sendRealtimeMessage(message.text)
-        } else if (messengerUiState.value.isTypingIndicator) {
+        // Live mode: the live loop drives the chatbox every 0.5s from the field's
+        // current text; just make sure it's running while there's content.
+        if (manualLiveMode) {
+            if (message.text.isNotEmpty()) startManualLiveLoop(local)
+            return
+        }
+        // Instant mode: a keystroke doesn't touch the chatbox (Send does); keep
+        // the legacy typing-indicator behaviour if the user enabled it.
+        if (messengerUiState.value.isTypingIndicator) {
             osc.typing = message.text.isNotEmpty()
         }
     }
 
+    /**
+     * Instant Send: push the manual message once, then HOLD the chatbox for 10s
+     * (automated senders skip their tick) so it stays readable. Sending again —
+     * even inside the 10s — always works and re-arms the hold. Over the char
+     * budget is a no-op (the UI also disables the button).
+     */
     fun sendMessage(local: Boolean = false) {
         if (isBanned) return
+        val text = messageText.value.text
+        if (text.isBlank()) return
+        if (text.length > manualCharBudget()) return // UI blocks this too
 
         val osc = if (!local) remoteVrcaOsc else localVrcaOsc
-
-        osc.sendMessage(
-            messageText.value.text,
-            messengerUiState.value.isSendImmediately,
-            triggerSFX = false
-        )
+        osc.sendMessage(text, messengerUiState.value.isSendImmediately, triggerSFX = false)
         osc.typing = false
 
-        conversationUiState.addMessage(
-            Message(messageText.value.text, false, Instant.now())
-        )
+        beginManualHold(text, local)
 
+        conversationUiState.addMessage(Message(text, false, Instant.now()))
         messageText.value = TextFieldValue("", TextRange.Zero)
         stashedMessage = ""
+    }
+
+    /** Clear the manual message from the chatbox + the field, drop the hold, and
+     *  restore the normal automated chatbox (or a clear if nothing is enabled). */
+    fun clearManual(local: Boolean = false) {
+        manualLiveJob?.cancel(); manualLiveJob = null
+        manualRevertJob?.cancel(); manualRevertJob = null
+        lastManualLiveSent = null
+        manualHoldUntilMs = 0L
+        lastManualHoldText = ""
+        messageText.value = TextFieldValue("", TextRange.Zero)
+        stashedMessage = ""
+        remoteVrcaOsc.typing = false
+        localVrcaOsc.typing = false
+        if (!isBanned) rebuildAndMaybeSendCombined(forceSend = true, local = local, forceClearIfAllOff = true)
+    }
+
+    /** Arm/extend the 10s takeover for the message [shown] and schedule the
+     *  revert back to the normal chatbox once it expires. */
+    private fun beginManualHold(shown: String, local: Boolean) {
+        manualHoldUntilMs = System.currentTimeMillis() + MANUAL_HOLD_MS
+        lastManualHoldText = shown
+        combinedPreviewText = shown
+        scheduleManualRevert(local)
+    }
+
+    private fun scheduleManualRevert(local: Boolean) {
+        manualRevertJob?.cancel()
+        manualRevertJob = viewModelScope.launch {
+            while (true) {
+                val wait = manualHoldUntilMs - System.currentTimeMillis()
+                if (wait <= 0) break
+                delay(wait)
+            }
+            // Hold expired with no fresh manual activity: drop back to normal.
+            lastManualHoldText = ""
+            lastManualLiveSent = null
+            remoteVrcaOsc.typing = false
+            localVrcaOsc.typing = false
+            if (!isBanned) rebuildAndMaybeSendCombined(forceSend = true, local = local, forceClearIfAllOff = true)
+        }
+    }
+
+    /**
+     * Live-typing loop: every 0.5s, if the field text changed, push it (scroll-
+     * formatted when Scroll is on) to the chatbox with a typing indicator and
+     * re-arm the 10s hold. When the field goes blank it restores the normal
+     * chatbox and stops; onMessageTextChange restarts it on the next keystroke.
+     */
+    private fun startManualLiveLoop(local: Boolean = false) {
+        if (manualLiveJob?.isActive == true) return
+        val osc = if (!local) remoteVrcaOsc else localVrcaOsc
+        manualLiveJob = viewModelScope.launch {
+            while (manualLiveMode && !isBanned) {
+                val text = messageText.value.text
+                if (text.isEmpty()) {
+                    // Field cleared: revert immediately and stop the loop.
+                    osc.typing = false
+                    manualHoldUntilMs = 0L
+                    lastManualHoldText = ""
+                    lastManualLiveSent = null
+                    rebuildAndMaybeSendCombined(forceSend = true, local = local, forceClearIfAllOff = true)
+                    break
+                }
+                if (text != lastManualLiveSent) {
+                    val budget = manualCharBudget()
+                    val shown = if (manualScroll) formatManualScroll(text, budget) else text.take(budget)
+                    osc.sendMessage(shown, sendImmediately = true, triggerSFX = false)
+                    osc.typing = true
+                    lastManualLiveSent = text
+                    manualHoldUntilMs = System.currentTimeMillis() + MANUAL_HOLD_MS
+                    lastManualHoldText = shown
+                    combinedPreviewText = shown
+                    scheduleManualRevert(local)
+                } else if (!manualHoldActive()) {
+                    // Text unchanged and the 10s hold has elapsed: the revert job
+                    // already restored the normal chatbox. Go idle (a keystroke
+                    // restarts the loop) instead of spinning every 0.5s forever.
+                    lastManualLiveSent = null
+                    break
+                }
+                delay(MANUAL_LIVE_TICK_MS)
+            }
+        }
     }
 
     // =========================
@@ -2359,6 +2537,14 @@ class VrcaViewModel(
                 localVrcaOsc.minimalBackground = it
                 rebuildCombinedPreviewOnly()
             }
+        }
+
+        // Manual Send mode + scroll style (local-only preferences).
+        viewModelScope.launch {
+            userPreferencesRepository.manualLiveMode.collect { manualLiveMode = it }
+        }
+        viewModelScope.launch {
+            userPreferencesRepository.manualScroll.collect { manualScroll = it }
         }
 
         // Per-source Now Playing enables: seed + follow DataStore (local-only).
@@ -3466,7 +3652,12 @@ class VrcaViewModel(
         cycleJob?.cancel()
         recentCyclePicks.clear()
         cycleJob = viewModelScope.launch {
-            cycleIndex = 0
+            // Resume from wherever the cycle left off instead of snapping back to
+            // line 1 on every Start. cycleIndex is preserved by stopCycle (and it
+            // keeps advancing in the background during a manual-send takeover),
+            // so pick it up here; coerced into range in case lines changed while
+            // stopped. This is the "Start/Stop resets the cycle to line 1" fix.
+            val resumePos = cycleIndex
             var prevPos = -1
             var first = true
             while (cycleEnabled && oscSending && !isBanned) {
@@ -3484,9 +3675,10 @@ class VrcaViewModel(
                     delay(cycleIntervalSeconds.toLong() * 1000L)
                     continue
                 }
-                // First tick shows position 0; subsequent ticks pick the next
-                // position (sequential or shuffle with the no-repeat window).
-                val pos = if (first) 0 else nextCyclePos(live.size, prevPos)
+                // First tick shows the RESUME position (where it left off), not a
+                // hard 0; subsequent ticks pick the next position (sequential or
+                // shuffle with the no-repeat window).
+                val pos = if (first) resumePos.coerceIn(0, live.size - 1) else nextCyclePos(live.size, prevPos)
                 first = false
                 prevPos = pos
                 cycleIndex = pos.coerceIn(0, live.size - 1)
@@ -3616,6 +3808,16 @@ class VrcaViewModel(
         forceClearIfAllOff: Boolean = false
     ) {
         if (isBanned) return
+
+        // Manual Send takeover: while a manual message holds the chatbox, the
+        // automated senders must NOT overwrite or clear it. Keep the Home preview
+        // showing the manual text and skip the send. The revert/clear paths drop
+        // the hold (set it to 0) BEFORE calling here, so restoring the normal
+        // chatbox still goes through.
+        if (manualHoldActive()) {
+            if (lastManualHoldText.isNotEmpty()) combinedPreviewText = lastManualHoldText
+            return
+        }
 
         val combined = buildCombinedText(cycleLineOverride)
 
