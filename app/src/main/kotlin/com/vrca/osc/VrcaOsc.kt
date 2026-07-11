@@ -86,8 +86,14 @@ class VrcaOsc(
 
     var typing = false
         set(value) {
-            field = value
-            sendOscMessage("/chatbox/typing", listOf(value))
+            // With the invisible/minimal-background chatbox ON, the VRChat typing
+            // indicator causes in-game UI issues — never show it. A false/clear
+            // still goes through so any indicator left over from before the trick
+            // was enabled is cleared. (Only manual-send paths set typing; the
+            // automated combined senders never do.)
+            val effective = value && !minimalBackground
+            field = effective
+            sendOscMessage("/chatbox/typing", listOf(effective))
         }
 
     private fun sendOscMessage(address: String, arguments: List<Any?>, delay: Long = 0) {
