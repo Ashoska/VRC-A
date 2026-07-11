@@ -87,21 +87,36 @@ object GroupAlertEnricher {
      */
     private fun collapseEventsByTitle(events: JSONArray): List<Pair<JSONObject, Boolean>> {
         val now = System.currentTimeMillis()
-        val byTitle = LinkedHashMap<String, MutableList<JSONObject>>()
+        val buckets = LinkedHashMap<String, MutableList<JSONObject>>()
         for (i in 0 until events.length()) {
             val ev = events.optJSONObject(i) ?: continue
-            // CONFIRMED field: `seriesId` groups every occurrence of a repeating
-            // event exactly (title can drift). Key on it when present so a flooded
-            // series collapses to ONE representative -> ONE single-event fetch,
-            // instead of the app grabbing info for all ~50 occurrences.
-            val series = ev.optString("seriesId", "").takeIf { it.isNotBlank() && it != "null" }
-            val t = series?.let { "s:$it" }
-                ?: normTitle(ev).ifBlank { "id:${ev.optString("id", i.toString())}" }
-            byTitle.getOrPut(t) { mutableListOf() }.add(ev)
+            val evId = ev.optString("id", "").ifBlank { i.toString() }
+            val kind = ev.optString("occurrenceKind", "")
+            val key = when {
+                // A KNOWN one-off never merges: unique bucket keyed on its own id.
+                // This stops a separate (single) event from being absorbed into a
+                // repeating series' bucket — which falsely flagged it recurring and
+                // dragged the whole series into its enrich/fire path when the group
+                // also had a repeating event.
+                kind.equals("single", true) -> "u:$evId"
+                // CONFIRMED field: `seriesId` groups every occurrence of a repeating
+                // event exactly (title can drift). Key on it when present so a
+                // flooded series collapses to ONE representative -> ONE single-event
+                // fetch, instead of grabbing info for all ~50 occurrences. Sparse
+                // list items (no series) fall back to title so title-identical
+                // repeats still collapse while a distinct one-off keeps its own bucket.
+                else -> ev.optString("seriesId", "").takeIf { it.isNotBlank() && it != "null" }
+                    ?.let { "s:$it" }
+                    ?: normTitle(ev).ifBlank { "id:$evId" }
+            }
+            buckets.getOrPut(key) { mutableListOf() }.add(ev)
         }
-        return byTitle.values.map { occ ->
-            if (occ.size == 1) occ[0] to false
-            else {
+        return buckets.values.map { occ ->
+            if (occ.size == 1) {
+                // A lone item is recurring ONLY if VRChat says so (occurrenceKind);
+                // a one-off must not be flagged just for sharing a bucket.
+                occ[0] to occ[0].optString("occurrenceKind", "").equals("occurrence", true)
+            } else {
                 val rep = occ.filter { parseTimestampMs(it.optString("startsAt", "")) >= now }
                     .minByOrNull { parseTimestampMs(it.optString("startsAt", "")) }
                     ?: occ.maxByOrNull { parseTimestampMs(it.optString("startsAt", "")) }
@@ -111,16 +126,36 @@ object GroupAlertEnricher {
         }
     }
 
-    /** Best-effort: whether the event repeats (part of a series). VRChat's exact
-     *  recurrence field isn't documented, so probe the likely names — any
-     *  non-empty/true value means recurring; absent → false (chip just won't show). */
+    /**
+     * Public: collapse a raw calendar-events array to ONE representative per
+     * series (the nearest UPCOMING occurrence) so callers never FIRE or enrich
+     * every future repeat of a recurring event — only the latest. Distinct
+     * events (different seriesId/title) each pass through unchanged, so OTHER
+     * events from the same group are still detected. Used by the pipeline's
+     * backfill + poll fire loops so a newly-created repeating series surfaces as
+     * a single notification instead of one card per occurrence.
+     */
+    fun collapseToRepresentatives(events: JSONArray): List<JSONObject> =
+        collapseEventsByTitle(events).map { it.first }
+
+    /** Whether the event repeats (part of a series). */
     fun extractRecurring(ev: JSONObject): Boolean {
+        // `occurrenceKind` is the AUTHORITATIVE recurrence signal (confirmed
+        // on-device): "occurrence" = part of a repeating series, "single" = a
+        // genuine one-off. Trust it EXCLUSIVELY when present — a "single" is never
+        // recurring even though VRChat still stamps it with a seriesId. That stray
+        // seriesId on one-offs was the cause of a separate event being falsely
+        // flagged as repeating whenever a real repeating event existed in the same
+        // group.
+        val kind = ev.optString("occurrenceKind", "")
+        if (kind.equals("occurrence", true)) return true
+        if (kind.equals("single", true)) return false
         if (ev.optBoolean("isRecurring", false)) return true
-        // CONFIRMED: a recurring occurrence has occurrenceKind=="occurrence" (a
-        // one-off is "single") and a non-null seriesId.
-        if (ev.optString("occurrenceKind", "").equals("occurrence", true)) return true
-        for (k in listOf("recurrence", "recurrenceRule", "repeatType", "recurringId",
-                "seriesId", "parentId", "parentCalendarEventId", "recurrenceId")) {
+        // occurrenceKind absent (a sparse list item): only a real recurrence RULE
+        // is a positive signal. Bare seriesId/parentId presence is deliberately
+        // NOT probed — every event (one-offs included) carries a seriesId, so
+        // treating its presence as recurring false-flagged singles.
+        for (k in listOf("recurrence", "recurrenceRule", "repeatType")) {
             val v = ev.opt(k) ?: continue
             if (v is Boolean && v) return true
             if (v is String && v.isNotBlank() && v.lowercase() != "none" && v.lowercase() != "never") return true

@@ -2538,8 +2538,12 @@ class VrchatPipelineService : Service() {
                         // without this they never surface on reopen.
                         val events = VrchatAuthManager.fetchGroupCalendarEvents(this@VrchatPipelineService, groupId, 20)
                         if (events != null) {
-                            for (j in 0 until events.length()) {
-                                fireGroupCalendarEvent(events.optJSONObject(j) ?: continue, groupId, groupName, seenMap, updatedMap)
+                            // Collapse recurring occurrences to ONE representative per
+                            // series (nearest upcoming) so a repeating event surfaces
+                            // as a single card, not one per future repeat. Distinct
+                            // events from the same group still pass through.
+                            for (ev in GroupAlertEnricher.collapseToRepresentatives(events)) {
+                                fireGroupCalendarEvent(ev, groupId, groupName, seenMap, updatedMap)
                             }
                         }
                         delay(250)
@@ -3171,8 +3175,11 @@ class VrchatPipelineService : Service() {
                 }
                 val events = VrchatAuthManager.fetchGroupCalendarEvents(this, groupId, 20)
                 if (events != null) {
-                    for (j in 0 until events.length()) {
-                        if (fireGroupCalendarEvent(events.optJSONObject(j) ?: continue, groupId, groupName, seenMap, updatedMap)) {
+                    // Collapse recurring occurrences to the nearest-upcoming
+                    // representative per series so a repeating event fires once,
+                    // not once per future repeat. Distinct series still fire.
+                    for (ev in GroupAlertEnricher.collapseToRepresentatives(events)) {
+                        if (fireGroupCalendarEvent(ev, groupId, groupName, seenMap, updatedMap)) {
                             changed = true
                         }
                     }
