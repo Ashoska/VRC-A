@@ -27,7 +27,9 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
 import com.vrca.BuildConfig
+import com.vrca.app.ChatboxSubLine
 import com.vrca.app.FeatureSessionStore
+import com.vrca.app.SubLineCodec
 import com.vrca.app.VrcaApplication
 import com.vrca.nowplaying.NowPlayingState
 import com.vrca.nowplaying.TitleCleaner
@@ -452,9 +454,11 @@ class VrcaViewModel(
             "timeMode" to timeMode
         )
 
-        data["afkPreset1"] = getAfkPresetPreview(1)
-        data["afkPreset2"] = getAfkPresetPreview(2)
-        data["afkPreset3"] = getAfkPresetPreview(3)
+        // Write the RAW (encoded) preset value so sub-line structure round-trips
+        // and the admin sees it — getAfkPresetPreview returns a rendered preview.
+        data["afkPreset1"] = afkPresetTexts.getOrElse(0) { "" }
+        data["afkPreset2"] = afkPresetTexts.getOrElse(1) { "" }
+        data["afkPreset3"] = afkPresetTexts.getOrElse(2) { "" }
 
         data["cyclePreset1"] = cyclePresetMessages.getOrNull(0)?.trim().orEmpty()
         data["cyclePreset2"] = cyclePresetMessages.getOrNull(1)?.trim().orEmpty()
@@ -654,9 +658,9 @@ class VrcaViewModel(
         put("spotifyPreset", spotifyPreset)
         put("timeEnabled", timeEnabled)
         put("timeMode", timeMode)
-        put("afkPreset1", getAfkPresetPreview(1))
-        put("afkPreset2", getAfkPresetPreview(2))
-        put("afkPreset3", getAfkPresetPreview(3))
+        put("afkPreset1", afkPresetTexts.getOrElse(0) { "" })
+        put("afkPreset2", afkPresetTexts.getOrElse(1) { "" })
+        put("afkPreset3", afkPresetTexts.getOrElse(2) { "" })
         put("cyclePreset1", cyclePresetMessages.getOrNull(0)?.trim().orEmpty())
         put("cyclePreset2", cyclePresetMessages.getOrNull(1)?.trim().orEmpty())
         put("cyclePreset3", cyclePresetMessages.getOrNull(2)?.trim().orEmpty())
@@ -3255,6 +3259,53 @@ class VrcaViewModel(
         startSelfSyncLoopIfNeeded()
     }
 
+    // ---- Pinned sub-lines (up to 3 chatbox rows, encoded into afkMessage) ----
+    // The hide/order/hidden-text state rides the existing afkMessage field (and
+    // therefore the preset slots + all sync) — no new Firestore fields. The SENT
+    // output is only the visible, non-blank rows (SubLineCodec.renderVisible).
+    fun pinnedSubLines(): List<ChatboxSubLine> = SubLineCodec.decode(afkMessage)
+
+    private fun setPinnedSubLines(subs: List<ChatboxSubLine>) {
+        // updateAfkText persists + auto-saves the selected preset + rebuilds preview.
+        updateAfkText(SubLineCodec.encode(subs.take(SubLineCodec.MAX_SUB_LINES)))
+    }
+
+    fun setPinnedSubLineText(index: Int, text: String) {
+        val subs = pinnedSubLines().toMutableList()
+        if (index !in subs.indices) return
+        subs[index] = subs[index].copy(text = text)
+        setPinnedSubLines(subs)
+    }
+
+    fun setPinnedSubLineHidden(index: Int, hidden: Boolean) {
+        val subs = pinnedSubLines().toMutableList()
+        if (index !in subs.indices) return
+        subs[index] = subs[index].copy(hidden = hidden)
+        setPinnedSubLines(subs)
+    }
+
+    fun addPinnedSubLine() {
+        val subs = pinnedSubLines().toMutableList()
+        if (subs.size >= SubLineCodec.MAX_SUB_LINES) return
+        subs.add(ChatboxSubLine("", false))
+        setPinnedSubLines(subs)
+    }
+
+    fun removePinnedSubLine(index: Int) {
+        val subs = pinnedSubLines().toMutableList()
+        if (index !in subs.indices) return
+        subs.removeAt(index)
+        if (subs.isEmpty()) subs.add(ChatboxSubLine("", false))
+        setPinnedSubLines(subs)
+    }
+
+    fun movePinnedSubLine(from: Int, to: Int) {
+        val subs = pinnedSubLines().toMutableList()
+        if (from !in subs.indices || to !in subs.indices || from == to) return
+        subs.add(to, subs.removeAt(from))
+        setPinnedSubLines(subs)
+    }
+
     // =========================
     // Cycle lines management
     // =========================
@@ -3563,7 +3614,8 @@ class VrcaViewModel(
     // =========================
     fun getAfkPresetPreview(slot: Int): String {
         val i = slot.coerceIn(1, 3) - 1
-        return afkPresetTexts[i].trim()
+        // Presets store the encoded pinned value; show the visible rows readably.
+        return SubLineCodec.renderVisible(afkPresetTexts[i]).replace("\n", "  /  ").trim()
     }
 
     fun getCyclePresetPreview(slot: Int): String {
@@ -4010,7 +4062,10 @@ class VrcaViewModel(
         cycleTrimWarning = ""
 
         // If banned, preview can still show what WOULD be sent, but nothing will send.
-        val afkLine = if (afkEnabled && afkMessage.trim().isNotEmpty()) resolveTokens(afkMessage.trim()) else ""
+        // Pinned may hold up to 3 sub-lines encoded in afkMessage; render only the
+        // visible, non-blank rows (joined by real newlines → separate chatbox rows).
+        val afkVisible = SubLineCodec.renderVisible(afkMessage)
+        val afkLine = if (afkEnabled && afkVisible.isNotEmpty()) resolveTokens(afkVisible) else ""
         val cycleLine = if (cycleEnabled) (cycleLineOverride ?: currentCycleLinePreview()) else ""
         val musicLines = if (spotifyEnabled) buildNowPlayingLines() else emptyList()
 
@@ -4188,7 +4243,13 @@ class VrcaViewModel(
 
         var cycleModifiedForMusic = false
 
-        while (cleaned.size > maxLines) {
+        // A Pinned block / Cycle slide can now be multiple chatbox ROWS (embedded
+        // '\n'), so the 9-line budget counts ROWS, not blocks. Over-budget removes
+        // whole lowest-priority blocks (Cycle first, then Music, then Pinned).
+        fun rowCount(list: List<LineWithPriority>): Int =
+            list.sumOf { it.text.count { c -> c == '\n' } + 1 }
+
+        while (rowCount(cleaned) > maxLines && cleaned.isNotEmpty()) {
             val idxToRemove = cleaned.indexOfLast { it.priority == Priority.CYCLE }
                 .takeIf { it >= 0 }
                 ?: cleaned.indexOfLast { it.priority == Priority.MUSIC }.takeIf { it >= 0 }
