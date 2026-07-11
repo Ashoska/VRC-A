@@ -1632,6 +1632,9 @@ class VrcaViewModel(
     private var manualLiveJob: Job? = null
     private var manualRevertJob: Job? = null
     private var lastManualLiveSent: String? = null
+    // Which OSC target the active live loop is driving (remote vs local), so a
+    // mid-hold exit from Live mode can hand the revert to the right sender.
+    private var manualLiveLocal: Boolean = false
 
     private fun manualHoldActive(): Boolean = System.currentTimeMillis() < manualHoldUntilMs
 
@@ -1647,10 +1650,21 @@ class VrcaViewModel(
         // Leaving Live mode stops the live loop + typing indicator; the current
         // hold still expires normally and reverts the chatbox.
         if (!enabled) {
+            val local = manualLiveLocal
             manualLiveJob?.cancel(); manualLiveJob = null
             lastManualLiveSent = null
             remoteVrcaOsc.typing = false
             localVrcaOsc.typing = false
+            // The live loop OWNED hold expiry while running; now that it's gone,
+            // hand the current hold back to the revert job so the chatbox still
+            // reverts to automation once it elapses (otherwise it'd stick on the
+            // manual text). No active hold → revert to the normal chatbox now.
+            if (manualHoldActive()) {
+                scheduleManualRevert(local)
+            } else if (!isBanned) {
+                lastManualHoldText = ""
+                rebuildAndMaybeSendCombined(forceSend = true, local = local, forceClearIfAllOff = true)
+            }
         }
     }
 
@@ -2161,6 +2175,16 @@ class VrcaViewModel(
     private fun startManualLiveLoop(local: Boolean = false) {
         if (manualLiveJob?.isActive == true) return
         val osc = if (!local) remoteVrcaOsc else localVrcaOsc
+        manualLiveLocal = local
+        // The live loop is the SOLE owner of hold expiry while it runs — cancel
+        // any Instant-mode revert job so the two can't race. The old design ran
+        // scheduleManualRevert() alongside the loop: at expiry the revert job
+        // reverted to automation AND nulled lastManualLiveSent, so the loop's next
+        // 0.5s tick saw the (unchanged) field as a NEW edit (text != null) and
+        // instantly re-armed the hold + re-pushed the manual text — flickering
+        // back to manual and, depending on tick ordering, sometimes never settling
+        // on automation at all. Now the loop detects expiry itself and reverts once.
+        manualRevertJob?.cancel(); manualRevertJob = null
         manualLiveJob = viewModelScope.launch {
             var typingOn = false
             while (manualLiveMode && !isBanned) {
@@ -2179,14 +2203,16 @@ class VrcaViewModel(
                     // A genuine edit (re)arms the 10s hold + shows the typing dots.
                     lastManualLiveSent = text
                     manualHoldUntilMs = System.currentTimeMillis() + MANUAL_HOLD_MS
-                    scheduleManualRevert(local)
                     if (!typingOn) { osc.typing = true; typingOn = true }
                 } else if (!manualHoldActive()) {
-                    // Unchanged AND the 10s window elapsed: the revert job already
-                    // restored the normal chatbox. Go idle (a keystroke restarts the
-                    // loop) instead of spinning forever.
+                    // Unchanged AND the 10s window elapsed: revert to the normal
+                    // chatbox HERE (the loop owns expiry in live mode) and stop.
+                    // A keystroke starts a fresh loop via onMessageTextChange.
                     if (typingOn) { osc.typing = false; typingOn = false }
+                    manualHoldUntilMs = 0L
+                    lastManualHoldText = ""
                     lastManualLiveSent = null
+                    rebuildAndMaybeSendCombined(forceSend = true, local = local, forceClearIfAllOff = true)
                     break
                 } else if (typingOn) {
                     // Paused but still inside the 10s window: drop the typing dots,
