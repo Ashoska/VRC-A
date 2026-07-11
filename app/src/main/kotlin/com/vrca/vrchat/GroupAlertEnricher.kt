@@ -75,8 +75,12 @@ object GroupAlertEnricher {
     }
 
     private fun normTitle(ev: JSONObject): String =
-        ev.optString("title", "").ifBlank { ev.optString("name", "") }
-            .trim().lowercase().replace(Regex("\\s+"), " ")
+        normTitleStr(ev.optString("title", "").ifBlank { ev.optString("name", "") })
+
+    /** Normalize a plain title string for cross-path matching (shared with the
+     *  alert store's dedup). */
+    private fun normTitleStr(t: String?): String =
+        t?.trim()?.lowercase()?.replace(Regex("\\s+"), " ").orEmpty()
 
     /**
      * Collapse recurring occurrences (same title) to ONE representative per series
@@ -330,12 +334,21 @@ object GroupAlertEnricher {
                         match = { e ->
                             e.eventRefId == evId ||
                                 (e.eventRefId == null && e.url?.contains(evId) == true) ||
+                                // Adopt a THIN v2 card (fired before its cal_ id
+                                // was known — the common freshly-created-event
+                                // case) by its event title, so this sweep upgrades
+                                // it IN PLACE (banner/timing/following) instead of
+                                // leaving it dangling while the REST sweep fires a
+                                // duplicate. The transform below links its
+                                // eventRefId, so it's only adopted once.
+                                (e.eventRefId == null && repTitle.isNotBlank() &&
+                                    normTitleStr(e.eventTitle) == repTitle) ||
                                 // A recurring representative updates ALL stored
                                 // occurrences of its series (matched by title) so
                                 // following/interested/etc. propagate to every one
                                 // and the display-collapse shows consistent data.
                                 (recurring && e.recurring && repTitle.isNotBlank() &&
-                                    (e.eventTitle?.trim()?.lowercase()?.replace(Regex("\\s+"), " ") ?: "") == repTitle)
+                                    normTitleStr(e.eventTitle) == repTitle)
                         },
                         transform = { e ->
                             e.copy(
