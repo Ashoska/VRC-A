@@ -27,7 +27,9 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
 import com.vrca.BuildConfig
+import com.vrca.app.ChatboxSubLine
 import com.vrca.app.FeatureSessionStore
+import com.vrca.app.SubLineCodec
 import com.vrca.app.VrcaApplication
 import com.vrca.nowplaying.NowPlayingState
 import com.vrca.nowplaying.TitleCleaner
@@ -452,9 +454,11 @@ class VrcaViewModel(
             "timeMode" to timeMode
         )
 
-        data["afkPreset1"] = getAfkPresetPreview(1)
-        data["afkPreset2"] = getAfkPresetPreview(2)
-        data["afkPreset3"] = getAfkPresetPreview(3)
+        // Write the RAW (encoded) preset value so sub-line structure round-trips
+        // and the admin sees it — getAfkPresetPreview returns a rendered preview.
+        data["afkPreset1"] = afkPresetTexts.getOrElse(0) { "" }
+        data["afkPreset2"] = afkPresetTexts.getOrElse(1) { "" }
+        data["afkPreset3"] = afkPresetTexts.getOrElse(2) { "" }
 
         data["cyclePreset1"] = cyclePresetMessages.getOrNull(0)?.trim().orEmpty()
         data["cyclePreset2"] = cyclePresetMessages.getOrNull(1)?.trim().orEmpty()
@@ -654,9 +658,9 @@ class VrcaViewModel(
         put("spotifyPreset", spotifyPreset)
         put("timeEnabled", timeEnabled)
         put("timeMode", timeMode)
-        put("afkPreset1", getAfkPresetPreview(1))
-        put("afkPreset2", getAfkPresetPreview(2))
-        put("afkPreset3", getAfkPresetPreview(3))
+        put("afkPreset1", afkPresetTexts.getOrElse(0) { "" })
+        put("afkPreset2", afkPresetTexts.getOrElse(1) { "" })
+        put("afkPreset3", afkPresetTexts.getOrElse(2) { "" })
         put("cyclePreset1", cyclePresetMessages.getOrNull(0)?.trim().orEmpty())
         put("cyclePreset2", cyclePresetMessages.getOrNull(1)?.trim().orEmpty())
         put("cyclePreset3", cyclePresetMessages.getOrNull(2)?.trim().orEmpty())
@@ -1632,6 +1636,9 @@ class VrcaViewModel(
     private var manualLiveJob: Job? = null
     private var manualRevertJob: Job? = null
     private var lastManualLiveSent: String? = null
+    // Which OSC target the active live loop is driving (remote vs local), so a
+    // mid-hold exit from Live mode can hand the revert to the right sender.
+    private var manualLiveLocal: Boolean = false
 
     private fun manualHoldActive(): Boolean = System.currentTimeMillis() < manualHoldUntilMs
 
@@ -1647,10 +1654,21 @@ class VrcaViewModel(
         // Leaving Live mode stops the live loop + typing indicator; the current
         // hold still expires normally and reverts the chatbox.
         if (!enabled) {
+            val local = manualLiveLocal
             manualLiveJob?.cancel(); manualLiveJob = null
             lastManualLiveSent = null
             remoteVrcaOsc.typing = false
             localVrcaOsc.typing = false
+            // The live loop OWNED hold expiry while running; now that it's gone,
+            // hand the current hold back to the revert job so the chatbox still
+            // reverts to automation once it elapses (otherwise it'd stick on the
+            // manual text). No active hold → revert to the normal chatbox now.
+            if (manualHoldActive()) {
+                scheduleManualRevert(local)
+            } else if (!isBanned) {
+                lastManualHoldText = ""
+                rebuildAndMaybeSendCombined(forceSend = true, local = local, forceClearIfAllOff = true)
+            }
         }
     }
 
@@ -2161,6 +2179,16 @@ class VrcaViewModel(
     private fun startManualLiveLoop(local: Boolean = false) {
         if (manualLiveJob?.isActive == true) return
         val osc = if (!local) remoteVrcaOsc else localVrcaOsc
+        manualLiveLocal = local
+        // The live loop is the SOLE owner of hold expiry while it runs — cancel
+        // any Instant-mode revert job so the two can't race. The old design ran
+        // scheduleManualRevert() alongside the loop: at expiry the revert job
+        // reverted to automation AND nulled lastManualLiveSent, so the loop's next
+        // 0.5s tick saw the (unchanged) field as a NEW edit (text != null) and
+        // instantly re-armed the hold + re-pushed the manual text — flickering
+        // back to manual and, depending on tick ordering, sometimes never settling
+        // on automation at all. Now the loop detects expiry itself and reverts once.
+        manualRevertJob?.cancel(); manualRevertJob = null
         manualLiveJob = viewModelScope.launch {
             var typingOn = false
             while (manualLiveMode && !isBanned) {
@@ -2179,14 +2207,16 @@ class VrcaViewModel(
                     // A genuine edit (re)arms the 10s hold + shows the typing dots.
                     lastManualLiveSent = text
                     manualHoldUntilMs = System.currentTimeMillis() + MANUAL_HOLD_MS
-                    scheduleManualRevert(local)
                     if (!typingOn) { osc.typing = true; typingOn = true }
                 } else if (!manualHoldActive()) {
-                    // Unchanged AND the 10s window elapsed: the revert job already
-                    // restored the normal chatbox. Go idle (a keystroke restarts the
-                    // loop) instead of spinning forever.
+                    // Unchanged AND the 10s window elapsed: revert to the normal
+                    // chatbox HERE (the loop owns expiry in live mode) and stop.
+                    // A keystroke starts a fresh loop via onMessageTextChange.
                     if (typingOn) { osc.typing = false; typingOn = false }
+                    manualHoldUntilMs = 0L
+                    lastManualHoldText = ""
                     lastManualLiveSent = null
+                    rebuildAndMaybeSendCombined(forceSend = true, local = local, forceClearIfAllOff = true)
                     break
                 } else if (typingOn) {
                     // Paused but still inside the 10s window: drop the typing dots,
@@ -3229,6 +3259,53 @@ class VrcaViewModel(
         startSelfSyncLoopIfNeeded()
     }
 
+    // ---- Pinned sub-lines (up to 3 chatbox rows, encoded into afkMessage) ----
+    // The hide/order/hidden-text state rides the existing afkMessage field (and
+    // therefore the preset slots + all sync) — no new Firestore fields. The SENT
+    // output is only the visible, non-blank rows (SubLineCodec.renderVisible).
+    fun pinnedSubLines(): List<ChatboxSubLine> = SubLineCodec.decode(afkMessage)
+
+    private fun setPinnedSubLines(subs: List<ChatboxSubLine>) {
+        // updateAfkText persists + auto-saves the selected preset + rebuilds preview.
+        updateAfkText(SubLineCodec.encode(subs.take(SubLineCodec.MAX_SUB_LINES)))
+    }
+
+    fun setPinnedSubLineText(index: Int, text: String) {
+        val subs = pinnedSubLines().toMutableList()
+        if (index !in subs.indices) return
+        subs[index] = subs[index].copy(text = text)
+        setPinnedSubLines(subs)
+    }
+
+    fun setPinnedSubLineHidden(index: Int, hidden: Boolean) {
+        val subs = pinnedSubLines().toMutableList()
+        if (index !in subs.indices) return
+        subs[index] = subs[index].copy(hidden = hidden)
+        setPinnedSubLines(subs)
+    }
+
+    fun addPinnedSubLine() {
+        val subs = pinnedSubLines().toMutableList()
+        if (subs.size >= SubLineCodec.MAX_SUB_LINES) return
+        subs.add(ChatboxSubLine("", false))
+        setPinnedSubLines(subs)
+    }
+
+    fun removePinnedSubLine(index: Int) {
+        val subs = pinnedSubLines().toMutableList()
+        if (index !in subs.indices) return
+        subs.removeAt(index)
+        if (subs.isEmpty()) subs.add(ChatboxSubLine("", false))
+        setPinnedSubLines(subs)
+    }
+
+    fun movePinnedSubLine(from: Int, to: Int) {
+        val subs = pinnedSubLines().toMutableList()
+        if (from !in subs.indices || to !in subs.indices || from == to) return
+        subs.add(to, subs.removeAt(from))
+        setPinnedSubLines(subs)
+    }
+
     // =========================
     // Cycle lines management
     // =========================
@@ -3492,14 +3569,37 @@ class VrcaViewModel(
     }
 
     /**
+     * No-repeat window for shuffle: how many recently-played positions to avoid,
+     * scaled by the number of active lines. Small counts stay at 1 (just no
+     * immediate repeat); from 5 lines up it ramps via these anchors (activeSize to
+     * window): 5→3, 10→5, 15→8, 20→14, interpolating linearly in between and
+     * clamping above the top anchor. More lines = enforce more variety before a
+     * line can come back around.
+     */
+    private fun shuffleWindow(activeSize: Int): Int {
+        if (activeSize < 5) return 1
+        val anchors = listOf(5 to 3, 10 to 5, 15 to 8, 20 to 14)
+        if (activeSize >= anchors.last().first) return anchors.last().second
+        for (i in 0 until anchors.size - 1) {
+            val (s0, w0) = anchors[i]
+            val (s1, w1) = anchors[i + 1]
+            if (activeSize in s0 until s1) {
+                val t = (activeSize - s0).toFloat() / (s1 - s0)
+                return Math.round(w0 + t * (w1 - w0)).toInt()
+            }
+        }
+        return anchors.last().second
+    }
+
+    /**
      * Pick the next active-line position. Sequential = previous+1. Shuffle = a random
-     * position avoiding the recent window (last 2 when >5 active lines, else last 1)
-     * so it stays random without repeating too much / never an immediate repeat.
+     * position avoiding the recent window (see [shuffleWindow]) so it stays random
+     * without repeating too much / never an immediate repeat.
      */
     private fun nextCyclePos(activeSize: Int, prevPos: Int): Int {
         if (activeSize <= 1) return 0
         if (!cycleShuffle) return (prevPos + 1) % activeSize
-        val window = (if (activeSize > 5) 2 else 1).coerceAtMost(activeSize - 1)
+        val window = shuffleWindow(activeSize).coerceIn(1, activeSize - 1)
         val recent = recentCyclePicks.toSet()
         val candidates = (0 until activeSize).filter { it !in recent }
         val pick = (candidates.ifEmpty { (0 until activeSize).filter { it != prevPos } })
@@ -3514,7 +3614,8 @@ class VrcaViewModel(
     // =========================
     fun getAfkPresetPreview(slot: Int): String {
         val i = slot.coerceIn(1, 3) - 1
-        return afkPresetTexts[i].trim()
+        // Presets store the encoded pinned value; show the visible rows readably.
+        return SubLineCodec.renderVisible(afkPresetTexts[i]).replace("\n", "  /  ").trim()
     }
 
     fun getCyclePresetPreview(slot: Int): String {
@@ -3961,7 +4062,10 @@ class VrcaViewModel(
         cycleTrimWarning = ""
 
         // If banned, preview can still show what WOULD be sent, but nothing will send.
-        val afkLine = if (afkEnabled && afkMessage.trim().isNotEmpty()) resolveTokens(afkMessage.trim()) else ""
+        // Pinned may hold up to 3 sub-lines encoded in afkMessage; render only the
+        // visible, non-blank rows (joined by real newlines → separate chatbox rows).
+        val afkVisible = SubLineCodec.renderVisible(afkMessage)
+        val afkLine = if (afkEnabled && afkVisible.isNotEmpty()) resolveTokens(afkVisible) else ""
         val cycleLine = if (cycleEnabled) (cycleLineOverride ?: currentCycleLinePreview()) else ""
         val musicLines = if (spotifyEnabled) buildNowPlayingLines() else emptyList()
 
@@ -4139,7 +4243,13 @@ class VrcaViewModel(
 
         var cycleModifiedForMusic = false
 
-        while (cleaned.size > maxLines) {
+        // A Pinned block / Cycle slide can now be multiple chatbox ROWS (embedded
+        // '\n'), so the 9-line budget counts ROWS, not blocks. Over-budget removes
+        // whole lowest-priority blocks (Cycle first, then Music, then Pinned).
+        fun rowCount(list: List<LineWithPriority>): Int =
+            list.sumOf { it.text.count { c -> c == '\n' } + 1 }
+
+        while (rowCount(cleaned) > maxLines && cleaned.isNotEmpty()) {
             val idxToRemove = cleaned.indexOfLast { it.priority == Priority.CYCLE }
                 .takeIf { it >= 0 }
                 ?: cleaned.indexOfLast { it.priority == Priority.MUSIC }.takeIf { it >= 0 }

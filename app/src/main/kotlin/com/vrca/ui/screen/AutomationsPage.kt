@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -50,6 +51,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
@@ -58,6 +60,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.vrca.app.ChatboxSubLine
+import com.vrca.app.SubLineCodec
 import com.vrca.ui.common.CompactSectionCard
 import com.vrca.ui.common.KitSectionHeader
 import com.vrca.ui.common.KitStatusChip
@@ -89,6 +93,22 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
     LaunchedEffect(vm.cycleLines.size) { syncCycleLineFieldsFromVm() }
     LaunchedEffect(vm.cycleLines.toList()) { syncCycleLineFieldsFromVm() }
 
+    // Pinned sub-line fields, same cursor-safe hoisted-map pattern as the cycle
+    // fields above: seed from vm.pinnedSubLines(), reseed only when the stored
+    // value changes from a NON-keystroke source (e.g. a preset load), so typing
+    // never jumps the cursor.
+    val pinnedFields = remember { mutableStateMapOf<Int, TextFieldValue>() }
+    fun syncPinnedFieldsFromVm() {
+        val subs = vm.pinnedSubLines()
+        val valid = subs.indices.toSet()
+        pinnedFields.keys.toList().forEach { if (it !in valid) pinnedFields.remove(it) }
+        subs.forEachIndexed { idx, sub ->
+            val existing = pinnedFields[idx]
+            if (existing == null || existing.text != sub.text) pinnedFields[idx] = TextFieldValue(sub.text)
+        }
+    }
+    LaunchedEffect(vm.afkMessage) { syncPinnedFieldsFromVm() }
+
     // Preset peek dialog state — set by long-pressing a preset chip.
     var peek by remember { mutableStateOf<PresetPeek?>(null) }
 
@@ -102,6 +122,10 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
     // repaint through.
     val afkPresetPreviews = List(3) { vm.getAfkPresetPreview(it + 1) }
     val selectedAfkSlot = vm.selectedAfkPreset
+    // Snapshot the pinned sub-lines in PAGE scope (same reason as the cycle mute
+    // flags below) so the CompactSectionCard content lambda re-runs when they
+    // change (hide toggle / reorder / preset load), not just on tab re-entry.
+    val pinnedSubs = vm.pinnedSubLines()
     val cyclePresetPreviews = List(5) { vm.getCyclePresetPreview(it + 1) }
     val selectedCycleSlot = vm.selectedCyclePreset
 
@@ -112,7 +136,8 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
         CompactSectionCard(
             title = "Pinned",
             icon = Icons.Filled.PushPin,
-            summary = vm.afkMessage.trim().ifBlank { "No message set" },
+            summary = com.vrca.app.SubLineCodec.renderVisible(vm.afkMessage)
+                .replace("\n", "  /  ").ifBlank { "No message set" },
             trailing = {
                 KitStatusChip(
                     if (vm.afkEnabled) "ON" else "OFF",
@@ -120,15 +145,24 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                 )
             }
         ) {
-            OutlinedTextField(
-                value = vm.afkMessage,
-                onValueChange = { s: String -> vm.updateAfkText(s) },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                label = { Text("Pinned text") },
-                supportingText = { CharBudgetMeter(vm.resolveTokens(vm.afkMessage).length) },
-                enabled = !isBanned
+            // Pinned can be up to 3 stacked chatbox rows — each row is its own
+            // sub-line (hide / reorder / delete), a compact take on the cycle rows.
+            KitSectionHeader(title = "Message rows", trailingValue = "up to 3 chatbox lines")
+            SubLineEditor(
+                subs = pinnedSubs,
+                fields = pinnedFields,
+                rowLabel = "Row",
+                resolvedLengthOf = { vm.resolveTokens(it).length },
+                enabled = !isBanned,
+                onTextChanged = { i, t -> vm.setPinnedSubLineText(i, t) },
+                onToggleHidden = { i, h -> vm.setPinnedSubLineHidden(i, h) },
+                onMoveUp = { i -> vm.movePinnedSubLine(i, i - 1) },
+                onMoveDown = { i -> vm.movePinnedSubLine(i, i + 1) },
+                onDelete = { i -> vm.removePinnedSubLine(i) },
+                onAdd = { vm.addPinnedSubLine() }
             )
+            Spacer(Modifier.height(2.dp))
+            CharBudgetMeter(vm.resolveTokens(com.vrca.app.SubLineCodec.renderVisible(vm.afkMessage)).length)
 
             TokensHint()
 
@@ -546,6 +580,186 @@ private fun PresetChip(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+        }
+    }
+}
+
+/* =========================
+   Sub-line editor (shared by Pinned rows + Cycle-slide rows)
+   Up to 3 chatbox rows per block — a compact take on the cycle-line row: number
+   badge doubles as the hide toggle, an always-on char meter, an overflow menu
+   (move up / move down / delete), plus an "Add row" button.
+   ========================= */
+@Composable
+private fun SubLineEditor(
+    subs: List<ChatboxSubLine>,
+    fields: SnapshotStateMap<Int, TextFieldValue>,
+    rowLabel: String,
+    resolvedLengthOf: (String) -> Int,
+    enabled: Boolean,
+    onTextChanged: (Int, String) -> Unit,
+    onToggleHidden: (Int, Boolean) -> Unit,
+    onMoveUp: (Int) -> Unit,
+    onMoveDown: (Int) -> Unit,
+    onDelete: (Int) -> Unit,
+    onAdd: () -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        subs.forEachIndexed { i, sub ->
+            key(i, sub.hidden) {
+                val fieldValue = fields[i] ?: TextFieldValue(sub.text)
+                SubLineRow(
+                    index = i,
+                    count = subs.size,
+                    rowLabel = rowLabel,
+                    value = fieldValue,
+                    hidden = sub.hidden,
+                    resolvedLength = resolvedLengthOf(fieldValue.text),
+                    enabled = enabled,
+                    onValueChange = { v -> fields[i] = v; onTextChanged(i, v.text) },
+                    onToggleHidden = { onToggleHidden(i, it) },
+                    onMoveUp = { onMoveUp(i) },
+                    onMoveDown = { onMoveDown(i) },
+                    onDelete = { onDelete(i) }
+                )
+            }
+        }
+        if (subs.size < SubLineCodec.MAX_SUB_LINES) {
+            TextButton(onClick = onAdd, enabled = enabled) {
+                Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Add row")
+            }
+        }
+    }
+}
+
+@Composable
+private fun SubLineRow(
+    index: Int,
+    count: Int,
+    rowLabel: String,
+    value: TextFieldValue,
+    hidden: Boolean,
+    resolvedLength: Int,
+    enabled: Boolean,
+    onValueChange: (TextFieldValue) -> Unit,
+    onToggleHidden: (Boolean) -> Unit,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit,
+    onDelete: () -> Unit
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    var focused by remember { mutableStateOf(false) }
+    val container =
+        if (hidden) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.20f)
+        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.40f)
+    val dim = if (hidden) 0.5f else 1f
+    Surface(
+        shape = MaterialTheme.shapes.small,
+        color = container,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .heightIn(min = 40.dp)
+                .padding(start = 6.dp, end = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Small number badge doubles as the hide toggle (dims when hidden).
+            Surface(
+                shape = androidx.compose.foundation.shape.CircleShape,
+                color = if (!hidden) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.12f),
+                onClick = { if (enabled) onToggleHidden(!hidden) },
+                enabled = enabled,
+                modifier = Modifier.size(24.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(
+                        "${index + 1}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (!hidden) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            Spacer(Modifier.width(8.dp))
+            Box(Modifier.weight(1f)) {
+                if (value.text.isEmpty()) {
+                    Text(
+                        "$rowLabel ${index + 1}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    )
+                }
+                BasicTextField(
+                    value = value,
+                    onValueChange = onValueChange,
+                    enabled = enabled,
+                    singleLine = !focused,
+                    maxLines = if (focused) 3 else 1,
+                    textStyle = MaterialTheme.typography.bodySmall.copy(
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = dim)
+                    ),
+                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onFocusChanged { focused = it.isFocused }
+                )
+            }
+            if (value.text.isNotEmpty()) {
+                Spacer(Modifier.width(6.dp))
+                CharBudgetMeter(resolvedLength)
+            }
+            IconButton(
+                onClick = { onToggleHidden(!hidden) },
+                enabled = enabled,
+                modifier = Modifier.size(30.dp)
+            ) {
+                Icon(
+                    if (!hidden) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
+                    contentDescription = if (!hidden) "Hide row ${index + 1}" else "Show row ${index + 1}",
+                    modifier = Modifier.size(16.dp),
+                    tint = if (!hidden) MaterialTheme.colorScheme.onSurfaceVariant
+                    else MaterialTheme.colorScheme.primary
+                )
+            }
+            Box {
+                IconButton(
+                    onClick = { menuOpen = true },
+                    enabled = enabled,
+                    modifier = Modifier.size(30.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.MoreVert,
+                        contentDescription = "Row ${index + 1} actions",
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Move up") },
+                        enabled = index > 0,
+                        leadingIcon = { Icon(Icons.Filled.ArrowUpward, null) },
+                        onClick = { menuOpen = false; onMoveUp() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Move down") },
+                        enabled = index < count - 1,
+                        leadingIcon = { Icon(Icons.Filled.ArrowDownward, null) },
+                        onClick = { menuOpen = false; onMoveDown() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Delete") },
+                        leadingIcon = {
+                            Icon(Icons.Filled.Delete, null, tint = MaterialTheme.colorScheme.error)
+                        },
+                        onClick = { menuOpen = false; onDelete() }
+                    )
+                }
+            }
         }
     }
 }

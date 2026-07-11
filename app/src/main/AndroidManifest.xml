@@ -14,6 +14,23 @@
     <!-- Boot receiver for pipeline service restart -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!--
+      Package visibility (Android 11+/API 30+). Without this, getApplicationIcon()
+      for the detected media app throws NameNotFoundException unless we happen to
+      be mid-interaction with its MediaSession — so the Now Playing source icon
+      resolved only intermittently and otherwise fell back to a generic glyph.
+      Declare the known media apps explicitly, plus any app exposing a
+      MediaBrowserService so "other media apps are always allowed" resolve too.
+    -->
+    <queries>
+        <package android:name="com.spotify.music" />
+        <package android:name="com.google.android.youtube" />
+        <package android:name="com.google.android.apps.youtube.music" />
+        <intent>
+            <action android:name="android.media.browse.MediaBrowserService" />
+        </intent>
+    </queries>
+
     <application
         android:name="com.vrca.app.VrcaApplication"
         android:allowBackup="true"

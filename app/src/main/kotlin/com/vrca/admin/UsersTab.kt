@@ -81,6 +81,7 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
 import com.google.firebase.firestore.Source
 import com.vrca.BuildConfig
+import com.vrca.app.SubLineCodec
 import com.vrca.vrchat.VrchatAuthManager
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -1158,16 +1159,20 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
     ElevatedCard {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             AdminCardHeader("Pinned Message", Icons.Filled.PushPin, AdminTone.Primary)
-            var pinnedEdit by remember(d.pinnedMessage) { mutableStateOf(d.pinnedMessage) }
+            // Pinned may hold up to 3 sub-lines encoded in the field. Show the
+            // readable form (rows as " ⏎ ", hidden rows tagged "⊘") and re-encode
+            // on save so the admin can see AND edit every row, hidden included.
+            val pinnedReadable = SubLineCodec.toAdminText(d.pinnedMessage)
+            var pinnedEdit by remember(pinnedReadable) { mutableStateOf(pinnedReadable) }
             OutlinedTextField(
                 value = pinnedEdit,
                 onValueChange = { pinnedEdit = it },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                label = { Text("Pinned text") },
+                label = { Text("Pinned text (⏎ = row, ⊘ = hidden)") },
                 trailingIcon = {
-                    if (pinnedEdit != d.pinnedMessage)
-                        IconButton(onClick = { writeField("afkMessage", pinnedEdit) }) {
+                    if (pinnedEdit != pinnedReadable)
+                        IconButton(onClick = { writeField("afkMessage", SubLineCodec.fromAdminText(pinnedEdit)) }) {
                             Icon(Icons.Filled.Check, "Save", modifier = Modifier.size(18.dp))
                         }
                 }
@@ -1176,16 +1181,17 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
             Text("Presets", style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             d.pinnedPresets.forEachIndexed { i, preset ->
-                var pe by remember(preset) { mutableStateOf(preset) }
+                val presetReadable = SubLineCodec.toAdminText(preset)
+                var pe by remember(presetReadable) { mutableStateOf(presetReadable) }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     OutlinedTextField(value = pe, onValueChange = { pe = it },
                         modifier = Modifier.weight(1f), singleLine = true, label = { Text("Preset ${i+1}") })
-                    if (pe != preset)
-                        IconButton(onClick = { writeField("afkPreset${i+1}", pe) }) {
+                    if (pe != presetReadable)
+                        IconButton(onClick = { writeField("afkPreset${i+1}", SubLineCodec.fromAdminText(pe)) }) {
                             Icon(Icons.Filled.Check, "Save", modifier = Modifier.size(18.dp))
                         }
-                    OutlinedButton(onClick = { writeField("afkMessage", pe) },
+                    OutlinedButton(onClick = { writeField("afkMessage", SubLineCodec.fromAdminText(pe)) },
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
                         Text("Load", style = MaterialTheme.typography.labelSmall)
                     }
@@ -1212,13 +1218,16 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                 }
             })
             if (d.cycleLinesText.isNotBlank()) {
-                var cycleEdit by remember(d.cycleLinesText) { mutableStateOf(d.cycleLinesText) }
+                // Each slide can hold up to 3 sub-lines; show them readable (rows
+                // as " ⏎ ", hidden as "⊘") and re-encode on save.
+                val cycleReadable = SubLineCodec.toAdminCycleText(d.cycleLinesText)
+                var cycleEdit by remember(cycleReadable) { mutableStateOf(cycleReadable) }
                 OutlinedTextField(value = cycleEdit, onValueChange = { cycleEdit = it },
-                    modifier = Modifier.fillMaxWidth(), label = { Text("Cycle lines") },
+                    modifier = Modifier.fillMaxWidth(), label = { Text("Cycle lines (⏎ = row, ⊘ = hidden)") },
                     minLines = 2, maxLines = 6,
                     trailingIcon = {
-                        if (cycleEdit != d.cycleLinesText)
-                            IconButton(onClick = { writeField("cycleLinesText", cycleEdit) }) {
+                        if (cycleEdit != cycleReadable)
+                            IconButton(onClick = { writeField("cycleLinesText", SubLineCodec.fromAdminCycleText(cycleEdit)) }) {
                                 Icon(Icons.Filled.Check, "Save", modifier = Modifier.size(18.dp))
                             }
                     })
@@ -1227,7 +1236,8 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
             Text("Cycle Presets", style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             d.cyclePresets.forEachIndexed { i, preset ->
-                var pe by remember(preset) { mutableStateOf(preset) }
+                val presetReadable = SubLineCodec.toAdminCycleText(preset)
+                var pe by remember(presetReadable) { mutableStateOf(presetReadable) }
                 var expanded by remember { mutableStateOf(false) }
                 ElevatedCard {
                     Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1245,21 +1255,21 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                         if (expanded) {
                             OutlinedTextField(value = pe, onValueChange = { pe = it },
                                 modifier = Modifier.fillMaxWidth(),
-                                label = { Text("Cycle lines") },
+                                label = { Text("Cycle lines (⏎ = row, ⊘ = hidden)") },
                                 minLines = 2, maxLines = 8)
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                if (pe != preset)
-                                    Button(onClick = { writeField("cyclePreset${i+1}", pe) },
+                                if (pe != presetReadable)
+                                    Button(onClick = { writeField("cyclePreset${i+1}", SubLineCodec.fromAdminCycleText(pe)) },
                                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) {
                                         Text("Save", style = MaterialTheme.typography.labelSmall)
                                     }
-                                OutlinedButton(onClick = { writeField("cycleLinesText", pe) },
+                                OutlinedButton(onClick = { writeField("cycleLinesText", SubLineCodec.fromAdminCycleText(pe)) },
                                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) {
                                     Text("Load to active", style = MaterialTheme.typography.labelSmall)
                                 }
                             }
                         } else {
-                            val preview = preset.lines().firstOrNull { it.isNotBlank() }?.trim() ?: "(empty)"
+                            val preview = presetReadable.lines().firstOrNull { it.isNotBlank() }?.trim() ?: "(empty)"
                             Text(preview, style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
