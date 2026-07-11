@@ -91,24 +91,21 @@ object GroupAlertEnricher {
         for (i in 0 until events.length()) {
             val ev = events.optJSONObject(i) ?: continue
             val evId = ev.optString("id", "").ifBlank { i.toString() }
-            val kind = ev.optString("occurrenceKind", "")
-            val key = when {
-                // A KNOWN one-off never merges: unique bucket keyed on its own id.
-                // This stops a separate (single) event from being absorbed into a
-                // repeating series' bucket — which falsely flagged it recurring and
-                // dragged the whole series into its enrich/fire path when the group
-                // also had a repeating event.
-                kind.equals("single", true) -> "u:$evId"
-                // CONFIRMED field: `seriesId` groups every occurrence of a repeating
-                // event exactly (title can drift). Key on it when present so a
-                // flooded series collapses to ONE representative -> ONE single-event
-                // fetch, instead of grabbing info for all ~50 occurrences. Sparse
-                // list items (no series) fall back to title so title-identical
-                // repeats still collapse while a distinct one-off keeps its own bucket.
-                else -> ev.optString("seriesId", "").takeIf { it.isNotBlank() && it != "null" }
-                    ?.let { "s:$it" }
-                    ?: normTitle(ev).ifBlank { "id:$evId" }
-            }
+            // Group by `seriesId` (every occurrence of a repeat shares it) else by
+            // normalized title (repeats share that too). Deliberately NOT keyed on
+            // `occurrenceKind`: the calendar LIST endpoint reports it unreliably
+            // (the confirmed field is on the single-event fetch), and keying it as
+            // "single -> unique bucket" BROKE the collapse — every occurrence became
+            // its own bucket, so the whole series flooded the fire path AND the
+            // enricher did one single-event fetch per occurrence (~50) instead of
+            // ONE, which is the "grabs all repeats before it loads the latest"
+            // slowness. A genuine one-off has its OWN seriesId (or a unique title)
+            // so it still keeps its own bucket; only a seriesless one-off sharing a
+            // repeat's EXACT title could mis-merge (rare, harmless). The
+            // one-off-falsely-flagged-recurring fix lives in extractRecurring (the
+            // chip), which is where it actually mattered.
+            val series = ev.optString("seriesId", "").takeIf { it.isNotBlank() && it != "null" }
+            val key = series?.let { "s:$it" } ?: normTitle(ev).ifBlank { "id:$evId" }
             buckets.getOrPut(key) { mutableListOf() }.add(ev)
         }
         return buckets.values.map { occ ->

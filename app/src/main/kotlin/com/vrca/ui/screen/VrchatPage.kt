@@ -1246,7 +1246,9 @@ private fun AlertGroupCard(
     }
     joinTargets?.let { targets ->
         InstanceListDialog(
-            title = "Join event · ${group.title}",
+            // Neutral title — the picker now serves both a LIVE event's "Join event"
+            // and an announcement's "See active instances".
+            title = "Active instances · ${group.title}",
             targets = targets,
             onDismiss = { joinTargets = null },
             emptyText = "This group has no open instances right now. The host may not have opened one yet — try Open in VRChat instead."
@@ -1295,7 +1297,11 @@ private fun AlertGroupCard(
                             displayTitle,
                             style = MaterialTheme.typography.titleSmall,
                             color = MaterialTheme.colorScheme.onSurface,
-                            maxLines = 1,
+                            // Long notification titles ("Announcement from <long group
+                            // name>", etc.) were cut with an ellipsis on ALL alert
+                            // types — this header is shared — so allow a second line
+                            // before ellipsizing.
+                            maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false)
                         )
@@ -1598,6 +1604,20 @@ private fun AlertEventBody(
     // Rich display needs only a known start time; the calendar ACTION additionally
     // needs the cal_/grp_ ids (checked at the button below).
     val isRichEvent = event.startsAtMs > 0L
+
+    // For an ANNOUNCEMENT (not a rich event), offer the same instance picker events
+    // get — but ONLY when the hosting group actually has an OPEN instance. Checked
+    // once on expand (this body only renders while the card is expanded), so it's
+    // one lightweight GET per opened announcement, not per row.
+    var announcementInstanceCount by remember(event.id) { mutableStateOf(0) }
+    if (!isRichEvent && event.groupRefId != null) {
+        LaunchedEffect(event.id, event.groupRefId) {
+            val insts = runCatching {
+                VrchatAuthManager.fetchGroupInstances(ctx, event.groupRefId!!)
+            }.getOrNull()
+            announcementInstanceCount = insts?.size ?: 0
+        }
+    }
     val phase = eventPhase(event.startsAtMs, event.endsAtMs, nowMs)
     val bodyUrls = remember(event.body) { extractBodyUrls(event.body) }
     val longBody = event.body.length > 320
@@ -1885,6 +1905,18 @@ private fun AlertEventBody(
                         prominent = false,
                         enabled = true,
                         onClick = { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+                    )
+                }
+                // Announcement from a group that currently has open instances: the
+                // same picker events use, shown ONLY when there's an active instance.
+                if (!isRichEvent && event.groupRefId != null && announcementInstanceCount > 0) {
+                    Spacer(Modifier.height(8.dp))
+                    CompactAlertButton(
+                        label = if (joinLoading) "Finding instances..." else "See active instances",
+                        icon = Icons.AutoMirrored.Filled.Login,
+                        prominent = true,
+                        enabled = !joinLoading,
+                        onClick = { onJoinEvent(event.groupRefId) }
                     )
                 }
                 // Phase-appropriate calendar/join actions.
