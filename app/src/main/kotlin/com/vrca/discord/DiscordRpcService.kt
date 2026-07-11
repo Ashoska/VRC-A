@@ -77,7 +77,7 @@ class DiscordRpcService : Service() {
         private const val NOTIF_ID = 1001
 
         private const val DEFAULT_VRCHAT_IMAGE_URL =
-            "https://raw.githubusercontent.com/shadowash321rulse-lab/VRChat-rpc-display/main/vrchat-1102x620.jpg"
+            "https://raw.githubusercontent.com/Ashoska/VRC-A-Image-store/main/vrchat-1102x620.jpg"
 
         const val ACTION_START = "com.vrca.DISCORD_RPC_START"
         const val ACTION_STOP = "com.vrca.DISCORD_RPC_STOP"

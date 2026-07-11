@@ -76,6 +76,12 @@ class VrcaApplication : Application(), ViewModelStoreOwner {
 
         cleanStaleUpdateApks()
 
+        // Free any on-demand OSC tutorial images left over from a replay that was
+        // killed mid-way: on a fresh process where onboarding is already COMPLETE
+        // there's no reason to keep them. A new user still mid-onboarding is NOT
+        // complete, so their prefetched images survive a close/kill (resume works).
+        clearStaleTutorialImages()
+
         // Track app foreground state (started-activity count) so background
         // workers (e.g. the friends-profile refresh) can poll fast while the
         // user is on-screen and back off when not. Dependency-free.
@@ -128,6 +134,16 @@ class VrcaApplication : Application(), ViewModelStoreOwner {
                 if (f.name.endsWith(".apk")) f.delete()
             }
         } catch (_: Throwable) {}
+    }
+
+    private fun clearStaleTutorialImages() {
+        Thread {
+            try {
+                if (com.vrca.ui.onboarding.OnboardingPrefs.isComplete(applicationContext)) {
+                    com.vrca.ui.onboarding.TutorialImageStore.clear(applicationContext)
+                }
+            } catch (_: Throwable) {}
+        }.start()
     }
 
     private fun installCrashHandler() {

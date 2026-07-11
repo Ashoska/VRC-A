@@ -189,6 +189,20 @@ fun VrcaApp() {
                 if (VrchatAuthManager.isLoggedIn(ctx)) {
                     startPipelineWarmup(ctx)
                 } else {
+                    // New user (onboarding not complete): spend the boot-screen time
+                    // PREFETCHING the on-demand OSC tutorial images (no longer bundled
+                    // in the APK) so the tutorial shows them instantly. This replaces
+                    // the old fixed "fake wait" with real work. Capped so a slow / no
+                    // network never hangs boot — the tutorial step re-downloads any
+                    // that missed.
+                    if (!com.vrca.ui.onboarding.OnboardingPrefs.isComplete(ctx)) {
+                        withTimeoutOrNull(TUTORIAL_PREFETCH_CAP_MS) {
+                            com.vrca.ui.onboarding.TutorialImageStore.ensureDownloaded(ctx)
+                        }
+                    }
+                    // Floor so the boot screen doesn't flash by before onboarding
+                    // (covers the cached / existing-logged-out case where the prefetch
+                    // returns instantly).
                     val elapsed = System.currentTimeMillis() - startMs
                     if (elapsed < NEW_USER_BOOT_FLOOR_MS) {
                         kotlinx.coroutines.delay(NEW_USER_BOOT_FLOOR_MS - elapsed)
@@ -597,6 +611,10 @@ fun VrcaApp() {
             onFinish = {
                 onboardingDone = true
                 com.vrca.ui.onboarding.OnboardingState.replayRequested.value = false
+                // Tutorial done (first-run completion AND replay exit both land
+                // here) — free the on-demand images. A new user mid-tutorial never
+                // reaches this, so their images survive a close/kill and resume works.
+                com.vrca.ui.onboarding.TutorialImageStore.clear(ctx)
             }
         )
         return
@@ -871,6 +889,11 @@ private const val REMOTE_PREFS_FILE = "vrca_remote"
  *  so it doesn't flash by on the way to onboarding. A logged-in user has no floor
  *  — the real presence-warm below paces the boot instead of a fake wait. */
 private const val NEW_USER_BOOT_FLOOR_MS = 3_000L
+
+/** Cap on the new-user boot-time prefetch of the on-demand OSC tutorial images —
+ *  a slow / no network never hangs boot; the tutorial step downloads any that
+ *  missed with its own spinner. */
+private const val TUTORIAL_PREFETCH_CAP_MS = 8_000L
 
 /** Cap on how long "Account status" waits for the VRChat pipeline to connect
  *  (presence warm) before proceeding — a dead session / bad network must never
