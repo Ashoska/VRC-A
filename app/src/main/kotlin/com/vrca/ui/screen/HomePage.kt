@@ -51,6 +51,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -207,6 +208,13 @@ internal fun HomePage(
         // VRChat server status warning
         VrchatStatusBanner()
 
+        // Confirmed-dead VRChat session: OSC is gated, so explain why + offer sign-in.
+        if (vm.vrchatAuthDead) {
+            com.vrca.ui.common.VrchatSessionExpiredBanner(
+                onSignIn = { onNavigate(AppPage.VrchatStatus) }
+            )
+        }
+
         if (moderation.warned && !(moderation.banned || moderation.deviceBanned)) {
             SectionCard(
                 title = "Account warning",
@@ -345,7 +353,7 @@ internal fun HomePage(
                         if (vm.manualLiveMode) {
                             ToggleRow(
                                 label = "Scroll",
-                                description = "Show the newest 4 lines; older lines scroll off the top.",
+                                description = "Scroll to the 4 newest lines.",
                                 checked = vm.manualScroll,
                                 enabled = !isBanned
                             ) { vm.setManualScrollFlag(it) }
@@ -362,8 +370,10 @@ internal fun HomePage(
                             supportingText = {
                                 Text(
                                     "$msgLen / $budget" +
-                                        if (vm.manualLiveMode) "  ·  shows live as you type" else "",
-                                    color = if (over) MaterialTheme.colorScheme.error
+                                        if (vm.manualLiveMode) "  ·  newest lines shown live" else "",
+                                    // In Live mode going over budget is expected —
+                                    // Scroll rolls older lines off — so don't alarm.
+                                    color = if (over && !vm.manualLiveMode) MaterialTheme.colorScheme.error
                                             else MaterialTheme.colorScheme.onSurfaceVariant,
                                     style = MaterialTheme.typography.labelSmall
                                 )
@@ -381,7 +391,7 @@ internal fun HomePage(
                                     enabled = !isBanned && msgLen > 0 && !over
                                 ) { Text("Send") }
                             }
-                            TextButton(
+                            OutlinedButton(
                                 onClick = { vm.clearManual() },
                                 modifier = Modifier.weight(1f),
                                 enabled = !isBanned

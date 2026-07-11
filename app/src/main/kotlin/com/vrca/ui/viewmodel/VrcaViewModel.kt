@@ -111,6 +111,10 @@ class VrcaViewModel(
         private const val MANUAL_LIVE_TICK_MS = 500L
         // Live scroll window: newest N lines stay visible, older ones scroll off.
         private const val MANUAL_SCROLL_LINES = 4
+        // Estimated proportional width to wrap each scroll line at — kept a touch
+        // narrower than VRChat's ~30-unit chatbox wrap so it never re-wraps our
+        // computed lines into a 5th, which would blow the 4-line window.
+        private const val MANUAL_SCROLL_WIDTH = 26f
 
         private const val META_STABLE_MS = 1_100L
         private const val META_CONFIRM_MOVE_MS = 900L
@@ -1657,30 +1661,103 @@ class VrcaViewModel(
     }
 
     /**
-     * Live scroll formatter: keep the NEWEST lines that fit — up to
-     * [MANUAL_SCROLL_LINES], and never exceeding [budget] characters so nothing
-     * is lost at a line break (the "drop the 4th line" backstop). If even the
-     * single newest line is over budget, show its last [budget] chars (so a long
-     * unbroken line still shows what you're currently typing).
+     * Live scroll formatter: show the NEWEST [MANUAL_SCROLL_LINES] VRChat chatbox
+     * lines, older lines scrolling off the top. VRChat wraps a long message into
+     * multiple visual lines, so we must wrap it OURSELVES and keep the newest few
+     * — splitting only on '\n' meant one long unbroken line was treated as a
+     * single line and we trimmed CHARACTERS off the front instead of dropping a
+     * whole line (the reported bug). We wrap by estimated proportional width (a
+     * touch narrower than VRChat so it never re-wraps our lines into a 5th),
+     * insert explicit newlines to lock those breaks, keep the last N, and cap at
+     * [budget] so nothing is lost at a wrap point ("drop the 4th line" backstop).
      */
     private fun formatManualScroll(text: String, budget: Int): String {
         if (text.isEmpty()) return ""
-        val lines = text.split("\n")
+        val lines = wrapToVisualLines(text, MANUAL_SCROLL_WIDTH)
         val kept = ArrayDeque<String>()
         var total = 0
-        // Walk from the newest line backwards, adding while it fits.
+        // Walk from the newest wrapped line backwards, keeping what fits.
         for (i in lines.indices.reversed()) {
             if (kept.size >= MANUAL_SCROLL_LINES) break
             val line = lines[i]
             val add = line.length + if (kept.isEmpty()) 0 else 1 // +1 for the join '\n'
             if (total + add > budget) {
-                if (kept.isEmpty()) return line.takeLast(budget) // newest line alone too long
+                if (kept.isEmpty()) return line.takeLast(budget) // newest line alone over budget
                 break
             }
             kept.addFirst(line)
             total += add
         }
         return kept.joinToString("\n")
+    }
+
+    /** Estimated proportional glyph width (VRChat's chatbox is centered
+     *  proportional text, so caps/wide glyphs wrap sooner than a char count). */
+    private fun manualCharWidth(c: Char): Float = when {
+        c == ' ' -> 0.5f
+        c in "iIlj|.,:;'!`" -> 0.5f
+        c in "mwMW" -> 1.5f
+        c.isUpperCase() || c.isDigit() -> 1.15f
+        else -> 1.0f
+    }
+
+    private fun manualStrWidth(s: String): Float {
+        var t = 0f; for (c in s) t += manualCharWidth(c); return t
+    }
+
+    /** Continuous raw suffix of [text] whose wrap is ≤ [maxLines] AND ≤ [budget]
+     *  chars — i.e. the visible scroll window without the inserted newlines. Used
+     *  to trim the in-app field so scrolled-off lines leave the box too (drops
+     *  whole visual lines off the FRONT, never the newest chars the user typed). */
+    private fun trimManualToWindow(text: String, maxLines: Int, maxW: Float, budget: Int): String {
+        var t = text
+        var guard = 0
+        while (guard++ < 500) {
+            val lines = wrapToVisualLines(t, maxW)
+            if (lines.size <= maxLines && t.length <= budget) break
+            val first = lines.firstOrNull() ?: break
+            var cut = first.length
+            if (cut < t.length && t[cut] == ' ') cut++ // eat the space the wrap consumed
+            if (cut <= 0) { t = t.takeLast(budget); break }
+            t = t.substring(cut.coerceAtMost(t.length))
+        }
+        return t
+    }
+
+    /** Greedy word-wrap into visual lines of ≤ [maxW] estimated width, honoring
+     *  explicit newlines and hard-splitting a single word longer than a line. */
+    private fun wrapToVisualLines(text: String, maxW: Float): List<String> {
+        val out = mutableListOf<String>()
+        for (para in text.split("\n")) {
+            val cur = StringBuilder()
+            var curW = 0f
+            for (word in para.split(" ")) {
+                var wd = word
+                // Hard-split a word that alone exceeds a full line.
+                while (manualStrWidth(wd) > maxW) {
+                    if (cur.isNotEmpty()) { out.add(cur.toString()); cur.setLength(0); curW = 0f }
+                    val sb = StringBuilder(); var acc = 0f; var i = 0
+                    while (i < wd.length) {
+                        val cw = manualCharWidth(wd[i])
+                        if (acc + cw > maxW && sb.isNotEmpty()) break
+                        sb.append(wd[i]); acc += cw; i++
+                    }
+                    out.add(sb.toString())
+                    wd = wd.substring(i.coerceAtLeast(1))
+                }
+                val sepW = if (cur.isEmpty()) 0f else manualCharWidth(' ')
+                val wW = manualStrWidth(wd)
+                if (cur.isNotEmpty() && curW + sepW + wW > maxW) {
+                    out.add(cur.toString()); cur.setLength(0); curW = 0f
+                    cur.append(wd); curW = wW
+                } else {
+                    if (cur.isNotEmpty()) { cur.append(' '); curW += sepW }
+                    cur.append(wd); curW += wW
+                }
+            }
+            out.add(cur.toString())
+        }
+        return out
     }
 
     fun stashMessage(local: Boolean = false) {
@@ -1800,9 +1877,17 @@ class VrcaViewModel(
     var accountDenied by mutableStateOf(false)
         private set
 
+    /** True when the VRChat session is CONFIRMED dead-and-unrecoverable (password
+     *  change / 30-day trusted-device expiry / cleared creds), not merely a
+     *  transient drop — determined by the pipeline over a 5-min window with the
+     *  device online + VRChat not in a major outage. Blocks OSC and drives the
+     *  in-app "session expired" banner; clears the instant the user signs in. */
+    var vrchatAuthDead by mutableStateOf(false)
+        private set
+
     /** OSC is blocked when ANY gate reason is active. */
     private fun refreshOscBlockGate() {
-        val blocked = forceUpdatePending || vrchatLoggedOut || accountDenied
+        val blocked = forceUpdatePending || vrchatLoggedOut || accountDenied || vrchatAuthDead
         remoteVrcaOsc.blocked = blocked
         localVrcaOsc.blocked = blocked
     }
@@ -1844,6 +1929,20 @@ class VrcaViewModel(
         viewModelScope.launch {
             com.vrca.vrchat.VrchatAuthManager.loggedInSignal.collect {
                 vrchatLoggedOut = false
+                // A fresh sign-in resolves a confirmed-dead session too.
+                vrchatAuthDead = false
+                com.vrca.vrchat.VrchatPipelineState.authDead = false
+                refreshOscBlockGate()
+            }
+        }
+        // Confirmed-dead session (present-but-invalid cookie the pipeline can't
+        // silently recover): gate OSC and raise the in-app banner. When sending,
+        // stop first so the chatbox-clearing send escapes before the block.
+        viewModelScope.launch {
+            com.vrca.vrchat.VrchatPipelineState.authDeadFlow.collect { dead ->
+                if (dead == vrchatAuthDead) return@collect
+                if (dead && oscSending) stopSending()
+                vrchatAuthDead = dead
                 refreshOscBlockGate()
             }
         }
@@ -1981,7 +2080,22 @@ class VrcaViewModel(
         // Live mode: the live loop drives the chatbox every 0.5s from the field's
         // current text; just make sure it's running while there's content.
         if (manualLiveMode) {
-            if (message.text.isNotEmpty()) startManualLiveLoop(local)
+            // Scroll: keep the FIELD itself a rolling window so lines that
+            // scrolled off VRChat also leave the in-app box (otherwise it grows
+            // past the char limit even though the chatbox is fine). Only rewrite
+            // when a line actually scrolled off (trimmed is shorter), and put the
+            // cursor at the end — the user types at the end, so their view doesn't
+            // jump; front-only removal keeps the visible bottom stable.
+            if (manualScroll && message.text.isNotEmpty()) {
+                val trimmed = trimManualToWindow(
+                    message.text, MANUAL_SCROLL_LINES, MANUAL_SCROLL_WIDTH, manualCharBudget()
+                )
+                if (trimmed.length < message.text.length) {
+                    messageText.value = TextFieldValue(trimmed, TextRange(trimmed.length))
+                    stashedMessage = trimmed
+                }
+            }
+            if (messageText.value.text.isNotEmpty()) startManualLiveLoop(local)
             return
         }
         // Instant mode: a keystroke doesn't touch the chatbox (Send does); keep

@@ -23,8 +23,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -435,6 +439,56 @@ fun KitSectionHeader(
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+        }
+    }
+}
+
+/**
+ * In-app banner shown when the VRChat session is confirmed dead-and-unrecoverable
+ * (drives off `VrcaViewModel.vrchatAuthDead`). OSC is gated while it shows, so the
+ * copy explains WHY the chatbox stopped and the likely causes, then offers a
+ * one-tap sign-in. Deliberately no notification — in-app only.
+ */
+@Composable
+fun VrchatSessionExpiredBanner(onSignIn: () -> Unit, modifier: Modifier = Modifier) {
+    val cs = MaterialTheme.colorScheme
+    ElevatedCard(
+        modifier = modifier.fillMaxWidth(),
+        colors = CardDefaults.elevatedCardColors(containerColor = cs.errorContainer)
+    ) {
+        Column(
+            Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Filled.ErrorOutline,
+                    contentDescription = null,
+                    tint = cs.onErrorContainer,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    "VRChat session expired",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = cs.onErrorContainer
+                )
+            }
+            Text(
+                "Your VRChat login expired, so the chatbox is paused. This usually " +
+                    "happens after a password change or if VRC-A hasn't been opened in " +
+                    "about 30 days. Sign in again to fix it.",
+                style = MaterialTheme.typography.bodySmall,
+                color = cs.onErrorContainer
+            )
+            Button(
+                onClick = onSignIn,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = cs.error,
+                    contentColor = cs.onError
+                )
+            ) { Text("Sign in to VRChat") }
         }
     }
 }

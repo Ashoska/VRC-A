@@ -73,7 +73,10 @@ import com.vrca.update.checkFirestoreRelease
 import com.vrca.vrchat.VrchatAuthManager
 import com.vrca.vrchat.VrchatBanChecker
 import com.vrca.vrchat.VrchatPipelineService
+import com.vrca.vrchat.VrchatPipelineState
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import android.app.DownloadManager
 import android.content.BroadcastReceiver
 import android.content.Intent
@@ -177,12 +180,19 @@ fun VrcaApp() {
                 kotlinx.coroutines.withTimeout(20_000L) {
                     bootstrapFirebaseAndCache(ctx)
                 }
-                // Hold the boot screen for a minimum of 5s so it never flashes by —
-                // if bootstrap finished faster, wait out the remainder (errors are
-                // exempt: they surface immediately so the user can retry).
-                val elapsed = System.currentTimeMillis() - startMs
-                if (elapsed < BOOT_MIN_DURATION_MS) {
-                    kotlinx.coroutines.delay(BOOT_MIN_DURATION_MS - elapsed)
+                // Warm VRChat presence DURING the Device-session stage if already
+                // logged in: fire the pipeline now so it's connecting in parallel
+                // and is "pretty much good" by the time Account status runs. This
+                // replaces the old fixed 5s wait with real work. A logged-out /
+                // new user has no session to warm, so hold a short 3s floor
+                // instead so the boot screen doesn't flash by before onboarding.
+                if (VrchatAuthManager.isLoggedIn(ctx)) {
+                    startPipelineWarmup(ctx)
+                } else {
+                    val elapsed = System.currentTimeMillis() - startMs
+                    if (elapsed < NEW_USER_BOOT_FLOOR_MS) {
+                        kotlinx.coroutines.delay(NEW_USER_BOOT_FLOOR_MS - elapsed)
+                    }
                 }
                 bootOk = true
             } catch (t: kotlinx.coroutines.TimeoutCancellationException) {
@@ -204,8 +214,11 @@ fun VrcaApp() {
 
     var phase1BanId   by remember { mutableStateOf<String?>(null) }
     var phase1Checked by remember { mutableStateOf(false) }
-    // Holds the boot screen a beat after the check lands so its green "Account
-    // status" tick is actually visible before the screen hands off to the app.
+    // "Account status" now represents the ban/moderation check AND VRChat presence
+    // readiness. A logged-out user has no presence to wait for, so it starts ready.
+    var presenceReady by remember { mutableStateOf(!VrchatAuthManager.isLoggedIn(ctx)) }
+    // Holds the boot screen a beat after both land so its green "Account status"
+    // tick is actually visible before the screen hands off to the app.
     var phase1HoldDone by remember { mutableStateOf(false) }
 
     LaunchedEffect(bootOk) {
@@ -220,14 +233,27 @@ fun VrcaApp() {
         phase1Checked = true
     }
 
-    LaunchedEffect(phase1Checked) {
-        if (phase1Checked) {
+    // If logged in, wait for the pipeline (warmed during Device session) to
+    // connect so Account status reflects real presence — capped so a dead
+    // session / bad network can never hang boot; it just proceeds.
+    LaunchedEffect(bootOk) {
+        if (!bootOk || presenceReady) return@LaunchedEffect
+        withTimeoutOrNull(PRESENCE_WARM_CAP_MS) {
+            VrchatPipelineState.isConnectedFlow.first { it }
+        }
+        presenceReady = true
+    }
+
+    val accountReady = phase1Checked && presenceReady
+
+    LaunchedEffect(accountReady) {
+        if (accountReady) {
             kotlinx.coroutines.delay(450)
             phase1HoldDone = true
         }
     }
 
-    if (bootOk && (!phase1Checked || !phase1HoldDone)) {
+    if (bootOk && (!accountReady || !phase1HoldDone)) {
         // Same screen as the bootstrap so the whole boot reads as one
         // continuous loading experience instead of dropping to a bare spinner.
         BootstrapScreen(
@@ -235,7 +261,7 @@ fun VrcaApp() {
             error = null,
             onRetry = {},
             phase = 2,
-            accountChecked = phase1Checked
+            accountChecked = accountReady
         )
         return
     }
@@ -841,9 +867,30 @@ private fun UpdateDialog(
 
 private const val REMOTE_PREFS_FILE = "vrca_remote"
 
-/** Minimum time the boot/loading screen is shown, even if bootstrap finishes
- *  sooner, so it never flashes by. */
-private const val BOOT_MIN_DURATION_MS = 5_000L
+/** Floor for a NEW / logged-out user's boot screen (no VRChat presence to warm),
+ *  so it doesn't flash by on the way to onboarding. A logged-in user has no floor
+ *  — the real presence-warm below paces the boot instead of a fake wait. */
+private const val NEW_USER_BOOT_FLOOR_MS = 3_000L
+
+/** Cap on how long "Account status" waits for the VRChat pipeline to connect
+ *  (presence warm) before proceeding — a dead session / bad network must never
+ *  hang boot; it just hands off and the app deals with it. */
+private const val PRESENCE_WARM_CAP_MS = 5_000L
+
+/** Start the VRChat pipeline foreground service to begin warming presence during
+ *  the Device-session boot stage (only called when already logged in). The app
+ *  is foregrounded here so the FGS start is allowed; the service itself uses
+ *  startForegroundSafely, and a duplicate ACTION_START from the normal post-login
+ *  flow is coalesced — so this can't double-start or crash. */
+private fun startPipelineWarmup(ctx: Context) {
+    val deviceHash = ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
+        .getString("device_id_hash", "") ?: ""
+    val intent = Intent(ctx, VrchatPipelineService::class.java).apply {
+        action = VrchatPipelineService.ACTION_START
+        putExtra(VrchatPipelineService.EXTRA_DEVICE_HASH, deviceHash)
+    }
+    runCatching { ContextCompat.startForegroundService(ctx, intent) }
+}
 
 private object RemoteKeys {
     // AdminScreen reads these from prefs (keep these key names stable!)
@@ -1263,14 +1310,6 @@ private fun BootstrapScreen(
                                 else -> 1
                             }
                         )
-                        BootCheckRow(
-                            label = "Account status",
-                            state = when {
-                                accountChecked -> 2
-                                phase >= 2 -> 1
-                                else -> 0
-                            }
-                        )
                         val vrcState by BootVrcStatus.state
                         val vrcDetail by BootVrcStatus.detail
                         BootCheckRow(
@@ -1286,6 +1325,14 @@ private fun BootstrapScreen(
                                 2 -> vrcDetail
                                 3 -> "Couldn't check status"
                                 else -> ""
+                            }
+                        )
+                        BootCheckRow(
+                            label = "Account status",
+                            state = when {
+                                accountChecked -> 2
+                                phase >= 2 -> 1
+                                else -> 0
                             }
                         )
                     }

@@ -207,6 +207,12 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+      // Confirmed-dead VRChat session: OSC is gated — explain + one-tap sign-in.
+      if (vm.vrchatAuthDead) {
+          item {
+              com.vrca.ui.common.VrchatSessionExpiredBanner(onSignIn = { showLogin = true })
+          }
+      }
       item {
         // =========================
         // Identity header — ONE merged card (docs/ui-revamp.md, VRChat tab):

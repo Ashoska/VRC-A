@@ -7,6 +7,8 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.IBinder
 import android.util.Log
@@ -77,6 +79,10 @@ class VrchatPipelineService : Service() {
 
     companion object {
         private const val TAG = "VrcPipeline"
+        // How long a definitively-dead-and-unrecoverable session must persist
+        // (while online + VRChat not in a major outage) before OSC is gated.
+        // Rides out transient blips / brief VRChat outages.
+        private const val AUTH_DEAD_CONFIRM_MS = 5 * 60 * 1000L
         private const val PIPELINE_URL = "wss://pipeline.vrchat.cloud"
         private const val USER_AGENT = "VRC-A-Companion/1.0 (Android; companion app)"
 
@@ -138,6 +144,9 @@ class VrchatPipelineService : Service() {
     private var wsJob: Job? = null
     private var webSocket: WebSocket? = null
     private var reconnectAttempt = 0
+    // When the current session first looked confirmed-dead (0 = not dead). The OSC
+    // auth-dead gate flips only once this has persisted AUTH_DEAD_CONFIRM_MS.
+    @Volatile private var authDeadSinceMs = 0L
     // Brief drops are kept INVISIBLE: on a socket failure/close we don't flip the
     // UI to "disconnected" or fire the disconnect notification right away — we hold
     // a grace window. A reconnect that lands within it (the common transient
@@ -584,6 +593,9 @@ class VrchatPipelineService : Service() {
                     disconnectMarkJob?.cancel()
                     visiblyDisconnected = false
                     VrchatPipelineState.isConnected = true
+                    // The WS handshake authed with the cookie — the session is
+                    // valid by definition, so any pending auth-dead state is stale.
+                    clearAuthDead()
                     pipelineConnectedAtMs = System.currentTimeMillis()
                     val displayName = VrchatAuthManager.getStoredDisplayName(this@VrchatPipelineService) ?: "VRChat user"
                     val notifText = "Connected as $displayName"
@@ -701,15 +713,73 @@ class VrchatPipelineService : Service() {
             // before reconnecting so an expired/IP-invalidated session recovers
             // on its own instead of looping on a dead authToken.
             if (reconnectAttempt >= 2) {
-                val valid = VrchatAuthManager.validateSession(this@VrchatPipelineService)
-                if (!valid) {
-                    if (visiblyDisconnected) updatePersistentNotif("Refreshing VRChat session...")
-                    VrchatAuthManager.autoRelogin(this@VrchatPipelineService)
-                }
+                evaluateSessionHealthOnReconnect()
             }
             if (visiblyDisconnected) updatePersistentNotif("Connecting...")
             connectWebSocket()
         }
+    }
+
+    /**
+     * Confirmed-dead session detection (drives the OSC auth-dead gate). Runs on
+     * the reconnect path — where a dead auth cookie surfaces as repeated WS
+     * failures — and performs the existing validate + auto-relogin, then decides
+     * whether the session is genuinely dead-and-unrecoverable vs a transient /
+     * environmental failure. It NEVER blames the user's session for a bad
+     * ENVIRONMENT: offline or a VRChat major outage → not dead. Only a definitive
+     * 401 that auto-relogin can't silently fix, held for AUTH_DEAD_CONFIRM_MS,
+     * flips authDead (password change / 30-day trusted-device expiry / cleared
+     * creds). Recovery (a valid session / successful relogin / WS reconnect)
+     * clears it immediately.
+     */
+    private suspend fun evaluateSessionHealthOnReconnect() {
+        if (!hasValidatedNetwork()) { clearAuthDead(); return } // offline: not the session's fault
+        if (isVrchatMajorOutage())  { clearAuthDead(); return } // VRChat down: not the session's fault
+        when (VrchatAuthManager.validateSessionDetailed(this@VrchatPipelineService)) {
+            VrchatAuthManager.SessionValidity.VALID -> clearAuthDead()
+            // 5xx / rate-limit / transient network — inconclusive, don't advance.
+            VrchatAuthManager.SessionValidity.UNKNOWN -> clearAuthDead()
+            VrchatAuthManager.SessionValidity.UNAUTHORIZED -> {
+                if (visiblyDisconnected) updatePersistentNotif("Refreshing VRChat session...")
+                val recovered = VrchatAuthManager.autoRelogin(this@VrchatPipelineService)
+                if (recovered) clearAuthDead() else markAuthDeadCandidate()
+            }
+        }
+    }
+
+    private fun clearAuthDead() {
+        authDeadSinceMs = 0L
+        if (VrchatPipelineState.authDead) VrchatPipelineState.authDead = false
+    }
+
+    private fun markAuthDeadCandidate() {
+        val now = System.currentTimeMillis()
+        if (authDeadSinceMs == 0L) authDeadSinceMs = now
+        if (now - authDeadSinceMs >= AUTH_DEAD_CONFIRM_MS && !VrchatPipelineState.authDead) {
+            Log.w(TAG, "VRChat session confirmed dead-and-unrecoverable — gating OSC")
+            VrchatPipelineState.authDead = true
+        }
+    }
+
+    /** Device has ACTUALLY-reachable internet (VALIDATED capability), not merely
+     *  an interface that claims connectivity. On any check failure returns true
+     *  so a connectivity-probe glitch can never drive a false "dead" (the
+     *  validate call below still returns UNKNOWN when genuinely offline). */
+    private fun hasValidatedNetwork(): Boolean {
+        return try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return true
+            val net = cm.activeNetwork ?: return false
+            val caps = cm.getNetworkCapabilities(net) ?: return false
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        } catch (e: Exception) {
+            true
+        }
+    }
+
+    private fun isVrchatMajorOutage(): Boolean {
+        val ind = VrchatPipelineState.statusPageState?.indicator?.lowercase() ?: return false
+        return ind == "major" || ind == "critical"
     }
 
     // ------------------------------------------------------------------
@@ -3961,6 +4031,18 @@ object VrchatPipelineState {
     var statusPageState: VrchatStatusPageData?
         get() = _statusPageState.value
         set(value) { _statusPageState.value = value }
+
+    // CONFIRMED-dead VRChat session: the auth cookie is present but definitively
+    // invalid (password change / 30-day trusted-device expiry / cleared creds)
+    // and can't be silently recovered, held across a confirmation window with the
+    // device online + VRChat not in a major outage. Drives the OSC auth-dead gate
+    // (blocks the chatbox) + the in-app "session expired" banner. Cleared the
+    // instant the WS reconnects / a login succeeds.
+    private val _authDead = MutableStateFlow(false)
+    val authDeadFlow: StateFlow<Boolean> = _authDead.asStateFlow()
+    var authDead: Boolean
+        get() = _authDead.value
+        set(value) { _authDead.value = value }
 
     // (online, total) friends from the local friends cache — fed by the service
     // on every cache mutation, ZERO extra API calls. Null until the cache loads.
