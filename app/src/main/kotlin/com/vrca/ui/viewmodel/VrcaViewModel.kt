@@ -1705,25 +1705,6 @@ class VrcaViewModel(
         var t = 0f; for (c in s) t += manualCharWidth(c); return t
     }
 
-    /** Continuous raw suffix of [text] whose wrap is ≤ [maxLines] AND ≤ [budget]
-     *  chars — i.e. the visible scroll window without the inserted newlines. Used
-     *  to trim the in-app field so scrolled-off lines leave the box too (drops
-     *  whole visual lines off the FRONT, never the newest chars the user typed). */
-    private fun trimManualToWindow(text: String, maxLines: Int, maxW: Float, budget: Int): String {
-        var t = text
-        var guard = 0
-        while (guard++ < 500) {
-            val lines = wrapToVisualLines(t, maxW)
-            if (lines.size <= maxLines && t.length <= budget) break
-            val first = lines.firstOrNull() ?: break
-            var cut = first.length
-            if (cut < t.length && t[cut] == ' ') cut++ // eat the space the wrap consumed
-            if (cut <= 0) { t = t.takeLast(budget); break }
-            t = t.substring(cut.coerceAtMost(t.length))
-        }
-        return t
-    }
-
     /** Greedy word-wrap into visual lines of ≤ [maxW] estimated width, honoring
      *  explicit newlines and hard-splitting a single word longer than a line. */
     private fun wrapToVisualLines(text: String, maxW: Float): List<String> {
@@ -2080,19 +2061,21 @@ class VrcaViewModel(
         // Live mode: the live loop drives the chatbox every 0.5s from the field's
         // current text; just make sure it's running while there's content.
         if (manualLiveMode) {
-            // Scroll: keep the FIELD itself a rolling window so lines that
-            // scrolled off VRChat also leave the in-app box (otherwise it grows
-            // past the char limit even though the chatbox is fine). Only rewrite
-            // when a line actually scrolled off (trimmed is shorter), and put the
-            // cursor at the end — the user types at the end, so their view doesn't
-            // jump; front-only removal keeps the visible bottom stable.
+            // Scroll: render the FIELD exactly as VRChat will — collapse to flowing
+            // text, wrap at VRChat's line width, then keep the newest 4 lines within
+            // the char budget (older lines scroll off the top). The field then shows
+            // the SAME lines as the chatbox instead of fewer (the in-app box is
+            // wider, so a message that wrapped to 3 lines in VRChat used to show as 2
+            // here — which made the scroll-off trim jump and typing feel off). The
+            // wrapped display IS what we send, so field == chatbox. Cursor forced to
+            // the end (the user types at the end, so the view never jumps). Newlines
+            // collapse to spaces — a scrolling ticker is one flowing line in VRChat,
+            // so manual line breaks aren't kept while Scroll is on.
             if (manualScroll && message.text.isNotEmpty()) {
-                val trimmed = trimManualToWindow(
-                    message.text, MANUAL_SCROLL_LINES, MANUAL_SCROLL_WIDTH, manualCharBudget()
-                )
-                if (trimmed.length < message.text.length) {
-                    messageText.value = TextFieldValue(trimmed, TextRange(trimmed.length))
-                    stashedMessage = trimmed
+                val display = formatManualScroll(message.text.replace("\n", " "), manualCharBudget())
+                if (display != message.text) {
+                    messageText.value = TextFieldValue(display, TextRange(display.length))
+                    stashedMessage = display
                 }
             }
             if (messageText.value.text.isNotEmpty()) startManualLiveLoop(local)
@@ -2179,34 +2162,47 @@ class VrcaViewModel(
         if (manualLiveJob?.isActive == true) return
         val osc = if (!local) remoteVrcaOsc else localVrcaOsc
         manualLiveJob = viewModelScope.launch {
+            var typingOn = false
             while (manualLiveMode && !isBanned) {
                 val text = messageText.value.text
                 if (text.isEmpty()) {
                     // Field cleared: revert immediately and stop the loop.
-                    osc.typing = false
+                    if (typingOn) { osc.typing = false; typingOn = false }
                     manualHoldUntilMs = 0L
                     lastManualHoldText = ""
                     lastManualLiveSent = null
                     rebuildAndMaybeSendCombined(forceSend = true, local = local, forceClearIfAllOff = true)
                     break
                 }
-                if (text != lastManualLiveSent) {
-                    val budget = manualCharBudget()
-                    val shown = if (manualScroll) formatManualScroll(text, budget) else text.take(budget)
-                    osc.sendMessage(shown, sendImmediately = true, triggerSFX = false)
-                    osc.typing = true
+                val changed = text != lastManualLiveSent
+                if (changed) {
+                    // A genuine edit (re)arms the 10s hold + shows the typing dots.
                     lastManualLiveSent = text
                     manualHoldUntilMs = System.currentTimeMillis() + MANUAL_HOLD_MS
-                    lastManualHoldText = shown
-                    combinedPreviewText = shown
                     scheduleManualRevert(local)
+                    if (!typingOn) { osc.typing = true; typingOn = true }
                 } else if (!manualHoldActive()) {
-                    // Text unchanged and the 10s hold has elapsed: the revert job
-                    // already restored the normal chatbox. Go idle (a keystroke
-                    // restarts the loop) instead of spinning every 0.5s forever.
+                    // Unchanged AND the 10s window elapsed: the revert job already
+                    // restored the normal chatbox. Go idle (a keystroke restarts the
+                    // loop) instead of spinning forever.
+                    if (typingOn) { osc.typing = false; typingOn = false }
                     lastManualLiveSent = null
                     break
+                } else if (typingOn) {
+                    // Paused but still inside the 10s window: drop the typing dots,
+                    // but KEEP pushing the text below so it stays up until revert.
+                    osc.typing = false; typingOn = false
                 }
+                // Push the CURRENT field text EVERY 0.5s tick for the whole hold
+                // window — even when the user pauses typing — so a keystroke that
+                // landed between ticks (fast typing) is always reflected within
+                // 0.5s and the final bit is never stranded. Identical re-sends are
+                // cheap and keep the chatbox message fresh until the revert.
+                val budget = manualCharBudget()
+                val shown = if (manualScroll) formatManualScroll(text, budget) else text.take(budget)
+                osc.sendMessage(shown, sendImmediately = true, triggerSFX = false)
+                lastManualHoldText = shown
+                combinedPreviewText = shown
                 delay(MANUAL_LIVE_TICK_MS)
             }
         }

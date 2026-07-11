@@ -1280,10 +1280,40 @@ class VrchatPipelineService : Service() {
                         }
                     }
                     v2Type.contains("event", true) || v2Type.contains("calendar", true) -> {
-                        if (groupId.isNotBlank() && eventId.isNotBlank() && isEventFingerprintSeen(groupId, eventId)) {
-                            Log.d(TAG, "WS event skipped (already fired): group=$groupId event=$eventId")
+                        // Strip VRChat's "New event by X:" boilerplate up front so
+                        // the title dedup below and the alert title agree.
+                        val cleanEvTitle = GroupAlertEnricher.cleanEventTitle(cleanName(v2Title))
+                        val normEvTitle = cleanEvTitle.trim().lowercase().replace(Regex("\\s+"), " ")
+                        // Skip if this event already has a card — by fingerprint,
+                        // OR (the freshly-created-event case, where this push has no
+                        // cal_ id) by title against an already-fired card. This
+                        // stops the thin v2 card and the REST sweep's full card from
+                        // BOTH appearing (one in the normal area, one in Signed up).
+                        val alreadyPresent = groupId.isNotBlank() && (
+                            (eventId.isNotBlank() && isEventFingerprintSeen(groupId, eventId)) ||
+                                InAppAlertState.hasEventFor("event_$groupId", eventId, normEvTitle)
+                        )
+                        if (alreadyPresent) {
+                            Log.d(TAG, "WS event skipped (already present): group=$groupId event=$eventId")
+                            if (eventId.isNotBlank()) addEventFingerprintToSeen(groupId, eventId)
+                            // Keep the existing (possibly thin) card enriching.
+                            if (groupId.isNotBlank()) scheduleTargetedGroupSweep(groupId)
                         } else {
                         val displayGroupName = resolveGroupNameAsync(groupId, senderName)
+                        // FETCH the full calendar event so the FIRST card is already
+                        // detailed (banner / timing / interested / following) instead
+                        // of a thin card that fills in a few seconds later — that
+                        // thin-then-detailed flip confused users checking it out.
+                        // Falls back to the thin card only when the event isn't
+                        // fetchable yet (backend indexing lag); the targeted sweep
+                        // then upgrades that thin card in place.
+                        val fullEvent = if (groupId.isNotBlank())
+                            resolveFullCalendarEvent(groupId, eventId, normEvTitle) else null
+                        if (fullEvent != null) {
+                            fireDetailedCalendarEvent(fullEvent, groupId, displayGroupName)
+                            // A follow-up sweep catches later edits / interested drift.
+                            scheduleTargetedGroupSweep(groupId)
+                        } else {
                         val groupKey2 = when {
                             groupId.isNotBlank() -> "event_$groupId"
                             displayGroupName != "a group" -> "event_name_$displayGroupName"
@@ -1322,7 +1352,7 @@ class VrchatPipelineService : Service() {
                             alertBody = eventBody,
                             // Strip VRChat's "New event by X:" boilerplate — the alert
                             // should show the actual event name.
-                            alertEventTitle = GroupAlertEnricher.cleanEventTitle(cleanName(v2Title)).ifBlank { null },
+                            alertEventTitle = cleanEvTitle.ifBlank { null },
                             eventTimestampMs = (evStartsMs.takeIf { it > 0 } ?: v2CreatedMs).takeIf { it > 0 },
                             alertRich = AlertRichMeta(
                                 groupRefId = groupId.ifBlank { null },
@@ -1337,6 +1367,7 @@ class VrchatPipelineService : Service() {
                         // timing) — enrich from the group's calendar right away
                         // instead of waiting for the 5-min poll.
                         if (groupId.isNotBlank()) scheduleTargetedGroupSweep(groupId)
+                        }
                         }
                     }
                     v2Type.contains("invite", true) -> {
@@ -3318,6 +3349,124 @@ class VrchatPipelineService : Service() {
         return synchronized(seenNotifIds) { fp in seenNotifIds }
     }
 
+    /**
+     * Resolves the FULL calendar-event object for a freshly-arrived
+     * notification-v2 event so its first in-app card is already detailed. Prefers
+     * the single-event fetch (carries `userInterest.isFollowing` + interested
+     * count); when the push had no cal_ id, matches the group calendar by
+     * normalized title (nearest-upcoming occurrence for a recurring series), then
+     * upgrades to the single-event object. One quick retry covers the brief window
+     * where VRChat hasn't indexed a just-created event yet. Returns null when
+     * nothing matched (caller falls back to a thin card + targeted sweep).
+     */
+    private suspend fun resolveFullCalendarEvent(
+        groupId: String, eventId: String, normTitle: String
+    ): JSONObject? {
+        if (groupId.isBlank()) return null
+        repeat(2) { attempt ->
+            if (attempt > 0) delay(1200)
+            try {
+                if (eventId.isNotBlank()) {
+                    VrchatAuthManager.fetchCalendarEvent(this, groupId, eventId)?.let { return it }
+                }
+                if (normTitle.isNotBlank()) {
+                    val list = VrchatAuthManager.fetchGroupCalendarEvents(this, groupId, 20)
+                    if (list != null) {
+                        val matches = ArrayList<JSONObject>()
+                        for (i in 0 until list.length()) {
+                            val ev = list.optJSONObject(i) ?: continue
+                            val t = ev.optString("title", "").ifBlank { ev.optString("name", "") }
+                                .trim().lowercase().replace(Regex("\\s+"), " ")
+                            if (t == normTitle) matches.add(ev)
+                        }
+                        if (matches.isNotEmpty()) {
+                            val now = System.currentTimeMillis()
+                            // Nearest UPCOMING occurrence (recurring), else newest.
+                            val rep = matches
+                                .filter { parseVrcTimestampMs(it.optString("startsAt", "")) >= now }
+                                .minByOrNull { parseVrcTimestampMs(it.optString("startsAt", "")) }
+                                ?: matches.maxByOrNull { parseVrcTimestampMs(it.optString("startsAt", "")) }
+                                ?: matches[0]
+                            val repId = rep.optString("id", "").ifBlank { findIdWithPrefix(rep, "cal_").orEmpty() }
+                            return if (repId.isNotBlank())
+                                (VrchatAuthManager.fetchCalendarEvent(this, groupId, repId) ?: rep)
+                            else rep
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "resolveFullCalendarEvent failed group=$groupId event=$eventId", e)
+            }
+        }
+        return null
+    }
+
+    /**
+     * Builds + fires the FULL rich event card straight from a calendar-event JSON
+     * object (banner / timing / interested / following / chips), so the live v2
+     * push shows a detailed card immediately instead of a thin one that fills in
+     * seconds later. Dedups via the event fingerprint + the alert-store id/title
+     * guard; records the fingerprint on fire.
+     */
+    private suspend fun fireDetailedCalendarEvent(
+        event: JSONObject, groupId: String, groupName: String
+    ) {
+        val eventId = event.optString("id", "").ifBlank { findIdWithPrefix(event, "cal_").orEmpty() }
+        if (eventId.isBlank()) return
+        val eventTitle = event.optString("title", "").ifBlank { event.optString("name", "") }
+        val eventDesc = event.optString("description", "").ifBlank { event.optString("text", "") }
+        if (eventTitle.isBlank() && eventDesc.isBlank()) return
+        if (isEventFingerprintSeen(groupId, eventId)) return
+        val normEvTitle = eventTitle.trim().lowercase().replace(Regex("\\s+"), " ")
+        if (InAppAlertState.hasEventFor("event_$groupId", eventId, normEvTitle)) {
+            addEventFingerprintToSeen(groupId, eventId)
+            return
+        }
+        val startsMs = parseVrcTimestampMs(event.optString("startsAt", ""))
+        val endsMs = parseVrcTimestampMs(event.optString("endsAt", ""))
+        val createdMs = parseVrcTimestampMs(event.optString("createdAt", ""))
+        val displayMs = startsMs.takeIf { it > 0 } ?: createdMs
+        val img = GroupAlertEnricher.extractEventImageUrl(event)
+        // The user's own in-app follow decision wins over the server read (which
+        // reports the creator's own events as perpetually followed).
+        val followKey = InAppAlertState.followSeriesKey(normEvTitle.ifBlank { eventTitle }, eventId)
+        val following = InAppAlertState.followOverride(followKey)
+            ?: GroupAlertEnricher.extractEventFollowing(event)
+        val rich = AlertRichMeta(
+            imageUrl = img,
+            groupRefId = groupId,
+            eventRefId = eventId,
+            startsAtMs = startsMs,
+            endsAtMs = endsMs,
+            createdAtMs = createdMs,
+            interestedCount = GroupAlertEnricher.extractInterestedCount(event),
+            category = event.optString("category", "").ifBlank { null },
+            platforms = GroupAlertEnricher.jsonArrayToCsv(event.optJSONArray("platforms")),
+            accessType = event.optString("accessType", "").ifBlank { null },
+            languages = GroupAlertEnricher.jsonArrayToCsv(event.optJSONArray("languages")),
+            following = following,
+            recurring = GroupAlertEnricher.extractRecurring(event)
+        )
+        val eventBody = if (startsMs > 0) eventDesc.ifBlank { eventTitle }
+            else buildCalendarEventBody(eventDesc, eventTitle, startsMs, endsMs, createdMs)
+        fireEventNotification(
+            id = "gce_$eventId".hashCode(),
+            title = "Event from $groupName",
+            text = "${eventTitle.ifBlank { "Event" }}${if (startsMs > 0) " · starts ${formatEventDateTime(startsMs)}" else ""}",
+            profileUrl = "https://vrchat.com/home/group/$groupId/calendar/$eventId",
+            prefKey = VrchatNotificationPrefs.KEY_NOTIF_GROUP_EVENT,
+            channelId = NOTIF_CHANNEL_GROUPS,
+            groupKey = GROUP_KEY_GROUPS,
+            dedupId = "gce_$eventId",
+            alertGroupKey = "event_$groupId",
+            alertBody = eventBody.ifBlank { null },
+            alertEventTitle = eventTitle.ifBlank { null },
+            eventTimestampMs = displayMs.takeIf { it > 0 },
+            alertRich = rich
+        )
+        addEventFingerprintToSeen(groupId, eventId)
+    }
+
     // Fires a group calendar event notification if it's new (not in seenMap).
     // Returns true if it fired (so callers can flag the seen-map dirty).
     private suspend fun fireGroupCalendarEvent(
@@ -3379,6 +3528,18 @@ class VrchatPipelineService : Service() {
         // event with the same title doesn't get suppressed.
         if (isEventFingerprintSeen(groupId, eventId)) return false
         if (eventTitle.isBlank() && eventDesc.isBlank()) return false
+        // The live notification-v2 push for a freshly-created event often can't
+        // resolve the cal_ id, so it fired a THIN card (no eventRefId, no
+        // fingerprint). Don't fire a SECOND, full card here — the targeted
+        // enricher upgrades that thin card in place. Match by id OR title so we
+        // dedup even though the thin card never knew the id; record the id so
+        // later polls also skip.
+        val normEvTitle = eventTitle.trim().lowercase().replace(Regex("\\s+"), " ")
+        if (InAppAlertState.hasEventFor("event_$groupId", eventId, normEvTitle)) {
+            updatedMap.put(seenKey, marker)
+            addEventFingerprintToSeen(groupId, eventId)
+            return false
+        }
         fireEventNotification(
             id = "gce_$eventId".hashCode(),
             title = "Event from $groupName",

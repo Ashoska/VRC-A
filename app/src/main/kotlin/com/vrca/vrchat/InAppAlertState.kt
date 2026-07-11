@@ -409,6 +409,32 @@ object InAppAlertState {
         return true
     }
 
+    /** Normalized event title for cross-path matching (same as the enricher). */
+    private fun normEventTitle(t: String?): String =
+        t?.trim()?.lowercase()?.replace(Regex("\\s+"), " ").orEmpty()
+
+    /**
+     * True if [groupKey] already holds an alert for this event — matched by the
+     * exact `cal_` [eventId], OR by its normalized event title. Used by BOTH
+     * event fire paths (the live notification-v2 push AND the REST calendar
+     * sweep) to avoid firing a DUPLICATE of the same event.
+     *
+     * A freshly-created event's v2 push frequently can't resolve the `cal_` id
+     * (thin payload), so its thin card and the REST sweep's full card would
+     * otherwise coexist — one in the normal area, one in "Signed up". Matching
+     * on the title lets whichever fires SECOND dedup against the first even when
+     * only one of them knew the id. (Tradeoff: two genuinely-distinct undismissed
+     * events in the same group sharing an EXACT title collapse to one — rare, and
+     * it aligns with the recurring-series "one card per series" behavior.)
+     */
+    fun hasEventFor(groupKey: String, eventId: String, normalizedTitle: String): Boolean {
+        val g = _groups.value.firstOrNull { it.groupId == groupKey } ?: return false
+        return g.events.any { e ->
+            (eventId.isNotBlank() && e.eventRefId == eventId) ||
+                (normalizedTitle.isNotBlank() && normEventTitle(e.eventTitle) == normalizedTitle)
+        }
+    }
+
     /** Records the world image for invite-target events whose actionData is
      *  [location] (any group) — lets the image store keep the file referenced
      *  until the invite alert is dismissed. */
