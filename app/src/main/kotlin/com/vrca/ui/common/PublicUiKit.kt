@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -29,12 +30,14 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -48,7 +51,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -325,16 +328,29 @@ fun LabeledRow(
 /**
  * Onboarding instruction image: fixed rounded frame + optional caption,
  * tap to expand full-screen with pinch zoom (Quest settings text is small
- * in a phone-width screenshot). Drawable-resource based — tutorial images
- * are baked into the APK (docs/ui-revamp.md, "Instructional images").
+ * in a phone-width screenshot). The images are downloaded on-demand into
+ * [com.vrca.ui.onboarding.TutorialImageStore] (NOT bundled in the APK), so this
+ * resolves the local file by [index] (1-based), shows a spinner while it's still
+ * downloading, and triggers a download itself as a fallback if a boot/replay
+ * prefetch didn't cover it.
  */
 @Composable
 fun TutorialImage(
-    resId: Int,
+    index: Int,
     contentDescription: String,
     caption: String? = null
 ) {
+    val ctx = LocalContext.current
     var fullscreen by rememberSaveable { mutableStateOf(false) }
+    var file by remember(index) {
+        mutableStateOf(com.vrca.ui.onboarding.TutorialImageStore.cachedFileFor(ctx, index))
+    }
+    LaunchedEffect(index) {
+        if (file == null) {
+            com.vrca.ui.onboarding.TutorialImageStore.ensureDownloaded(ctx)
+            file = com.vrca.ui.onboarding.TutorialImageStore.cachedFileFor(ctx, index)
+        }
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Surface(
@@ -342,14 +358,26 @@ fun TutorialImage(
             color = MaterialTheme.colorScheme.surfaceVariant,
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable { fullscreen = true }
+                .clickable(enabled = file != null) { fullscreen = true }
         ) {
-            Image(
-                painter = painterResource(resId),
-                contentDescription = contentDescription,
-                contentScale = ContentScale.FillWidth,
-                modifier = Modifier.fillMaxWidth()
-            )
+            val f = file
+            if (f != null) {
+                coil.compose.AsyncImage(
+                    model = f,
+                    contentDescription = contentDescription,
+                    contentScale = ContentScale.FillWidth,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            } else {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(140.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(strokeWidth = 2.dp)
+                }
+            }
         }
         if (!caption.isNullOrBlank()) {
             Text(
@@ -360,7 +388,8 @@ fun TutorialImage(
         }
     }
 
-    if (fullscreen) {
+    val zoomFile = file
+    if (fullscreen && zoomFile != null) {
         Dialog(
             onDismissRequest = { fullscreen = false },
             properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -383,7 +412,7 @@ fun TutorialImage(
                 contentAlignment = Alignment.Center
             ) {
                 Image(
-                    painter = painterResource(resId),
+                    painter = coil.compose.rememberAsyncImagePainter(model = zoomFile),
                     contentDescription = contentDescription,
                     contentScale = ContentScale.Fit,
                     modifier = Modifier

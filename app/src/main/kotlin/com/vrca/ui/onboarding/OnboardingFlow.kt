@@ -223,6 +223,11 @@ fun OnboardingFlow(
     // never sets it — replaying must not change first-run state.
     LaunchedEffect(Unit) { if (!replay) OnboardingPrefs.markStarted(ctx) }
 
+    // The OSC tutorial images aren't bundled in the APK — download them on entry.
+    // New users prefetch at boot (VrcaApp); replay downloads them fresh here.
+    // Idempotent: cached images are skipped. Cleanup happens in VrcaApp onFinish.
+    LaunchedEffect(Unit) { TutorialImageStore.ensureDownloaded(ctx) }
+
     fun advance() { if (step < STEP_COUNT - 1) step++ else { OnboardingPrefs.markComplete(ctx); onFinish() } }
     fun back() { if (step > 0) step-- }
     fun finishNow() { OnboardingPrefs.markComplete(ctx); onFinish() }
@@ -795,22 +800,22 @@ private fun StepEnableOsc() {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 NumberedInstruction(1, "In VRChat, open the Action Menu (radial menu)")
                 com.vrca.ui.common.TutorialImage(
-                    resId = com.vrca.R.drawable.osc_tutorial_1,
+                    index = 1,
                     contentDescription = "VRChat Action Menu showing Options"
                 )
                 NumberedInstruction(2, "Select Options, then find OSC")
                 com.vrca.ui.common.TutorialImage(
-                    resId = com.vrca.R.drawable.osc_tutorial_2,
+                    index = 2,
                     contentDescription = "Options submenu with OSC highlighted"
                 )
                 NumberedInstruction(3, "Select OSC")
                 com.vrca.ui.common.TutorialImage(
-                    resId = com.vrca.R.drawable.osc_tutorial_3,
+                    index = 3,
                     contentDescription = "OSC submenu showing Enabled toggle off"
                 )
                 NumberedInstruction(4, "Set OSC to Enabled")
                 com.vrca.ui.common.TutorialImage(
-                    resId = com.vrca.R.drawable.osc_tutorial_4,
+                    index = 4,
                     contentDescription = "OSC Enabled toggle turned on"
                 )
             }
