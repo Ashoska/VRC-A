@@ -295,7 +295,6 @@ object GroupAlertEnricher {
                     val platformsCsv = jsonArrayToCsv(ev.optJSONArray("platforms"))
                     val languagesCsv = jsonArrayToCsv(ev.optJSONArray("languages"))
                     val access = ev.optString("accessType", "")
-                    val interested = extractInterestedCount(ev)
                     // The group calendar LIST omits the user's per-event follow
                     // state, so an event added IN-GAME wasn't detected. Fetch the
                     // single event (which carries it) to get authoritative
@@ -303,6 +302,13 @@ object GroupAlertEnricher {
                     // representative (after recurring-collapse, ~1 per series).
                     val single = VrchatAuthManager.fetchCalendarEvent(ctx, groupId, evId)
                     val src = single ?: ev
+                    // Interested count comes from the SINGLE event first — VRChat's
+                    // group-calendar LIST count lags (it didn't move when the user
+                    // added/removed even though the website updated instantly),
+                    // while the single-event object carries the live count the site
+                    // shows. Fall back to the list only if the single fetch failed.
+                    val interested = extractInterestedCount(src).takeIf { it >= 0 }
+                        ?: extractInterestedCount(ev)
                     // The user's explicit in-app follow decision is AUTHORITATIVE and
                     // permanent — it wins over the server read, which for the user's
                     // OWN events perpetually reports following=true (so removing an
