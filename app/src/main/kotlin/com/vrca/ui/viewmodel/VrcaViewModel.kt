@@ -3518,14 +3518,37 @@ class VrcaViewModel(
     }
 
     /**
+     * No-repeat window for shuffle: how many recently-played positions to avoid,
+     * scaled by the number of active lines. Small counts stay at 1 (just no
+     * immediate repeat); from 5 lines up it ramps via these anchors (activeSize to
+     * window): 5→3, 10→5, 15→8, 20→14, interpolating linearly in between and
+     * clamping above the top anchor. More lines = enforce more variety before a
+     * line can come back around.
+     */
+    private fun shuffleWindow(activeSize: Int): Int {
+        if (activeSize < 5) return 1
+        val anchors = listOf(5 to 3, 10 to 5, 15 to 8, 20 to 14)
+        if (activeSize >= anchors.last().first) return anchors.last().second
+        for (i in 0 until anchors.size - 1) {
+            val (s0, w0) = anchors[i]
+            val (s1, w1) = anchors[i + 1]
+            if (activeSize in s0 until s1) {
+                val t = (activeSize - s0).toFloat() / (s1 - s0)
+                return Math.round(w0 + t * (w1 - w0)).toInt()
+            }
+        }
+        return anchors.last().second
+    }
+
+    /**
      * Pick the next active-line position. Sequential = previous+1. Shuffle = a random
-     * position avoiding the recent window (last 2 when >5 active lines, else last 1)
-     * so it stays random without repeating too much / never an immediate repeat.
+     * position avoiding the recent window (see [shuffleWindow]) so it stays random
+     * without repeating too much / never an immediate repeat.
      */
     private fun nextCyclePos(activeSize: Int, prevPos: Int): Int {
         if (activeSize <= 1) return 0
         if (!cycleShuffle) return (prevPos + 1) % activeSize
-        val window = (if (activeSize > 5) 2 else 1).coerceAtMost(activeSize - 1)
+        val window = shuffleWindow(activeSize).coerceIn(1, activeSize - 1)
         val recent = recentCyclePicks.toSet()
         val candidates = (0 until activeSize).filter { it !in recent }
         val pick = (candidates.ifEmpty { (0 until activeSize).filter { it != prevPos } })
