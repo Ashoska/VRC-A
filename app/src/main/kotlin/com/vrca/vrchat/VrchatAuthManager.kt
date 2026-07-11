@@ -727,17 +727,29 @@ object VrchatAuthManager {
     // Session validation
     // ------------------------------------------------------------------
 
-    suspend fun validateSession(context: Context): Boolean = withContext(Dispatchers.IO) {
-        val cookieHeader = getCookieHeader(context) ?: return@withContext false
+    /** VALID = auth cookie accepted; UNAUTHORIZED = auth cookie definitively dead
+     *  (401); UNKNOWN = inconclusive (no cookie / network error / 5xx). The
+     *  distinction matters for the OSC auth-dead gate: "couldn't reach VRChat"
+     *  must NEVER be treated as "session dead". */
+    enum class SessionValidity { VALID, UNAUTHORIZED, UNKNOWN }
+
+    suspend fun validateSessionDetailed(context: Context): SessionValidity = withContext(Dispatchers.IO) {
+        val cookieHeader = getCookieHeader(context) ?: return@withContext SessionValidity.UNKNOWN
         try {
             val (code, _, rawCookies) = get("$BASE/auth", null, cookieHeader)
-            if (code == 200) captureRolledCookies(context, rawCookies)
-            code == 200
+            when {
+                code == 200 -> { captureRolledCookies(context, rawCookies); SessionValidity.VALID }
+                code == 401 -> SessionValidity.UNAUTHORIZED
+                else -> SessionValidity.UNKNOWN // 5xx / rate-limit / other = inconclusive
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Session validation failed", e)
-            false
+            SessionValidity.UNKNOWN
         }
     }
+
+    suspend fun validateSession(context: Context): Boolean =
+        validateSessionDetailed(context) == SessionValidity.VALID
 
     // ------------------------------------------------------------------
     // Presence fetch

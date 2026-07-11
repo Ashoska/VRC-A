@@ -207,6 +207,13 @@ internal fun HomePage(
         // VRChat server status warning
         VrchatStatusBanner()
 
+        // Confirmed-dead VRChat session: OSC is gated, so explain why + offer sign-in.
+        if (vm.vrchatAuthDead) {
+            com.vrca.ui.common.VrchatSessionExpiredBanner(
+                onSignIn = { onNavigate(AppPage.VrchatStatus) }
+            )
+        }
+
         if (moderation.warned && !(moderation.banned || moderation.deviceBanned)) {
             SectionCard(
                 title = "Account warning",

@@ -1800,9 +1800,17 @@ class VrcaViewModel(
     var accountDenied by mutableStateOf(false)
         private set
 
+    /** True when the VRChat session is CONFIRMED dead-and-unrecoverable (password
+     *  change / 30-day trusted-device expiry / cleared creds), not merely a
+     *  transient drop — determined by the pipeline over a 5-min window with the
+     *  device online + VRChat not in a major outage. Blocks OSC and drives the
+     *  in-app "session expired" banner; clears the instant the user signs in. */
+    var vrchatAuthDead by mutableStateOf(false)
+        private set
+
     /** OSC is blocked when ANY gate reason is active. */
     private fun refreshOscBlockGate() {
-        val blocked = forceUpdatePending || vrchatLoggedOut || accountDenied
+        val blocked = forceUpdatePending || vrchatLoggedOut || accountDenied || vrchatAuthDead
         remoteVrcaOsc.blocked = blocked
         localVrcaOsc.blocked = blocked
     }
@@ -1844,6 +1852,20 @@ class VrcaViewModel(
         viewModelScope.launch {
             com.vrca.vrchat.VrchatAuthManager.loggedInSignal.collect {
                 vrchatLoggedOut = false
+                // A fresh sign-in resolves a confirmed-dead session too.
+                vrchatAuthDead = false
+                com.vrca.vrchat.VrchatPipelineState.authDead = false
+                refreshOscBlockGate()
+            }
+        }
+        // Confirmed-dead session (present-but-invalid cookie the pipeline can't
+        // silently recover): gate OSC and raise the in-app banner. When sending,
+        // stop first so the chatbox-clearing send escapes before the block.
+        viewModelScope.launch {
+            com.vrca.vrchat.VrchatPipelineState.authDeadFlow.collect { dead ->
+                if (dead == vrchatAuthDead) return@collect
+                if (dead && oscSending) stopSending()
+                vrchatAuthDead = dead
                 refreshOscBlockGate()
             }
         }
