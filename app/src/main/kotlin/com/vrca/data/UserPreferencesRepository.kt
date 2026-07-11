@@ -100,6 +100,11 @@ class UserPreferencesRepository(private val context: Context) {
         val TIME_MODE                = stringPreferencesKey("time_mode")
         val CARD_ORDER               = stringPreferencesKey("card_order")
         val MINIMAL_CHATBOX_BG       = booleanPreferencesKey("minimal_chatbox_bg")
+        // Manual Send: live-typing mode (false = Instant type-and-send default,
+        // true = Live updates above your head as you type) + the Live scroll style
+        // (4-line rolling window). Local-only, not synced to Firestore.
+        val MANUAL_LIVE_MODE         = booleanPreferencesKey("manual_live_mode")
+        val MANUAL_SCROLL            = booleanPreferencesKey("manual_scroll")
         // Per-source Now Playing enables (Media tab). Default ON; an unlisted
         // media app is always allowed (no key for it).
         val MEDIA_SOURCE_SPOTIFY     = booleanPreferencesKey("media_source_spotify")
@@ -237,6 +242,8 @@ class UserPreferencesRepository(private val context: Context) {
         raw.split(",").map { it.trim().let { k -> if (k == "AFK") "Pinned" else k } }.filter { it.isNotBlank() }
     }.distinctUntilChanged()
     val minimalChatboxBg:       Flow<Boolean> = context.dataStore.data.map { it[Keys.MINIMAL_CHATBOX_BG] ?: false }.distinctUntilChanged()
+    val manualLiveMode:         Flow<Boolean> = context.dataStore.data.map { it[Keys.MANUAL_LIVE_MODE] ?: false }.distinctUntilChanged()
+    val manualScroll:           Flow<Boolean> = context.dataStore.data.map { it[Keys.MANUAL_SCROLL] ?: false }.distinctUntilChanged()
     val mediaSourceSpotify:     Flow<Boolean> = context.dataStore.data.map { it[Keys.MEDIA_SOURCE_SPOTIFY] ?: true }.distinctUntilChanged()
     val mediaSourceYoutube:     Flow<Boolean> = context.dataStore.data.map { it[Keys.MEDIA_SOURCE_YOUTUBE] ?: true }.distinctUntilChanged()
     val mediaSourceYtMusic:     Flow<Boolean> = context.dataStore.data.map { it[Keys.MEDIA_SOURCE_YTMUSIC] ?: true }.distinctUntilChanged()
@@ -376,6 +383,8 @@ class UserPreferencesRepository(private val context: Context) {
     suspend fun saveTimeMode(v: String)                 = context.dataStore.edit { it[Keys.TIME_MODE]    = v }
     suspend fun saveCardOrder(order: List<String>)      = context.dataStore.edit { it[Keys.CARD_ORDER]   = order.joinToString(",") }
     suspend fun saveMinimalChatboxBg(v: Boolean)        = context.dataStore.edit { it[Keys.MINIMAL_CHATBOX_BG] = v }
+    suspend fun saveManualLiveMode(v: Boolean)          = context.dataStore.edit { it[Keys.MANUAL_LIVE_MODE] = v }
+    suspend fun saveManualScroll(v: Boolean)            = context.dataStore.edit { it[Keys.MANUAL_SCROLL] = v }
     suspend fun saveMediaSourceSpotify(v: Boolean)      = context.dataStore.edit { it[Keys.MEDIA_SOURCE_SPOTIFY] = v }
     suspend fun saveMediaSourceYoutube(v: Boolean)      = context.dataStore.edit { it[Keys.MEDIA_SOURCE_YOUTUBE] = v }
     suspend fun saveMediaSourceYtMusic(v: Boolean)      = context.dataStore.edit { it[Keys.MEDIA_SOURCE_YTMUSIC] = v }
