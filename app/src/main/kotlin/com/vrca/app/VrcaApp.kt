@@ -1190,9 +1190,11 @@ private fun BootstrapScreen(
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // The REAL app icon (@mipmap/ic_launcher — the VRC-A chibi art,
-                // same as the manifest android:icon), clipped circular by the
-                // Surface shape.
+                // The VRC-A chibi logo (drawable-nodpi/vrca_logo, a 512px copy of
+                // the same character art as the launcher icon), clipped circular by
+                // the Surface shape. This is a DEDICATED high-res asset — NOT the
+                // small @mipmap/ic_launcher (48-192px), which would upscale and blur
+                // at this ~136dp boot size on high-density phones.
                 Surface(
                     shape = CircleShape,
                     color = colors.primary.copy(alpha = 0.10f),
@@ -1206,7 +1208,7 @@ private fun BootstrapScreen(
                     // last stretch out so the character blends into the tinted
                     // circle instead of looking chopped off.
                     Image(
-                        painter = painterResource(com.vrca.R.mipmap.ic_launcher),
+                        painter = painterResource(com.vrca.R.drawable.vrca_logo),
                         contentDescription = null,
                         modifier = Modifier
                             .fillMaxSize()
