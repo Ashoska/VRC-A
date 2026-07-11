@@ -1190,10 +1190,9 @@ private fun BootstrapScreen(
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // The REAL app icon (@mipmap/ic_launcher — the VRC-A character
-                // art, same as the manifest android:icon), clipped circular by
-                // the Surface shape. Do NOT use ic_launcher_foreground.xml —
-                // that vector is a leftover template gradient, not the logo.
+                // The REAL app icon (@mipmap/ic_launcher — the VRC-A chibi art,
+                // same as the manifest android:icon), clipped circular by the
+                // Surface shape.
                 Surface(
                     shape = CircleShape,
                     color = colors.primary.copy(alpha = 0.10f),
