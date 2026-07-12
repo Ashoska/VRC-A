@@ -184,37 +184,43 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
     var viewportTopPx by remember { mutableFloatStateOf(0f) }
     var viewportHeightPx by remember { mutableIntStateOf(0) }
     val cycleRowWindowTops = remember { mutableStateMapOf<Int, Float>() }
-    val cycleAutoDir = remember { mutableFloatStateOf(0f) } // signed px/frame, 0 = none
+    // Shared auto-scroll direction (signed px/frame, 0 = none) — set by whichever
+    // drag (cycle main line, cycle sub, or pinned sub) is active. Only one drag runs
+    // at a time, so a single shared knob is safe.
+    val cycleAutoDir = remember { mutableFloatStateOf(0f) }
     val edgePx = with(LocalDensity.current) { 96.dp.toPx() }
     // How far past a section card's edge the finger may stray and still have the drop
     // accepted (clamped to the nearest slot). Beyond this → the drag reverts.
     val DRAG_ACCEPT_MARGIN = with(LocalDensity.current) { 72.dp.toPx() }
-    LaunchedEffect(cycleDragIndex) {
-        if (cycleDragIndex == null) { cycleAutoDir.floatValue = 0f; return@LaunchedEffect }
-        while (cycleDragIndex != null) {
-            val dir = cycleAutoDir.floatValue
-            if (dir != 0f && viewportHeightPx > 0) {
-                val before = pageScroll.value
-                pageScroll.scrollBy(dir)
-                // Keep the dragged row under the finger + extend the reachable range
-                // as new rows scroll in: fold the actual scrolled distance into the
-                // drag offset (content-space displacement from the origin slot).
-                cycleDragOffsetY.floatValue += (pageScroll.value - before).toFloat()
-            }
-            withFrameNanos { }
-        }
-    }
 
     // ---- Drag-to-reorder SUB-LINES within a block (pinned block + each cycle
     // slide's sub-lines) ---- Same UI-only, commit-on-drop model as the cycle
-    // main-line drag, but scoped to one block (keyed by `subDragKey`). Blocks are
-    // small + on-screen when expanded, so no auto-scroll here.
+    // main-line drag, but scoped to one block (keyed by `subDragKey`).
     val dropBarColor = MaterialTheme.colorScheme.primary
     var subDragKey by remember { mutableStateOf<String?>(null) }
     var subDragIndex by remember { mutableStateOf<Int?>(null) }
     val subDragOffsetY = remember { mutableFloatStateOf(0f) }
     val subRowHeights = remember { mutableStateMapOf<String, Int>() } // "$key#$i" -> px
     val subRowWindowTops = remember { mutableStateMapOf<String, Float>() } // "$key#$i" -> window y
+
+    // Unified auto-scroll: runs while ANY drag is active (cycle main line OR a sub
+    // line in either section, incl. Pinned) and folds the scrolled distance into
+    // whichever drag's offset is live so the row stays under the finger and rows
+    // that scroll into view become reachable.
+    LaunchedEffect(cycleDragIndex, subDragKey) {
+        if (cycleDragIndex == null && subDragKey == null) { cycleAutoDir.floatValue = 0f; return@LaunchedEffect }
+        while (cycleDragIndex != null || subDragKey != null) {
+            val dir = cycleAutoDir.floatValue
+            if (dir != 0f && viewportHeightPx > 0) {
+                val before = pageScroll.value
+                pageScroll.scrollBy(dir)
+                val scrolled = (pageScroll.value - before).toFloat()
+                if (cycleDragIndex != null) cycleDragOffsetY.floatValue += scrolled
+                else subDragOffsetY.floatValue += scrolled
+            }
+            withFrameNanos { }
+        }
+    }
 
     // ---- Cross-section drag (Pinned <-> Cycle) ----
     // Section card window rects (for detecting which section the finger is over) +
@@ -308,6 +314,15 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                     val fingerY = (subRowWindowTops["$key#$index"] ?: 0f) + c.position.y
                     dragFingerY.floatValue = fingerY
                     updateCross(origin, fingerY)
+                    // Auto-scroll the page when the finger nears a viewport edge (so a
+                    // pinned/sub drag can reach rows off-screen, and cross-dragging can
+                    // scroll the OTHER section into view).
+                    cycleAutoDir.floatValue = when {
+                        viewportHeightPx <= 0 -> 0f
+                        fingerY < viewportTopPx + edgePx -> -14f
+                        fingerY > viewportTopPx + viewportHeightPx - edgePx -> 14f
+                        else -> 0f
+                    }
                 },
                 onDragEnd = {
                     val from = subDragIndex
@@ -332,7 +347,10 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                         } ?: true
                         when {
                             cross != null && onCrossSection != null -> onCrossSection(cross)
-                            outside && onOutside != null -> onOutside()
+                            // Promote (cycle sub → own line) ONLY when dragged clearly out
+                            // of the block but STILL within the section card. Dragged fully
+                            // out of the UI → fall through → revert (back to its sub area).
+                            outside && withinCard && onOutside != null -> onOutside()
                             withinCard -> {
                                 val to = subDropTarget(key, from, count, offset)
                                 if (to != from) onMove(from, to)
@@ -340,11 +358,11 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                         }
                     }
                     subDragKey = null; subDragIndex = null; subDragOffsetY.floatValue = 0f
-                    crossTarget = null; crossDropIndex = -1
+                    crossTarget = null; crossDropIndex = -1; cycleAutoDir.floatValue = 0f
                 },
                 onDragCancel = {
                     subDragKey = null; subDragIndex = null; subDragOffsetY.floatValue = 0f
-                    crossTarget = null; crossDropIndex = -1
+                    crossTarget = null; crossDropIndex = -1; cycleAutoDir.floatValue = 0f
                 }
             )
         }
