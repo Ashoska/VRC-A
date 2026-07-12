@@ -202,6 +202,11 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
     val subDragOffsetY = remember { mutableFloatStateOf(0f) }
     val subRowHeights = remember { mutableStateMapOf<String, Int>() } // "$key#$i" -> px
     val subRowWindowTops = remember { mutableStateMapOf<String, Float>() } // "$key#$i" -> window y
+    // Window-Y of each sub-drag GRAB HANDLE (the badge). The pointer position from
+    // detectDragGesturesAfterLongPress is relative to this node, so handleTop + pos.y
+    // is the exact finger window-Y — more reliable than the row-level top (cycle sub
+    // rows sit inside a graphicsLayer'd Column, where the row top wasn't landing).
+    val subHandleTops = remember { mutableStateMapOf<String, Float>() } // "$key#$i" -> window y
 
     // Unified auto-scroll: runs while ANY drag is active (cycle main line OR a sub
     // line in either section, incl. Pinned) and folds the scrolled distance into
@@ -304,14 +309,21 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
         onCrossSection: ((String) -> Unit)? = null,
         onMove: (Int, Int) -> Unit
     ): Modifier =
-        Modifier.pointerInput(key, index, count) {
+        Modifier
+            .onGloballyPositioned { subHandleTops["$key#$index"] = it.positionInWindow().y }
+            .pointerInput(key, index, count) {
             val origin = if (key == "pinned") "pinned" else "cycle"
             detectDragGesturesAfterLongPress(
                 onDragStart = { subDragKey = key; subDragIndex = index; subDragOffsetY.floatValue = 0f },
                 onDrag = { c, d ->
                     c.consume()
                     subDragOffsetY.floatValue += d.y
-                    val fingerY = (subRowWindowTops["$key#$index"] ?: 0f) + c.position.y
+                    // Finger window-Y from the GRAB HANDLE's own position (pos is relative
+                    // to it) — falls back to the row top. Fixes cycle sub-rows whose row
+                    // top wasn't landing (they sit inside a graphicsLayer'd Column), which
+                    // left crossTarget/section detection dead so no drop bar ever showed.
+                    val anchorY = subHandleTops["$key#$index"] ?: subRowWindowTops["$key#$index"] ?: 0f
+                    val fingerY = anchorY + c.position.y
                     dragFingerY.floatValue = fingerY
                     updateCross(origin, fingerY)
                     // Auto-scroll the page when the finger nears a viewport edge (so a
