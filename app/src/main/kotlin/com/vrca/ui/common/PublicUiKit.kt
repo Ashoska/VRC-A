@@ -151,15 +151,20 @@ fun CompactSectionCard(
     collapsible: Boolean = true,
     initiallyExpanded: Boolean = false,
     persistExpansion: Boolean = true,
+    expandedState: androidx.compose.runtime.MutableState<Boolean>? = null,
+    modifier: Modifier = Modifier,
     trailing: (@Composable RowScope.() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    var expanded by if (persistExpansion)
+    // Caller can hoist the expand state (e.g. to auto-expand on cross-section drag
+    // hover); otherwise it's owned internally as before.
+    val ownState = if (persistExpansion)
         rememberSaveable(title) { mutableStateOf(!collapsible || initiallyExpanded) }
     else
         remember(title) { mutableStateOf(!collapsible || initiallyExpanded) }
+    var expanded by (expandedState ?: ownState)
 
-    ElevatedCard(Modifier.fillMaxWidth()) {
+    ElevatedCard(modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(
                 Modifier

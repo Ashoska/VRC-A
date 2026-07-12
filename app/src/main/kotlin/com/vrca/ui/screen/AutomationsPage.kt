@@ -1,5 +1,6 @@
 package com.vrca.ui.screen
 
+import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -56,16 +57,22 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInWindow
@@ -125,37 +132,48 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
     var cycleDragIndex by remember { mutableStateOf<Int?>(null) }
     val cycleDragOffsetY = remember { mutableFloatStateOf(0f) }
     val cycleRowHeights = remember { mutableStateMapOf<Int, Int>() }
+    // When the dragged line hovers over ANOTHER line's CENTER, that's a DEMOTE
+    // (nest it as a sub-line of the target) instead of a reorder. null = reorder.
+    var cycleDemoteTarget by remember { mutableStateOf<Int?>(null) }
 
+    // Absolute-position drop target: where the dragged row's CENTER sits vs the
+    // midpoints of the other rows (in the original layout). Returns the post-removal
+    // insertion index, which is exactly moveCycleLine's `to`. More consistent near
+    // the ends / between rows than an incremental half-height walk.
     fun cycleDropTarget(origin: Int, offsetY: Float): Int {
         val n = vm.cycleLines.size
-        if (n <= 1) return origin.coerceIn(0, n - 1)
-        var i = origin
-        if (offsetY > 0f) {
-            var acc = offsetY
-            while (i < n - 1) {
-                val h = (cycleRowHeights[i + 1] ?: cycleRowHeights[origin] ?: 0).toFloat()
-                if (h > 0f && acc > h / 2f) { acc -= h; i++ } else break
-            }
-        } else if (offsetY < 0f) {
-            var acc = offsetY
-            while (i > 0) {
-                val h = (cycleRowHeights[i - 1] ?: cycleRowHeights[origin] ?: 0).toFloat()
-                if (h > 0f && acc < -h / 2f) { acc += h; i-- } else break
-            }
+        if (n <= 1) return 0
+        val heights = (0 until n).map { (cycleRowHeights[it] ?: 0).toFloat() }
+        val originTop = heights.take(origin).sum()
+        val draggedH = heights.getOrElse(origin) { 0f }
+        val draggedCenter = originTop + offsetY + draggedH / 2f
+        var target = 0
+        var top = 0f
+        for (i in 0 until n) {
+            if (i == origin) { top += heights[i]; continue }
+            val mid = top + heights[i] / 2f
+            if (draggedCenter > mid) target++
+            top += heights[i]
         }
-        return i
+        return target.coerceIn(0, n - 1)
     }
 
-    // Vertical shift (px) to apply to a NON-dragged row to open the gap.
-    fun cycleGapShift(idx: Int): Float {
-        val from = cycleDragIndex ?: return 0f
-        val to = cycleDropTarget(from, cycleDragOffsetY.floatValue)
-        val dh = (cycleRowHeights[from] ?: 0).toFloat()
-        return when {
-            from < to && idx in (from + 1)..to -> -dh   // dragging down → rows above the gap slide up
-            to < from && idx in to until from -> dh      // dragging up → rows below the gap slide down
-            else -> 0f
+    // Which line (if any) the dragged row's center is hovering over the MIDDLE of —
+    // a demote target. Only the center band counts (the edges stay reorder zones).
+    fun cycleDemoteHover(origin: Int, offsetY: Float): Int? {
+        val n = vm.cycleLines.size
+        if (n <= 1) return null
+        val heights = (0 until n).map { (cycleRowHeights[it] ?: 0).toFloat() }
+        val originTop = heights.take(origin).sum()
+        val draggedH = heights.getOrElse(origin) { 0f }
+        val center = originTop + offsetY + draggedH / 2f
+        var top = 0f
+        for (i in 0 until n) {
+            val h = heights[i]
+            if (i != origin && center >= top + h * 0.30f && center <= top + h * 0.70f) return i
+            top += h
         }
+        return null
     }
 
     // Auto-scroll the page while dragging near the top/bottom edge so lines that
@@ -183,6 +201,138 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
             withFrameNanos { }
         }
     }
+
+    // ---- Drag-to-reorder SUB-LINES within a block (pinned block + each cycle
+    // slide's sub-lines) ---- Same UI-only, commit-on-drop model as the cycle
+    // main-line drag, but scoped to one block (keyed by `subDragKey`). Blocks are
+    // small + on-screen when expanded, so no auto-scroll here.
+    val dropBarColor = MaterialTheme.colorScheme.primary
+    var subDragKey by remember { mutableStateOf<String?>(null) }
+    var subDragIndex by remember { mutableStateOf<Int?>(null) }
+    val subDragOffsetY = remember { mutableFloatStateOf(0f) }
+    val subRowHeights = remember { mutableStateMapOf<String, Int>() } // "$key#$i" -> px
+    val subRowWindowTops = remember { mutableStateMapOf<String, Float>() } // "$key#$i" -> window y
+
+    // ---- Cross-section drag (Pinned <-> Cycle) ----
+    // Section card window rects (for detecting which section the finger is over) +
+    // hoisted expand state (so hovering the OTHER section can auto-expand it).
+    val pinnedCardExpanded = rememberSaveable { mutableStateOf(false) }
+    val cycleCardExpanded = rememberSaveable { mutableStateOf(false) }
+    var pinnedCardRect by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
+    var cycleCardRect by remember { mutableStateOf<androidx.compose.ui.geometry.Rect?>(null) }
+    var crossTarget by remember { mutableStateOf<String?>(null) } // "pinned" | "cycle" | null
+
+    fun sectionAt(fingerY: Float): String? = when {
+        pinnedCardRect?.let { fingerY >= it.top && fingerY <= it.bottom } == true -> "pinned"
+        cycleCardRect?.let { fingerY >= it.top && fingerY <= it.bottom } == true -> "cycle"
+        else -> null
+    }
+
+    // Update crossTarget for a drag whose ORIGIN section is [origin]; auto-expand the
+    // hovered other section so its rows come into view.
+    fun updateCross(origin: String, fingerY: Float) {
+        val sec = sectionAt(fingerY)
+        val cross = if (sec != null && sec != origin) sec else null
+        crossTarget = cross
+        if (cross == "cycle") cycleCardExpanded.value = true
+        if (cross == "pinned") pinnedCardExpanded.value = true
+    }
+
+    fun subDropTarget(key: String, origin: Int, count: Int, offsetY: Float): Int {
+        if (count <= 1) return 0
+        val h = (0 until count).map { (subRowHeights["$key#$it"] ?: 0).toFloat() }
+        val originTop = h.take(origin).sum()
+        val draggedH = h.getOrElse(origin) { 0f }
+        val center = originTop + offsetY + draggedH / 2f
+        var target = 0; var top = 0f
+        for (i in 0 until count) {
+            if (i == origin) { top += h[i]; continue }
+            val mid = top + h[i] / 2f
+            if (center > mid) target++
+            top += h[i]
+        }
+        return target.coerceIn(0, count - 1)
+    }
+
+    // Badge grab modifier for a sub-row (long-press to reorder within its block).
+    // Dropped OUTSIDE the block bounds → onOutside (promote to its own line for
+    // cycle sub-lines; null = just revert, e.g. pinned which has no slide level).
+    fun subDragHandle(
+        key: String,
+        index: Int,
+        count: Int,
+        onOutside: (() -> Unit)? = null,
+        onCrossSection: ((String) -> Unit)? = null,
+        onMove: (Int, Int) -> Unit
+    ): Modifier =
+        Modifier.pointerInput(key, index, count) {
+            val origin = if (key == "pinned") "pinned" else "cycle"
+            detectDragGesturesAfterLongPress(
+                onDragStart = { subDragKey = key; subDragIndex = index; subDragOffsetY.floatValue = 0f },
+                onDrag = { c, d ->
+                    c.consume()
+                    subDragOffsetY.floatValue += d.y
+                    val fingerY = (subRowWindowTops["$key#$index"] ?: 0f) + c.position.y
+                    updateCross(origin, fingerY)
+                },
+                onDragEnd = {
+                    val from = subDragIndex
+                    if (from != null && subDragKey == key) {
+                        val cross = crossTarget
+                        val offset = subDragOffsetY.floatValue
+                        val h = (0 until count).map { (subRowHeights["$key#$it"] ?: 0) }
+                        val originTop = h.take(from).sum().toFloat()
+                        val draggedH = h.getOrElse(from) { 0 }.toFloat()
+                        val totalH = h.sum().toFloat()
+                        val curTop = originTop + offset
+                        val outMargin = draggedH * 0.9f
+                        val outside = curTop < -outMargin || curTop > (totalH - draggedH) + outMargin
+                        when {
+                            cross != null && onCrossSection != null -> onCrossSection(cross)
+                            outside && onOutside != null -> onOutside()
+                            !outside -> {
+                                val to = subDropTarget(key, from, count, offset)
+                                if (to != from) onMove(from, to)
+                            }
+                        }
+                    }
+                    subDragKey = null; subDragIndex = null; subDragOffsetY.floatValue = 0f; crossTarget = null
+                },
+                onDragCancel = {
+                    subDragKey = null; subDragIndex = null; subDragOffsetY.floatValue = 0f; crossTarget = null
+                }
+            )
+        }
+
+    // Wrapper modifier for a sub-row: float the dragged one, draw the drop bar,
+    // measure heights. Local index space is 0..count-1 within the block.
+    fun subRowMod(key: String, index: Int, count: Int): Modifier = Modifier
+        .zIndex(if (subDragKey == key && subDragIndex == index) 1f else 0f)
+        .graphicsLayer {
+            translationY = if (subDragKey == key && subDragIndex == index) subDragOffsetY.floatValue else 0f
+            shadowElevation = if (subDragKey == key && subDragIndex == index) 8f else 0f
+        }
+        .drawBehind {
+            val from = subDragIndex ?: return@drawBehind
+            if (subDragKey != key || from == index) return@drawBehind
+            val target = subDropTarget(key, from, count, subDragOffsetY.floatValue)
+            if (target == from) return@drawBehind
+            val boundary = if (target <= from) target else target + 1
+            val barH = 3.dp.toPx(); val r = CornerRadius(barH / 2f)
+            when {
+                boundary == index -> drawRoundRect(dropBarColor, Offset(0f, -barH - 1f), Size(size.width, barH), r)
+                index == count - 1 && boundary >= count ->
+                    drawRoundRect(dropBarColor, Offset(0f, size.height + 1f), Size(size.width, barH), r)
+            }
+        }
+        .onSizeChanged { subRowHeights["$key#$index"] = it.height }
+        .onGloballyPositioned { subRowWindowTops["$key#$index"] = it.positionInWindow().y }
+
+    // Page-scope snapshots so a card's content lambda re-runs on sub-drag start/end
+    // (the dragActive opaque styling is a composition-time read; the float/bar are
+    // deferred layer/draw reads). Offset changes never hit these (drag stays smooth).
+    val subDragKeySnap = subDragKey
+    val subDragIndexSnap = subDragIndex
 
     // Pinned sub-line fields, same cursor-safe hoisted-map pattern as the cycle
     // fields above: seed from vm.pinnedSubLines(), reseed only when the stored
@@ -234,6 +384,14 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
             icon = Icons.Filled.PushPin,
             summary = com.vrca.app.SubLineCodec.renderVisible(vm.afkMessage)
                 .replace("\n", "  /  ").ifBlank { "No message set" },
+            expandedState = pinnedCardExpanded,
+            modifier = Modifier
+                .onGloballyPositioned { pinnedCardRect = it.boundsInWindow() }
+                .then(
+                    if (crossTarget == "pinned")
+                        Modifier.border(2.dp, MaterialTheme.colorScheme.primary, MaterialTheme.shapes.medium)
+                    else Modifier
+                ),
             trailing = {
                 KitStatusChip(
                     if (vm.afkEnabled) "ON" else "OFF",
@@ -256,7 +414,15 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                 onMoveUp = { i -> vm.movePinnedSubLine(i, i - 1) },
                 onMoveDown = { i -> vm.movePinnedSubLine(i, i + 1) },
                 onDelete = { i -> vm.removePinnedSubLine(i) },
-                onAdd = { vm.addPinnedSubLine() }
+                onAdd = { vm.addPinnedSubLine() },
+                activeDragIndex = if (subDragKeySnap == "pinned") subDragIndexSnap else null,
+                dragModifierFor = { i ->
+                    subDragHandle(
+                        "pinned", i, pinnedSubs.size,
+                        onCrossSection = { sec -> if (sec == "cycle") vm.movePinnedRowToCycle(i) }
+                    ) { f, t -> vm.movePinnedSubLine(f, t) }
+                },
+                rowModifierFor = { i -> subRowMod("pinned", i, pinnedSubs.size) }
             )
             // Combined total only matters once there's more than one visible row —
             // for a single row the per-row meter already IS the total.
@@ -335,8 +501,12 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
         val cycleSubs: List<List<ChatboxSubLine>> = vm.cycleLines.map { SubLineCodec.decode(it) }
         // Page-scope snapshot of which row is being dragged (changes only on
         // pick-up/drop, so recomposing on it is cheap) — the per-frame offset is
-        // read inside graphicsLayer blocks instead.
+        // read inside graphicsLayer / drawBehind blocks instead.
         val draggingIdx = cycleDragIndex
+        // Is the current demote target valid (fits within the 3-row cap)?
+        val cycleDemoteValid = cycleDemoteTarget?.let { t ->
+            draggingIdx != null && vm.canDemoteCycleInto(draggingIdx, t)
+        } ?: false
         CompactSectionCard(
             title = "Cycle",
             icon = Icons.Filled.Loop,
@@ -348,6 +518,14 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                 if (vm.cycleShuffle) append(" · shuffle")
                 if (cycleNow.isNotBlank()) append(" · now: “${cycleNow.replace("\n", " / ")}”")
             },
+            expandedState = cycleCardExpanded,
+            modifier = Modifier
+                .onGloballyPositioned { cycleCardRect = it.boundsInWindow() }
+                .then(
+                    if (crossTarget == "cycle")
+                        Modifier.border(2.dp, MaterialTheme.colorScheme.primary, MaterialTheme.shapes.medium)
+                    else Modifier
+                ),
             trailing = {
                 KitStatusChip(
                     if (vm.cycleEnabled) "ON" else "OFF",
@@ -371,8 +549,14 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                             onDrag = { change, dragAmount ->
                                 change.consume()
                                 cycleDragOffsetY.floatValue += dragAmount.y
-                                // Auto-scroll when the finger nears a viewport edge.
                                 val fingerY = (cycleRowWindowTops[idx] ?: 0f) + change.position.y
+                                // Over the Pinned section? → cross-section move.
+                                updateCross("cycle", fingerY)
+                                // Demote target: hovering another line's centre nests
+                                // this line into it (only when NOT crossing sections).
+                                cycleDemoteTarget = if (crossTarget == null)
+                                    cycleDemoteHover(idx, cycleDragOffsetY.floatValue) else null
+                                // Auto-scroll when the finger nears a viewport edge.
                                 cycleAutoDir.floatValue = when {
                                     viewportHeightPx <= 0 -> 0f
                                     fingerY < viewportTopPx + edgePx -> -14f
@@ -383,25 +567,38 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                             onDragEnd = {
                                 val from = cycleDragIndex
                                 if (from != null) {
-                                    // Dropped well outside the list → revert (no move).
                                     val offset = cycleDragOffsetY.floatValue
-                                    val n = vm.cycleLines.size
-                                    val heights = (0 until n).map { (cycleRowHeights[it] ?: 0) }
-                                    val originTop = heights.take(from).sum().toFloat()
-                                    val draggedH = heights.getOrElse(from) { 0 }.toFloat()
-                                    val totalH = heights.sum().toFloat()
-                                    val curTop = originTop + offset
-                                    val outMargin = draggedH * 0.8f
-                                    val outside = curTop < -outMargin || curTop > (totalH - draggedH) + outMargin
-                                    if (!outside) {
-                                        val to = cycleDropTarget(from, offset)
-                                        if (to != from) vm.moveCycleLine(from, to)
+                                    val cross = crossTarget
+                                    val demote = cycleDemoteTarget
+                                    when {
+                                        // Move the whole line into Pinned (if it fits).
+                                        cross == "pinned" -> vm.moveCycleLineToPinned(from)
+                                        // Nest into another line's sub-lines (if it fits).
+                                        demote != null ->
+                                            vm.demoteCycleLineInto(from, demote) // no-op if invalid → reverts
+                                        else -> {
+                                            // Reorder, unless dropped well outside → revert.
+                                            val n = vm.cycleLines.size
+                                            val heights = (0 until n).map { (cycleRowHeights[it] ?: 0) }
+                                            val originTop = heights.take(from).sum().toFloat()
+                                            val draggedH = heights.getOrElse(from) { 0 }.toFloat()
+                                            val totalH = heights.sum().toFloat()
+                                            val curTop = originTop + offset
+                                            val outMargin = draggedH * 0.8f
+                                            val outside = curTop < -outMargin || curTop > (totalH - draggedH) + outMargin
+                                            if (!outside) {
+                                                val to = cycleDropTarget(from, offset)
+                                                if (to != from) vm.moveCycleLine(from, to)
+                                            }
+                                        }
                                     }
                                 }
-                                cycleDragIndex = null; cycleDragOffsetY.floatValue = 0f; cycleAutoDir.floatValue = 0f
+                                cycleDragIndex = null; cycleDragOffsetY.floatValue = 0f
+                                cycleAutoDir.floatValue = 0f; cycleDemoteTarget = null; crossTarget = null
                             },
                             onDragCancel = {
-                                cycleDragIndex = null; cycleDragOffsetY.floatValue = 0f; cycleAutoDir.floatValue = 0f
+                                cycleDragIndex = null; cycleDragOffsetY.floatValue = 0f
+                                cycleAutoDir.floatValue = 0f; cycleDemoteTarget = null; crossTarget = null
                             }
                         )
                     } else Modifier
@@ -411,10 +608,37 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                             modifier = Modifier
                                 .zIndex(if (draggingIdx == idx) 1f else 0f)
                                 .graphicsLayer {
-                                    translationY =
-                                        if (cycleDragIndex == idx) cycleDragOffsetY.floatValue
-                                        else cycleGapShift(idx)
+                                    // Only the dragged row translates (follows the
+                                    // finger); the rest stay put and a bright bar
+                                    // shows the drop position (drawBehind below).
+                                    translationY = if (cycleDragIndex == idx) cycleDragOffsetY.floatValue else 0f
                                     shadowElevation = if (cycleDragIndex == idx) 10f else 0f
+                                }
+                                .drawBehind {
+                                    val from = cycleDragIndex ?: return@drawBehind
+                                    if (from == idx) return@drawBehind
+                                    // No insertion bar while hovering a demote target.
+                                    if (cycleDemoteTarget != null) return@drawBehind
+                                    val target = cycleDropTarget(from, cycleDragOffsetY.floatValue)
+                                    if (target == from) return@drawBehind
+                                    val boundary = if (target <= from) target else target + 1
+                                    val barH = 3.dp.toPx()
+                                    val n = vm.cycleLines.size
+                                    val radius = CornerRadius(barH / 2f)
+                                    when {
+                                        boundary == idx -> drawRoundRect(
+                                            color = dropBarColor,
+                                            topLeft = Offset(0f, -barH - 1f),
+                                            size = Size(size.width, barH),
+                                            cornerRadius = radius
+                                        )
+                                        idx == n - 1 && boundary >= n -> drawRoundRect(
+                                            color = dropBarColor,
+                                            topLeft = Offset(0f, size.height + 1f),
+                                            size = Size(size.width, barH),
+                                            cornerRadius = radius
+                                        )
+                                    }
                                 }
                                 .onSizeChanged { cycleRowHeights[idx] = it.height }
                                 .onGloballyPositioned { cycleRowWindowTops[idx] = it.positionInWindow().y }
@@ -433,6 +657,8 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                                 subCount = (subs.size - 1).coerceAtLeast(0),
                                 dragHandleModifier = dragHandleMod,
                                 dragActive = draggingIdx == idx,
+                                demoteTargetValid = if (cycleDemoteTarget == idx) cycleDemoteValid else null,
+                                dragInvalid = draggingIdx == idx && cycleDemoteTarget != null && !cycleDemoteValid,
                                 onExpand = { cycleExpanded[idx] = !expanded },
                                 onValueChange = { v: TextFieldValue ->
                                     cycleLineFields["$idx:0"] = v
@@ -446,10 +672,21 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                                 canDuplicate = vm.cycleLines.size < MAX_CYCLE_LINES,
                                 enabled = !isBanned
                             )
-                            if (expanded) {
+                            // Collapse the sub-lines WHILE this line is being dragged
+                            // (cycleExpanded is untouched, so they reopen on drop and
+                            // the drag gesture isn't disposed by a key change). The
+                            // row shrinks → drop math uses its true collapsed height.
+                            if (expanded && draggingIdx != idx) {
+                                // Sub-lines reorder AMONG THEMSELVES (indices 1..) — a
+                                // 0-based block "cyc:$idx" of m = subs.size-1 rows, so
+                                // local index j = s-1 maps to real sub index j+1.
+                                val subKey = "cyc:$idx"
+                                val m = subs.size - 1
                                 for (s in 1 until subs.size) {
                                     val sub = subs[s]
-                                    key(idx, s, sub.hidden) {
+                                    val j = s - 1
+                                    val subActive = subDragKeySnap == subKey && subDragIndexSnap == j
+                                    key(idx, s, sub.hidden, subActive) {
                                         val subField = cycleLineFields["$idx:$s"] ?: TextFieldValue(sub.text)
                                         SubLineRow(
                                             index = s,
@@ -472,7 +709,14 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                                             onToggleHidden = { vm.setCycleSubLineHidden(idx, s, it) },
                                             onMoveUp = { vm.moveCycleSubLine(idx, s, s - 1) },
                                             onMoveDown = { vm.moveCycleSubLine(idx, s, s + 1) },
-                                            onDelete = { vm.removeCycleSubLine(idx, s) }
+                                            onDelete = { vm.removeCycleSubLine(idx, s) },
+                                            modifier = subRowMod(subKey, j, m),
+                                            dragHandleModifier = subDragHandle(
+                                                subKey, j, m,
+                                                onOutside = { vm.promoteCycleSubLine(idx, s) },
+                                                onCrossSection = { sec -> if (sec == "pinned") vm.moveCycleSubToPinned(idx, s) }
+                                            ) { f, t -> vm.moveCycleSubLine(idx, f + 1, t + 1) },
+                                            dragActive = subActive
                                         )
                                     }
                                 }
@@ -833,14 +1077,17 @@ private fun SubLineEditor(
     onMoveUp: (Int) -> Unit,
     onMoveDown: (Int) -> Unit,
     onDelete: (Int) -> Unit,
-    onAdd: () -> Unit
+    onAdd: () -> Unit,
+    activeDragIndex: Int? = null,
+    dragModifierFor: (Int) -> Modifier = { Modifier },
+    rowModifierFor: (Int) -> Modifier = { Modifier }
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         // Main line — always visible, full size; number/chevron expand the rest.
         val main = subs.firstOrNull() ?: ChatboxSubLine("", false)
         // key on hidden so the main row repaints the instant its eye toggles (same
         // AnimatedVisibility-skip fix as the sub-rows / cycle mute rows).
-        key(main.hidden, subs.size) {
+        key(main.hidden, subs.size, activeDragIndex == 0) {
             SubLineRow(
                 index = 0,
                 count = subs.size,
@@ -859,7 +1106,10 @@ private fun SubLineEditor(
                 onToggleHidden = { onToggleHidden(0, it) },
                 onMoveUp = {},
                 onMoveDown = { onMoveDown(0) },
-                onDelete = { onDelete(0) }
+                onDelete = { onDelete(0) },
+                modifier = rowModifierFor(0),
+                dragHandleModifier = dragModifierFor(0),
+                dragActive = activeDragIndex == 0
             )
         }
         if (expanded) {
@@ -867,7 +1117,7 @@ private fun SubLineEditor(
             // sub-lines of the main line, not standalone lines.
             for (i in 1 until subs.size) {
                 val sub = subs[i]
-                key(i, sub.hidden) {
+                key(i, sub.hidden, activeDragIndex == i) {
                     SubLineRow(
                         index = i,
                         count = subs.size,
@@ -886,7 +1136,10 @@ private fun SubLineEditor(
                         onToggleHidden = { onToggleHidden(i, it) },
                         onMoveUp = { onMoveUp(i) },
                         onMoveDown = { onMoveDown(i) },
-                        onDelete = { onDelete(i) }
+                        onDelete = { onDelete(i) },
+                        modifier = rowModifierFor(i),
+                        dragHandleModifier = dragModifierFor(i),
+                        dragActive = activeDragIndex == i
                     )
                 }
             }
@@ -935,15 +1188,21 @@ private fun SubLineRow(
     onToggleHidden: (Boolean) -> Unit,
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    modifier: Modifier = Modifier,
+    dragHandleModifier: Modifier = Modifier,
+    dragActive: Boolean = false
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     var focused by remember { mutableStateOf(false) }
     // Sub-lines sit a touch dimmer + indented so they nest under the main line.
     val baseAlpha = if (compact) 0.28f else 0.42f
-    val container =
-        if (hidden) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = baseAlpha * 0.5f)
-        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = baseAlpha)
+    val container = when {
+        // A dragged row floats over the others → must be opaque.
+        dragActive -> lerp(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.colorScheme.primary, 0.18f)
+        hidden -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = baseAlpha * 0.5f)
+        else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = baseAlpha)
+    }
     val dim = if (hidden) 0.5f else 1f
     val badgeSize = if (compact) 20.dp else 26.dp
     val iconBtn = if (compact) 28.dp else 32.dp
@@ -953,7 +1212,10 @@ private fun SubLineRow(
     Surface(
         shape = MaterialTheme.shapes.small,
         color = container,
-        modifier = Modifier
+        border = if (dragActive)
+            androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.primary)
+        else null,
+        modifier = modifier
             .fillMaxWidth()
             .padding(start = if (compact) 22.dp else 0.dp)
     ) {
@@ -963,14 +1225,14 @@ private fun SubLineRow(
                 .padding(start = 6.dp, end = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Main row: number badge = expand/collapse. Sub row: number badge = hide.
+            // Number badge = the drag GRAB point (long-press to reorder within the
+            // block). Tapping does nothing — expand is the chevron, hide is the eye —
+            // so grabbing can't accidentally toggle expand/hide.
             Surface(
                 shape = androidx.compose.foundation.shape.CircleShape,
                 color = if (!hidden) MaterialTheme.colorScheme.primary.copy(alpha = if (expandable && expanded) 0.30f else 0.16f)
                 else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.12f),
-                onClick = { if (enabled) { if (expandable) onExpand() else onToggleHidden(!hidden) } },
-                enabled = enabled,
-                modifier = Modifier.size(badgeSize)
+                modifier = Modifier.size(badgeSize).then(dragHandleModifier)
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Text(
@@ -1115,30 +1377,37 @@ private fun CycleLineRow(
     canDuplicate: Boolean,
     enabled: Boolean,
     dragHandleModifier: Modifier = Modifier,
-    dragActive: Boolean = false
+    dragActive: Boolean = false,
+    demoteTargetValid: Boolean? = null,
+    dragInvalid: Boolean = false
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     // When this field is focused, let a long line wrap onto multiple lines so the
     // whole thing is visible while typing; collapse back to one line on blur.
     var focused by remember { mutableStateOf(false) }
     val container = when {
-        // The dragged row floats over the others, so it MUST be opaque or the rows
-        // behind bleed through (tester-reported). Solid primary-tinted surface.
+        // Dragged row hovering an INVALID demote target → red-ish so the user sees
+        // it won't fit. Valid dragged → opaque primary (floats over others).
+        dragActive && dragInvalid -> lerp(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.colorScheme.error, 0.22f)
         dragActive -> lerp(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.colorScheme.primary, 0.18f)
+        // A demote target: green-tint "nest here" when it fits, red when it won't.
+        demoteTargetValid == true -> lerp(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.colorScheme.primary, 0.24f)
+        demoteTargetValid == false -> lerp(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.colorScheme.error, 0.16f)
         isActive -> MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
         !lineEnabled -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
         else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+    }
+    val borderColor = when {
+        demoteTargetValid == false || (dragActive && dragInvalid) -> MaterialTheme.colorScheme.error
+        isActive || dragActive || demoteTargetValid == true -> MaterialTheme.colorScheme.primary
+        else -> null
     }
     val dim = if (lineEnabled) 1f else 0.5f
     Surface(
         shape = MaterialTheme.shapes.medium,
         color = container,
-        border = if (isActive || dragActive)
-            androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.primary)
-        else null,
-        // Long-press ANYWHERE on the row (that a child doesn't claim) starts the
-        // drag — no separate grab handle.
-        modifier = Modifier.fillMaxWidth().then(dragHandleModifier)
+        border = borderColor?.let { androidx.compose.foundation.BorderStroke(1.dp, it) },
+        modifier = Modifier.fillMaxWidth()
     ) {
         Row(
             modifier = Modifier
@@ -1146,14 +1415,13 @@ private fun CycleLineRow(
                 .padding(start = 6.dp, end = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Number badge = expand/collapse the slide's sub-lines (mute moved to
-            // the eye). Brighter when expanded.
+            // Number badge = the drag GRAB point (long-press to reorder). Tapping it
+            // does NOT expand — expansion is the chevron only — so trying to grab
+            // the line can't accidentally toggle its sub-lines.
             Surface(
                 shape = androidx.compose.foundation.shape.CircleShape,
                 color = MaterialTheme.colorScheme.primary.copy(alpha = if (expanded) 0.32f else 0.18f),
-                onClick = { if (enabled) onExpand() },
-                enabled = enabled,
-                modifier = Modifier.size(28.dp)
+                modifier = Modifier.size(28.dp).then(dragHandleModifier)
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Text(
