@@ -3329,8 +3329,31 @@ class VrcaViewModel(
         cycleLines.addAll(lines)
         cycleLineEnabled.clear()
         syncCycleEnabledSize()
+        // Heal any historically-corrupted line whose MAIN sub-line is hidden (a
+        // pinned<->cycle move used to carry the hidden flag onto sub 0, so the line
+        // decoded as blank → uncounted + non-sending while still showing its text).
+        // Re-persist the cleaned form so the fix sticks across restarts.
+        if (repairCycleMainVisibility()) persistCycleLinesPreserve()
         recentCyclePicks.clear()
         rebuildCombinedPreviewOnly()
+    }
+
+    /** The MAIN line (sub 0) of a cycle slide must never be sub-level HIDDEN — its
+     *  visibility is governed by the line's mute (cycleLineEnabled), not the sub
+     *  hidden flag (which the editor never exposes for sub 0). Force sub 0 visible on
+     *  every slide; returns true if anything was repaired. Cheap no-op normally. */
+    private fun repairCycleMainVisibility(): Boolean {
+        var changed = false
+        for (i in cycleLines.indices) {
+            val subs = SubLineCodec.decode(cycleLines[i])
+            if (subs.isNotEmpty() && subs[0].hidden) {
+                val fixed = subs.toMutableList()
+                fixed[0] = fixed[0].copy(hidden = false)
+                cycleLines[i] = SubLineCodec.encode(fixed)
+                changed = true
+            }
+        }
+        return changed
     }
 
     /** Apply a persisted CSV of per-line "1"/"0" mute flags (local restore). */
@@ -3344,6 +3367,9 @@ class VrcaViewModel(
     }
 
     private fun persistCycleLinesPreserve() {
+        // Self-heal sub-0 visibility on every mutation's output so no drag op can ever
+        // persist a hidden main line (see repairCycleMainVisibility).
+        repairCycleMainVisibility()
         val joined = cycleLines.take(MAX_CYCLE_LINES).joinToString("\n")
         viewModelScope.launch { userPreferencesRepository.saveCycleMessages(joined) }
         persistCycleLineEnabled()
@@ -3548,6 +3574,8 @@ class VrcaViewModel(
         val pinned = pinnedSubLines().filter { it.text.isNotBlank() }.toMutableList()
         val insertAt = if (at < 0) pinned.size else at.coerceIn(0, pinned.size)
         pinned.addAll(insertAt, moving)
+        // Pinned's main line (row 0) has no eye — it must never be sub-level hidden.
+        if (pinned.isNotEmpty()) pinned[0] = pinned[0].copy(hidden = false)
         updateAfkText(SubLineCodec.encode(pinned.take(SubLineCodec.MAX_SUB_LINES)))
         cycleLines.removeAt(slide)
         if (slide in cycleLineEnabled.indices) cycleLineEnabled.removeAt(slide)
@@ -3573,6 +3601,8 @@ class VrcaViewModel(
         val pinned = pinnedSubLines().filter { it.text.isNotBlank() }.toMutableList()
         val insertAt = if (at < 0) pinned.size else at.coerceIn(0, pinned.size)
         pinned.add(insertAt, moved)
+        // Pinned's main line (row 0) has no eye — it must never be sub-level hidden.
+        if (pinned.isNotEmpty()) pinned[0] = pinned[0].copy(hidden = false)
         updateAfkText(SubLineCodec.encode(pinned.take(SubLineCodec.MAX_SUB_LINES)))
         recentCyclePicks.clear()
         persistCycleLinesPreserve()
@@ -3591,8 +3621,9 @@ class VrcaViewModel(
         if (psubs.isEmpty()) psubs.add(ChatboxSubLine("", false))
         updateAfkText(SubLineCodec.encode(psubs))
         val insertAt = if (at < 0) cycleLines.size else at.coerceIn(0, cycleLines.size)
-        cycleLines.add(insertAt, SubLineCodec.encode(listOf(moved)))
-        if (insertAt <= cycleLineEnabled.size) cycleLineEnabled.add(insertAt, true)
+        // Hidden pinned row → visible-but-MUTED cycle line (sub 0 never hidden).
+        cycleLines.add(insertAt, SubLineCodec.encode(listOf(moved.copy(hidden = false))))
+        if (insertAt <= cycleLineEnabled.size) cycleLineEnabled.add(insertAt, !moved.hidden)
         syncCycleEnabledSize()
         recentCyclePicks.clear()
         persistCycleLinesPreserve()
@@ -3611,8 +3642,11 @@ class VrcaViewModel(
         if (subs.isEmpty()) subs.add(ChatboxSubLine("", false))
         cycleLines[slide] = SubLineCodec.encode(subs)
         syncCycleEnabledSize()
-        cycleLines.add(slide + 1, SubLineCodec.encode(listOf(moved)))
-        cycleLineEnabled.add(slide + 1, true)
+        // A standalone cycle line's visibility is its MUTE, not the sub hidden flag —
+        // so a hidden sub promotes to a visible-but-MUTED line (intent preserved,
+        // sub 0 never hidden → the line still decodes/counts correctly).
+        cycleLines.add(slide + 1, SubLineCodec.encode(listOf(moved.copy(hidden = false))))
+        cycleLineEnabled.add(slide + 1, !moved.hidden)
         recentCyclePicks.clear()
         persistCycleLinesPreserve()
         rebuildCombinedPreviewOnly()
