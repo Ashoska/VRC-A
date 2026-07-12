@@ -1,6 +1,7 @@
 package com.vrca.ui.screen
 
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,6 +26,7 @@ import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Loop
@@ -49,6 +51,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -59,7 +62,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -103,6 +109,49 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
     LaunchedEffect(vm.cycleLines.toList()) { syncCycleLineFieldsFromVm() }
     // Per-slide expand state (sub-lines hidden until the slide is selected).
     val cycleExpanded = remember { mutableStateMapOf<Int, Boolean>() }
+
+    // ---- Drag-to-reorder cycle lines ----
+    // UI-only until drop: the picked row (cycleDragIndex) is STABLE for the whole
+    // gesture and cycleDragOffsetY follows the finger; the actual reorder
+    // (vm.moveCycleLine) happens ONCE on release. So an interrupted drag (invalid
+    // drop, tab-away, crash) reverts for free — nothing was mutated. Other rows
+    // shift via graphicsLayer to open a gap at the computed target. Offset reads
+    // live inside graphicsLayer blocks (no per-frame recomposition).
+    var cycleDragIndex by remember { mutableStateOf<Int?>(null) }
+    val cycleDragOffsetY = remember { mutableFloatStateOf(0f) }
+    val cycleRowHeights = remember { mutableStateMapOf<Int, Int>() }
+
+    fun cycleDropTarget(origin: Int, offsetY: Float): Int {
+        val n = vm.cycleLines.size
+        if (n <= 1) return origin.coerceIn(0, n - 1)
+        var i = origin
+        if (offsetY > 0f) {
+            var acc = offsetY
+            while (i < n - 1) {
+                val h = (cycleRowHeights[i + 1] ?: cycleRowHeights[origin] ?: 0).toFloat()
+                if (h > 0f && acc > h / 2f) { acc -= h; i++ } else break
+            }
+        } else if (offsetY < 0f) {
+            var acc = offsetY
+            while (i > 0) {
+                val h = (cycleRowHeights[i - 1] ?: cycleRowHeights[origin] ?: 0).toFloat()
+                if (h > 0f && acc < -h / 2f) { acc += h; i-- } else break
+            }
+        }
+        return i
+    }
+
+    // Vertical shift (px) to apply to a NON-dragged row to open the gap.
+    fun cycleGapShift(idx: Int): Float {
+        val from = cycleDragIndex ?: return 0f
+        val to = cycleDropTarget(from, cycleDragOffsetY.floatValue)
+        val dh = (cycleRowHeights[from] ?: 0).toFloat()
+        return when {
+            from < to && idx in (from + 1)..to -> -dh   // dragging down → rows above the gap slide up
+            to < from && idx in to until from -> dh      // dragging up → rows below the gap slide down
+            else -> 0f
+        }
+    }
 
     // Pinned sub-line fields, same cursor-safe hoisted-map pattern as the cycle
     // fields above: seed from vm.pinnedSubLines(), reseed only when the stored
@@ -250,6 +299,10 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
         // Snapshot each slide's sub-lines in PAGE scope (same AnimatedVisibility-skip
         // reason as the mute flags) so editing a sub-line re-runs the card content.
         val cycleSubs: List<List<ChatboxSubLine>> = vm.cycleLines.map { SubLineCodec.decode(it) }
+        // Page-scope snapshot of which row is being dragged (changes only on
+        // pick-up/drop, so recomposing on it is cheap) — the per-frame offset is
+        // read inside graphicsLayer blocks instead.
+        val draggingIdx = cycleDragIndex
         CompactSectionCard(
             title = "Cycle",
             icon = Icons.Filled.Loop,
@@ -277,8 +330,38 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                     val lineEn = cycleEnabledFlags.getOrElse(idx) { true }
                     val subs = cycleSubs.getOrElse(idx) { listOf(ChatboxSubLine("", false)) }
                     val expanded = cycleExpanded[idx] ?: false
+                    val canDrag = vm.cycleLines.size > 1 && !isBanned
+                    val dragHandleMod = if (canDrag) Modifier.pointerInput(idx, vm.cycleLines.size) {
+                        detectDragGesturesAfterLongPress(
+                            onDragStart = { cycleDragIndex = idx; cycleDragOffsetY.floatValue = 0f },
+                            onDrag = { change, dragAmount ->
+                                change.consume()
+                                cycleDragOffsetY.floatValue += dragAmount.y
+                            },
+                            onDragEnd = {
+                                val from = cycleDragIndex
+                                if (from != null) {
+                                    val to = cycleDropTarget(from, cycleDragOffsetY.floatValue)
+                                    if (to != from) vm.moveCycleLine(from, to)
+                                }
+                                cycleDragIndex = null; cycleDragOffsetY.floatValue = 0f
+                            },
+                            onDragCancel = { cycleDragIndex = null; cycleDragOffsetY.floatValue = 0f }
+                        )
+                    } else Modifier
                     key(idx, lineEn, expanded, subs.size) {
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Column(
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier
+                                .zIndex(if (draggingIdx == idx) 1f else 0f)
+                                .graphicsLayer {
+                                    translationY =
+                                        if (cycleDragIndex == idx) cycleDragOffsetY.floatValue
+                                        else cycleGapShift(idx)
+                                    shadowElevation = if (cycleDragIndex == idx) 10f else 0f
+                                }
+                                .onSizeChanged { cycleRowHeights[idx] = it.height }
+                        ) {
                             // Main line (sub-line 0) — its number badge / chevron expands.
                             val mainField = cycleLineFields["$idx:0"]
                                 ?: TextFieldValue(subs.firstOrNull()?.text.orEmpty())
@@ -291,6 +374,8 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                                 isActive = idx == activeRaw,
                                 expanded = expanded,
                                 subCount = (subs.size - 1).coerceAtLeast(0),
+                                dragHandleModifier = dragHandleMod,
+                                dragActive = draggingIdx == idx,
                                 onExpand = { cycleExpanded[idx] = !expanded },
                                 onValueChange = { v: TextFieldValue ->
                                     cycleLineFields["$idx:0"] = v
@@ -967,13 +1052,16 @@ private fun CycleLineRow(
     onMoveDown: () -> Unit,
     onDelete: () -> Unit,
     canDuplicate: Boolean,
-    enabled: Boolean
+    enabled: Boolean,
+    dragHandleModifier: Modifier = Modifier,
+    dragActive: Boolean = false
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     // When this field is focused, let a long line wrap onto multiple lines so the
     // whole thing is visible while typing; collapse back to one line on blur.
     var focused by remember { mutableStateOf(false) }
     val container = when {
+        dragActive -> MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
         isActive -> MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
         !lineEnabled -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
         else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
@@ -982,7 +1070,7 @@ private fun CycleLineRow(
     Surface(
         shape = MaterialTheme.shapes.medium,
         color = container,
-        border = if (isActive)
+        border = if (isActive || dragActive)
             androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.primary)
         else null,
         modifier = Modifier.fillMaxWidth()
@@ -990,9 +1078,18 @@ private fun CycleLineRow(
         Row(
             modifier = Modifier
                 .heightIn(min = 44.dp)
-                .padding(start = 6.dp, end = 2.dp),
+                .padding(start = 4.dp, end = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            // Drag handle (long-press to reorder the line). Hidden when there's
+            // nothing to reorder (dragHandleModifier is empty).
+            Icon(
+                Icons.Filled.DragHandle,
+                contentDescription = "Drag to reorder line ${index + 1}",
+                modifier = dragHandleModifier.size(20.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+            )
+            Spacer(Modifier.width(2.dp))
             // Number badge = expand/collapse the slide's sub-lines (mute moved to
             // the eye). Brighter when expanded.
             Surface(
