@@ -566,16 +566,19 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                             },
                             onDragEnd = {
                                 val from = cycleDragIndex
+                                var structuralMove = false
                                 if (from != null) {
                                     val offset = cycleDragOffsetY.floatValue
                                     val cross = crossTarget
                                     val demote = cycleDemoteTarget
                                     when {
                                         // Move the whole line into Pinned (if it fits).
-                                        cross == "pinned" -> vm.moveCycleLineToPinned(from)
+                                        cross == "pinned" -> { vm.moveCycleLineToPinned(from); structuralMove = true }
                                         // Nest into another line's sub-lines (if it fits).
-                                        demote != null ->
+                                        demote != null -> {
                                             vm.demoteCycleLineInto(from, demote) // no-op if invalid → reverts
+                                            structuralMove = true
+                                        }
                                         else -> {
                                             // Reorder, unless dropped well outside → revert.
                                             val n = vm.cycleLines.size
@@ -588,13 +591,18 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                                             val outside = curTop < -outMargin || curTop > (totalH - draggedH) + outMargin
                                             if (!outside) {
                                                 val to = cycleDropTarget(from, offset)
-                                                if (to != from) vm.moveCycleLine(from, to)
+                                                if (to != from) { vm.moveCycleLine(from, to); structuralMove = true }
                                             }
                                         }
                                     }
                                 }
                                 cycleDragIndex = null; cycleDragOffsetY.floatValue = 0f
                                 cycleAutoDir.floatValue = 0f; cycleDemoteTarget = null; crossTarget = null
+                                // cycleExpanded is keyed by INDEX; any reorder/demote/cross
+                                // shifts indices, so a stale entry would leave a DIFFERENT
+                                // line showing expanded (and the moved line collapsed). Reset
+                                // it after a structural move so expand state is never stranded.
+                                if (structuralMove) { cycleExpanded.clear(); pinnedExpanded = false }
                             },
                             onDragCancel = {
                                 cycleDragIndex = null; cycleDragOffsetY.floatValue = 0f
@@ -686,7 +694,15 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                                     val sub = subs[s]
                                     val j = s - 1
                                     val subActive = subDragKeySnap == subKey && subDragIndexSnap == j
-                                    key(idx, s, sub.hidden, subActive) {
+                                    // NOTE: subActive is deliberately NOT in the key() — it flips
+                                    // true the instant a drag starts, and a key change disposes+
+                                    // recreates this row, which CANCELS the in-progress
+                                    // detectDragGesturesAfterLongPress gesture (the "can't drag
+                                    // sub-lines" bug). dragActive styling still updates because
+                                    // subActive is read from the page-scope subDragKeySnap/
+                                    // subDragIndexSnap snapshots, so the content lambda re-runs and
+                                    // the row recomposes IN PLACE (key stable → gesture survives).
+                                    key(idx, s, sub.hidden) {
                                         val subField = cycleLineFields["$idx:$s"] ?: TextFieldValue(sub.text)
                                         SubLineRow(
                                             index = s,
@@ -1087,7 +1103,11 @@ private fun SubLineEditor(
         val main = subs.firstOrNull() ?: ChatboxSubLine("", false)
         // key on hidden so the main row repaints the instant its eye toggles (same
         // AnimatedVisibility-skip fix as the sub-rows / cycle mute rows).
-        key(main.hidden, subs.size, activeDragIndex == 0) {
+        // activeDragIndex is deliberately NOT in the key — a key change on drag start
+        // disposes+recreates the row and cancels the long-press-drag gesture (the
+        // "can't drag pinned rows" bug). dragActive styling still updates because
+        // activeDragIndex is derived from the page-scope subDragKeySnap snapshot.
+        key(main.hidden, subs.size) {
             SubLineRow(
                 index = 0,
                 count = subs.size,
@@ -1117,7 +1137,9 @@ private fun SubLineEditor(
             // sub-lines of the main line, not standalone lines.
             for (i in 1 until subs.size) {
                 val sub = subs[i]
-                key(i, sub.hidden, activeDragIndex == i) {
+                // activeDragIndex NOT in the key — see the main-row note above (a key
+                // change on drag start would cancel the in-progress gesture).
+                key(i, sub.hidden) {
                     SubLineRow(
                         index = i,
                         count = subs.size,
