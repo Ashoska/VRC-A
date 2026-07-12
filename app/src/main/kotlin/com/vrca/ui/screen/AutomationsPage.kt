@@ -132,6 +132,13 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
     var cycleDragIndex by remember { mutableStateOf<Int?>(null) }
     val cycleDragOffsetY = remember { mutableFloatStateOf(0f) }
     val cycleRowHeights = remember { mutableStateMapOf<Int, Int>() }
+    // The dragged row's TARGET window-top = its window-top at grab time + pure finger
+    // travel (dragVisualTop). The float is `dragVisualTop - liveRowTop`, so ANY layout
+    // shift under the row (e.g. the Pinned card auto-expanding ABOVE Cycle during a
+    // cross-drag, which pushes Cycle down) is compensated and the pill keeps tracking
+    // the finger. The drop-math offset (cycleDragOffsetY / subDragOffsetY, which folds
+    // auto-scroll) is kept separate. Only one drag runs at a time → one shared value.
+    val dragVisualTop = remember { mutableFloatStateOf(0f) }
     // When the dragged line hovers over ANOTHER line's CENTER, that's a DEMOTE
     // (nest it as a sub-line of the target) instead of a reorder. null = reorder.
     var cycleDemoteTarget by remember { mutableStateOf<Int?>(null) }
@@ -314,10 +321,14 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
             .pointerInput(key, index, count) {
             val origin = if (key == "pinned") "pinned" else "cycle"
             detectDragGesturesAfterLongPress(
-                onDragStart = { subDragKey = key; subDragIndex = index; subDragOffsetY.floatValue = 0f },
+                onDragStart = {
+                    subDragKey = key; subDragIndex = index; subDragOffsetY.floatValue = 0f
+                    dragVisualTop.floatValue = subRowWindowTops["$key#$index"] ?: subHandleTops["$key#$index"] ?: 0f
+                },
                 onDrag = { c, d ->
                     c.consume()
                     subDragOffsetY.floatValue += d.y
+                    dragVisualTop.floatValue += d.y
                     // Finger window-Y from the GRAB HANDLE's own position (pos is relative
                     // to it) — falls back to the row top. Fixes cycle sub-rows whose row
                     // top wasn't landing (they sit inside a graphicsLayer'd Column), which
@@ -384,7 +395,11 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
     fun subRowMod(key: String, index: Int, count: Int): Modifier = Modifier
         .zIndex(if (subDragKey == key && subDragIndex == index) 1f else 0f)
         .graphicsLayer {
-            translationY = if (subDragKey == key && subDragIndex == index) subDragOffsetY.floatValue else 0f
+            // See dragVisualTop: float from the LIVE layout top so a cross-drag's
+            // Pinned auto-expand can't make the pill jump off the finger.
+            translationY = if (subDragKey == key && subDragIndex == index)
+                dragVisualTop.floatValue - (subRowWindowTops["$key#$index"] ?: dragVisualTop.floatValue)
+            else 0f
             shadowElevation = if (subDragKey == key && subDragIndex == index) 8f else 0f
         }
         .drawBehind {
@@ -637,10 +652,14 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                     val canDrag = vm.cycleLines.size > 1 && !isBanned
                     val dragHandleMod = if (canDrag) Modifier.pointerInput(idx, vm.cycleLines.size) {
                         detectDragGesturesAfterLongPress(
-                            onDragStart = { cycleDragIndex = idx; cycleDragOffsetY.floatValue = 0f },
+                            onDragStart = {
+                                cycleDragIndex = idx; cycleDragOffsetY.floatValue = 0f
+                                dragVisualTop.floatValue = cycleRowWindowTops[idx] ?: 0f
+                            },
                             onDrag = { change, dragAmount ->
                                 change.consume()
                                 cycleDragOffsetY.floatValue += dragAmount.y
+                                dragVisualTop.floatValue += dragAmount.y
                                 val fingerY = (cycleRowWindowTops[idx] ?: 0f) + change.position.y
                                 dragFingerY.floatValue = fingerY
                                 // Over the Pinned section? → cross-section move.
@@ -711,7 +730,12 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                                     // Only the dragged row translates (follows the
                                     // finger); the rest stay put and a bright bar
                                     // shows the drop position (drawBehind below).
-                                    translationY = if (cycleDragIndex == idx) cycleDragOffsetY.floatValue else 0f
+                                    // Float = target window-top (finger travel) minus the
+                                    // LIVE layout top, so a layout shift under the row (Pinned
+                                    // auto-expand during a cross-drag) can't make the pill jump.
+                                    translationY = if (cycleDragIndex == idx)
+                                        dragVisualTop.floatValue - (cycleRowWindowTops[idx] ?: dragVisualTop.floatValue)
+                                    else 0f
                                     shadowElevation = if (cycleDragIndex == idx) 10f else 0f
                                 }
                                 .drawBehind {
