@@ -82,19 +82,27 @@ private const val VRC_CHAR_BUDGET = 144
 
 @Composable
 internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
-    val cycleLineFields = remember { mutableStateMapOf<Int, TextFieldValue>() }
+    // Cycle fields are keyed by "slide:sub" now that each slide can hold up to 3
+    // sub-lines (sub 0 is the main editor line). Seeded from the decoded sub-lines.
+    val cycleLineFields = remember { mutableStateMapOf<String, TextFieldValue>() }
 
     fun syncCycleLineFieldsFromVm() {
-        val valid = vm.cycleLines.indices.toSet()
-        cycleLineFields.keys.toList().forEach { if (it !in valid) cycleLineFields.remove(it) }
-        vm.cycleLines.forEachIndexed { idx, text ->
-            val existing = cycleLineFields[idx]
-            if (existing == null || existing.text != text) cycleLineFields[idx] = TextFieldValue(text)
+        val valid = HashSet<String>()
+        vm.cycleLines.forEachIndexed { slide, raw ->
+            SubLineCodec.decode(raw).forEachIndexed { sub, s ->
+                val k = "$slide:$sub"
+                valid.add(k)
+                val existing = cycleLineFields[k]
+                if (existing == null || existing.text != s.text) cycleLineFields[k] = TextFieldValue(s.text)
+            }
         }
+        cycleLineFields.keys.toList().forEach { if (it !in valid) cycleLineFields.remove(it) }
     }
 
     LaunchedEffect(vm.cycleLines.size) { syncCycleLineFieldsFromVm() }
     LaunchedEffect(vm.cycleLines.toList()) { syncCycleLineFieldsFromVm() }
+    // Per-slide expand state (sub-lines hidden until the slide is selected).
+    val cycleExpanded = remember { mutableStateMapOf<Int, Boolean>() }
 
     // Pinned sub-line fields, same cursor-safe hoisted-map pattern as the cycle
     // fields above: seed from vm.pinnedSubLines(), reseed only when the stored
@@ -239,16 +247,19 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
         // summary updated, the rows did not). Each row gets a plain Boolean so
         // its value param actually differs and it can't be skipped.
         val cycleEnabledFlags: List<Boolean> = vm.cycleLineEnabled.toList()
+        // Snapshot each slide's sub-lines in PAGE scope (same AnimatedVisibility-skip
+        // reason as the mute flags) so editing a sub-line re-runs the card content.
+        val cycleSubs: List<List<ChatboxSubLine>> = vm.cycleLines.map { SubLineCodec.decode(it) }
         CompactSectionCard(
             title = "Cycle",
             icon = Icons.Filled.Loop,
             summary = buildString {
-                val live = vm.cycleLines.count { it.isNotBlank() }
+                val live = cycleSubs.count { subs -> subs.any { !it.hidden && it.text.isNotBlank() } }
                 val hidden = vm.cycleLineEnabled.count { !it }
                 append("$live lines · ${vm.cycleIntervalSeconds}s")
                 if (hidden > 0) append(" · $hidden hidden")
                 if (vm.cycleShuffle) append(" · shuffle")
-                if (cycleNow.isNotBlank()) append(" · now: “$cycleNow”")
+                if (cycleNow.isNotBlank()) append(" · now: “${cycleNow.replace("\n", " / ")}”")
             },
             trailing = {
                 KitStatusChip(
@@ -264,28 +275,94 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 vm.cycleLines.forEachIndexed { idx, _ ->
                     val lineEn = cycleEnabledFlags.getOrElse(idx) { true }
-                    key(idx, lineEn) {
-                        val fieldValue =
-                            cycleLineFields[idx] ?: TextFieldValue(vm.cycleLines.getOrNull(idx).orEmpty())
-                        CycleLineRow(
-                            index = idx,
-                            count = vm.cycleLines.size,
-                            value = fieldValue,
-                            lineEnabled = lineEn,
-                            resolvedLength = vm.resolveTokens(fieldValue.text).length,
-                            isActive = idx == activeRaw,
-                            onValueChange = { v: TextFieldValue ->
-                                cycleLineFields[idx] = v
-                                vm.updateCycleLine(idx, v.text)
-                            },
-                            onToggleEnabled = { vm.setCycleLineEnabled(idx, it) },
-                            onDuplicate = { vm.duplicateCycleLine(idx) },
-                            onMoveUp = { vm.moveCycleLine(idx, idx - 1) },
-                            onMoveDown = { vm.moveCycleLine(idx, idx + 1) },
-                            onDelete = { vm.removeCycleLine(idx) },
-                            canDuplicate = vm.cycleLines.size < MAX_CYCLE_LINES,
-                            enabled = !isBanned
-                        )
+                    val subs = cycleSubs.getOrElse(idx) { listOf(ChatboxSubLine("", false)) }
+                    val expanded = cycleExpanded[idx] ?: false
+                    key(idx, lineEn, expanded, subs.size) {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            // Main line (sub-line 0) — its number badge / chevron expands.
+                            val mainField = cycleLineFields["$idx:0"]
+                                ?: TextFieldValue(subs.firstOrNull()?.text.orEmpty())
+                            CycleLineRow(
+                                index = idx,
+                                count = vm.cycleLines.size,
+                                value = mainField,
+                                lineEnabled = lineEn,
+                                resolvedLength = vm.resolveTokens(mainField.text).length,
+                                isActive = idx == activeRaw,
+                                expanded = expanded,
+                                subCount = (subs.size - 1).coerceAtLeast(0),
+                                onExpand = { cycleExpanded[idx] = !expanded },
+                                onValueChange = { v: TextFieldValue ->
+                                    cycleLineFields["$idx:0"] = v
+                                    vm.setCycleSubLineText(idx, 0, v.text)
+                                },
+                                onToggleEnabled = { vm.setCycleLineEnabled(idx, it) },
+                                onDuplicate = { vm.duplicateCycleLine(idx) },
+                                onMoveUp = { vm.moveCycleLine(idx, idx - 1) },
+                                onMoveDown = { vm.moveCycleLine(idx, idx + 1) },
+                                onDelete = { vm.removeCycleLine(idx) },
+                                canDuplicate = vm.cycleLines.size < MAX_CYCLE_LINES,
+                                enabled = !isBanned
+                            )
+                            if (expanded) {
+                                for (s in 1 until subs.size) {
+                                    val sub = subs[s]
+                                    key(idx, s, sub.hidden) {
+                                        val subField = cycleLineFields["$idx:$s"] ?: TextFieldValue(sub.text)
+                                        SubLineRow(
+                                            index = s,
+                                            count = subs.size,
+                                            rowLabel = "Row",
+                                            compact = true,
+                                            value = subField,
+                                            hidden = sub.hidden,
+                                            resolvedLength = vm.resolveTokens(subField.text).length,
+                                            enabled = !isBanned,
+                                            expandable = false,
+                                            expanded = false,
+                                            subCount = 0,
+                                            onExpand = {},
+                                            showOverflow = true,
+                                            onValueChange = { v ->
+                                                cycleLineFields["$idx:$s"] = v
+                                                vm.setCycleSubLineText(idx, s, v.text)
+                                            },
+                                            onToggleHidden = { vm.setCycleSubLineHidden(idx, s, it) },
+                                            onMoveUp = { vm.moveCycleSubLine(idx, s, s - 1) },
+                                            onMoveDown = { vm.moveCycleSubLine(idx, s, s + 1) },
+                                            onDelete = { vm.removeCycleSubLine(idx, s) }
+                                        )
+                                    }
+                                }
+                                Row(
+                                    Modifier.padding(start = 22.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    if (subs.size < SubLineCodec.MAX_SUB_LINES) {
+                                        TextButton(
+                                            onClick = { vm.addCycleSubLine(idx) },
+                                            enabled = !isBanned,
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                        ) {
+                                            Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(Modifier.width(4.dp))
+                                            Text("Add row", style = MaterialTheme.typography.labelMedium)
+                                        }
+                                        Spacer(Modifier.width(8.dp))
+                                    }
+                                    val visibleRows = subs.count { !it.hidden && it.text.isNotBlank() }
+                                    val total = vm.resolveTokens(
+                                        SubLineCodec.renderVisible(vm.cycleLines.getOrElse(idx) { "" })
+                                    ).length
+                                    Text(
+                                        if (visibleRows > 1) "up to 3 rows · $total/$VRC_CHAR_BUDGET total"
+                                        else "up to 3 chatbox lines",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -786,21 +863,20 @@ private fun SubLineRow(
                 Spacer(Modifier.width(6.dp))
                 CharBudgetMeter(resolvedLength)
             }
-            // Hide toggle (eye) — sub-lines only; the main line is the line itself.
-            if (!expandable) {
-                IconButton(
-                    onClick = { onToggleHidden(!hidden) },
-                    enabled = enabled,
-                    modifier = Modifier.size(iconBtn)
-                ) {
-                    Icon(
-                        if (!hidden) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
-                        contentDescription = if (!hidden) "Hide row ${index + 1}" else "Show row ${index + 1}",
-                        modifier = Modifier.size(iconSize),
-                        tint = if (!hidden) MaterialTheme.colorScheme.onSurfaceVariant
-                        else MaterialTheme.colorScheme.primary
-                    )
-                }
+            // Hide toggle (eye) — on every row, including the main line, so a user
+            // can hide the main row and show only a sub-line.
+            IconButton(
+                onClick = { onToggleHidden(!hidden) },
+                enabled = enabled,
+                modifier = Modifier.size(iconBtn)
+            ) {
+                Icon(
+                    if (!hidden) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
+                    contentDescription = if (!hidden) "Hide row ${index + 1}" else "Show row ${index + 1}",
+                    modifier = Modifier.size(iconSize),
+                    tint = if (!hidden) MaterialTheme.colorScheme.onSurfaceVariant
+                    else MaterialTheme.colorScheme.primary
+                )
             }
             // Main row: overflow only once there are sub-lines to reorder/delete.
             if (showOverflow) {
@@ -867,11 +943,11 @@ private fun SubLineRow(
 }
 
 /**
- * One compact cycle line, restyled for the revamp: a slim bordered field with an
- * inline tappable number badge (mutes the line — dims when off), the text field,
- * an always-on per-line char meter, and a single overflow menu carrying the new
- * controls (move up/down, duplicate, delete). The line currently being sent is
- * highlighted live ([isActive]). Tokens like {time}/{song} substitute at send time.
+ * One cycle line (the MAIN line of a slide, editing sub-line 0). The number badge
+ * / trailing chevron expands the slide into its nested sub-lines; the eye mutes
+ * the whole slide (dims when off); the overflow menu moves/duplicates/deletes the
+ * SLIDE. The line currently being sent is highlighted live ([isActive]). Tokens
+ * like {time}/{song} substitute at send time.
  */
 @Composable
 private fun CycleLineRow(
@@ -881,6 +957,9 @@ private fun CycleLineRow(
     lineEnabled: Boolean,
     resolvedLength: Int,
     isActive: Boolean,
+    expanded: Boolean,
+    subCount: Int,
+    onExpand: () -> Unit,
     onValueChange: (TextFieldValue) -> Unit,
     onToggleEnabled: (Boolean) -> Unit,
     onDuplicate: () -> Unit,
@@ -914,12 +993,12 @@ private fun CycleLineRow(
                 .padding(start = 6.dp, end = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Number badge doubles as the mute toggle (most-used per-line action).
+            // Number badge = expand/collapse the slide's sub-lines (mute moved to
+            // the eye). Brighter when expanded.
             Surface(
                 shape = androidx.compose.foundation.shape.CircleShape,
-                color = if (lineEnabled) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
-                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.12f),
-                onClick = { if (enabled) onToggleEnabled(!lineEnabled) },
+                color = MaterialTheme.colorScheme.primary.copy(alpha = if (expanded) 0.32f else 0.18f),
+                onClick = { if (enabled) onExpand() },
                 enabled = enabled,
                 modifier = Modifier.size(28.dp)
             ) {
@@ -927,8 +1006,7 @@ private fun CycleLineRow(
                     Text(
                         "${index + 1}",
                         style = MaterialTheme.typography.labelMedium,
-                        color = if (lineEnabled) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.primary
                     )
                 }
             }
@@ -1014,6 +1092,26 @@ private fun CycleLineRow(
                         onClick = { menuOpen = false; onDelete() }
                     )
                 }
+            }
+            // Expand chevron (+ "+N" when collapsed with sub-lines).
+            if (!expanded && subCount > 0) {
+                Text(
+                    "+$subCount",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+            IconButton(
+                onClick = onExpand,
+                enabled = enabled,
+                modifier = Modifier.size(34.dp)
+            ) {
+                Icon(
+                    if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                    contentDescription = if (expanded) "Hide sub-lines" else "Add / edit sub-lines",
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
             }
         }
     }
