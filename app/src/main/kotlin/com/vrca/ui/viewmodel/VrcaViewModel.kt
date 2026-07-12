@@ -3454,6 +3454,55 @@ class VrcaViewModel(
         rebuildCombinedPreviewOnly()
     }
 
+    // ---- Cycle sub-lines (each slide up to 3 rows, encoded into cycleLines[slide]) ----
+    // Mirrors the Pinned sub-line ops; rides the existing cycleLines/cycleLinesText
+    // sync + presets (no new Firestore fields). The main editor line is sub-line 0.
+    fun cycleSlideSubLines(slide: Int): List<ChatboxSubLine> =
+        SubLineCodec.decode(cycleLines.getOrElse(slide) { "" })
+
+    private fun setCycleSlideSubLines(slide: Int, subs: List<ChatboxSubLine>) {
+        if (slide !in cycleLines.indices) return
+        cycleLines[slide] = SubLineCodec.encode(subs.take(SubLineCodec.MAX_SUB_LINES))
+        persistCycleLinesPreserve()
+        rebuildCombinedPreviewOnly()
+    }
+
+    fun setCycleSubLineText(slide: Int, sub: Int, text: String) {
+        val subs = cycleSlideSubLines(slide).toMutableList()
+        if (sub !in subs.indices) return
+        subs[sub] = subs[sub].copy(text = text)
+        setCycleSlideSubLines(slide, subs)
+    }
+
+    fun setCycleSubLineHidden(slide: Int, sub: Int, hidden: Boolean) {
+        val subs = cycleSlideSubLines(slide).toMutableList()
+        if (sub !in subs.indices) return
+        subs[sub] = subs[sub].copy(hidden = hidden)
+        setCycleSlideSubLines(slide, subs)
+    }
+
+    fun addCycleSubLine(slide: Int) {
+        val subs = cycleSlideSubLines(slide).toMutableList()
+        if (subs.size >= SubLineCodec.MAX_SUB_LINES) return
+        subs.add(ChatboxSubLine("", false))
+        setCycleSlideSubLines(slide, subs)
+    }
+
+    fun removeCycleSubLine(slide: Int, sub: Int) {
+        val subs = cycleSlideSubLines(slide).toMutableList()
+        if (sub !in subs.indices) return
+        subs.removeAt(sub)
+        if (subs.isEmpty()) subs.add(ChatboxSubLine("", false))
+        setCycleSlideSubLines(slide, subs)
+    }
+
+    fun moveCycleSubLine(slide: Int, from: Int, to: Int) {
+        val subs = cycleSlideSubLines(slide).toMutableList()
+        if (from !in subs.indices || to !in subs.indices || from == to) return
+        subs.add(to, subs.removeAt(from))
+        setCycleSlideSubLines(slide, subs)
+    }
+
     /** Duplicate a line directly below it (carries its mute state). */
     fun duplicateCycleLine(index: Int) {
         if (isBanned) return
@@ -3522,8 +3571,11 @@ class VrcaViewModel(
         val out = ArrayList<String>(cycleLines.size)
         for (i in cycleLines.indices) {
             if (out.size >= MAX_CYCLE_LINES) break
-            val t = cycleLines[i].trim()
-            if (t.isNotEmpty() && cycleLineEnabled.getOrElse(i) { true }) out.add(t)
+            // A slide may hold up to 3 sub-lines encoded in cycleLines[i]; render
+            // only its visible rows (joined by real newlines = separate chatbox
+            // rows). Muted slides + slides with no visible content are skipped.
+            val rendered = SubLineCodec.renderVisible(cycleLines[i])
+            if (rendered.isNotEmpty() && cycleLineEnabled.getOrElse(i) { true }) out.add(rendered)
         }
         return out
     }
@@ -3620,21 +3672,25 @@ class VrcaViewModel(
 
     fun getCyclePresetPreview(slot: Int): String {
         val i = slot.coerceIn(1, 5) - 1
-        val firstLine = cyclePresetMessages[i].lines().firstOrNull { it.isNotBlank() }?.trim().orEmpty()
-        return firstLine
+        // Slides may be sub-line encoded; show the first slide's visible rows.
+        val firstSlide = cyclePresetMessages[i].split("\n").firstOrNull { SubLineCodec.hasVisible(it) }.orEmpty()
+        return SubLineCodec.renderVisible(firstSlide).replace("\n", "  /  ").trim()
     }
 
     /** Full multi-line cycle preset content — the Automations preset-chip
      *  long-press peek needs more than the first line. */
     fun getCyclePresetFull(slot: Int): String {
         val i = slot.coerceIn(1, 5) - 1
-        return cyclePresetMessages[i]
+        return cyclePresetMessages[i].split("\n")
+            .map { SubLineCodec.renderVisible(it).replace("\n", "  /  ") }
+            .filter { it.isNotBlank() }
+            .joinToString("\n")
     }
 
     /** Short metadata line for a cycle preset ("5 lines · 10s · shuffle"). */
     fun getCyclePresetSubtitle(slot: Int): String {
         val i = slot.coerceIn(1, 5) - 1
-        val lines = cyclePresetMessages.getOrElse(i) { "" }.lines().count { it.isNotBlank() }
+        val lines = cyclePresetMessages.getOrElse(i) { "" }.split("\n").count { SubLineCodec.hasVisible(it) }
         val interval = cyclePresetIntervals.getOrElse(i) { 10 }
         val shuf = cyclePresetShuffle.getOrElse(i) { false }
         return buildString {
@@ -3654,8 +3710,8 @@ class VrcaViewModel(
         if (!cycleEnabled) return -1
         val raw = ArrayList<Int>(cycleLines.size)
         for (i in cycleLines.indices) {
-            val t = cycleLines[i].trim()
-            if (t.isNotEmpty() && cycleLineEnabled.getOrElse(i) { true }) raw.add(i)
+            // Match activeCycleLines exactly (visible rows, not raw markers).
+            if (SubLineCodec.hasVisible(cycleLines[i]) && cycleLineEnabled.getOrElse(i) { true }) raw.add(i)
         }
         if (raw.isEmpty()) return -1
         return raw[cycleIndex % raw.size]
