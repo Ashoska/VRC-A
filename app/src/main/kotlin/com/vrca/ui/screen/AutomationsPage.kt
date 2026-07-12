@@ -5,6 +5,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -24,6 +25,8 @@ import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Loop
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PushPin
@@ -108,6 +111,8 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
         }
     }
     LaunchedEffect(vm.afkMessage) { syncPinnedFieldsFromVm() }
+    // Sub-lines stay hidden until the user selects the line (taps its number/chevron).
+    var pinnedExpanded by remember { mutableStateOf(false) }
 
     // Preset peek dialog state — set by long-pressing a preset chip.
     var peek by remember { mutableStateOf<PresetPeek?>(null) }
@@ -145,15 +150,16 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                 )
             }
         ) {
-            // Pinned can be up to 3 stacked chatbox rows — each row is its own
-            // sub-line (hide / reorder / delete), a compact take on the cycle rows.
-            KitSectionHeader(title = "Message rows", trailingValue = "up to 3 chatbox lines")
+            // The main line shows normally; tapping its number/chevron reveals up
+            // to 2 small nested sub-lines (each its own chatbox row).
             SubLineEditor(
                 subs = pinnedSubs,
                 fields = pinnedFields,
                 rowLabel = "Row",
                 resolvedLengthOf = { vm.resolveTokens(it).length },
                 enabled = !isBanned,
+                expanded = pinnedExpanded,
+                onToggleExpanded = { pinnedExpanded = !pinnedExpanded },
                 onTextChanged = { i, t -> vm.setPinnedSubLineText(i, t) },
                 onToggleHidden = { i, h -> vm.setPinnedSubLineHidden(i, h) },
                 onMoveUp = { i -> vm.movePinnedSubLine(i, i - 1) },
@@ -161,8 +167,12 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                 onDelete = { i -> vm.removePinnedSubLine(i) },
                 onAdd = { vm.addPinnedSubLine() }
             )
-            Spacer(Modifier.height(2.dp))
-            CharBudgetMeter(vm.resolveTokens(com.vrca.app.SubLineCodec.renderVisible(vm.afkMessage)).length)
+            // Combined total only matters once there's more than one visible row —
+            // for a single row the per-row meter already IS the total.
+            if (com.vrca.app.SubLineCodec.visibleRowCount(vm.afkMessage) > 1) {
+                Spacer(Modifier.height(2.dp))
+                CharBudgetMeter(vm.resolveTokens(com.vrca.app.SubLineCodec.renderVisible(vm.afkMessage)).length)
+            }
 
             TokensHint()
 
@@ -586,9 +596,9 @@ private fun PresetChip(
 
 /* =========================
    Sub-line editor (shared by Pinned rows + Cycle-slide rows)
-   Up to 3 chatbox rows per block — a compact take on the cycle-line row: number
-   badge doubles as the hide toggle, an always-on char meter, an overflow menu
-   (move up / move down / delete), plus an "Add row" button.
+   The MAIN line (row 0) shows normally; tapping its number badge / chevron
+   reveals up to 2 small nested sub-lines (each its own chatbox row) with hide /
+   reorder / delete, plus "Add row" and the "up to 3 chatbox lines" caption.
    ========================= */
 @Composable
 private fun SubLineEditor(
@@ -597,6 +607,8 @@ private fun SubLineEditor(
     rowLabel: String,
     resolvedLengthOf: (String) -> Int,
     enabled: Boolean,
+    expanded: Boolean,
+    onToggleExpanded: () -> Unit,
     onTextChanged: (Int, String) -> Unit,
     onToggleHidden: (Int, Boolean) -> Unit,
     onMoveUp: (Int) -> Unit,
@@ -605,30 +617,77 @@ private fun SubLineEditor(
     onAdd: () -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        subs.forEachIndexed { i, sub ->
-            key(i, sub.hidden) {
-                val fieldValue = fields[i] ?: TextFieldValue(sub.text)
-                SubLineRow(
-                    index = i,
-                    count = subs.size,
-                    rowLabel = rowLabel,
-                    value = fieldValue,
-                    hidden = sub.hidden,
-                    resolvedLength = resolvedLengthOf(fieldValue.text),
-                    enabled = enabled,
-                    onValueChange = { v -> fields[i] = v; onTextChanged(i, v.text) },
-                    onToggleHidden = { onToggleHidden(i, it) },
-                    onMoveUp = { onMoveUp(i) },
-                    onMoveDown = { onMoveDown(i) },
-                    onDelete = { onDelete(i) }
-                )
+        // Main line — always visible, full size; number/chevron expand the rest.
+        val main = subs.firstOrNull() ?: ChatboxSubLine("", false)
+        SubLineRow(
+            index = 0,
+            count = subs.size,
+            rowLabel = rowLabel,
+            compact = false,
+            value = fields[0] ?: TextFieldValue(main.text),
+            hidden = main.hidden,
+            resolvedLength = resolvedLengthOf(fields[0]?.text ?: main.text),
+            enabled = enabled,
+            expandable = true,
+            expanded = expanded,
+            subCount = (subs.size - 1).coerceAtLeast(0),
+            onExpand = onToggleExpanded,
+            showOverflow = expanded && subs.size > 1,
+            onValueChange = { v -> fields[0] = v; onTextChanged(0, v.text) },
+            onToggleHidden = { onToggleHidden(0, it) },
+            onMoveUp = {},
+            onMoveDown = { onMoveDown(0) },
+            onDelete = { onDelete(0) }
+        )
+        if (expanded) {
+            // Nested sub-lines (index 1..) — small + indented so they read as
+            // sub-lines of the main line, not standalone lines.
+            for (i in 1 until subs.size) {
+                val sub = subs[i]
+                key(i, sub.hidden) {
+                    SubLineRow(
+                        index = i,
+                        count = subs.size,
+                        rowLabel = rowLabel,
+                        compact = true,
+                        value = fields[i] ?: TextFieldValue(sub.text),
+                        hidden = sub.hidden,
+                        resolvedLength = resolvedLengthOf(fields[i]?.text ?: sub.text),
+                        enabled = enabled,
+                        expandable = false,
+                        expanded = false,
+                        subCount = 0,
+                        onExpand = {},
+                        showOverflow = true,
+                        onValueChange = { v -> fields[i] = v; onTextChanged(i, v.text) },
+                        onToggleHidden = { onToggleHidden(i, it) },
+                        onMoveUp = { onMoveUp(i) },
+                        onMoveDown = { onMoveDown(i) },
+                        onDelete = { onDelete(i) }
+                    )
+                }
             }
-        }
-        if (subs.size < SubLineCodec.MAX_SUB_LINES) {
-            TextButton(onClick = onAdd, enabled = enabled) {
-                Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("Add row")
+            Row(
+                Modifier.padding(start = 22.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (subs.size < SubLineCodec.MAX_SUB_LINES) {
+                    TextButton(
+                        onClick = onAdd,
+                        enabled = enabled,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                    ) {
+                        Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Add row", style = MaterialTheme.typography.labelMedium)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text(
+                    "up to 3 chatbox lines",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                )
             }
         }
     }
@@ -639,10 +698,16 @@ private fun SubLineRow(
     index: Int,
     count: Int,
     rowLabel: String,
+    compact: Boolean,
     value: TextFieldValue,
     hidden: Boolean,
     resolvedLength: Int,
     enabled: Boolean,
+    expandable: Boolean,
+    expanded: Boolean,
+    subCount: Int,
+    onExpand: () -> Unit,
+    showOverflow: Boolean,
     onValueChange: (TextFieldValue) -> Unit,
     onToggleHidden: (Boolean) -> Unit,
     onMoveUp: () -> Unit,
@@ -651,29 +716,38 @@ private fun SubLineRow(
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     var focused by remember { mutableStateOf(false) }
+    // Sub-lines sit a touch dimmer + indented so they nest under the main line.
+    val baseAlpha = if (compact) 0.28f else 0.42f
     val container =
-        if (hidden) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.20f)
-        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.40f)
+        if (hidden) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = baseAlpha * 0.5f)
+        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = baseAlpha)
     val dim = if (hidden) 0.5f else 1f
+    val badgeSize = if (compact) 20.dp else 26.dp
+    val iconBtn = if (compact) 28.dp else 32.dp
+    val iconSize = if (compact) 14.dp else 16.dp
+    val rowHeight = if (compact) 34.dp else 42.dp
+    val textStyle = if (compact) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyMedium
     Surface(
         shape = MaterialTheme.shapes.small,
         color = container,
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = if (compact) 22.dp else 0.dp)
     ) {
         Row(
             modifier = Modifier
-                .heightIn(min = 40.dp)
+                .heightIn(min = rowHeight)
                 .padding(start = 6.dp, end = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Small number badge doubles as the hide toggle (dims when hidden).
+            // Main row: number badge = expand/collapse. Sub row: number badge = hide.
             Surface(
                 shape = androidx.compose.foundation.shape.CircleShape,
-                color = if (!hidden) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                color = if (!hidden) MaterialTheme.colorScheme.primary.copy(alpha = if (expandable && expanded) 0.30f else 0.16f)
                 else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.12f),
-                onClick = { if (enabled) onToggleHidden(!hidden) },
+                onClick = { if (enabled) { if (expandable) onExpand() else onToggleHidden(!hidden) } },
                 enabled = enabled,
-                modifier = Modifier.size(24.dp)
+                modifier = Modifier.size(badgeSize)
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Text(
@@ -689,7 +763,7 @@ private fun SubLineRow(
                 if (value.text.isEmpty()) {
                     Text(
                         "$rowLabel ${index + 1}",
-                        style = MaterialTheme.typography.bodySmall,
+                        style = textStyle,
                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                     )
                 }
@@ -699,7 +773,7 @@ private fun SubLineRow(
                     enabled = enabled,
                     singleLine = !focused,
                     maxLines = if (focused) 3 else 1,
-                    textStyle = MaterialTheme.typography.bodySmall.copy(
+                    textStyle = textStyle.copy(
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = dim)
                     ),
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
@@ -712,51 +786,79 @@ private fun SubLineRow(
                 Spacer(Modifier.width(6.dp))
                 CharBudgetMeter(resolvedLength)
             }
-            IconButton(
-                onClick = { onToggleHidden(!hidden) },
-                enabled = enabled,
-                modifier = Modifier.size(30.dp)
-            ) {
-                Icon(
-                    if (!hidden) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
-                    contentDescription = if (!hidden) "Hide row ${index + 1}" else "Show row ${index + 1}",
-                    modifier = Modifier.size(16.dp),
-                    tint = if (!hidden) MaterialTheme.colorScheme.onSurfaceVariant
-                    else MaterialTheme.colorScheme.primary
-                )
-            }
-            Box {
+            // Hide toggle (eye) — sub-lines only; the main line is the line itself.
+            if (!expandable) {
                 IconButton(
-                    onClick = { menuOpen = true },
+                    onClick = { onToggleHidden(!hidden) },
                     enabled = enabled,
-                    modifier = Modifier.size(30.dp)
+                    modifier = Modifier.size(iconBtn)
                 ) {
                     Icon(
-                        Icons.Filled.MoreVert,
-                        contentDescription = "Row ${index + 1} actions",
-                        modifier = Modifier.size(16.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        if (!hidden) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
+                        contentDescription = if (!hidden) "Hide row ${index + 1}" else "Show row ${index + 1}",
+                        modifier = Modifier.size(iconSize),
+                        tint = if (!hidden) MaterialTheme.colorScheme.onSurfaceVariant
+                        else MaterialTheme.colorScheme.primary
                     )
                 }
-                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                    DropdownMenuItem(
-                        text = { Text("Move up") },
-                        enabled = index > 0,
-                        leadingIcon = { Icon(Icons.Filled.ArrowUpward, null) },
-                        onClick = { menuOpen = false; onMoveUp() }
+            }
+            // Main row: overflow only once there are sub-lines to reorder/delete.
+            if (showOverflow) {
+                Box {
+                    IconButton(
+                        onClick = { menuOpen = true },
+                        enabled = enabled,
+                        modifier = Modifier.size(iconBtn)
+                    ) {
+                        Icon(
+                            Icons.Filled.MoreVert,
+                            contentDescription = "Row ${index + 1} actions",
+                            modifier = Modifier.size(iconSize),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Move up") },
+                            enabled = index > 0,
+                            leadingIcon = { Icon(Icons.Filled.ArrowUpward, null) },
+                            onClick = { menuOpen = false; onMoveUp() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Move down") },
+                            enabled = index < count - 1,
+                            leadingIcon = { Icon(Icons.Filled.ArrowDownward, null) },
+                            onClick = { menuOpen = false; onMoveDown() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Delete") },
+                            leadingIcon = {
+                                Icon(Icons.Filled.Delete, null, tint = MaterialTheme.colorScheme.error)
+                            },
+                            onClick = { menuOpen = false; onDelete() }
+                        )
+                    }
+                }
+            }
+            // Main row: expand chevron (+ "+N" when collapsed with sub-lines).
+            if (expandable) {
+                if (!expanded && subCount > 0) {
+                    Text(
+                        "+$subCount",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
                     )
-                    DropdownMenuItem(
-                        text = { Text("Move down") },
-                        enabled = index < count - 1,
-                        leadingIcon = { Icon(Icons.Filled.ArrowDownward, null) },
-                        onClick = { menuOpen = false; onMoveDown() }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Delete") },
-                        leadingIcon = {
-                            Icon(Icons.Filled.Delete, null, tint = MaterialTheme.colorScheme.error)
-                        },
-                        onClick = { menuOpen = false; onDelete() }
+                }
+                IconButton(
+                    onClick = onExpand,
+                    enabled = enabled,
+                    modifier = Modifier.size(iconBtn)
+                ) {
+                    Icon(
+                        if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                        contentDescription = if (expanded) "Hide sub-lines" else "Add / edit sub-lines",
+                        modifier = Modifier.size(iconSize),
+                        tint = MaterialTheme.colorScheme.primary
                     )
                 }
             }
