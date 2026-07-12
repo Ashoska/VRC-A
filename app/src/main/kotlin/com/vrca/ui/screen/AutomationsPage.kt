@@ -3,6 +3,7 @@ package com.vrca.ui.screen
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,7 +27,6 @@ import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Loop
@@ -58,13 +58,18 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateMap
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
@@ -153,6 +158,32 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
         }
     }
 
+    // Auto-scroll the page while dragging near the top/bottom edge so lines that
+    // are off-screen can be reached. The page's ScrollState is hoisted here; the
+    // viewport window bounds come from PageContainer's onViewport; each row reports
+    // its window top so we can tell where the finger is relative to the viewport.
+    val pageScroll = rememberScrollState()
+    var viewportTopPx by remember { mutableFloatStateOf(0f) }
+    var viewportHeightPx by remember { mutableIntStateOf(0) }
+    val cycleRowWindowTops = remember { mutableStateMapOf<Int, Float>() }
+    val cycleAutoDir = remember { mutableFloatStateOf(0f) } // signed px/frame, 0 = none
+    val edgePx = with(LocalDensity.current) { 96.dp.toPx() }
+    LaunchedEffect(cycleDragIndex) {
+        if (cycleDragIndex == null) { cycleAutoDir.floatValue = 0f; return@LaunchedEffect }
+        while (cycleDragIndex != null) {
+            val dir = cycleAutoDir.floatValue
+            if (dir != 0f && viewportHeightPx > 0) {
+                val before = pageScroll.value
+                pageScroll.scrollBy(dir)
+                // Keep the dragged row under the finger + extend the reachable range
+                // as new rows scroll in: fold the actual scrolled distance into the
+                // drag offset (content-space displacement from the origin slot).
+                cycleDragOffsetY.floatValue += (pageScroll.value - before).toFloat()
+            }
+            withFrameNanos { }
+        }
+    }
+
     // Pinned sub-line fields, same cursor-safe hoisted-map pattern as the cycle
     // fields above: seed from vm.pinnedSubLines(), reseed only when the stored
     // value changes from a NON-keystroke source (e.g. a preset load), so typing
@@ -191,7 +222,10 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
     val cyclePresetPreviews = List(5) { vm.getCyclePresetPreview(it + 1) }
     val selectedCycleSlot = vm.selectedCyclePreset
 
-    PageContainer {
+    PageContainer(
+        scrollState = pageScroll,
+        onViewport = { top, h -> viewportTopPx = top; viewportHeightPx = h }
+    ) {
         // =========================
         // Pinned — collapsed = status ("'msg' · ON"), expanded = editor.
         // =========================
@@ -337,16 +371,38 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                             onDrag = { change, dragAmount ->
                                 change.consume()
                                 cycleDragOffsetY.floatValue += dragAmount.y
+                                // Auto-scroll when the finger nears a viewport edge.
+                                val fingerY = (cycleRowWindowTops[idx] ?: 0f) + change.position.y
+                                cycleAutoDir.floatValue = when {
+                                    viewportHeightPx <= 0 -> 0f
+                                    fingerY < viewportTopPx + edgePx -> -14f
+                                    fingerY > viewportTopPx + viewportHeightPx - edgePx -> 14f
+                                    else -> 0f
+                                }
                             },
                             onDragEnd = {
                                 val from = cycleDragIndex
                                 if (from != null) {
-                                    val to = cycleDropTarget(from, cycleDragOffsetY.floatValue)
-                                    if (to != from) vm.moveCycleLine(from, to)
+                                    // Dropped well outside the list → revert (no move).
+                                    val offset = cycleDragOffsetY.floatValue
+                                    val n = vm.cycleLines.size
+                                    val heights = (0 until n).map { (cycleRowHeights[it] ?: 0) }
+                                    val originTop = heights.take(from).sum().toFloat()
+                                    val draggedH = heights.getOrElse(from) { 0 }.toFloat()
+                                    val totalH = heights.sum().toFloat()
+                                    val curTop = originTop + offset
+                                    val outMargin = draggedH * 0.8f
+                                    val outside = curTop < -outMargin || curTop > (totalH - draggedH) + outMargin
+                                    if (!outside) {
+                                        val to = cycleDropTarget(from, offset)
+                                        if (to != from) vm.moveCycleLine(from, to)
+                                    }
                                 }
-                                cycleDragIndex = null; cycleDragOffsetY.floatValue = 0f
+                                cycleDragIndex = null; cycleDragOffsetY.floatValue = 0f; cycleAutoDir.floatValue = 0f
                             },
-                            onDragCancel = { cycleDragIndex = null; cycleDragOffsetY.floatValue = 0f }
+                            onDragCancel = {
+                                cycleDragIndex = null; cycleDragOffsetY.floatValue = 0f; cycleAutoDir.floatValue = 0f
+                            }
                         )
                     } else Modifier
                     key(idx, lineEn, expanded, subs.size) {
@@ -361,6 +417,7 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                                     shadowElevation = if (cycleDragIndex == idx) 10f else 0f
                                 }
                                 .onSizeChanged { cycleRowHeights[idx] = it.height }
+                                .onGloballyPositioned { cycleRowWindowTops[idx] = it.positionInWindow().y }
                         ) {
                             // Main line (sub-line 0) — its number badge / chevron expands.
                             val mainField = cycleLineFields["$idx:0"]
@@ -781,26 +838,30 @@ private fun SubLineEditor(
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         // Main line — always visible, full size; number/chevron expand the rest.
         val main = subs.firstOrNull() ?: ChatboxSubLine("", false)
-        SubLineRow(
-            index = 0,
-            count = subs.size,
-            rowLabel = rowLabel,
-            compact = false,
-            value = fields[0] ?: TextFieldValue(main.text),
-            hidden = main.hidden,
-            resolvedLength = resolvedLengthOf(fields[0]?.text ?: main.text),
-            enabled = enabled,
-            expandable = true,
-            expanded = expanded,
-            subCount = (subs.size - 1).coerceAtLeast(0),
-            onExpand = onToggleExpanded,
-            showOverflow = expanded && subs.size > 1,
-            onValueChange = { v -> fields[0] = v; onTextChanged(0, v.text) },
-            onToggleHidden = { onToggleHidden(0, it) },
-            onMoveUp = {},
-            onMoveDown = { onMoveDown(0) },
-            onDelete = { onDelete(0) }
-        )
+        // key on hidden so the main row repaints the instant its eye toggles (same
+        // AnimatedVisibility-skip fix as the sub-rows / cycle mute rows).
+        key(main.hidden, subs.size) {
+            SubLineRow(
+                index = 0,
+                count = subs.size,
+                rowLabel = rowLabel,
+                compact = false,
+                value = fields[0] ?: TextFieldValue(main.text),
+                hidden = main.hidden,
+                resolvedLength = resolvedLengthOf(fields[0]?.text ?: main.text),
+                enabled = enabled,
+                expandable = true,
+                expanded = expanded,
+                subCount = (subs.size - 1).coerceAtLeast(0),
+                onExpand = onToggleExpanded,
+                showOverflow = expanded && subs.size > 1,
+                onValueChange = { v -> fields[0] = v; onTextChanged(0, v.text) },
+                onToggleHidden = { onToggleHidden(0, it) },
+                onMoveUp = {},
+                onMoveDown = { onMoveDown(0) },
+                onDelete = { onDelete(0) }
+            )
+        }
         if (expanded) {
             // Nested sub-lines (index 1..) — small + indented so they read as
             // sub-lines of the main line, not standalone lines.
@@ -1061,7 +1122,9 @@ private fun CycleLineRow(
     // whole thing is visible while typing; collapse back to one line on blur.
     var focused by remember { mutableStateOf(false) }
     val container = when {
-        dragActive -> MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
+        // The dragged row floats over the others, so it MUST be opaque or the rows
+        // behind bleed through (tester-reported). Solid primary-tinted surface.
+        dragActive -> lerp(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.colorScheme.primary, 0.18f)
         isActive -> MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
         !lineEnabled -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
         else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
@@ -1073,23 +1136,16 @@ private fun CycleLineRow(
         border = if (isActive || dragActive)
             androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.primary)
         else null,
-        modifier = Modifier.fillMaxWidth()
+        // Long-press ANYWHERE on the row (that a child doesn't claim) starts the
+        // drag — no separate grab handle.
+        modifier = Modifier.fillMaxWidth().then(dragHandleModifier)
     ) {
         Row(
             modifier = Modifier
                 .heightIn(min = 44.dp)
-                .padding(start = 4.dp, end = 2.dp),
+                .padding(start = 6.dp, end = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Drag handle (long-press to reorder the line). Hidden when there's
-            // nothing to reorder (dragHandleModifier is empty).
-            Icon(
-                Icons.Filled.DragHandle,
-                contentDescription = "Drag to reorder line ${index + 1}",
-                modifier = dragHandleModifier.size(20.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-            )
-            Spacer(Modifier.width(2.dp))
             // Number badge = expand/collapse the slide's sub-lines (mute moved to
             // the eye). Brighter when expanded.
             Surface(
