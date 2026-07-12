@@ -3540,13 +3540,14 @@ class VrcaViewModel(
         return moving in 1..SubLineCodec.MAX_SUB_LINES && pinned + moving <= SubLineCodec.MAX_SUB_LINES
     }
 
-    /** Move a whole cycle slide into Pinned (append its rows); removes the slide. */
-    fun moveCycleLineToPinned(slide: Int): Boolean {
+    /** Move a whole cycle slide into Pinned at [at] (append when [at] < 0); removes the slide. */
+    fun moveCycleLineToPinned(slide: Int, at: Int = -1): Boolean {
         if (isBanned) return false
         if (!canMoveCycleLineToPinned(slide)) return false
         val moving = SubLineCodec.decode(cycleLines[slide]).filter { it.text.isNotBlank() }
         val pinned = pinnedSubLines().filter { it.text.isNotBlank() }.toMutableList()
-        pinned.addAll(moving)
+        val insertAt = if (at < 0) pinned.size else at.coerceIn(0, pinned.size)
+        pinned.addAll(insertAt, moving)
         updateAfkText(SubLineCodec.encode(pinned.take(SubLineCodec.MAX_SUB_LINES)))
         cycleLines.removeAt(slide)
         if (slide in cycleLineEnabled.indices) cycleLineEnabled.removeAt(slide)
@@ -3560,8 +3561,8 @@ class VrcaViewModel(
     fun canMoveCycleSubToPinned(): Boolean =
         pinnedSubLines().count { it.text.isNotBlank() } < SubLineCodec.MAX_SUB_LINES
 
-    /** Move one cycle sub-line into Pinned (append); removes it from its slide. */
-    fun moveCycleSubToPinned(slide: Int, sub: Int): Boolean {
+    /** Move one cycle sub-line into Pinned at [at] (append when [at] < 0); removes it from its slide. */
+    fun moveCycleSubToPinned(slide: Int, sub: Int, at: Int = -1): Boolean {
         if (isBanned) return false
         val subs = cycleSlideSubLines(slide).toMutableList()
         if (sub !in subs.indices) return false
@@ -3570,7 +3571,8 @@ class VrcaViewModel(
         if (subs.isEmpty()) subs.add(ChatboxSubLine("", false))
         cycleLines[slide] = SubLineCodec.encode(subs)
         val pinned = pinnedSubLines().filter { it.text.isNotBlank() }.toMutableList()
-        pinned.add(moved)
+        val insertAt = if (at < 0) pinned.size else at.coerceIn(0, pinned.size)
+        pinned.add(insertAt, moved)
         updateAfkText(SubLineCodec.encode(pinned.take(SubLineCodec.MAX_SUB_LINES)))
         recentCyclePicks.clear()
         persistCycleLinesPreserve()
@@ -3578,8 +3580,8 @@ class VrcaViewModel(
         return true
     }
 
-    /** Move one Pinned row out to become its own new cycle line. */
-    fun movePinnedRowToCycle(subIndex: Int): Boolean {
+    /** Move one Pinned row out to become its own new cycle line at [at] (append when [at] < 0). */
+    fun movePinnedRowToCycle(subIndex: Int, at: Int = -1): Boolean {
         if (isBanned) return false
         if (cycleLines.size >= MAX_CYCLE_LINES) return false
         val psubs = pinnedSubLines().toMutableList()
@@ -3588,7 +3590,9 @@ class VrcaViewModel(
         if (moved.text.isBlank()) return false
         if (psubs.isEmpty()) psubs.add(ChatboxSubLine("", false))
         updateAfkText(SubLineCodec.encode(psubs))
-        cycleLines.add(SubLineCodec.encode(listOf(moved)))
+        val insertAt = if (at < 0) cycleLines.size else at.coerceIn(0, cycleLines.size)
+        cycleLines.add(insertAt, SubLineCodec.encode(listOf(moved)))
+        if (insertAt <= cycleLineEnabled.size) cycleLineEnabled.add(insertAt, true)
         syncCycleEnabledSize()
         recentCyclePicks.clear()
         persistCycleLinesPreserve()
