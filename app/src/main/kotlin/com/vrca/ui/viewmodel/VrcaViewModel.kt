@@ -3503,6 +3503,117 @@ class VrcaViewModel(
         setCycleSlideSubLines(slide, subs)
     }
 
+    // ---- Promote / demote (drag between the slide level and the sub-line level) ----
+    /** True if slide [from]'s non-blank sub-lines can be appended to slide [into]
+     *  without exceeding the 3-row cap (used to gray-out an invalid demote drop). */
+    fun canDemoteCycleInto(from: Int, into: Int): Boolean {
+        if (from == into || from !in cycleLines.indices || into !in cycleLines.indices) return false
+        val fromRows = SubLineCodec.decode(cycleLines[from]).count { it.text.isNotBlank() }
+        val intoRows = SubLineCodec.decode(cycleLines[into]).count { it.text.isNotBlank() }
+        return fromRows in 1..SubLineCodec.MAX_SUB_LINES &&
+            intoRows + fromRows <= SubLineCodec.MAX_SUB_LINES
+    }
+
+    /** Demote: slide [from] becomes appended sub-line(s) of slide [into]; [from] is
+     *  removed. No-op (returns false) if it would exceed the 3-row cap. */
+    fun demoteCycleLineInto(from: Int, into: Int): Boolean {
+        if (isBanned) return false
+        if (!canDemoteCycleInto(from, into)) return false
+        val fromSubs = SubLineCodec.decode(cycleLines[from]).filter { it.text.isNotBlank() }
+        val intoClean = SubLineCodec.decode(cycleLines[into]).filter { it.text.isNotBlank() }.toMutableList()
+        intoClean.addAll(fromSubs)
+        cycleLines[into] = SubLineCodec.encode(intoClean) // set BEFORE removeAt (into valid pre-removal)
+        cycleLines.removeAt(from)
+        if (from in cycleLineEnabled.indices) cycleLineEnabled.removeAt(from)
+        recentCyclePicks.clear()
+        persistCycleLinesPreserve()
+        rebuildCombinedPreviewOnly()
+        return true
+    }
+
+    // ---- Cross-section moves (Pinned <-> Cycle) ----
+    /** True if a cycle slide's non-blank rows fit into Pinned (3-row cap). */
+    fun canMoveCycleLineToPinned(slide: Int): Boolean {
+        if (slide !in cycleLines.indices) return false
+        val moving = SubLineCodec.decode(cycleLines[slide]).count { it.text.isNotBlank() }
+        val pinned = pinnedSubLines().count { it.text.isNotBlank() }
+        return moving in 1..SubLineCodec.MAX_SUB_LINES && pinned + moving <= SubLineCodec.MAX_SUB_LINES
+    }
+
+    /** Move a whole cycle slide into Pinned (append its rows); removes the slide. */
+    fun moveCycleLineToPinned(slide: Int): Boolean {
+        if (isBanned) return false
+        if (!canMoveCycleLineToPinned(slide)) return false
+        val moving = SubLineCodec.decode(cycleLines[slide]).filter { it.text.isNotBlank() }
+        val pinned = pinnedSubLines().filter { it.text.isNotBlank() }.toMutableList()
+        pinned.addAll(moving)
+        updateAfkText(SubLineCodec.encode(pinned.take(SubLineCodec.MAX_SUB_LINES)))
+        cycleLines.removeAt(slide)
+        if (slide in cycleLineEnabled.indices) cycleLineEnabled.removeAt(slide)
+        recentCyclePicks.clear()
+        persistCycleLinesPreserve()
+        rebuildCombinedPreviewOnly()
+        return true
+    }
+
+    /** True if a single cycle sub-line fits into Pinned. */
+    fun canMoveCycleSubToPinned(): Boolean =
+        pinnedSubLines().count { it.text.isNotBlank() } < SubLineCodec.MAX_SUB_LINES
+
+    /** Move one cycle sub-line into Pinned (append); removes it from its slide. */
+    fun moveCycleSubToPinned(slide: Int, sub: Int): Boolean {
+        if (isBanned) return false
+        val subs = cycleSlideSubLines(slide).toMutableList()
+        if (sub !in subs.indices) return false
+        if (subs[sub].text.isBlank() || !canMoveCycleSubToPinned()) return false
+        val moved = subs.removeAt(sub)
+        if (subs.isEmpty()) subs.add(ChatboxSubLine("", false))
+        cycleLines[slide] = SubLineCodec.encode(subs)
+        val pinned = pinnedSubLines().filter { it.text.isNotBlank() }.toMutableList()
+        pinned.add(moved)
+        updateAfkText(SubLineCodec.encode(pinned.take(SubLineCodec.MAX_SUB_LINES)))
+        recentCyclePicks.clear()
+        persistCycleLinesPreserve()
+        rebuildCombinedPreviewOnly()
+        return true
+    }
+
+    /** Move one Pinned row out to become its own new cycle line. */
+    fun movePinnedRowToCycle(subIndex: Int): Boolean {
+        if (isBanned) return false
+        if (cycleLines.size >= MAX_CYCLE_LINES) return false
+        val psubs = pinnedSubLines().toMutableList()
+        if (subIndex !in psubs.indices) return false
+        val moved = psubs.removeAt(subIndex)
+        if (moved.text.isBlank()) return false
+        if (psubs.isEmpty()) psubs.add(ChatboxSubLine("", false))
+        updateAfkText(SubLineCodec.encode(psubs))
+        cycleLines.add(SubLineCodec.encode(listOf(moved)))
+        syncCycleEnabledSize()
+        recentCyclePicks.clear()
+        persistCycleLinesPreserve()
+        rebuildCombinedPreviewOnly()
+        return true
+    }
+
+    /** Promote: sub-line [sub] of slide [slide] leaves the slide and becomes its own
+     *  new cycle line inserted right after it. No-op if at the 20-line cap. */
+    fun promoteCycleSubLine(slide: Int, sub: Int) {
+        if (isBanned) return
+        if (cycleLines.size >= MAX_CYCLE_LINES) return
+        val subs = cycleSlideSubLines(slide).toMutableList()
+        if (sub !in subs.indices) return
+        val moved = subs.removeAt(sub)
+        if (subs.isEmpty()) subs.add(ChatboxSubLine("", false))
+        cycleLines[slide] = SubLineCodec.encode(subs)
+        syncCycleEnabledSize()
+        cycleLines.add(slide + 1, SubLineCodec.encode(listOf(moved)))
+        cycleLineEnabled.add(slide + 1, true)
+        recentCyclePicks.clear()
+        persistCycleLinesPreserve()
+        rebuildCombinedPreviewOnly()
+    }
+
     /** Duplicate a line directly below it (carries its mute state). */
     fun duplicateCycleLine(index: Int) {
         if (isBanned) return
