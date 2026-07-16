@@ -295,6 +295,10 @@ fun VrcaApp() {
     var remoteTosText by remember { mutableStateOf("") }
     var remoteTosUrl by remember { mutableStateOf("") }
     var remoteTosUpdatedAtMs by remember { mutableStateOf(0L) }
+    // Discord community invite rides the SAME config/app listener (it's the same doc)
+    // instead of a second one-shot get() in VrcaScreen — one read, and now live: an
+    // admin editing the link updates the button without a relaunch.
+    var remoteDiscordInvite by remember { mutableStateOf("") }
 
     DisposableEffect(Unit) {
         val reg = FirebaseFirestore.getInstance()
@@ -305,6 +309,7 @@ fun VrcaApp() {
                     remoteTosText = snap.getString("tosText") ?: ""
                     remoteTosUrl = snap.getString("tosUrl") ?: ""
                     remoteTosUpdatedAtMs = snap.getTimestamp("updatedAt")?.toDate()?.time ?: 0L
+                    remoteDiscordInvite = (snap.getString("discordInvite") ?: "").trim()
                 }
             }
         onDispose { reg.remove() }
@@ -390,6 +395,37 @@ fun VrcaApp() {
                     }
                 onDispose { reg.remove() }
             }
+        }
+
+        // Live GLOBAL "release to all" detection: foreground-scoped snapshot listener on
+        // releases/latest (attaches while the app is open, detaches on background — so it
+        // only ever bills the currently-open users when you actually publish, and 0 while
+        // closed). Complements the 6h background poll (which still catches an update pushed
+        // while backgrounded). Never DOWNGRADES a newer targeted release already shown.
+        DisposableEffect(Unit) {
+            val latestRef = FirebaseFirestore.getInstance()
+                .collection("releases").document("latest")
+            val reg = latestRef.addSnapshotListener { snap, _ ->
+                if (snap == null || !snap.exists()) return@addSnapshotListener
+                val url = snap.getString("downloadUrl").orEmpty()
+                if (url.isBlank()) return@addSnapshotListener
+                val code = snap.getLong("versionCode") ?: return@addSnapshotListener
+                if (code <= BuildConfig.VERSION_CODE) return@addSnapshotListener
+                val curCode = (releaseCheckResult as? ReleaseCheckResult.UpdateAvailable)?.info?.versionCode ?: 0L
+                if (code <= curCode) return@addSnapshotListener
+                releaseCheckResult = ReleaseCheckResult.UpdateAvailable(
+                    ReleaseInfo(
+                        versionCode = code,
+                        versionName = snap.getString("versionName").orEmpty(),
+                        downloadUrl = url,
+                        requiredMinCode = snap.getLong("requiredMinCode") ?: 0L,
+                        notes = snap.getString("notes").orEmpty()
+                    ),
+                    forced = true
+                )
+                updateDismissed = false
+            }
+            onDispose { reg.remove() }
         }
 
         // Backwards compat: real-time detection via targetedUpdateUrl on user doc
@@ -699,7 +735,7 @@ fun VrcaApp() {
        Main app
        ------------------------- */
 
-    VrcaScreen(chatboxViewModel = vm)
+    VrcaScreen(chatboxViewModel = vm, discordInvite = remoteDiscordInvite)
 }
 
 /**
