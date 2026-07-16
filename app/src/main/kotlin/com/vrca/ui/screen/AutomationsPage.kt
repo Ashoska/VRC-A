@@ -11,11 +11,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
@@ -77,7 +79,9 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.zIndex
+import kotlin.math.roundToInt
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -135,6 +139,25 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
     // When the dragged line hovers over ANOTHER line's CENTER, that's a DEMOTE
     // (nest it as a sub-line of the target) instead of a reorder. null = reorder.
     var cycleDemoteTarget by remember { mutableStateOf<Int?>(null) }
+
+    // ---- Drag GHOST overlay ----
+    // The picked-up row is NOT translated in place (cards clip it + a sibling card
+    // would draw over it during a cross-section drag, and an in-place offset desyncs
+    // when a card's layout shifts). Instead the real row stays put and DIMS, while a
+    // display-only copy is drawn in a page-level overlay ABOVE every card, positioned
+    // by the ABSOLUTE finger (dragFingerY − grabPoint). grabPoint is captured once on
+    // the first drag frame so the finger stays locked to its exact grab point; because
+    // dragFingerY recomputes off the row's live anchor, a layout shift cancels too.
+    var overlayWinTop by remember { mutableFloatStateOf(0f) }
+    var overlayWinLeft by remember { mutableFloatStateOf(0f) }
+    val dragGrabPointY = remember { mutableFloatStateOf(Float.NaN) }
+    var ghostLeftPx by remember { mutableFloatStateOf(0f) }   // dragged row window-left
+    var ghostWidthPx by remember { mutableIntStateOf(0) }      // dragged row window-width
+    // Per-row window left/width (top lives in cycleRowWindowTops/subRowWindowTops).
+    val cycleRowLeft = remember { mutableStateMapOf<Int, Float>() }
+    val cycleRowWidth = remember { mutableStateMapOf<Int, Int>() }
+    val subRowLeft = remember { mutableStateMapOf<String, Float>() }
+    val subRowWidth = remember { mutableStateMapOf<String, Int>() }
 
     // Absolute-position drop target: where the dragged row's CENTER sits vs the
     // midpoints of the other rows (in the original layout). Returns the post-removal
@@ -314,7 +337,12 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
             .pointerInput(key, index, count) {
             val origin = if (key == "pinned") "pinned" else "cycle"
             detectDragGesturesAfterLongPress(
-                onDragStart = { subDragKey = key; subDragIndex = index; subDragOffsetY.floatValue = 0f },
+                onDragStart = {
+                    subDragKey = key; subDragIndex = index; subDragOffsetY.floatValue = 0f
+                    dragGrabPointY.floatValue = Float.NaN
+                    ghostLeftPx = subRowLeft["$key#$index"] ?: 0f
+                    ghostWidthPx = subRowWidth["$key#$index"] ?: 0
+                },
                 onDrag = { c, d ->
                     c.consume()
                     subDragOffsetY.floatValue += d.y
@@ -325,6 +353,9 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                     val anchorY = subHandleTops["$key#$index"] ?: subRowWindowTops["$key#$index"] ?: 0f
                     val fingerY = anchorY + c.position.y
                     dragFingerY.floatValue = fingerY
+                    // Lock the ghost to the finger's exact grab point (captured once).
+                    if (dragGrabPointY.floatValue.isNaN())
+                        dragGrabPointY.floatValue = fingerY - (subRowWindowTops["$key#$index"] ?: fingerY)
                     updateCross(origin, fingerY)
                     // Auto-scroll the page when the finger nears a viewport edge (so a
                     // pinned/sub drag can reach rows off-screen, and cross-dragging can
@@ -382,10 +413,9 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
     // Wrapper modifier for a sub-row: float the dragged one, draw the drop bar,
     // measure heights. Local index space is 0..count-1 within the block.
     fun subRowMod(key: String, index: Int, count: Int): Modifier = Modifier
-        .zIndex(if (subDragKey == key && subDragIndex == index) 1f else 0f)
         .graphicsLayer {
-            translationY = if (subDragKey == key && subDragIndex == index) subDragOffsetY.floatValue else 0f
-            shadowElevation = if (subDragKey == key && subDragIndex == index) 8f else 0f
+            // Picked-up sub-row stays put and dims; a copy floats in the page overlay.
+            alpha = if (subDragKey == key && subDragIndex == index) 0.4f else 1f
         }
         .drawBehind {
             val barH = 3.dp.toPx(); val r = CornerRadius(barH / 2f)
@@ -415,8 +445,12 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                     drawRoundRect(dropBarColor, Offset(0f, size.height + 1f), Size(size.width, barH), r)
             }
         }
-        .onSizeChanged { subRowHeights["$key#$index"] = it.height }
-        .onGloballyPositioned { subRowWindowTops["$key#$index"] = it.positionInWindow().y }
+        .onSizeChanged { subRowHeights["$key#$index"] = it.height; subRowWidth["$key#$index"] = it.width }
+        .onGloballyPositioned {
+            val p = it.positionInWindow()
+            subRowWindowTops["$key#$index"] = p.y
+            subRowLeft["$key#$index"] = p.x
+        }
 
     // Page-scope snapshots so a card's content lambda re-runs on sub-drag start/end
     // (the dragActive opaque styling is a composition-time read; the float/bar are
@@ -462,6 +496,15 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
     val cyclePresetPreviews = List(5) { vm.getCyclePresetPreview(it + 1) }
     val selectedCycleSlot = vm.selectedCyclePreset
 
+    // Box wraps the scrolling content so the drag GHOST can be drawn in a page-level
+    // overlay ABOVE every card (outside their clips) — see the drag-ghost state above.
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .onGloballyPositioned {
+                val p = it.positionInWindow(); overlayWinLeft = p.x; overlayWinTop = p.y
+            }
+    ) {
     PageContainer(
         scrollState = pageScroll,
         onViewport = { top, h -> viewportTopPx = top; viewportHeightPx = h }
@@ -637,12 +680,21 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                     val canDrag = vm.cycleLines.size > 1 && !isBanned
                     val dragHandleMod = if (canDrag) Modifier.pointerInput(idx, vm.cycleLines.size) {
                         detectDragGesturesAfterLongPress(
-                            onDragStart = { cycleDragIndex = idx; cycleDragOffsetY.floatValue = 0f },
+                            onDragStart = {
+                                cycleDragIndex = idx; cycleDragOffsetY.floatValue = 0f
+                                dragGrabPointY.floatValue = Float.NaN
+                                ghostLeftPx = cycleRowLeft[idx] ?: 0f
+                                ghostWidthPx = cycleRowWidth[idx] ?: 0
+                            },
                             onDrag = { change, dragAmount ->
                                 change.consume()
                                 cycleDragOffsetY.floatValue += dragAmount.y
                                 val fingerY = (cycleRowWindowTops[idx] ?: 0f) + change.position.y
                                 dragFingerY.floatValue = fingerY
+                                // Lock the ghost to the finger's exact grab point (captured
+                                // once, first frame — the row hasn't moved yet).
+                                if (dragGrabPointY.floatValue.isNaN())
+                                    dragGrabPointY.floatValue = fingerY - (cycleRowWindowTops[idx] ?: fingerY)
                                 // Over the Pinned section? → cross-section move.
                                 updateCross("cycle", fingerY)
                                 // Demote target: hovering another line's centre nests
@@ -706,13 +758,12 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                         Column(
                             verticalArrangement = Arrangement.spacedBy(4.dp),
                             modifier = Modifier
-                                .zIndex(if (draggingIdx == idx) 1f else 0f)
                                 .graphicsLayer {
-                                    // Only the dragged row translates (follows the
-                                    // finger); the rest stay put and a bright bar
-                                    // shows the drop position (drawBehind below).
-                                    translationY = if (cycleDragIndex == idx) cycleDragOffsetY.floatValue else 0f
-                                    shadowElevation = if (cycleDragIndex == idx) 10f else 0f
+                                    // The picked-up row does NOT move — it stays in its slot
+                                    // and DIMS; a copy floats in the page overlay (above all
+                                    // cards) following the finger. The insertion bar (below)
+                                    // shows where it will land.
+                                    alpha = if (cycleDragIndex == idx) 0.4f else 1f
                                 }
                                 .drawBehind {
                                     val barH = 3.dp.toPx()
@@ -763,8 +814,12 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                                         )
                                     }
                                 }
-                                .onSizeChanged { cycleRowHeights[idx] = it.height }
-                                .onGloballyPositioned { cycleRowWindowTops[idx] = it.positionInWindow().y }
+                                .onSizeChanged { cycleRowHeights[idx] = it.height; cycleRowWidth[idx] = it.width }
+                                .onGloballyPositioned {
+                                    val p = it.positionInWindow()
+                                    cycleRowWindowTops[idx] = p.y
+                                    cycleRowLeft[idx] = p.x
+                                }
                         ) {
                             // Main line (sub-line 0) — its number badge / chevron expands.
                             val mainField = cycleLineFields["$idx:0"]
@@ -989,6 +1044,67 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
             }
         }
     }
+    // ---- Drag GHOST: a display-only copy of the picked-up row, drawn above every
+    // card (never clipped) and pinned to the finger's exact grab point. ----
+    val ghostActive = cycleDragIndex != null || subDragKey != null
+    if (ghostActive && ghostWidthPx > 0 && !dragGrabPointY.floatValue.isNaN()) {
+        val cIdx = cycleDragIndex
+        val sKey = subDragKey
+        val sIdx = subDragIndex
+        Box(
+            modifier = Modifier
+                .zIndex(1f)
+                .offset {
+                    IntOffset(
+                        (ghostLeftPx - overlayWinLeft).roundToInt(),
+                        (dragFingerY.floatValue - dragGrabPointY.floatValue - overlayWinTop).roundToInt()
+                    )
+                }
+                .width(with(LocalDensity.current) { ghostWidthPx.toDp() })
+        ) {
+            when {
+                cIdx != null -> {
+                    val decoded = SubLineCodec.decode(vm.cycleLines.getOrElse(cIdx) { "" })
+                    val gv = cycleLineFields["$cIdx:0"] ?: TextFieldValue(decoded.firstOrNull()?.text.orEmpty())
+                    CycleLineRow(
+                        index = cIdx, count = vm.cycleLines.size, value = gv,
+                        lineEnabled = vm.cycleLineEnabled.getOrElse(cIdx) { true },
+                        resolvedLength = vm.resolveTokens(gv.text).length,
+                        isActive = false, expanded = false,
+                        subCount = (decoded.size - 1).coerceAtLeast(0),
+                        onExpand = {}, onValueChange = {}, onToggleEnabled = {}, onDuplicate = {},
+                        onMoveUp = {}, onMoveDown = {}, onDelete = {},
+                        canDuplicate = false, enabled = false, dragActive = true
+                    )
+                }
+                sKey != null && sIdx != null -> {
+                    val gv: TextFieldValue
+                    val gHidden: Boolean
+                    val gCompact: Boolean
+                    val gIndex: Int
+                    if (sKey == "pinned") {
+                        val s = vm.pinnedSubLines().getOrNull(sIdx)
+                        gv = pinnedFields[sIdx] ?: TextFieldValue(s?.text.orEmpty())
+                        gHidden = s?.hidden == true; gCompact = sIdx > 0; gIndex = sIdx
+                    } else {
+                        val lineIdx = sKey.removePrefix("cyc:").toIntOrNull() ?: -1
+                        val cs = SubLineCodec.decode(vm.cycleLines.getOrElse(lineIdx) { "" })
+                        val real = sIdx + 1
+                        gv = cycleLineFields["$lineIdx:$real"] ?: TextFieldValue(cs.getOrNull(real)?.text.orEmpty())
+                        gHidden = cs.getOrNull(real)?.hidden == true; gCompact = true; gIndex = real
+                    }
+                    SubLineRow(
+                        index = gIndex, count = gIndex + 1, rowLabel = "Row", compact = gCompact,
+                        value = gv, hidden = gHidden, resolvedLength = vm.resolveTokens(gv.text).length,
+                        enabled = false, expandable = false, expanded = false, subCount = 0,
+                        onExpand = {}, showOverflow = false, onValueChange = {}, onToggleHidden = {},
+                        onMoveUp = {}, onMoveDown = {}, onDelete = {}, dragActive = true
+                    )
+                }
+            }
+        }
+    }
+    } // end Box overlay wrapper
 
     // Preset peek dialog (long-press): iconed header + per-line content + switch.
     peek?.let { p ->
