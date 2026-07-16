@@ -313,6 +313,19 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
         return fingerY >= top && fingerY <= top + h
     }
 
+    // Which cycle line's CENTER band the finger is over (a NEST target) — finger-based
+    // so it works for ANY drag source (cycle line, cycle sub, pinned row/sub). Excludes
+    // [exclude] (a line can't nest into itself / its own parent).
+    fun cycleLineCenterUnderFinger(fingerY: Float, exclude: Int?): Int? {
+        for (i in 0 until vm.cycleLines.size) {
+            if (i == exclude) continue
+            val top = cycleRowWindowTops[i] ?: continue
+            val h = (cycleRowHeights[i] ?: 0).toFloat()
+            if (fingerY >= top + h * 0.30f && fingerY <= top + h * 0.70f) return i
+        }
+        return null
+    }
+
     // Feed the INSTANT hover section into pendingCross (the 2s LaunchedEffect arms it);
     // keep the drop boundary tracking the finger once armed.
     fun updateCross(origin: String, fingerY: Float) {
@@ -373,6 +386,7 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
         count: Int,
         onOutside: ((Int) -> Unit)? = null,
         onCrossSection: ((String) -> Unit)? = null,
+        onNest: ((Int) -> Unit)? = null,
         onMove: (Int, Int) -> Unit
     ): Modifier =
         Modifier
@@ -400,10 +414,22 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                     if (dragGrabPointY.floatValue.isNaN())
                         dragGrabPointY.floatValue = fingerY - (subRowWindowTops["$key#$index"] ?: fingerY)
                     updateCross(origin, fingerY)
+                    // Hovering a cycle LINE'S CENTRE (2s) NESTS this item as a sub of that
+                    // line — works for pinned rows/subs AND cycle subs (a cycle sub excludes
+                    // its own parent line). Sticky once armed so the expansion can't disarm.
+                    val ownLine = if (key.startsWith("cyc:")) key.removePrefix("cyc:").toIntOrNull() else null
+                    pendingDemote = when {
+                        cycleDemoteTarget != null && fingerOverCycleLine(cycleDemoteTarget!!, fingerY) -> cycleDemoteTarget
+                        sectionAt(fingerY) == "cycle" -> cycleLineCenterUnderFinger(fingerY, ownLine)
+                        else -> null
+                    }
+                    // Nesting into a specific line's CENTRE wins over a plain cross-to-new-
+                    // line insert (matters for a pinned source over the cycle area).
+                    if (pendingDemote != null) pendingCross = null
                     // A cycle sub dragged OUT of its block (still in the Cycle card, not
-                    // crossing) will PROMOTE to a new main line — show the SAME reorder
-                    // bar the cycle lines use, at the target index.
-                    subPromoteIndex = if (onOutside != null && origin == "cycle" && pendingCross == null) {
+                    // crossing, not over a line's centre-to-nest) PROMOTES to a new main
+                    // line — show the SAME reorder bar the cycle lines use.
+                    subPromoteIndex = if (onOutside != null && origin == "cycle" && pendingCross == null && pendingDemote == null) {
                         val bh = (0 until count).map { (subRowHeights["$key#$it"] ?: 0) }
                         val oTop = bh.take(index).sum().toFloat()
                         val dH = bh.getOrElse(index) { 0 }.toFloat()
@@ -444,8 +470,11 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                         val withinCard = originCardRect?.let { r ->
                             dragFingerY.floatValue in (r.top - DRAG_ACCEPT_MARGIN)..(r.bottom + DRAG_ACCEPT_MARGIN)
                         } ?: true
+                        val nest = cycleDemoteTarget
                         when {
                             cross != null && onCrossSection != null -> onCrossSection(cross)
+                            // Nest this item as a sub-line of the armed cycle line.
+                            nest != null && onNest != null -> onNest(nest)
                             // Promote (cycle sub → own line) ONLY when dragged clearly out
                             // of the block but STILL within the section card. Dragged fully
                             // out of the UI → fall through → revert (back to its sub area).
@@ -458,12 +487,12 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                     }
                     subDragKey = null; subDragIndex = null; subDragOffsetY.floatValue = 0f
                     crossTarget = null; crossDropIndex = -1; cycleAutoDir.floatValue = 0f
-                    pendingCross = null; pendingDemote = null; subPromoteIndex = -1
+                    pendingCross = null; pendingDemote = null; subPromoteIndex = -1; cycleDemoteTarget = null
                 },
                 onDragCancel = {
                     subDragKey = null; subDragIndex = null; subDragOffsetY.floatValue = 0f
                     crossTarget = null; crossDropIndex = -1; cycleAutoDir.floatValue = 0f
-                    pendingCross = null; pendingDemote = null; subPromoteIndex = -1
+                    pendingCross = null; pendingDemote = null; subPromoteIndex = -1; cycleDemoteTarget = null
                 }
             )
         }
@@ -615,7 +644,8 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                 dragModifierFor = { i ->
                     subDragHandle(
                         "pinned", i, pinnedSubs.size,
-                        onCrossSection = { sec -> if (sec == "cycle") vm.movePinnedRowToCycle(i, crossDropIndex) }
+                        onCrossSection = { sec -> if (sec == "cycle") vm.movePinnedRowToCycle(i, crossDropIndex) },
+                        onNest = { target -> vm.movePinnedRowIntoCycleLine(i, target) }
                     ) { f, t -> vm.movePinnedSubLine(f, t) }
                 },
                 rowModifierFor = { i -> subRowMod("pinned", i, pinnedSubs.size) }
@@ -699,9 +729,15 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
         // pick-up/drop, so recomposing on it is cheap) — the per-frame offset is
         // read inside graphicsLayer / drawBehind blocks instead.
         val draggingIdx = cycleDragIndex
-        // Is the current demote target valid (fits within the 3-row cap)?
+        // Is the current nest/demote target valid (fits within the 3-row cap)? A cycle
+        // LINE source uses canDemoteCycleInto (all its rows must fit); a sub/pinned
+        // source (subDragKey set) only adds ONE row → canNestIntoCycleLine.
         val cycleDemoteValid = cycleDemoteTarget?.let { t ->
-            draggingIdx != null && vm.canDemoteCycleInto(draggingIdx, t)
+            when {
+                draggingIdx != null -> vm.canDemoteCycleInto(draggingIdx, t)
+                subDragKey != null -> vm.canNestIntoCycleLine(t)
+                else -> false
+            }
         } ?: false
         CompactSectionCard(
             title = "Cycle",
@@ -989,7 +1025,8 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                                             dragHandleModifier = subDragHandle(
                                                 subKey, j, m,
                                                 onOutside = { at -> vm.promoteCycleSubLine(idx, s, at) },
-                                                onCrossSection = { sec -> if (sec == "pinned") vm.moveCycleSubToPinned(idx, s, crossDropIndex) }
+                                                onCrossSection = { sec -> if (sec == "pinned") vm.moveCycleSubToPinned(idx, s, crossDropIndex) },
+                                                onNest = { target -> vm.moveCycleSubIntoLine(idx, s, target) }
                                             ) { f, t -> vm.moveCycleSubLine(idx, f + 1, t + 1) },
                                             dragActive = subActive
                                         )

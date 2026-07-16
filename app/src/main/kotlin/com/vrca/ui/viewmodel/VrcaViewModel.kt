@@ -3631,6 +3631,57 @@ class VrcaViewModel(
         return true
     }
 
+    /** True if cycle line [target] is a real line (≥1 content row) with room for one
+     *  more sub-line. Used to gray-out an invalid nest drop for sub/pinned sources. */
+    fun canNestIntoCycleLine(target: Int): Boolean {
+        if (target !in cycleLines.indices) return false
+        val n = SubLineCodec.decode(cycleLines[target]).count { it.text.isNotBlank() }
+        return n in 1 until SubLineCodec.MAX_SUB_LINES
+    }
+
+    /** Nest cycle sub-line [sub] of slide [fromSlide] as a sub-line of cycle line
+     *  [target] (append). No-op if target is full or it's the same slide. */
+    fun moveCycleSubIntoLine(fromSlide: Int, sub: Int, target: Int): Boolean {
+        if (isBanned) return false
+        if (fromSlide == target) return false
+        if (fromSlide !in cycleLines.indices || target !in cycleLines.indices) return false
+        if (!canNestIntoCycleLine(target)) return false
+        val fromSubs = cycleSlideSubLines(fromSlide).toMutableList()
+        if (sub !in fromSubs.indices || fromSubs[sub].text.isBlank()) return false
+        val moved = fromSubs.removeAt(sub)
+        if (fromSubs.isEmpty()) fromSubs.add(ChatboxSubLine("", false))
+        val targetSubs = SubLineCodec.decode(cycleLines[target]).filter { it.text.isNotBlank() }.toMutableList()
+        targetSubs.add(moved) // appended (index ≥1) → hidden flag preserved, sub 0 untouched
+        cycleLines[fromSlide] = SubLineCodec.encode(fromSubs)
+        cycleLines[target] = SubLineCodec.encode(targetSubs.take(SubLineCodec.MAX_SUB_LINES))
+        recentCyclePicks.clear()
+        persistCycleLinesPreserve() // self-heals main-line visibility
+        rebuildCombinedPreviewOnly()
+        return true
+    }
+
+    /** Nest a Pinned row ([pinnedIndex]) as a sub-line of cycle line [target] (append).
+     *  No-op if target is full. */
+    fun movePinnedRowIntoCycleLine(pinnedIndex: Int, target: Int): Boolean {
+        if (isBanned) return false
+        if (target !in cycleLines.indices) return false
+        if (!canNestIntoCycleLine(target)) return false
+        val psubs = pinnedSubLines().toMutableList()
+        if (pinnedIndex !in psubs.indices) return false
+        val moved = psubs.removeAt(pinnedIndex)
+        if (moved.text.isBlank()) return false
+        if (psubs.isEmpty()) psubs.add(ChatboxSubLine("", false))
+        if (psubs.isNotEmpty()) psubs[0] = psubs[0].copy(hidden = false) // pinned main has no eye
+        updateAfkText(SubLineCodec.encode(psubs))
+        val targetSubs = SubLineCodec.decode(cycleLines[target]).filter { it.text.isNotBlank() }.toMutableList()
+        targetSubs.add(moved)
+        cycleLines[target] = SubLineCodec.encode(targetSubs.take(SubLineCodec.MAX_SUB_LINES))
+        recentCyclePicks.clear()
+        persistCycleLinesPreserve()
+        rebuildCombinedPreviewOnly()
+        return true
+    }
+
     /** Promote: sub-line [sub] of slide [slide] leaves the slide and becomes its own
      *  new cycle line inserted at [at] (right after its slide when [at] < 0). No-op if
      *  at the 20-line cap. */
