@@ -55,6 +55,7 @@ internal object UsersDirectoryCache {
                 put("vrchatLastSyncAt", tsMs(u.vrchatLastSyncAt))
                 put("isOnlineInApp", u.isOnlineInApp)
                 put("offlineAt", tsMs(u.offlineAt))
+                put("killSignal", tsMs(u.killSignal))
                 put("versionName", u.versionName)
             })
         }
@@ -91,6 +92,7 @@ internal object UsersDirectoryCache {
                     vrchatLastSyncAt = msTs(o.optLong("vrchatLastSyncAt")),
                     isOnlineInApp = o.optBoolean("isOnlineInApp"),
                     offlineAt = msTs(o.optLong("offlineAt")),
+                    killSignal = msTs(o.optLong("killSignal")),
                     versionName = o.optString("versionName", "")
                 )
             }

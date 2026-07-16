@@ -118,6 +118,10 @@ internal data class UserRow(
     // lastActiveAt it forces the row offline instantly; a live heartbeat
     // advances lastActiveAt past it, so it can never false-flag a running app.
     val offlineAt: Timestamp? = null,
+    // Admin kill marker. Within KILL_GRACE_MS of now it forces the row offline
+    // even if the user's app reopened and wrote a fresh lastActiveAt — so a kill
+    // holds offline briefly instead of instantly bouncing back online.
+    val killSignal: Timestamp? = null,
     val versionName: String = ""
     // Profile pictures are NOT stored in Firestore and NOT displayed in the
     // admin UI — AdminAvatar shows the name initial (the on-demand VRChat+
@@ -175,7 +179,8 @@ internal data class UserDetail(
     val lastSeenAt: Timestamp? = null,
     val updatedAt: Timestamp? = null,
     val isOnlineInApp: Boolean = false,
-    val offlineAt: Timestamp? = null
+    val offlineAt: Timestamp? = null,
+    val killSignal: Timestamp? = null
 )
 
 internal data class ModerationTarget(
@@ -248,12 +253,24 @@ internal const val WATCHED_STALE_WINDOW_MS = 25L * 1000L
  * and a stopped heartbeat flips offline after just [WATCHED_STALE_WINDOW_MS].
  */
 internal const val WATCH_RAMP_MS = 45L * 1000L
+// After an admin kill, hold the row offline this long even if the user's app
+// reopens and writes a fresh lastActiveAt — so a kill doesn't instantly bounce
+// back online. The durable offline (past this window) comes from `offlineAt`,
+// which the admin writes in the SAME kill batch (see the Kill App button).
+internal const val KILL_GRACE_MS = 7L * 1000L
 
 internal fun isUserOnline(u: UserRow, nowMs: Long = System.currentTimeMillis()): Boolean {
+    // Kill grace: a fresh killSignal forces offline regardless of liveness, so a
+    // reopen within KILL_GRACE_MS can't flip the row back online. Kill-scoped (not
+    // offlineAt) so a normal swipe→instant-reopen still shows online right away.
+    val killMs = u.killSignal?.toDate()?.time ?: 0L
+    if (killMs > 0L && nowMs - killMs in 0L until KILL_GRACE_MS) return false
     val activeMs = (u.lastActiveAt ?: u.lastSeenAt)?.toDate()?.time ?: return false
     if (nowMs - activeMs >= ONLINE_STALENESS_WINDOW_MS) return false
-    // Instant-offline on a clean swipe: a shutdown marker newer than the last
-    // liveness write means the app was deliberately closed after that heartbeat.
+    // Instant-offline on a clean swipe OR an admin kill: a shutdown/kill marker
+    // newer than the last liveness write means the app was closed after that
+    // heartbeat. (The kill batch writes offlineAt too, so this stays offline past
+    // the grace until the user actually reopens with a newer lastActiveAt.)
     val offlineMs = u.offlineAt?.toDate()?.time ?: 0L
     if (offlineMs > activeMs) return false
     return true
@@ -299,6 +316,7 @@ internal fun parseUserRow(d: com.google.firebase.firestore.DocumentSnapshot): Us
         vrchatLastSyncAt = d.getTimestamp("vrchatLastSyncAt"),
         isOnlineInApp = d.getBoolean("isOnlineInApp") ?: false,
         offlineAt = d.getTimestamp("offlineAt"),
+        killSignal = d.getTimestamp("killSignal"),
         versionName = (d.getString("versionName") ?: "").trim()
     )
 }
@@ -421,7 +439,8 @@ internal fun UsersTab(
             lastSeenAt = snap.getTimestamp("lastSeenAt"),
             updatedAt = snap.getTimestamp("updatedAt"),
             isOnlineInApp = snap.getBoolean("isOnlineInApp") ?: false,
-            offlineAt = snap.getTimestamp("offlineAt")
+            offlineAt = snap.getTimestamp("offlineAt"),
+            killSignal = snap.getTimestamp("killSignal")
         )
     }
     // Selected user detail: Phase 3 read model — the ONLY live read in the admin
@@ -538,6 +557,7 @@ internal fun UsersTab(
             // cleared) goes back online. Only fall back to the directory row's value
             // while the detail hasn't loaded yet (d == null).
             offlineAt    = if (d != null) d.offlineAt else rawRow.offlineAt,
+            killSignal   = if (d != null) d.killSignal else rawRow.killSignal,
             isOnlineInApp = d?.isOnlineInApp ?: rawRow.isOnlineInApp
         )
         Column(
@@ -681,9 +701,17 @@ internal fun UsersTab(
                                     runCatching {
                                         // Account-wide: kill every device on this VRChat account
                                         // (only the currently-open one acts on a fresh killSignal).
+                                        // offlineAt rides the SAME write — the DURABLE offline
+                                        // marker (isUserOnline: offlineAt > lastActiveAt), written
+                                        // by the admin so it can't be lost by the dying app. The
+                                        // fresh killSignal separately holds the KILL_GRACE_MS window.
                                         AccountModeration.applyAccountWide(
                                             db, row.docId,
-                                            mapOf("killSignal" to com.google.firebase.firestore.FieldValue.serverTimestamp())
+                                            mapOf(
+                                                "killSignal" to com.google.firebase.firestore.FieldValue.serverTimestamp(),
+                                                "offlineAt" to com.google.firebase.firestore.FieldValue.serverTimestamp(),
+                                                "isOnlineInApp" to false
+                                            )
                                         )
                                     }.onFailure { e -> setError(e.message ?: "Kill failed") }
                                     setGlobalLoading(false)

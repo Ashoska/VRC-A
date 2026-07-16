@@ -776,6 +776,7 @@ fun AdminScreen() {
                                     // healed user returns online; the watched-stale path
                                     // synthesizes offlineAt here to flip the row offline.
                                     offlineAt = detail.offlineAt,
+                                    killSignal = detail.killSignal ?: cur.killSignal,
                                     isOnlineInApp = detail.isOnlineInApp,
                                     vrchatUserId = detail.vrchatUserId.ifBlank { cur.vrchatUserId },
                                     vrchatDisplayName = detail.vrchatDisplayName.ifBlank { cur.vrchatDisplayName },

@@ -1278,6 +1278,7 @@ class VrcaViewModel(
     private var lastBanEffective: Boolean = false
 
     private var killSignalHandled: Boolean = false
+    private val KEY_LAST_HANDLED_KILL_MS = "last_handled_kill_ms"
     private var lastVrchatLogoutMs: Long = 0L
     private var lastDiscordLogoutMs: Long = 0L
 
@@ -1293,8 +1294,17 @@ class VrcaViewModel(
         }
     }
 
-    private fun handleAdminKill() {
+    private fun handleAdminKill(killMs: Long) {
         if (killSignalHandled) return
+        // A kill is ONE-SHOT per kill event. Persist the handled killSignal ms so a
+        // REOPEN doesn't re-trigger the same (still <60s-fresh) killSignal — that was
+        // the "reopen closes again a few times" loop (killSignalHandled is in-memory
+        // and resets each process). A genuinely NEW admin kill has a newer timestamp
+        // → killMs > lastHandled → fires again.
+        val prefs = app.getSharedPreferences(com.vrca.app.AppShutdown.PREFS, android.content.Context.MODE_PRIVATE)
+        val lastHandled = prefs.getLong(KEY_LAST_HANDLED_KILL_MS, 0L)
+        if (killMs <= lastHandled) return
+        prefs.edit().putLong(KEY_LAST_HANDLED_KILL_MS, killMs).commit()
         killSignalHandled = true
         try {
             // Fully stop the process AND keep it dead (set the swipe/manual-kill guards
@@ -1372,7 +1382,10 @@ class VrcaViewModel(
                             if (killSignal != null) {
                                 val killMs = killSignal.seconds * 1000L + (killSignal.nanoseconds / 1_000_000L)
                                 val ageMs = System.currentTimeMillis() - killMs
-                                if (ageMs in 0L..60_000L) handleAdminKill()
+                                // Age window blocks an ANCIENT killSignal (e.g. reinstall);
+                                // the per-kill dedup inside handleAdminKill blocks a REOPEN
+                                // re-triggering the same fresh one.
+                                if (ageMs in 0L..60_000L) handleAdminKill(killMs)
                             }
 
                             // Admin remote-logout signals (fresh + once per timestamp).
