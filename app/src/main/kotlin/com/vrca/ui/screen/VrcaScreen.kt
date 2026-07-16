@@ -242,7 +242,9 @@ private object DeviceId {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun VrcaScreen(
-    chatboxViewModel: com.vrca.ui.viewmodel.VrcaViewModel
+    chatboxViewModel: com.vrca.ui.viewmodel.VrcaViewModel,
+    // Rides VrcaApp's single config/app listener (no separate get here) — live.
+    discordInvite: String = ""
 ) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -283,24 +285,22 @@ fun VrcaScreen(
 
     var announcements by remember { mutableStateOf<List<AnnouncementUi>>(emptyList()) }
 
-    // Announcements (in-app display). This used to be a persistent snapshot
-    // listener, which duplicated the always-attached, background-surviving
-    // listener in VrchatPipelineService (attachAnnouncementsListener) — two
-    // listeners on the identical `active==true limit 60` query, each billing a
-    // read per matching doc on attach AND on every change. The service listener
-    // is the real-time source (it fires the notifications), so the in-app list
-    // only needs a one-shot read on screen entry: announcements change rarely
-    // and a brand-new one arrives as a notification anyway. This drops a
-    // persistent listener (and its re-fire reads) with no regression, and works
-    // even when the user isn't logged into VRChat (service not running).
-    LaunchedEffect(Unit) {
-        db.collection("announcements")
+    // Announcements (in-app display) — FOREGROUND-scoped snapshot listener: it
+    // attaches while this screen is composed (app open) and detaches on
+    // background/leave (onDispose), so the list updates LIVE while you're looking
+    // and costs nothing while closed. The initial callback is one read (same as the
+    // old one-shot get); a live push only bills when it actually lands while open.
+    // The background-surviving service listener (attachAnnouncementsListener) is
+    // still the source of the notification when the user isn't on this screen.
+    DisposableEffect(Unit) {
+        val reg = db.collection("announcements")
             .whereEqualTo("active", true)
             .orderBy("createdAt", Query.Direction.DESCENDING)
             .limit(60)
-            .get()
-            .addOnSuccessListener { snap ->
-                val list = snap.documents.map { d ->
+            .addSnapshotListener { snap, err ->
+                if (err != null) { reportFirebase("announcements", "Failed to load announcements", err); return@addSnapshotListener }
+                if (snap == null) return@addSnapshotListener
+                announcements = snap.documents.map { d ->
                     AnnouncementUi(
                         id = d.id,
                         title = d.getString("title") ?: "",
@@ -313,11 +313,8 @@ fun VrcaScreen(
                     compareByDescending<AnnouncementUi> { it.priority }
                         .thenByDescending { it.createdAt }
                 )
-                announcements = list
             }
-            .addOnFailureListener { err ->
-                reportFirebase("announcements", "Failed to load announcements", err)
-            }
+        onDispose { reg.remove() }
     }
 
     // --- Moderation state comes from ViewModel ---
@@ -398,24 +395,15 @@ fun VrcaScreen(
     val setupNeedsAttention = ipSet.value != null && (!vrcLinked || ipSet.value == false)
 
     // Discord community invite (public build): the admin sets the link in
-    // config/app.discordInvite; we surface a Discord button in the top bar that
-    // opens it. Empty/blank link → button hidden.
-    val discordInvite = remember { mutableStateOf("") }
-    if (!BuildConfig.IS_ADMIN_BUILD) {
-        LaunchedEffect(Unit) {
-            runCatching {
-                val snap = db.collection("config").document("app").get().await()
-                discordInvite.value = (snap.getString("discordInvite") ?: "").trim()
-            }
-        }
-    }
+    // config/app.discordInvite; the top-bar button opens it. The value is passed in
+    // from VrcaApp's single config/app listener (merged read + live). Blank → hidden.
 
     // Single-session take-over: this VRChat account is currently active on another
     // device. The displaced device stands fully down behind a "Use here" screen
     // (OSC is already blocked at the chokepoint); tapping re-claims and the other
     // device then stops. Public build only (admin never participates).
     if (!BuildConfig.IS_ADMIN_BUILD && chatboxViewModel.accountDenied) {
-        AccountDeniedScreen(supportUrl = discordInvite.value)
+        AccountDeniedScreen(supportUrl = discordInvite)
         return
     }
 
@@ -435,11 +423,11 @@ fun VrcaScreen(
                             IconButton(onClick = { page = AppPage.Admin }) {
                                 Icon(Icons.Filled.Gavel, contentDescription = "Admin")
                             }
-                        } else if (discordInvite.value.isNotBlank()) {
+                        } else if (discordInvite.isNotBlank()) {
                             IconButton(onClick = {
                                 runCatching {
                                     ctx.startActivity(
-                                        Intent(Intent.ACTION_VIEW, Uri.parse(discordInvite.value))
+                                        Intent(Intent.ACTION_VIEW, Uri.parse(discordInvite))
                                             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                                     )
                                 }
