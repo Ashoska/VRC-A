@@ -261,6 +261,17 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
     // Insertion boundary in the TARGET section while cross-dragging (drives the drop
     // bar drawn in that section AND the positional insert on release). -1 = none.
     var crossDropIndex by remember { mutableStateOf(-1) }
+    // Cross-section + demote now require a 2-SECOND continuous hover to ARM (so
+    // dragging PAST a target doesn't trigger it). pendingCross / pendingDemote hold
+    // what the finger is over RIGHT NOW; a LaunchedEffect promotes them to the armed
+    // crossTarget / cycleDemoteTarget after HOVER_ARM_MS and expands only that target
+    // (a specific cycle line's OWN subs — not the whole card).
+    var pendingCross by remember { mutableStateOf<String?>(null) }
+    var pendingDemote by remember { mutableStateOf<Int?>(null) }
+    // A cycle SUB dragged OUT of its block into the main cycle-line flow shows the SAME
+    // insertion bar the cycle reorder uses, at this index (-1 = not promoting). On drop
+    // the sub promotes to a new cycle line here.
+    var subPromoteIndex by remember { mutableStateOf(-1) }
     // Last finger window-Y of the active drag — used at drop to tell "still in the UI
     // (accept, clamp to nearest slot)" from "dragged completely out (revert)".
     val dragFingerY = remember { mutableFloatStateOf(0f) }
@@ -292,16 +303,48 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
         return b
     }
 
-    // Update crossTarget for a drag whose ORIGIN section is [origin]; auto-expand the
-    // hovered other section so its rows come into view, and track the drop boundary.
+    // Sticky check: is the finger still anywhere within line [idx]'s window bounds?
+    // Once a demote target is armed + EXPANDED, its height grows and the offset-based
+    // cycleDemoteHover would drift off it → disarm/flicker. Holding the armed target
+    // while the finger stays over its (grown) bounds prevents that.
+    fun fingerOverCycleLine(idx: Int, fingerY: Float): Boolean {
+        val top = cycleRowWindowTops[idx] ?: return false
+        val h = (cycleRowHeights[idx] ?: 0).toFloat()
+        return fingerY >= top && fingerY <= top + h
+    }
+
+    // Feed the INSTANT hover section into pendingCross (the 2s LaunchedEffect arms it);
+    // keep the drop boundary tracking the finger once armed.
     fun updateCross(origin: String, fingerY: Float) {
         val sec = sectionAt(fingerY)
-        val cross = if (sec != null && sec != origin) sec else null
-        crossTarget = cross
-        when (cross) {
-            "cycle" -> { cycleCardExpanded.value = true; crossDropIndex = crossDropBoundary("cycle", fingerY) }
-            "pinned" -> { pinnedCardExpanded.value = true; crossDropIndex = crossDropBoundary("pinned", fingerY) }
-            else -> crossDropIndex = -1
+        pendingCross = if (sec != null && sec != origin) sec else null
+        if (crossTarget != null) crossDropIndex = crossDropBoundary(crossTarget!!, fingerY)
+    }
+
+    // Arm a cross-section drop only after the finger HOLDS over the other section for
+    // 2s (dragging past never arms — the key change restarts the wait). Expands the
+    // target so its slots show; disarms the moment the finger leaves.
+    LaunchedEffect(pendingCross) {
+        val t = pendingCross
+        if (t == null) { crossTarget = null; crossDropIndex = -1; return@LaunchedEffect }
+        if (crossTarget != t) { crossTarget = null; crossDropIndex = -1 }
+        delay(2000L)
+        if (pendingCross == t) {
+            crossTarget = t
+            if (t == "pinned") pinnedCardExpanded.value = true else cycleCardExpanded.value = true
+            crossDropIndex = crossDropBoundary(t, dragFingerY.floatValue)
+        }
+    }
+    // Same 2s hold to arm a DEMOTE (nest a cycle line into the hovered line). Expands
+    // ONLY that specific line's sub-area (per-line, not the whole card).
+    LaunchedEffect(pendingDemote) {
+        val t = pendingDemote
+        if (t == null) { cycleDemoteTarget = null; return@LaunchedEffect }
+        if (cycleDemoteTarget != t) cycleDemoteTarget = null
+        delay(2000L)
+        if (pendingDemote == t) {
+            cycleDemoteTarget = t
+            cycleExpanded[t] = true
         }
     }
 
@@ -328,7 +371,7 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
         key: String,
         index: Int,
         count: Int,
-        onOutside: (() -> Unit)? = null,
+        onOutside: ((Int) -> Unit)? = null,
         onCrossSection: ((String) -> Unit)? = null,
         onMove: (Int, Int) -> Unit
     ): Modifier =
@@ -357,6 +400,19 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                     if (dragGrabPointY.floatValue.isNaN())
                         dragGrabPointY.floatValue = fingerY - (subRowWindowTops["$key#$index"] ?: fingerY)
                     updateCross(origin, fingerY)
+                    // A cycle sub dragged OUT of its block (still in the Cycle card, not
+                    // crossing) will PROMOTE to a new main line — show the SAME reorder
+                    // bar the cycle lines use, at the target index.
+                    subPromoteIndex = if (onOutside != null && origin == "cycle" && pendingCross == null) {
+                        val bh = (0 until count).map { (subRowHeights["$key#$it"] ?: 0) }
+                        val oTop = bh.take(index).sum().toFloat()
+                        val dH = bh.getOrElse(index) { 0 }.toFloat()
+                        val tH = bh.sum().toFloat()
+                        val curTop = oTop + subDragOffsetY.floatValue
+                        val out = curTop < -(dH * 1.4f) || curTop > (tH - dH) + dH * 1.4f
+                        val inCycle = cycleCardRect?.let { fingerY >= it.top && fingerY <= it.bottom } ?: false
+                        if (out && inCycle) crossDropBoundary("cycle", fingerY) else -1
+                    } else -1
                     // Auto-scroll the page when the finger nears a viewport edge (so a
                     // pinned/sub drag can reach rows off-screen, and cross-dragging can
                     // scroll the OTHER section into view).
@@ -393,7 +449,7 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                             // Promote (cycle sub → own line) ONLY when dragged clearly out
                             // of the block but STILL within the section card. Dragged fully
                             // out of the UI → fall through → revert (back to its sub area).
-                            outside && withinCard && onOutside != null -> onOutside()
+                            outside && withinCard && onOutside != null -> onOutside(subPromoteIndex)
                             withinCard -> {
                                 val to = subDropTarget(key, from, count, offset)
                                 if (to != from) onMove(from, to)
@@ -402,10 +458,12 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                     }
                     subDragKey = null; subDragIndex = null; subDragOffsetY.floatValue = 0f
                     crossTarget = null; crossDropIndex = -1; cycleAutoDir.floatValue = 0f
+                    pendingCross = null; pendingDemote = null; subPromoteIndex = -1
                 },
                 onDragCancel = {
                     subDragKey = null; subDragIndex = null; subDragOffsetY.floatValue = 0f
                     crossTarget = null; crossDropIndex = -1; cycleAutoDir.floatValue = 0f
+                    pendingCross = null; pendingDemote = null; subPromoteIndex = -1
                 }
             )
         }
@@ -436,6 +494,9 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
             if (subDragKey != key || from == index) return@drawBehind
             // Dragged sub is crossing into the other section — its bar shows there.
             if (crossTarget != null) return@drawBehind
+            // Dragged sub is being PROMOTED out into the main flow — its bar shows in the
+            // cycle main-line list, not inside this block.
+            if (subPromoteIndex >= 0) return@drawBehind
             val target = subDropTarget(key, from, count, subDragOffsetY.floatValue)
             if (target == from) return@drawBehind
             val boundary = if (target <= from) target else target + 1
@@ -698,9 +759,14 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                                 // Over the Pinned section? → cross-section move.
                                 updateCross("cycle", fingerY)
                                 // Demote target: hovering another line's centre nests
-                                // this line into it (only when NOT crossing sections).
-                                cycleDemoteTarget = if (crossTarget == null)
-                                    cycleDemoteHover(idx, cycleDragOffsetY.floatValue) else null
+                                // this line into it (only when NOT hovering another
+                                // section). Feeds the 2s arm. Once armed + expanded, keep
+                                // it sticky while the finger stays over the grown bounds.
+                                pendingDemote = when {
+                                    pendingCross != null -> null
+                                    cycleDemoteTarget != null && fingerOverCycleLine(cycleDemoteTarget!!, fingerY) -> cycleDemoteTarget
+                                    else -> cycleDemoteHover(idx, cycleDragOffsetY.floatValue)
+                                }
                                 // Auto-scroll when the finger nears a viewport edge.
                                 cycleAutoDir.floatValue = when {
                                     viewportHeightPx <= 0 -> 0f
@@ -742,6 +808,7 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                                 }
                                 cycleDragIndex = null; cycleDragOffsetY.floatValue = 0f
                                 cycleAutoDir.floatValue = 0f; cycleDemoteTarget = null; crossTarget = null; crossDropIndex = -1
+                                pendingCross = null; pendingDemote = null
                                 // cycleExpanded is keyed by INDEX; any reorder/demote/cross
                                 // shifts indices, so a stale entry would leave a DIFFERENT
                                 // line showing expanded (and the moved line collapsed). Reset
@@ -751,6 +818,7 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                             onDragCancel = {
                                 cycleDragIndex = null; cycleDragOffsetY.floatValue = 0f
                                 cycleAutoDir.floatValue = 0f; cycleDemoteTarget = null; crossTarget = null; crossDropIndex = -1
+                                pendingCross = null; pendingDemote = null
                             }
                         )
                     } else Modifier
@@ -773,6 +841,27 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                                     // dragged INTO Cycle) — cycleDragIndex is null here.
                                     if (cycleDragIndex == null && crossTarget == "cycle" && subDragKey != null) {
                                         val boundary = crossDropIndex
+                                        when {
+                                            boundary == idx -> drawRoundRect(
+                                                color = dropBarColor,
+                                                topLeft = Offset(0f, -barH - 1f),
+                                                size = Size(size.width, barH),
+                                                cornerRadius = radius
+                                            )
+                                            idx == n - 1 && boundary >= n -> drawRoundRect(
+                                                color = dropBarColor,
+                                                topLeft = Offset(0f, size.height + 1f),
+                                                size = Size(size.width, barH),
+                                                cornerRadius = radius
+                                            )
+                                        }
+                                        return@drawBehind
+                                    }
+                                    // A cycle SUB dragged out into the main flow → show the
+                                    // insertion bar where it will PROMOTE to a new line.
+                                    if (cycleDragIndex == null && subPromoteIndex >= 0 &&
+                                        subDragKey?.startsWith("cyc:") == true) {
+                                        val boundary = subPromoteIndex
                                         when {
                                             boundary == idx -> drawRoundRect(
                                                 color = dropBarColor,
@@ -899,7 +988,7 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                                             modifier = subRowMod(subKey, j, m),
                                             dragHandleModifier = subDragHandle(
                                                 subKey, j, m,
-                                                onOutside = { vm.promoteCycleSubLine(idx, s) },
+                                                onOutside = { at -> vm.promoteCycleSubLine(idx, s, at) },
                                                 onCrossSection = { sec -> if (sec == "pinned") vm.moveCycleSubToPinned(idx, s, crossDropIndex) }
                                             ) { f, t -> vm.moveCycleSubLine(idx, f + 1, t + 1) },
                                             dragActive = subActive

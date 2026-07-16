@@ -3632,8 +3632,9 @@ class VrcaViewModel(
     }
 
     /** Promote: sub-line [sub] of slide [slide] leaves the slide and becomes its own
-     *  new cycle line inserted right after it. No-op if at the 20-line cap. */
-    fun promoteCycleSubLine(slide: Int, sub: Int) {
+     *  new cycle line inserted at [at] (right after its slide when [at] < 0). No-op if
+     *  at the 20-line cap. */
+    fun promoteCycleSubLine(slide: Int, sub: Int, at: Int = -1) {
         if (isBanned) return
         if (cycleLines.size >= MAX_CYCLE_LINES) return
         val subs = cycleSlideSubLines(slide).toMutableList()
@@ -3642,11 +3643,12 @@ class VrcaViewModel(
         if (subs.isEmpty()) subs.add(ChatboxSubLine("", false))
         cycleLines[slide] = SubLineCodec.encode(subs)
         syncCycleEnabledSize()
+        val insertAt = if (at < 0) slide + 1 else at.coerceIn(0, cycleLines.size)
         // A standalone cycle line's visibility is its MUTE, not the sub hidden flag —
         // so a hidden sub promotes to a visible-but-MUTED line (intent preserved,
         // sub 0 never hidden → the line still decodes/counts correctly).
-        cycleLines.add(slide + 1, SubLineCodec.encode(listOf(moved.copy(hidden = false))))
-        cycleLineEnabled.add(slide + 1, !moved.hidden)
+        cycleLines.add(insertAt, SubLineCodec.encode(listOf(moved.copy(hidden = false))))
+        cycleLineEnabled.add(insertAt, !moved.hidden)
         recentCyclePicks.clear()
         persistCycleLinesPreserve()
         rebuildCombinedPreviewOnly()
