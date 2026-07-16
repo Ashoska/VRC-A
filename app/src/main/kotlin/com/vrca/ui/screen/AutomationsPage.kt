@@ -261,13 +261,13 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
     // Insertion boundary in the TARGET section while cross-dragging (drives the drop
     // bar drawn in that section AND the positional insert on release). -1 = none.
     var crossDropIndex by remember { mutableStateOf(-1) }
-    // Cross-section + demote now require a 2-SECOND continuous hover to ARM (so
-    // dragging PAST a target doesn't trigger it). pendingCross / pendingDemote hold
-    // what the finger is over RIGHT NOW; a LaunchedEffect promotes them to the armed
-    // crossTarget / cycleDemoteTarget after HOVER_ARM_MS and expands only that target
-    // (a specific cycle line's OWN subs — not the whole card).
-    var pendingCross by remember { mutableStateOf<String?>(null) }
+    // Cross-section (opening the OTHER card) is INSTANT. Only NESTING into a specific
+    // cycle line requires a short hover (HOVER_ARM_MS) — pendingDemote holds the line
+    // the finger is over RIGHT NOW; a LaunchedEffect arms cycleDemoteTarget + expands
+    // ONLY that line after the hold. hoverExpandedLine tracks the line the hover opened
+    // so moving to another line auto-collapses the previous one.
     var pendingDemote by remember { mutableStateOf<Int?>(null) }
+    var hoverExpandedLine by remember { mutableStateOf<Int?>(null) }
     // A cycle SUB dragged OUT of its block into the main cycle-line flow shows the SAME
     // insertion bar the cycle reorder uses, at this index (-1 = not promoting). On drop
     // the sub promotes to a new cycle line here.
@@ -326,38 +326,33 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
         return null
     }
 
-    // Feed the INSTANT hover section into pendingCross (the 2s LaunchedEffect arms it);
-    // keep the drop boundary tracking the finger once armed.
+    // Opening the OTHER card is INSTANT — arm the cross + expand it the moment the
+    // finger is over the other section (no hold; the hold is only for nesting a line).
     fun updateCross(origin: String, fingerY: Float) {
         val sec = sectionAt(fingerY)
-        pendingCross = if (sec != null && sec != origin) sec else null
-        if (crossTarget != null) crossDropIndex = crossDropBoundary(crossTarget!!, fingerY)
-    }
-
-    // Arm a cross-section drop only after the finger HOLDS over the other section for
-    // 2s (dragging past never arms — the key change restarts the wait). Expands the
-    // target so its slots show; disarms the moment the finger leaves.
-    LaunchedEffect(pendingCross) {
-        val t = pendingCross
-        if (t == null) { crossTarget = null; crossDropIndex = -1; return@LaunchedEffect }
-        if (crossTarget != t) { crossTarget = null; crossDropIndex = -1 }
-        delay(2000L)
-        if (pendingCross == t) {
-            crossTarget = t
-            if (t == "pinned") pinnedCardExpanded.value = true else cycleCardExpanded.value = true
-            crossDropIndex = crossDropBoundary(t, dragFingerY.floatValue)
+        val cross = if (sec != null && sec != origin) sec else null
+        crossTarget = cross
+        when (cross) {
+            "cycle" -> { cycleCardExpanded.value = true; crossDropIndex = crossDropBoundary("cycle", fingerY) }
+            "pinned" -> { pinnedCardExpanded.value = true; crossDropIndex = crossDropBoundary("pinned", fingerY) }
+            else -> crossDropIndex = -1
         }
     }
-    // Same 2s hold to arm a DEMOTE (nest a cycle line into the hovered line). Expands
-    // ONLY that specific line's sub-area (per-line, not the whole card).
+
+    // A short 0.5s hold arms a NEST (drop the item as a sub-line of the hovered line)
+    // and expands ONLY that line. Moving to another line collapses the previous one so
+    // the user can immediately hover-expand a different line.
     LaunchedEffect(pendingDemote) {
         val t = pendingDemote
+        // Finger moved off the hover-expanded line → collapse it right away.
+        hoverExpandedLine?.let { if (it != t) { cycleExpanded[it] = false; hoverExpandedLine = null } }
         if (t == null) { cycleDemoteTarget = null; return@LaunchedEffect }
         if (cycleDemoteTarget != t) cycleDemoteTarget = null
-        delay(2000L)
+        delay(500L)
         if (pendingDemote == t) {
             cycleDemoteTarget = t
             cycleExpanded[t] = true
+            hoverExpandedLine = t
         }
     }
 
@@ -425,11 +420,11 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                     }
                     // Nesting into a specific line's CENTRE wins over a plain cross-to-new-
                     // line insert (matters for a pinned source over the cycle area).
-                    if (pendingDemote != null) pendingCross = null
+                    if (pendingDemote != null) crossTarget = null
                     // A cycle sub dragged OUT of its block (still in the Cycle card, not
                     // crossing, not over a line's centre-to-nest) PROMOTES to a new main
                     // line — show the SAME reorder bar the cycle lines use.
-                    subPromoteIndex = if (onOutside != null && origin == "cycle" && pendingCross == null && pendingDemote == null) {
+                    subPromoteIndex = if (onOutside != null && origin == "cycle" && crossTarget == null && pendingDemote == null) {
                         val bh = (0 until count).map { (subRowHeights["$key#$it"] ?: 0) }
                         val oTop = bh.take(index).sum().toFloat()
                         val dH = bh.getOrElse(index) { 0 }.toFloat()
@@ -487,12 +482,12 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                     }
                     subDragKey = null; subDragIndex = null; subDragOffsetY.floatValue = 0f
                     crossTarget = null; crossDropIndex = -1; cycleAutoDir.floatValue = 0f
-                    pendingCross = null; pendingDemote = null; subPromoteIndex = -1; cycleDemoteTarget = null
+                    pendingDemote = null; subPromoteIndex = -1; cycleDemoteTarget = null; hoverExpandedLine = null
                 },
                 onDragCancel = {
                     subDragKey = null; subDragIndex = null; subDragOffsetY.floatValue = 0f
                     crossTarget = null; crossDropIndex = -1; cycleAutoDir.floatValue = 0f
-                    pendingCross = null; pendingDemote = null; subPromoteIndex = -1; cycleDemoteTarget = null
+                    pendingDemote = null; subPromoteIndex = -1; cycleDemoteTarget = null; hoverExpandedLine = null
                 }
             )
         }
@@ -799,7 +794,7 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                                 // section). Feeds the 2s arm. Once armed + expanded, keep
                                 // it sticky while the finger stays over the grown bounds.
                                 pendingDemote = when {
-                                    pendingCross != null -> null
+                                    crossTarget != null -> null
                                     cycleDemoteTarget != null && fingerOverCycleLine(cycleDemoteTarget!!, fingerY) -> cycleDemoteTarget
                                     else -> cycleDemoteHover(idx, cycleDragOffsetY.floatValue)
                                 }
@@ -844,7 +839,7 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                                 }
                                 cycleDragIndex = null; cycleDragOffsetY.floatValue = 0f
                                 cycleAutoDir.floatValue = 0f; cycleDemoteTarget = null; crossTarget = null; crossDropIndex = -1
-                                pendingCross = null; pendingDemote = null
+                                pendingDemote = null; hoverExpandedLine = null
                                 // cycleExpanded is keyed by INDEX; any reorder/demote/cross
                                 // shifts indices, so a stale entry would leave a DIFFERENT
                                 // line showing expanded (and the moved line collapsed). Reset
@@ -854,7 +849,7 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                             onDragCancel = {
                                 cycleDragIndex = null; cycleDragOffsetY.floatValue = 0f
                                 cycleAutoDir.floatValue = 0f; cycleDemoteTarget = null; crossTarget = null; crossDropIndex = -1
-                                pendingCross = null; pendingDemote = null
+                                pendingDemote = null; hoverExpandedLine = null
                             }
                         )
                     } else Modifier
