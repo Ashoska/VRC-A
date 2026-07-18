@@ -282,22 +282,31 @@ object GroupAlertEnricher {
     }
 
     /**
-     * Detects DELETED followed events for [groupId] and flags their cards "Removed".
-     * A card is a candidate only when it's a signed-up ([following]==true), not-yet-
-     * removed event whose series is ABSENT from the freshly-fetched live calendar
-     * ([liveKeys]) — then a single tri-state fetch CONFIRMS the deletion (a real 404,
-     * never a network blip) before flagging it. Bounded: deduped per series and
-     * capped at a handful of confirming fetches per sweep so a large "Going" list
-     * can't burst REST calls.
+     * Detects DELETED events for [groupId] (followed OR not) and flags their cards
+     * "Removed". A card is a candidate when it's a not-yet-removed event whose series
+     * is ABSENT from the freshly-fetched live calendar ([liveKeys]) AND it's still
+     * RELEVANT — signed up ([following]==true), UPCOMING, or unknown-timing. A clearly
+     * PAST non-followed event is skipped (it ended, it wasn't "removed", and
+     * re-confirming it every sweep is waste). A single tri-state fetch then CONFIRMS
+     * the deletion — only a real 404 flags it; a network / 429 / 5xx blip is UNKNOWN
+     * and flags nothing. Bounded: deduped per series and capped so a large group
+     * can't burst REST calls. Absent-from-list detection itself is FREE (the enricher
+     * already fetched that list to update every visible card), so the only added cost
+     * is the handful of 404-confirm fetches for events that actually went missing.
      */
-    private suspend fun detectRemovedFollowedEvents(ctx: Context, groupId: String, liveKeys: Set<String>) {
+    private suspend fun detectRemovedEvents(ctx: Context, groupId: String, liveKeys: Set<String>) {
         val groupKey = "event_$groupId"
         val g = InAppAlertState.groups.value.firstOrNull { it.groupId == groupKey } ?: return
+        val now = System.currentTimeMillis()
         val seen = HashSet<String>()
         val candidates = ArrayList<InAppAlertEvent>()
         for (e in g.events) {
-            if (e.following != true || e.removed) continue
+            if (e.removed) continue
             val evId = e.eventRefId ?: continue
+            // Only bother with events worth flagging: signed-up (any phase), or
+            // upcoming / unknown-timing. Skip clearly-past non-followed events.
+            val relevant = e.following == true || e.startsAtMs <= 0L || e.startsAtMs >= now
+            if (!relevant) continue
             val titleKey = normTitleStr(e.eventTitle).takeIf { it.isNotBlank() }?.let { "t:$it" }
             val present = liveKeys.contains("c:$evId") ||
                 (e.seriesId != null && liveKeys.contains("s:${e.seriesId}")) ||
@@ -306,7 +315,7 @@ object GroupAlertEnricher {
             val dedup = e.seriesId?.let { "s:$it" } ?: "c:$evId"
             if (!seen.add(dedup)) continue
             candidates.add(e)
-            if (candidates.size >= 8) break
+            if (candidates.size >= 10) break
         }
         for (e in candidates) {
             val evId = e.eventRefId ?: continue
@@ -340,7 +349,7 @@ object GroupAlertEnricher {
                         .takeIf { it.isNotBlank() }?.let { liveKeys.add("c:$it") }
                     normTitle(e).takeIf { it.isNotBlank() }?.let { liveKeys.add("t:$it") }
                 }
-                detectRemovedFollowedEvents(ctx, groupId, liveKeys)
+                detectRemovedEvents(ctx, groupId, liveKeys)
                 for ((ev, isRecurringSeries) in collapseEventsByTitle(events)) {
                     val evId = ev.optString("id", "").ifBlank { findIdWithPrefix(ev, "cal_").orEmpty() }
                     if (evId.isBlank()) continue
