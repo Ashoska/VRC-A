@@ -284,6 +284,44 @@ object InAppAlertState {
         AlertImageStore.gc(ctx)
     }
 
+    // An event is live for up to 4h after start when it has no published end
+    // time (matches the UI's eventPhase()).
+    private const val LIVE_TAIL_MS = 4L * 60 * 60 * 1000
+
+    /** True once an event has clearly ENDED (past its end, or >4h past start with
+     *  no end). Unknown-timing events (no start AND no end) are never "ended". */
+    fun eventEnded(e: InAppAlertEvent, nowMs: Long): Boolean = when {
+        e.endsAtMs > 0L -> e.endsAtMs < nowMs
+        e.startsAtMs > 0L -> nowMs - e.startsAtMs > LIVE_TAIL_MS
+        else -> false
+    }
+
+    /**
+     * Removes events that have clearly ENDED from every group so concluded events
+     * stop cluttering "Going" / the notifications area (an event you were going to
+     * shouldn't sit in "Going" days after it finished). DELETED cards (`removed`)
+     * are KEPT — they show the red "Removed" state until the user dismisses them —
+     * and non-event alerts (no timing) are untouched. A recurring series keeps its
+     * upcoming occurrences and only sheds the past ones. Emptied groups are dropped.
+     * Returns true if anything changed.
+     */
+    fun pruneEndedEvents(ctx: Context, nowMs: Long): Boolean {
+        var changed = false
+        val next = _groups.value.mapNotNull { g ->
+            val kept = g.events.filter { it.removed || !eventEnded(it, nowMs) }
+            when {
+                kept.size == g.events.size -> g
+                kept.isEmpty() -> { changed = true; null }
+                else -> { changed = true; g.copy(events = kept) }
+            }
+        }
+        if (!changed) return false
+        _groups.value = next
+        persist(ctx)
+        AlertImageStore.gc(ctx)
+        return true
+    }
+
     // Manual-pin cap (signed-up/calendar events are separate and uncapped).
     const val MAX_PINNED = 10
 
