@@ -1335,6 +1335,12 @@ class VrchatPipelineService : Service() {
                             .ifBlank { evDetails?.optString("endsAt", "").orEmpty() }
                         val evStartsMs = parseVrcTimestampMs(evStartsAt)
                         val evEndsMs = parseVrcTimestampMs(evEndsAt)
+                        // Series id when the push carries it (top-level or nested) —
+                        // groups by series immediately; absent → null (sweep fills it).
+                        val evSeriesId = content.optString("seriesId", "")
+                            .ifBlank { evData?.optString("seriesId", "").orEmpty() }
+                            .ifBlank { evDetails?.optString("seriesId", "").orEmpty() }
+                            .takeIf { it.isNotBlank() && it != "null" }
                         val eventBody = if (evStartsMs > 0) message.ifBlank { v2Title.ifBlank { "New group event" } }
                             else buildCalendarEventBody(
                                 message, v2Title.ifBlank { "New group event" }, evStartsMs, evEndsMs, v2CreatedMs
@@ -1357,6 +1363,7 @@ class VrchatPipelineService : Service() {
                             alertRich = AlertRichMeta(
                                 groupRefId = groupId.ifBlank { null },
                                 eventRefId = eventId.ifBlank { null },
+                                seriesId = evSeriesId,
                                 startsAtMs = evStartsMs,
                                 endsAtMs = evEndsMs,
                                 createdAtMs = v2CreatedMs
@@ -2275,6 +2282,13 @@ class VrchatPipelineService : Service() {
                     .ifBlank { evDetails?.optString("endsAt", "").orEmpty() }
                 val evStartsMs = parseVrcTimestampMs(evStartsAt)
                 val evEndsMs = parseVrcTimestampMs(evEndsAt)
+                // Series id when the push carries it (top-level or nested) — lets the
+                // card group by series immediately instead of waiting for the enrich
+                // sweep. Absent on trimmed payloads → null (sweep fills it).
+                val evSeriesId = obj.optString("seriesId", "")
+                    .ifBlank { evData?.optString("seriesId", "").orEmpty() }
+                    .ifBlank { evDetails?.optString("seriesId", "").orEmpty() }
+                    .takeIf { it.isNotBlank() && it != "null" }
                 val body = if (evStartsMs > 0) message.ifBlank { v2Title.ifBlank { "New group event" } }
                     else buildCalendarEventBody(
                         message, v2Title.ifBlank { "New group event" }, evStartsMs, evEndsMs, v2CreatedMs
@@ -2295,6 +2309,7 @@ class VrchatPipelineService : Service() {
                     alertRich = AlertRichMeta(
                         groupRefId = groupId.ifBlank { null },
                         eventRefId = eventId2.ifBlank { null },
+                        seriesId = evSeriesId,
                         startsAtMs = evStartsMs,
                         endsAtMs = evEndsMs,
                         createdAtMs = v2CreatedMs
