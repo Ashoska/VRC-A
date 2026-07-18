@@ -96,6 +96,12 @@ class DiscordRpcService : Service() {
         // resumes instead of resetting. Applies to BOTH the in-VRChat and the
         // not-in-VRChat counters (shared via resolveElapsedStart).
         private const val ONLINE_GRACE_MS = 20L * 60 * 1000
+        // The not-in-VRChat counter's persisted start is only cleared once the
+        // online session has been sustained at least this long. This stops a
+        // transient presence flicker to "online" (a stale REST read / racy WS
+        // event on a flaky connection) from wiping the offline counter and
+        // restarting it from 0 — a genuine visit still clears it after ~3 min.
+        private const val OFFLINE_CLEAR_CONFIRM_MS = 3L * 60 * 1000
         private const val SESSION_CHECK_INTERVAL_MS = 30_000L
         private const val MAX_CONSECUTIVE_PUSH_FAILURES = 5
         // How many CONSECUTIVE 30s health checks a state must persist before we do a
@@ -945,8 +951,25 @@ class DiscordRpcService : Service() {
         //     prefs persist and a reopen within the grace window resumes them.
         if (isOnline) {
             onlineStartEpochMs = resolveElapsedStart("online_start_epoch", "last_online_seen", nowMs)
-            if (rpcPrefs.getLong("offline_start_epoch", 0L) != 0L ||
-                rpcPrefs.getLong("offline_last_seen", 0L) != 0L) {
+            // Only clear the not-in-VRChat counter once the online session is
+            // CONFIRMED sustained (online_start_epoch is at least
+            // OFFLINE_CLEAR_CONFIRM_MS old). A transient presence flicker to
+            // "online" resolves a FRESH online_start_epoch (the prior session
+            // went stale > grace ago), so nowMs - onlineStartEpochMs ~= 0 and
+            // we leave the offline prefs intact — the offline counter then
+            // CARRIES ON across the blip within its own grace window instead of
+            // restarting from 0. A genuine sustained visit (or one that carried
+            // its start across a real brief blip) clears them, so leaving
+            // VRChat restarts the offline clock as intended. Fix for "the
+            // not-in-VRChat RPC timer randomly restarts on connection blips";
+            // the in-VRChat timer was never affected (it has its own grace
+            // carry and its prefs are never cleared), which is why it's stable
+            // during active play.
+            val onlineConfirmed = onlineStartEpochMs > 0L &&
+                (nowMs - onlineStartEpochMs) >= OFFLINE_CLEAR_CONFIRM_MS
+            if (onlineConfirmed &&
+                (rpcPrefs.getLong("offline_start_epoch", 0L) != 0L ||
+                    rpcPrefs.getLong("offline_last_seen", 0L) != 0L)) {
                 rpcPrefs.edit()
                     .remove("offline_start_epoch")
                     .remove("offline_last_seen")

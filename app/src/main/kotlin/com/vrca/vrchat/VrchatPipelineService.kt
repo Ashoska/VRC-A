@@ -2569,6 +2569,10 @@ class VrchatPipelineService : Service() {
                 val seenRaw = dataStore.data.first()[androidx.datastore.preferences.core.stringPreferencesKey("notif_group_announcement_seen")] ?: "{}"
                 val seenMap = try { JSONObject(seenRaw) } catch (e: Exception) { JSONObject() }
                 val updatedMap = JSONObject(seenRaw)
+                // See pollGroupAnnouncements: first sweep records current groups
+                // as "known" without seeding; a group joined LATER is baselined
+                // silently so its old announcements/events don't fire on join.
+                val knownInit = seenMap.has("__known_groups_init")
                 val groupCount = minOf(groups.length(), 50)
                 for (i in 0 until groupCount) {
                     val group = groups.optJSONObject(i) ?: continue
@@ -2576,6 +2580,13 @@ class VrchatPipelineService : Service() {
                     val groupName = group.optString("name", "A group")
                     if (groupId.isBlank()) continue
                     if (groupName.isNotBlank() && groupName != "A group") groupNameCache[groupId] = groupName
+                    if (!knownInit) {
+                        updatedMap.put("${groupId}__known", "1")
+                    } else if (!seenMap.has("${groupId}__known")) {
+                        seedGroupBaselineSilently(groupId, seenMap, updatedMap)
+                        updatedMap.put("${groupId}__known", "1")
+                        continue
+                    }
                     try {
                         // Sweep group POSTS (which includes the pinned
                         // announcement — no separate fetchGroupAnnouncement
@@ -2652,6 +2663,7 @@ class VrchatPipelineService : Service() {
                         Log.w(TAG, "backfill: group announcement $groupId failed", e)
                     }
                 }
+                if (!knownInit) updatedMap.put("__known_groups_init", "1")
                 // Persist updated seen timestamps
                 val repo = com.vrca.data.UserPreferencesRepository(this@VrchatPipelineService)
                 repo.saveNotifGroupAnnouncementSeen(updatedMap.toString())
@@ -2672,6 +2684,62 @@ class VrchatPipelineService : Service() {
      * silently dropped on the first run — only events that happen after setup
      * generate notifications.
      */
+    /**
+     * Silently baselines a group the user JUST JOINED: records ALL of its
+     * current posts + calendar events into the seen map (and their content /
+     * event fingerprints into seenNotifIds) WITHOUT firing. Fix for "old group
+     * announcements fire as notifications when you join a new group" — the
+     * first-run seedBackfillBaseline only covers the groups you were in at first
+     * launch, so a group joined later had none of its pre-existing content
+     * baselined and the backfill / poll swept it all as new. After this runs
+     * once for a group, only content created after you joined surfaces.
+     * Mutates seenMap + updatedMap in place; the caller persists updatedMap and
+     * sets the "${groupId}__known" marker.
+     */
+    private suspend fun seedGroupBaselineSilently(
+        groupId: String,
+        seenMap: JSONObject,
+        updatedMap: JSONObject
+    ) {
+        try {
+            val posts = VrchatAuthManager.fetchGroupPosts(this@VrchatPipelineService, groupId, 20)
+            if (posts != null) {
+                for (j in 0 until posts.length()) {
+                    val post = posts.optJSONObject(j) ?: continue
+                    val postId = post.optString("id", "")
+                    val postCreatedAt = post.optString("createdAt", "")
+                    if (postId.isBlank() || postCreatedAt.isBlank()) continue
+                    val k = "${groupId}_post_$postId"
+                    seenMap.put(k, postCreatedAt)
+                    updatedMap.put(k, postCreatedAt)
+                    // Also record the content fingerprint so the live v2 path /
+                    // cross-path dedup can't fire the same pre-existing post.
+                    addContentFingerprintToSeen(
+                        groupId, post.optString("title", ""), post.optString("text", "")
+                    )
+                }
+            }
+            delay(250)
+            val events = VrchatAuthManager.fetchGroupCalendarEvents(this@VrchatPipelineService, groupId, 20)
+            if (events != null) {
+                for (j in 0 until events.length()) {
+                    val ev = events.optJSONObject(j) ?: continue
+                    val evId = ev.optString("id", "").ifBlank { findIdWithPrefix(ev, "cal_").orEmpty() }
+                    if (evId.isBlank()) continue
+                    val marker = ev.optString("startsAt", "").ifBlank {
+                        ev.optString("createdAt", "").ifBlank { evId }
+                    }
+                    val k = "${groupId}_event_$evId"
+                    seenMap.put(k, marker)
+                    updatedMap.put(k, marker)
+                    addEventFingerprintToSeen(groupId, evId)
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "seedGroupBaselineSilently: group $groupId failed", e)
+        }
+    }
+
     private suspend fun seedBackfillBaseline() {
         try {
             val groups = VrchatAuthManager.fetchUserGroups(this@VrchatPipelineService) ?: return
@@ -3213,6 +3281,12 @@ class VrchatPipelineService : Service() {
         val seenMap = try { JSONObject(seenRaw) } catch (_: Exception) { JSONObject() }
         val updatedMap = JSONObject(seenRaw)
         var changed = false
+        // First sweep on this version records the current groups as "known"
+        // WITHOUT seeding (so existing groups still fire genuinely-missed items).
+        // Thereafter, a group NOT in the known set is one the user JOINED later,
+        // so its pre-existing posts/events are baselined silently instead of
+        // firing as notifications.
+        val knownInit = seenMap.has("__known_groups_init")
         val groupCount = minOf(groups.length(), 50)
         for (i in 0 until groupCount) {
             val group = groups.optJSONObject(i) ?: continue
@@ -3220,6 +3294,16 @@ class VrchatPipelineService : Service() {
             val groupName = group.optString("name", "A group")
             if (groupId.isBlank()) continue
             if (groupName.isNotBlank() && groupName != "A group") groupNameCache[groupId] = groupName
+            if (!knownInit) {
+                updatedMap.put("${groupId}__known", "1")
+                changed = true
+            } else if (!seenMap.has("${groupId}__known")) {
+                // Newly joined group — silently baseline all current content.
+                seedGroupBaselineSilently(groupId, seenMap, updatedMap)
+                updatedMap.put("${groupId}__known", "1")
+                changed = true
+                continue
+            }
             try {
                 // Posts endpoint includes the pinned announcement, so no
                 // separate fetchGroupAnnouncement call — eliminates the
@@ -3289,6 +3373,10 @@ class VrchatPipelineService : Service() {
             } catch (e: Exception) {
                 Log.w(TAG, "pollGroupAnnouncements: group $groupId failed", e)
             }
+        }
+        if (!knownInit) {
+            updatedMap.put("__known_groups_init", "1")
+            changed = true
         }
         if (changed) {
             val repo = com.vrca.data.UserPreferencesRepository(this)
