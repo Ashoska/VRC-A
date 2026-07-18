@@ -26,7 +26,19 @@ data class InAppAlertEvent(
     val imageUrl: String? = null,
     // VRChat ids backing the calendar actions (Add to Calendar / Join event).
     val groupRefId: String? = null,   // grp_...
-    val eventRefId: String? = null,   // cal_...
+    val eventRefId: String? = null,   // cal_... (per-OCCURRENCE id; differs across
+                                      // a recurring series' occurrences)
+    // Stable per-SERIES id (every occurrence of a repeat shares it). This is the
+    // real identity used to group/collapse/match events — the normalized title is
+    // only a fallback when VRChat didn't provide one. Keying on the title caused
+    // two DISTINCT series to merge, cross-write each other's banner/languages/
+    // description, and flip-flop which one a card showed.
+    val seriesId: String? = null,     // s...
+    // Set true when the event has been confirmed DELETED from VRChat (a 404 on the
+    // single-event fetch, with the series also absent from the group calendar). A
+    // removed event drops out of "Going", renders with a red "Removed" treatment in
+    // the normal area, and is dismissable.
+    val removed: Boolean = false,
     // Scheduled timing (epoch ms; 0 = unknown). Drives the countdown / Live
     // now / Ended status chip and the Starts/Ends rows.
     val startsAtMs: Long = 0L,
@@ -75,6 +87,7 @@ data class AlertRichMeta(
     val imageUrl: String? = null,
     val groupRefId: String? = null,
     val eventRefId: String? = null,
+    val seriesId: String? = null,
     val startsAtMs: Long = 0L,
     val endsAtMs: Long = 0L,
     val createdAtMs: Long = 0L,
@@ -344,6 +357,10 @@ object InAppAlertState {
         )
     }
 
+    /** The existing display title for [groupKey], or null if the group isn't present. */
+    fun groupTitleOf(groupKey: String): String? =
+        _groups.value.firstOrNull { it.groupId == groupKey }?.title
+
     fun pinnedCount(): Int = _groups.value.count { it.pinned }
 
     /**
@@ -435,6 +452,64 @@ object InAppAlertState {
         }
     }
 
+    /**
+     * SERIES-aware identity test used by the enricher: does [groupKey] already hold
+     * a card for this event? Matches by (in strength order) the stable [seriesId],
+     * the per-occurrence [eventId], or the normalized title. This is what lets the
+     * enricher know whether to UPDATE an existing card or RE-ADD a dismissed one.
+     */
+    fun hasSeriesCard(groupKey: String, seriesId: String?, eventId: String?, normalizedTitle: String): Boolean {
+        val g = _groups.value.firstOrNull { it.groupId == groupKey } ?: return false
+        return g.events.any { e -> eventMatchesSeries(e, seriesId, eventId, normalizedTitle) }
+    }
+
+    /** Shared series-identity predicate. seriesId (when both sides have it) is the
+     *  strongest signal; then the occurrence id; then the normalized title. */
+    fun eventMatchesSeries(
+        e: InAppAlertEvent,
+        seriesId: String?,
+        eventId: String?,
+        normalizedTitle: String
+    ): Boolean {
+        if (!seriesId.isNullOrBlank() && e.seriesId == seriesId) return true
+        if (!eventId.isNullOrBlank() && e.eventRefId == eventId) return true
+        return normalizedTitle.isNotBlank() && normEventTitle(e.eventTitle) == normalizedTitle
+    }
+
+    /**
+     * Re-adds [event] to [groupKey] WITHOUT firing an Android notification — the
+     * "re-surface a swiped followed event" path (Fix for events subscribed to /
+     * created then dismissed from the in-app list vanishing from "Going"). Only
+     * adds when no card for this series exists (so it can't duplicate a live one);
+     * returns true if it added. The server follow-read that drives this already
+     * detects website/PC/headset subscribes, so this simply makes that read able to
+     * re-materialize a card the user swiped away.
+     */
+    fun readdFollowedEventIfMissing(ctx: Context, groupKey: String, groupTitle: String, event: InAppAlertEvent): Boolean {
+        val normTitle = normEventTitle(event.eventTitle)
+        if (hasSeriesCard(groupKey, event.seriesId, event.eventRefId, normTitle)) return false
+        addGroupedEvent(ctx, groupKey, groupTitle, event.url, event)
+        return true
+    }
+
+    /**
+     * Marks every card of a series in [groupKey] as REMOVED (event deleted from
+     * VRChat) and clears its `following` so it drops out of "Going" and renders with
+     * the red "Removed" treatment in the normal area. Returns true if anything
+     * changed. Never fires a notification.
+     */
+    fun markSeriesRemoved(
+        ctx: Context,
+        groupKey: String,
+        seriesId: String?,
+        eventId: String?,
+        normalizedTitle: String
+    ): Boolean = enrichEvents(
+        ctx, groupKey,
+        match = { e -> !e.removed && eventMatchesSeries(e, seriesId, eventId, normalizedTitle) },
+        transform = { e -> e.copy(removed = true, following = false) }
+    )
+
     /** Records the world image for invite-target events whose actionData is
      *  [location] (any group) — lets the image store keep the file referenced
      *  until the invite alert is dismissed. */
@@ -473,6 +548,8 @@ object InAppAlertState {
                     put("imageUrl", e.imageUrl ?: "")
                     put("groupRefId", e.groupRefId ?: "")
                     put("eventRefId", e.eventRefId ?: "")
+                    put("seriesId", e.seriesId ?: "")
+                    put("removed", e.removed)
                     put("startsAt", e.startsAtMs)
                     put("endsAt", e.endsAtMs)
                     put("createdAt", e.createdAtMs)
@@ -524,6 +601,8 @@ object InAppAlertState {
                     imageUrl = eObj.optString("imageUrl").ifBlank { null },
                     groupRefId = eObj.optString("groupRefId").ifBlank { null },
                     eventRefId = eObj.optString("eventRefId").ifBlank { null },
+                    seriesId = eObj.optString("seriesId").ifBlank { null },
+                    removed = eObj.optBoolean("removed", false),
                     startsAtMs = eObj.optLong("startsAt", 0L),
                     endsAtMs = eObj.optLong("endsAt", 0L),
                     createdAtMs = eObj.optLong("createdAt", 0L),

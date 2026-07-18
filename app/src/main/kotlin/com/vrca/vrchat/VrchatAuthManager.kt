@@ -1176,18 +1176,37 @@ object VrchatAuthManager {
      * object (also richer for organizer/recurrence).
      */
     suspend fun fetchCalendarEvent(context: Context, groupId: String, eventId: String): org.json.JSONObject? =
+        fetchCalendarEventResult(context, groupId, eventId).event
+
+    /**
+     * Tri-state single calendar-event fetch. [CalendarEventResult.status] lets the
+     * caller distinguish a definitive **404 (deleted)** from a transient failure
+     * (network / 429 / no cookie), so a bad connection never false-flags a live
+     * event as "Removed". FOUND carries the object; DELETED means VRChat returned
+     * 404; UNKNOWN is any other non-200 / error.
+     */
+    enum class CalendarEventStatus { FOUND, DELETED, UNKNOWN }
+    data class CalendarEventResult(val status: CalendarEventStatus, val event: org.json.JSONObject?)
+
+    suspend fun fetchCalendarEventResult(context: Context, groupId: String, eventId: String): CalendarEventResult =
         withContext(Dispatchers.IO) {
-            if (groupId.isBlank() || eventId.isBlank()) return@withContext null
-            val cookieHeader = getCookieHeader(context) ?: return@withContext null
+            if (groupId.isBlank() || eventId.isBlank())
+                return@withContext CalendarEventResult(CalendarEventStatus.UNKNOWN, null)
+            val cookieHeader = getCookieHeader(context)
+                ?: return@withContext CalendarEventResult(CalendarEventStatus.UNKNOWN, null)
             try {
                 val (code, body, rawCookies) = get("$BASE/calendar/$groupId/$eventId", null, cookieHeader)
-                if (code == 200) captureRolledCookies(context, rawCookies)
-                if (code == 200 && body.startsWith("{")) {
-                    org.json.JSONObject(body)
-                } else null
+                when {
+                    code == 200 && body.startsWith("{") -> {
+                        captureRolledCookies(context, rawCookies)
+                        CalendarEventResult(CalendarEventStatus.FOUND, org.json.JSONObject(body))
+                    }
+                    code == 404 -> CalendarEventResult(CalendarEventStatus.DELETED, null)
+                    else -> CalendarEventResult(CalendarEventStatus.UNKNOWN, null)
+                }
             } catch (e: Exception) {
                 Log.w(TAG, "fetchCalendarEvent($groupId,$eventId) failed", e)
-                null
+                CalendarEventResult(CalendarEventStatus.UNKNOWN, null)
             }
         }
 

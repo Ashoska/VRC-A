@@ -974,7 +974,32 @@ private object RemoteKeys {
 private suspend fun bootstrapFirebaseAndCache(ctx: Context) {
     val auth = FirebaseAuth.getInstance()
     if (auth.currentUser == null) {
-        auth.signInAnonymously().await()
+        // Anonymous sign-in is the ONE hard network dependency of boot — the
+        // rest of bootstrap is runCatching/non-fatal. On a brand-new install's
+        // FIRST open the network + Firebase stack is often still cold, so a
+        // single attempt fails transiently and the user sees "Device session"
+        // error until they reopen (by which point it's warm). Retry a few times
+        // with short exponential backoff so a cold-start blip self-heals inside
+        // the boot window instead of surfacing a manual-retry error. Well within
+        // the 20s outer withTimeout (worst case ~400+800+1600+3000 ≈ 5.8s).
+        var lastErr: Throwable? = null
+        var delayMs = 400L
+        var attempt = 0
+        while (auth.currentUser == null && attempt < 4) {
+            try {
+                auth.signInAnonymously().await()
+            } catch (t: Throwable) {
+                lastErr = t
+                if (attempt < 3) {
+                    kotlinx.coroutines.delay(delayMs)
+                    delayMs = (delayMs * 2).coerceAtMost(3000L)
+                }
+            }
+            attempt++
+        }
+        if (auth.currentUser == null) {
+            throw lastErr ?: IllegalStateException("Anonymous auth returned null user")
+        }
     }
     val uid = auth.currentUser?.uid ?: error("Anonymous auth returned null user")
 
