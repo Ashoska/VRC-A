@@ -74,6 +74,11 @@ object GroupAlertEnricher {
         return null
     }
 
+    /** VRChat's stable per-SERIES id off a calendar-event object (every occurrence
+     *  of a repeat shares it; a genuine one-off has its own). null when absent. */
+    fun extractSeriesId(ev: JSONObject): String? =
+        ev.optString("seriesId", "").takeIf { it.isNotBlank() && it != "null" }
+
     private fun normTitle(ev: JSONObject): String =
         normTitleStr(ev.optString("title", "").ifBlank { ev.optString("name", "") })
 
@@ -276,6 +281,45 @@ object GroupAlertEnricher {
         }
     }
 
+    /**
+     * Detects DELETED followed events for [groupId] and flags their cards "Removed".
+     * A card is a candidate only when it's a signed-up ([following]==true), not-yet-
+     * removed event whose series is ABSENT from the freshly-fetched live calendar
+     * ([liveKeys]) — then a single tri-state fetch CONFIRMS the deletion (a real 404,
+     * never a network blip) before flagging it. Bounded: deduped per series and
+     * capped at a handful of confirming fetches per sweep so a large "Going" list
+     * can't burst REST calls.
+     */
+    private suspend fun detectRemovedFollowedEvents(ctx: Context, groupId: String, liveKeys: Set<String>) {
+        val groupKey = "event_$groupId"
+        val g = InAppAlertState.groups.value.firstOrNull { it.groupId == groupKey } ?: return
+        val seen = HashSet<String>()
+        val candidates = ArrayList<InAppAlertEvent>()
+        for (e in g.events) {
+            if (e.following != true || e.removed) continue
+            val evId = e.eventRefId ?: continue
+            val titleKey = normTitleStr(e.eventTitle).takeIf { it.isNotBlank() }?.let { "t:$it" }
+            val present = liveKeys.contains("c:$evId") ||
+                (e.seriesId != null && liveKeys.contains("s:${e.seriesId}")) ||
+                (titleKey != null && liveKeys.contains(titleKey))
+            if (present) continue
+            val dedup = e.seriesId?.let { "s:$it" } ?: "c:$evId"
+            if (!seen.add(dedup)) continue
+            candidates.add(e)
+            if (candidates.size >= 8) break
+        }
+        for (e in candidates) {
+            val evId = e.eventRefId ?: continue
+            val res = VrchatAuthManager.fetchCalendarEventResult(ctx, groupId, evId)
+            if (res.status == VrchatAuthManager.CalendarEventStatus.DELETED) {
+                InAppAlertState.markSeriesRemoved(
+                    ctx, groupKey, e.seriesId, evId, normTitleStr(e.eventTitle)
+                )
+            }
+            kotlinx.coroutines.delay(250)
+        }
+    }
+
     private suspend fun enrichLocked(ctx: Context, groupId: String): Boolean {
         try {
             // ---- Calendar events: match alerts by the cal_ id ----
@@ -284,6 +328,19 @@ object GroupAlertEnricher {
             // ~1 call per series instead of one per flooded occurrence.
             val events = VrchatAuthManager.fetchGroupCalendarEvents(ctx, groupId, 20)
             if (events != null) {
+                // Series keys present in the LIVE calendar right now (by seriesId,
+                // cal_ id, and normalized title). Used below to detect a card whose
+                // event VRChat no longer lists — a deletion candidate confirmed by a
+                // 404 single-fetch before we flag it "Removed".
+                val liveKeys = HashSet<String>()
+                for (i in 0 until events.length()) {
+                    val e = events.optJSONObject(i) ?: continue
+                    extractSeriesId(e)?.let { liveKeys.add("s:$it") }
+                    e.optString("id", "").ifBlank { findIdWithPrefix(e, "cal_").orEmpty() }
+                        .takeIf { it.isNotBlank() }?.let { liveKeys.add("c:$it") }
+                    normTitle(e).takeIf { it.isNotBlank() }?.let { liveKeys.add("t:$it") }
+                }
+                detectRemovedFollowedEvents(ctx, groupId, liveKeys)
                 for ((ev, isRecurringSeries) in collapseEventsByTitle(events)) {
                     val evId = ev.optString("id", "").ifBlank { findIdWithPrefix(ev, "cal_").orEmpty() }
                     if (evId.isBlank()) continue
@@ -303,6 +360,8 @@ object GroupAlertEnricher {
                     // representative (after recurring-collapse, ~1 per series).
                     val single = VrchatAuthManager.fetchCalendarEvent(ctx, groupId, evId)
                     val src = single ?: ev
+                    // Stable per-series id (single event first, then list item).
+                    val seriesId = extractSeriesId(src) ?: extractSeriesId(ev)
                     // Interested count comes from the SINGLE event first — VRChat's
                     // group-calendar LIST count lags (it didn't move when the user
                     // added/removed even though the website updated instantly),
@@ -332,7 +391,12 @@ object GroupAlertEnricher {
                     InAppAlertState.enrichEvents(
                         ctx, "event_$groupId",
                         match = { e ->
-                            e.eventRefId == evId ||
+                            // SERIES id is the strongest, title-independent signal —
+                            // it keeps two DISTINCT series from cross-matching (which
+                            // mixed their banners/languages/descriptions and made a
+                            // card flip-flop between them).
+                            (seriesId != null && e.seriesId == seriesId) ||
+                                e.eventRefId == evId ||
                                 (e.eventRefId == null && e.url?.contains(evId) == true) ||
                                 // Adopt a THIN v2 card (fired before its cal_ id
                                 // was known — the common freshly-created-event
@@ -340,21 +404,23 @@ object GroupAlertEnricher {
                                 // it IN PLACE (banner/timing/following) instead of
                                 // leaving it dangling while the REST sweep fires a
                                 // duplicate. The transform below links its
-                                // eventRefId, so it's only adopted once.
-                                (e.eventRefId == null && repTitle.isNotBlank() &&
-                                    normTitleStr(e.eventTitle) == repTitle) ||
+                                // eventRefId/seriesId, so it's only adopted once.
+                                (e.eventRefId == null && e.seriesId == null &&
+                                    repTitle.isNotBlank() && normTitleStr(e.eventTitle) == repTitle) ||
                                 // A recurring representative updates ALL stored
-                                // occurrences of its series (matched by title) so
-                                // following/interested/etc. propagate to every one
-                                // and the display-collapse shows consistent data.
-                                (recurring && e.recurring && repTitle.isNotBlank() &&
-                                    normTitleStr(e.eventTitle) == repTitle)
+                                // occurrences of its series. Prefer seriesId; fall
+                                // back to title only for cards that have no seriesId
+                                // yet (pre-update / thin), so a titled sibling series
+                                // can't be dragged in once ids are known.
+                                (recurring && e.recurring && e.seriesId == null &&
+                                    repTitle.isNotBlank() && normTitleStr(e.eventTitle) == repTitle)
                         },
                         transform = { e ->
                             e.copy(
                                 imageUrl = img ?: e.imageUrl,
                                 groupRefId = e.groupRefId ?: groupId,
                                 eventRefId = evId,
+                                seriesId = seriesId ?: e.seriesId,
                                 startsAtMs = if (startsMs > 0) startsMs else e.startsAtMs,
                                 endsAtMs = if (endsMs > 0) endsMs else e.endsAtMs,
                                 createdAtMs = if (createdMs > 0) createdMs else e.createdAtMs,
@@ -377,10 +443,51 @@ object GroupAlertEnricher {
                                 // (time/description) land here on the next sweep.
                                 eventTitle = title.ifBlank { e.eventTitle },
                                 timestampMs = if (startsMs > 0) startsMs else e.timestampMs,
-                                body = if (startsMs > 0 && desc.isNotBlank()) desc else e.body
+                                body = if (startsMs > 0 && desc.isNotBlank()) desc else e.body,
+                                // Matching a LIVE representative proves the event
+                                // exists — clear any stale "Removed" flag (self-heal
+                                // if it was briefly mis-flagged / recreated).
+                                removed = false
                             )
                         }
                     )
+                    // ---- Re-surface a followed event whose card was swiped away ----
+                    // The server follow-read above is authoritative and already
+                    // reflects website / PC / headset subscribes. If it says we're
+                    // GOING and no card for this series exists (the user dismissed it
+                    // from the in-app list before it was known-followed), silently
+                    // re-add one so it returns to "Going" — no Android notification.
+                    // Remove-from-Calendar sets following=false, so an intentional
+                    // un-follow is never fought. Repeatable + per-series.
+                    if (following == true &&
+                        !InAppAlertState.hasSeriesCard("event_$groupId", seriesId, evId, repTitle)) {
+                        val gTitle = InAppAlertState.groupTitleOf("event_$groupId")
+                            ?: ("Event from " + (VrchatAuthManager.fetchGroupName(ctx, groupId) ?: "a group"))
+                        InAppAlertState.readdFollowedEventIfMissing(
+                            ctx, "event_$groupId", gTitle,
+                            InAppAlertEvent(
+                                id = "event_${groupId}_resurf_$evId",
+                                body = if (startsMs > 0 && desc.isNotBlank()) desc else title,
+                                timestampMs = if (startsMs > 0) startsMs else createdMs,
+                                eventTitle = title.ifBlank { null },
+                                url = "https://vrchat.com/home/group/$groupId/calendar/$evId",
+                                imageUrl = img,
+                                groupRefId = groupId,
+                                eventRefId = evId,
+                                seriesId = seriesId,
+                                startsAtMs = startsMs,
+                                endsAtMs = endsMs,
+                                createdAtMs = createdMs,
+                                interestedCount = interested,
+                                category = category.ifBlank { null },
+                                platforms = platformsCsv,
+                                accessType = access.ifBlank { null },
+                                languages = languagesCsv,
+                                following = true,
+                                recurring = recurring
+                            )
+                        )
+                    }
                 }
             }
             // ---- Posts/announcements: match alerts by normalized body ----

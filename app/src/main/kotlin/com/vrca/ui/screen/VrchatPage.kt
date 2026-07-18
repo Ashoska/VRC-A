@@ -848,23 +848,37 @@ private fun LazyListScope.inAppAlertSection(
             val silver = Color(0xFFC7CDD9)
             val signedUpCards = ArrayList<Pair<String, InAppAlertGroup>>()
             val pinnedCards = ArrayList<Pair<String, InAppAlertGroup>>()
+            val removedCards = ArrayList<Pair<String, InAppAlertGroup>>()
             val restCards = ArrayList<Pair<String, InAppAlertGroup>>()
+            // Series key for splitting: the stable seriesId (so two distinct series
+            // never share a "Going"/"Removed" card), title fallback, then id.
+            fun seriesKey(ev: InAppAlertEvent): String = when {
+                !ev.seriesId.isNullOrBlank() -> "s:${ev.seriesId}"
+                !ev.eventTitle.isNullOrBlank() ->
+                    "t:${ev.eventTitle.trim().lowercase().replace(Regex("\\s+"), " ")}"
+                else -> "id:${ev.id}"
+            }
             for (g in filtered) {
-                val followed = g.events.filter { it.following == true }
-                val others = g.events.filter { it.following != true }
-                // Group the followed events by SERIES (normalized title) so a
-                // recurring event the user signed up for shows as ONE card — its ~50
-                // occurrences, each independently marked following, would otherwise
-                // each spawn its own "Going" card. The card's own recurring-collapse
-                // then picks the nearest upcoming occurrence and shows the count.
+                // A DELETED event leaves "Going" and becomes its own red "Removed"
+                // card in the normal area; it's never signed-up or grouped-in.
+                val followed = g.events.filter { it.following == true && !it.removed }
+                val removedEvts = g.events.filter { it.removed }
+                val others = g.events.filter { it.following != true && !it.removed }
+                // Group the followed events by SERIES so a recurring event the user
+                // signed up for shows as ONE card — its ~50 occurrences, each
+                // independently marked following, would otherwise each spawn its own
+                // "Going" card. The card's own recurring-collapse then picks the
+                // nearest upcoming occurrence and shows the count.
                 val bySeries = LinkedHashMap<String, MutableList<InAppAlertEvent>>()
-                for (ev in followed) {
-                    val t = ev.eventTitle?.trim()?.lowercase()?.replace(Regex("\\s+"), " ").orEmpty()
-                    val skey = if (t.isNotBlank()) "t:$t" else "id:${ev.id}"
-                    bySeries.getOrPut(skey) { mutableListOf() }.add(ev)
-                }
+                for (ev in followed) bySeries.getOrPut(seriesKey(ev)) { mutableListOf() }.add(ev)
                 for ((skey, evs) in bySeries) {
                     signedUpCards.add("su_${g.groupId}_$skey" to g.copy(events = evs))
+                }
+                // Removed events: each series its own standalone red card.
+                val byRemoved = LinkedHashMap<String, MutableList<InAppAlertEvent>>()
+                for (ev in removedEvts) byRemoved.getOrPut(seriesKey(ev)) { mutableListOf() }.add(ev)
+                for ((skey, evs) in byRemoved) {
+                    removedCards.add("rm_${g.groupId}_$skey" to g.copy(events = evs))
                 }
                 if (others.isNotEmpty()) {
                     val rem = g.copy(events = others)
@@ -938,7 +952,8 @@ private fun LazyListScope.inAppAlertSection(
                     }
                 }
             }
-            if ((signedUpCards.isNotEmpty() || pinnedCards.isNotEmpty()) && restCards.isNotEmpty()) {
+            if ((signedUpCards.isNotEmpty() || pinnedCards.isNotEmpty()) &&
+                (restCards.isNotEmpty() || removedCards.isNotEmpty())) {
                 item(key = "rest_header") {
                     Text(
                         "Other notifications",
@@ -948,6 +963,12 @@ private fun LazyListScope.inAppAlertSection(
                         modifier = Modifier.padding(start = 4.dp, end = 4.dp, top = 6.dp, bottom = 2.dp)
                     )
                 }
+            }
+            // Deleted events: red "Removed" cards, at the top of the normal area,
+            // dismissable so the user can swipe the dead event away.
+            items(removedCards, key = { it.first }) { (_, group) ->
+                AlertGroupCard(group = group, nowMs = nowMs, signedUp = false, pinned = false,
+                    removed = true, onTogglePin = {}, onDismiss = { dismissCard(group) })
             }
             items(restCards, key = { it.first }) { (_, group) ->
                 AlertGroupCard(group = group, nowMs = nowMs, signedUp = false, pinned = false,
@@ -972,9 +993,15 @@ private fun collapseRecurring(
     if (events.size < 2) return events
     val byKey = LinkedHashMap<String, MutableList<InAppAlertEvent>>()
     for (e in events) {
-        val t = e.eventTitle?.trim()?.lowercase()
-        // Only fold when there's a real title to key on; otherwise keep unique by id.
-        val key = if (t.isNullOrBlank()) "id:${e.id}" else "t:$t"
+        // SERIES id is the real identity — every occurrence of a repeat shares it,
+        // and two DISTINCT series never collide on it (title-only keying merged
+        // different events and flip-flopped which one a card showed). Fall back to
+        // the normalized title only when there's no seriesId, then to the id.
+        val key = when {
+            !e.seriesId.isNullOrBlank() -> "s:${e.seriesId}"
+            !e.eventTitle.isNullOrBlank() -> "t:${e.eventTitle.trim().lowercase()}"
+            else -> "id:${e.id}"
+        }
         byKey.getOrPut(key) { mutableListOf() }.add(e)
     }
     return byKey.values.map { occ ->
@@ -1137,16 +1164,27 @@ private fun AlertGroupCard(
     nowMs: Long,
     signedUp: Boolean = false,
     pinned: Boolean = false,
+    removed: Boolean = false,
     onTogglePin: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
     // Accent treatment: signed-up (Added to Calendar) = GOLD, manually pinned =
-    // SILVER; both get an accent bar/border + a pill and are protected from
-    // dismissal. (No emoji anywhere — pin is the Material PushPin symbol.)
+    // SILVER, DELETED-from-VRChat = RED; all three get an accent bar/border + a
+    // pill. Signed-up/pinned are protected from dismissal; a removed card is
+    // dismissable (swipe the dead event away). (No emoji — pin is PushPin.)
     val gold = Color(0xFFFFC64B)
     val silver = Color(0xFFC7CDD9)
+    val red = Color(0xFFE05561)
+    // A removed card is styled special (red) but stays dismissable, so it is NOT
+    // part of `special` (which gates dismissal protection below).
     val special = signedUp || pinned
-    val accent = if (signedUp) gold else silver
+    val accent = when {
+        signedUp -> gold
+        pinned -> silver
+        removed -> red
+        else -> silver
+    }
+    val decorated = special || removed
     val ctx = LocalContext.current
     var expanded by remember { mutableStateOf(false) }
     // Collapse recurring occurrences (VRChat auto-creates EVERY day of a repeat as
@@ -1259,12 +1297,12 @@ private fun AlertGroupCard(
         colors = CardDefaults.elevatedCardColors(
             // Faint warm tint pushes a signed-up card toward gold without hurting
             // legibility; normal cards keep surfaceVariant.
-            containerColor = if (special)
+            containerColor = if (decorated)
                 androidx.compose.ui.graphics.lerp(MaterialTheme.colorScheme.surfaceVariant, accent, 0.10f)
             else MaterialTheme.colorScheme.surfaceVariant
         ),
         elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp),
-        modifier = if (special)
+        modifier = if (decorated)
             Modifier.border(1.dp, accent.copy(alpha = 0.6f), MaterialTheme.shapes.medium)
         else Modifier
     ) {
@@ -1280,7 +1318,7 @@ private fun AlertGroupCard(
                         .padding(end = 10.dp, top = 2.dp)
                         .size(width = 3.dp, height = 30.dp)
                         .background(
-                            if (special) accent else MaterialTheme.colorScheme.primary,
+                            if (decorated) accent else MaterialTheme.colorScheme.primary,
                             shape = MaterialTheme.shapes.small
                         )
                 )
@@ -1305,32 +1343,39 @@ private fun AlertGroupCard(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false)
                         )
-                        if (special) {
+                        if (decorated) {
                             Spacer(Modifier.width(6.dp))
                             Surface(color = accent.copy(alpha = 0.20f), shape = MaterialTheme.shapes.extraSmall) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
                                     modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
                                 ) {
-                                    if (signedUp) {
-                                        Text(
+                                    when {
+                                        signedUp -> Text(
                                             "★ Going",
                                             style = MaterialTheme.typography.labelSmall,
                                             fontWeight = FontWeight.Bold,
                                             color = accent
                                         )
-                                    } else {
-                                        Icon(
-                                            Icons.Filled.PushPin, null,
-                                            modifier = Modifier.size(11.dp), tint = accent
-                                        )
-                                        Spacer(Modifier.width(3.dp))
-                                        Text(
-                                            "Pinned",
+                                        removed -> Text(
+                                            "Removed",
                                             style = MaterialTheme.typography.labelSmall,
                                             fontWeight = FontWeight.Bold,
                                             color = accent
                                         )
+                                        else -> {
+                                            Icon(
+                                                Icons.Filled.PushPin, null,
+                                                modifier = Modifier.size(11.dp), tint = accent
+                                            )
+                                            Spacer(Modifier.width(3.dp))
+                                            Text(
+                                                "Pinned",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = accent
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -1359,7 +1404,7 @@ private fun AlertGroupCard(
                                 color = MaterialTheme.colorScheme.outline
                             )
                         }
-                        if (!signedUp) {
+                        if (!signedUp && !removed) {
                         Spacer(Modifier.width(6.dp))
                         Box(Modifier.size(20.dp).clip(CircleShape).clickable { onTogglePin() },
                             contentAlignment = Alignment.Center) {
@@ -1919,8 +1964,34 @@ private fun AlertEventBody(
                         onClick = { onJoinEvent(event.groupRefId) }
                     )
                 }
-                // Phase-appropriate calendar/join actions.
-                if (isRichEvent && event.groupRefId != null) {
+                // Deleted from VRChat: no calendar/join actions — the event is gone.
+                // A clear red notice replaces the buttons; the card is dismissable.
+                if (event.removed) {
+                    Spacer(Modifier.height(8.dp))
+                    Surface(
+                        color = Color(0xFFE05561).copy(alpha = 0.14f),
+                        shape = MaterialTheme.shapes.small,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                Icons.Filled.EventBusy, null,
+                                tint = Color(0xFFE05561), modifier = Modifier.size(16.dp)
+                            )
+                            Text(
+                                "This event was removed from VRChat",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = Color(0xFFE05561)
+                            )
+                        }
+                    }
+                }
+                // Phase-appropriate calendar/join actions (suppressed once removed).
+                if (!event.removed && isRichEvent && event.groupRefId != null) {
                     when (phase) {
                         EventPhase.UPCOMING -> if (event.eventRefId != null) {
                             val onCal = event.following == true
