@@ -176,8 +176,13 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
     // alerts were dismissed. Only rich event/announcement groups are swept —
     // bounded to a handful of groups → ~2 REST calls each per cycle, on-tab only.
     LaunchedEffect(Unit) {
+        // Sweep away events that have ENDED so concluded events don't linger in
+        // "Going" / the notifications area (timestamp-only, no network). Runs on
+        // entry (immediate declutter) and every cycle.
+        InAppAlertState.pruneEndedEvents(ctx, System.currentTimeMillis())
         delay(5_000)
         while (true) {
+            InAppAlertState.pruneEndedEvents(ctx, System.currentTimeMillis())
             val groupIds = InAppAlertState.groups.value
                 .asSequence()
                 .filter { it.groupId.startsWith("event_grp_") || it.groupId.startsWith("announcement_grp_") }

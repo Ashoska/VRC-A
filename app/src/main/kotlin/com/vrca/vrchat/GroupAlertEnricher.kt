@@ -258,7 +258,19 @@ object GroupAlertEnricher {
      * matching alert events. Debounced per group ([minIntervalMs]) AND globally
      * serialized/spaced across groups; returns true when a sweep actually ran.
      */
-    suspend fun enrich(ctx: Context, groupId: String, minIntervalMs: Long = 60_000L): Boolean {
+    suspend fun enrich(
+        ctx: Context,
+        groupId: String,
+        minIntervalMs: Long = 60_000L,
+        // Re-surface a dismissed followed event ONLY when this is a post-fire sweep
+        // (the genuine "you subscribed/created and swiped it away too fast" window).
+        // The routine periodic sweep must NOT re-add dismissed events — VRChat
+        // reports the user's OWN events as followed forever, so a periodic
+        // re-surface brought every dismissed self-created event back on every tab
+        // open (the "old dismissed events keep reappearing in Going" bug). Default
+        // false = update existing cards only.
+        allowResurface: Boolean = false
+    ): Boolean {
         if (groupId.isBlank()) return false
         // Atomic per-group debounce check+stamp (two concurrent calls for the
         // same group can't both pass).
@@ -275,7 +287,7 @@ object GroupAlertEnricher {
                 kotlinx.coroutines.delay(GLOBAL_SPACING_MS - sinceLast)
             }
             lastAnySweepMs = System.currentTimeMillis()
-            return enrichLocked(ctx, groupId)
+            return enrichLocked(ctx, groupId, allowResurface)
         } finally {
             sweepMutex.unlock()
         }
@@ -303,16 +315,20 @@ object GroupAlertEnricher {
         for (e in g.events) {
             if (e.removed) continue
             val evId = e.eventRefId ?: continue
-            // Only bother with events worth flagging: signed-up (any phase), or
-            // upcoming / unknown-timing. Skip clearly-past non-followed events.
-            val relevant = e.following == true || e.startsAtMs <= 0L || e.startsAtMs >= now
-            if (!relevant) continue
+            // ENDED events are handled by the prune (they just vanish); the red
+            // "Removed" state is reserved for an event you might still attend that
+            // got cancelled. So only confirm NON-ended events here.
+            if (InAppAlertState.eventEnded(e, now)) continue
             val titleKey = normTitleStr(e.eventTitle).takeIf { it.isNotBlank() }?.let { "t:$it" }
             val present = liveKeys.contains("c:$evId") ||
                 (e.seriesId != null && liveKeys.contains("s:${e.seriesId}")) ||
                 (titleKey != null && liveKeys.contains(titleKey))
             if (present) continue
-            val dedup = e.seriesId?.let { "s:$it" } ?: "c:$evId"
+            // Dedup per SERIES: seriesId, else normalized title (repeating
+            // occurrences share it — this is what makes a deleted repeating series
+            // cost ONE confirm fetch instead of one per flooded occurrence), else
+            // the occurrence id.
+            val dedup = e.seriesId?.let { "s:$it" } ?: titleKey ?: "c:$evId"
             if (!seen.add(dedup)) continue
             candidates.add(e)
             if (candidates.size >= 10) break
@@ -329,19 +345,24 @@ object GroupAlertEnricher {
         }
     }
 
-    private suspend fun enrichLocked(ctx: Context, groupId: String): Boolean {
+    private suspend fun enrichLocked(ctx: Context, groupId: String, allowResurface: Boolean): Boolean {
         try {
             // ---- Calendar events: match alerts by the cal_ id ----
             // Collapse recurring occurrences to ONE representative per series FIRST,
             // so the per-representative single-event fetch (below) is bounded to
             // ~1 call per series instead of one per flooded occurrence.
             val events = VrchatAuthManager.fetchGroupCalendarEvents(ctx, groupId, 20)
+            // Series keys present in the LIVE calendar right now (by seriesId,
+            // cal_ id, and normalized title). Used below to detect a card whose
+            // event VRChat no longer lists — a deletion candidate confirmed by a
+            // 404 single-fetch before we flag it "Removed". Built even when the list
+            // is null/empty (an ALL-events-deleted group returns null): detection
+            // then runs with an empty set, and the per-event 404-confirm is the
+            // authoritative signal — a network blip returns UNKNOWN and flags
+            // nothing, so running on null is safe. This is the fix for a deleted
+            // followed event in an emptied group never flipping to "Removed".
+            val liveKeys = HashSet<String>()
             if (events != null) {
-                // Series keys present in the LIVE calendar right now (by seriesId,
-                // cal_ id, and normalized title). Used below to detect a card whose
-                // event VRChat no longer lists — a deletion candidate confirmed by a
-                // 404 single-fetch before we flag it "Removed".
-                val liveKeys = HashSet<String>()
                 for (i in 0 until events.length()) {
                     val e = events.optJSONObject(i) ?: continue
                     extractSeriesId(e)?.let { liveKeys.add("s:$it") }
@@ -349,7 +370,9 @@ object GroupAlertEnricher {
                         .takeIf { it.isNotBlank() }?.let { liveKeys.add("c:$it") }
                     normTitle(e).takeIf { it.isNotBlank() }?.let { liveKeys.add("t:$it") }
                 }
-                detectRemovedEvents(ctx, groupId, liveKeys)
+            }
+            detectRemovedEvents(ctx, groupId, liveKeys)
+            if (events != null) {
                 for ((ev, isRecurringSeries) in collapseEventsByTitle(events)) {
                     val evId = ev.optString("id", "").ifBlank { findIdWithPrefix(ev, "cal_").orEmpty() }
                     if (evId.isBlank()) continue
@@ -452,23 +475,25 @@ object GroupAlertEnricher {
                                 // (time/description) land here on the next sweep.
                                 eventTitle = title.ifBlank { e.eventTitle },
                                 timestampMs = if (startsMs > 0) startsMs else e.timestampMs,
-                                body = if (startsMs > 0 && desc.isNotBlank()) desc else e.body,
-                                // Matching a LIVE representative proves the event
-                                // exists — clear any stale "Removed" flag (self-heal
-                                // if it was briefly mis-flagged / recreated).
-                                removed = false
+                                body = if (startsMs > 0 && desc.isNotBlank()) desc else e.body
+                                // NOTE: deliberately do NOT clear `removed` here. A
+                                // title-fallback match could otherwise un-remove a
+                                // DELETED same-title event (e.g. two repeating series
+                                // in one group). `removed` is set only on a confirmed
+                                // 404 and stays sticky until the user dismisses it; a
+                                // genuinely recreated event gets a fresh id → new card.
                             )
                         }
                     )
                     // ---- Re-surface a followed event whose card was swiped away ----
-                    // The server follow-read above is authoritative and already
-                    // reflects website / PC / headset subscribes. If it says we're
-                    // GOING and no card for this series exists (the user dismissed it
-                    // from the in-app list before it was known-followed), silently
-                    // re-add one so it returns to "Going" — no Android notification.
-                    // Remove-from-Calendar sets following=false, so an intentional
-                    // un-follow is never fought. Repeatable + per-series.
-                    if (following == true &&
+                    // ONLY on a post-fire sweep (allowResurface): the genuine
+                    // "you subscribed/created and swiped it away too fast" window.
+                    // The routine periodic sweep must NOT re-add dismissed events —
+                    // VRChat reports the user's OWN events as followed forever, so a
+                    // periodic re-surface resurrected every dismissed self-created
+                    // event on each tab open. Remove-from-Calendar sets
+                    // following=false, so an intentional un-follow is never fought.
+                    if (allowResurface && following == true &&
                         !InAppAlertState.hasSeriesCard("event_$groupId", seriesId, evId, repTitle)) {
                         val gTitle = InAppAlertState.groupTitleOf("event_$groupId")
                             ?: ("Event from " + (VrchatAuthManager.fetchGroupName(ctx, groupId) ?: "a group"))

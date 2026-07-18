@@ -2106,7 +2106,13 @@ class VrchatPipelineService : Service() {
             for (delayMs in listOf(2500L, 6000L, 15000L)) {
                 delay(delayMs)
                 try {
-                    GroupAlertEnricher.enrich(this@VrchatPipelineService, groupId, minIntervalMs = 0)
+                    // Post-fire sweep: allowed to RE-SURFACE a just-fired followed
+                    // event the user swiped away too early. The periodic tab-loop
+                    // sweep deliberately does NOT (it would resurrect old dismissed
+                    // self-created events every open).
+                    GroupAlertEnricher.enrich(
+                        this@VrchatPipelineService, groupId, minIntervalMs = 0, allowResurface = true
+                    )
                 } catch (e: Exception) {
                     Log.w(TAG, "Targeted group sweep failed for $groupId", e)
                 }
