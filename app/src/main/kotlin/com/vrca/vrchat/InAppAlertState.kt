@@ -321,18 +321,43 @@ object InAppAlertState {
         var changed = false
         val next = _groups.value.mapNotNull { g ->
             if (!g.groupId.startsWith("event_")) return@mapNotNull g
-            val kept = g.events.filter { it.removed || !eventEnded(it, nowMs) }
-            when {
-                kept.size == g.events.size -> g
-                kept.isEmpty() -> { changed = true; null }
-                else -> { changed = true; g.copy(events = kept) }
+            val newEvents = ArrayList<InAppAlertEvent>(g.events.size)
+            var groupChanged = false
+            for (e in g.events) {
+                if (e.removed || !eventEnded(e, nowMs)) { newEvents.add(e); continue }
+                // Ended. A RECURRING series ROLLS FORWARD to its next upcoming
+                // occurrence (from EventSeriesStore) instead of vanishing — the card
+                // switches to the next date rather than being pruned away. A concluded
+                // series (no upcoming occurrence) or a non-recurring event just drops.
+                val advanced = advanceRecurringEvent(ctx, e, nowMs)
+                groupChanged = true
+                if (advanced != null) newEvents.add(advanced)
             }
+            if (!groupChanged) return@mapNotNull g
+            changed = true
+            if (newEvents.isEmpty()) null else g.copy(events = newEvents)
         }
         if (!changed) return false
         _groups.value = next
         persist(ctx)
         AlertImageStore.gc(ctx)
         return true
+    }
+
+    /** If [e] is a recurring event whose shown occurrence ended, returns a copy
+     *  re-pointed at the series' next upcoming occurrence (so the card advances to the
+     *  next date); null when it should be dropped (not recurring, or the series has no
+     *  upcoming occurrence left). Series-level fields (title/banner) are preserved. */
+    private fun advanceRecurringEvent(ctx: Context, e: InAppAlertEvent, nowMs: Long): InAppAlertEvent? {
+        if (!e.recurring || e.seriesId.isNullOrBlank() || e.groupRefId.isNullOrBlank()) return null
+        val nx = EventSeriesStore.nextUpcoming(ctx, e.groupRefId, e.seriesId, nowMs) ?: return null
+        return e.copy(
+            eventRefId = nx.id,
+            startsAtMs = nx.startsAtMs,
+            endsAtMs = nx.endsAtMs,
+            timestampMs = if (nx.startsAtMs > 0L) nx.startsAtMs else e.timestampMs,
+            following = nx.following ?: e.following
+        )
     }
 
     // Manual-pin cap (signed-up/calendar events are separate and uncapped).

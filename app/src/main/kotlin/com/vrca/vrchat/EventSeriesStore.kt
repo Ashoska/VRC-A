@@ -207,6 +207,18 @@ object EventSeriesStore {
         return map.isNotEmpty() && map.values.all { it.deleted }
     }
 
+    /** The nearest occurrence that has NOT ended (upcoming or currently live), used to
+     *  ROLL a recurring card forward when its shown occurrence ends. null when the
+     *  series has no more occurrences (concluded) or we have no data for it. */
+    @Synchronized
+    fun nextUpcoming(ctx: Context, groupId: String, seriesId: String, nowMs: Long): Occurrence? {
+        ensureLoaded(ctx)
+        val map = cache[key(groupId, seriesId)] ?: return null
+        return map.values
+            .filter { !it.deleted && !it.ended(nowMs) && it.startsAtMs > 0L }
+            .minByOrNull { it.startsAtMs }
+    }
+
     /** Occurrence ids whose follow state is unknown or older than [staleMs], nearest
      *  upcoming first — the lazy fetch targets (bounded by the caller). */
     @Synchronized
