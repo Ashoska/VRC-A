@@ -82,6 +82,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.zIndex
 import kotlin.math.roundToInt
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -102,11 +103,43 @@ private val MAX_CYCLE_LINES = VrcaViewModel.MAX_CYCLE_LINES
 // the editors meter against it (mirrors VrcaViewModel.VRC_MAX_CHARS).
 private const val VRC_CHAR_BUDGET = 144
 
+/**
+ * Re-seed a text field's [TextFieldValue] from an external [text] while PRESERVING
+ * the cursor. `TextFieldValue(text)` defaults its selection to `TextRange.Zero`
+ * (the front), so blindly rebuilding a field on every VM echo yanked the cursor to
+ * position 0 mid-typing. Returns [existing] unchanged (same reference) when the text
+ * already matches, so the caller can skip a no-op state write.
+ */
+private fun reseedField(existing: TextFieldValue?, text: String): TextFieldValue {
+    if (existing == null) return TextFieldValue(text)
+    if (existing.text == text) return existing
+    val len = text.length
+    return existing.copy(
+        text = text,
+        selection = TextRange(
+            existing.selection.start.coerceIn(0, len),
+            existing.selection.end.coerceIn(0, len)
+        )
+    )
+}
+
 @Composable
 internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
     // Cycle fields are keyed by "slide:sub" now that each slide can hold up to 3
     // sub-lines (sub 0 is the main editor line). Seeded from the decoded sub-lines.
     val cycleLineFields = remember { mutableStateMapOf<String, TextFieldValue>() }
+    // The field key ("c:slide:sub" / "p:idx") the user is CURRENTLY editing. The
+    // VM->field sync skips it so a keystroke's own VM echo can't overwrite the live
+    // field and yank the cursor (the "cursor teleports to the front while typing/
+    // deleting fast" bug — TextFieldValue(text) defaults its selection to
+    // TextRange.Zero). External changes to a focused field just wait for blur.
+    val focusedFieldKey = remember { mutableStateOf<String?>(null) }
+    val onFieldFocus: (String, Boolean) -> Unit = { key, f ->
+        focusedFieldKey.value =
+            if (f) key
+            else if (focusedFieldKey.value == key) null
+            else focusedFieldKey.value
+    }
 
     fun syncCycleLineFieldsFromVm() {
         val valid = HashSet<String>()
@@ -114,8 +147,10 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
             SubLineCodec.decode(raw).forEachIndexed { sub, s ->
                 val k = "$slide:$sub"
                 valid.add(k)
+                if (focusedFieldKey.value == "c:$k") return@forEachIndexed
                 val existing = cycleLineFields[k]
-                if (existing == null || existing.text != s.text) cycleLineFields[k] = TextFieldValue(s.text)
+                val reseeded = reseedField(existing, s.text)
+                if (reseeded !== existing) cycleLineFields[k] = reseeded
             }
         }
         cycleLineFields.keys.toList().forEach { if (it !in valid) cycleLineFields.remove(it) }
@@ -553,8 +588,10 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
         val valid = subs.indices.toSet()
         pinnedFields.keys.toList().forEach { if (it !in valid) pinnedFields.remove(it) }
         subs.forEachIndexed { idx, sub ->
+            if (focusedFieldKey.value == "p:$idx") return@forEachIndexed
             val existing = pinnedFields[idx]
-            if (existing == null || existing.text != sub.text) pinnedFields[idx] = TextFieldValue(sub.text)
+            val reseeded = reseedField(existing, sub.text)
+            if (reseeded !== existing) pinnedFields[idx] = reseeded
         }
     }
     LaunchedEffect(vm.afkMessage) { syncPinnedFieldsFromVm() }
@@ -635,6 +672,7 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                 onMoveDown = { i -> vm.movePinnedSubLine(i, i + 1) },
                 onDelete = { i -> vm.removePinnedSubLine(i) },
                 onAdd = { vm.addPinnedSubLine() },
+                onFocusChange = { i, f -> onFieldFocus("p:$i", f) },
                 activeDragIndex = if (subDragKeySnap == "pinned") subDragIndexSnap else null,
                 dragModifierFor = { i ->
                     subDragHandle(
@@ -962,6 +1000,7 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                                     cycleLineFields["$idx:0"] = v
                                     vm.setCycleSubLineText(idx, 0, v.text)
                                 },
+                                onFocusChange = { onFieldFocus("c:$idx:0", it) },
                                 onToggleEnabled = { vm.setCycleLineEnabled(idx, it) },
                                 onDuplicate = { vm.duplicateCycleLine(idx) },
                                 onMoveUp = { vm.moveCycleLine(idx, idx - 1) },
@@ -1012,6 +1051,7 @@ internal fun AutomationsPage(vm: VrcaViewModel, isBanned: Boolean) {
                                                 cycleLineFields["$idx:$s"] = v
                                                 vm.setCycleSubLineText(idx, s, v.text)
                                             },
+                                            onFocusChange = { onFieldFocus("c:$idx:$s", it) },
                                             onToggleHidden = { vm.setCycleSubLineHidden(idx, s, it) },
                                             onMoveUp = { vm.moveCycleSubLine(idx, s, s - 1) },
                                             onMoveDown = { vm.moveCycleSubLine(idx, s, s + 1) },
@@ -1446,6 +1486,7 @@ private fun SubLineEditor(
     onMoveDown: (Int) -> Unit,
     onDelete: (Int) -> Unit,
     onAdd: () -> Unit,
+    onFocusChange: (Int, Boolean) -> Unit = { _, _ -> },
     activeDragIndex: Int? = null,
     dragModifierFor: (Int) -> Modifier = { Modifier },
     rowModifierFor: (Int) -> Modifier = { Modifier }
@@ -1475,6 +1516,7 @@ private fun SubLineEditor(
                 onExpand = onToggleExpanded,
                 showOverflow = expanded && subs.size > 1,
                 onValueChange = { v -> fields[0] = v; onTextChanged(0, v.text) },
+                onFocusChange = { onFocusChange(0, it) },
                 onToggleHidden = { onToggleHidden(0, it) },
                 onMoveUp = {},
                 onMoveDown = { onMoveDown(0) },
@@ -1507,6 +1549,7 @@ private fun SubLineEditor(
                         onExpand = {},
                         showOverflow = true,
                         onValueChange = { v -> fields[i] = v; onTextChanged(i, v.text) },
+                        onFocusChange = { onFocusChange(i, it) },
                         onToggleHidden = { onToggleHidden(i, it) },
                         onMoveUp = { onMoveUp(i) },
                         onMoveDown = { onMoveDown(i) },
@@ -1563,6 +1606,7 @@ private fun SubLineRow(
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
     onDelete: () -> Unit,
+    onFocusChange: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier,
     dragHandleModifier: Modifier = Modifier,
     dragActive: Boolean = false
@@ -1638,7 +1682,7 @@ private fun SubLineRow(
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .onFocusChanged { focused = it.isFocused }
+                        .onFocusChanged { focused = it.isFocused; onFocusChange(it.isFocused) }
                 )
             }
             if (value.text.isNotEmpty()) {
@@ -1750,6 +1794,7 @@ private fun CycleLineRow(
     onDelete: () -> Unit,
     canDuplicate: Boolean,
     enabled: Boolean,
+    onFocusChange: (Boolean) -> Unit = {},
     dragHandleModifier: Modifier = Modifier,
     dragActive: Boolean = false,
     demoteTargetValid: Boolean? = null,
@@ -1826,7 +1871,7 @@ private fun CycleLineRow(
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .onFocusChanged { focused = it.isFocused }
+                        .onFocusChanged { focused = it.isFocused; onFocusChange(it.isFocused) }
                 )
             }
             if (value.text.isNotEmpty()) {

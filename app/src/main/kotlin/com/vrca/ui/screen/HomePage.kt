@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChevronRight
@@ -106,6 +107,10 @@ internal fun HomePage(
     val scope = rememberCoroutineScope()
 
     val connectionBring = remember { BringIntoViewRequester() }
+    // Keeps the Manual Send field visible while typing — the live preview above it
+    // grows as you type and would otherwise push the input line out of view.
+    val manualBring = remember { BringIntoViewRequester() }
+    var manualFieldFocused by remember { mutableStateOf(false) }
 
     val pm = remember(ctx) { ctx.getSystemService(Context.POWER_SERVICE) as PowerManager }
     var batteryOk by remember { mutableStateOf(pm.isIgnoringBatteryOptimizations(ctx.packageName)) }
@@ -359,10 +364,22 @@ internal fun HomePage(
                             ) { vm.setManualScrollFlag(it) }
                         }
 
+                        // Bring the input back into view as the live preview above
+                        // grows/shifts while typing (a small delay lets it relayout
+                        // first, then we scroll the field into view).
+                        LaunchedEffect(vm.messageText.value.text, manualFieldFocused) {
+                            if (manualFieldFocused) {
+                                kotlinx.coroutines.delay(60)
+                                runCatching { manualBring.bringIntoView() }
+                            }
+                        }
                         OutlinedTextField(
                             value = vm.messageText.value,
                             onValueChange = { v: TextFieldValue -> vm.onMessageTextChange(v) },
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .bringIntoViewRequester(manualBring)
+                                .onFocusChanged { manualFieldFocused = it.isFocused },
                             minLines = 2,
                             label = { Text("Message") },
                             isError = over && !vm.manualLiveMode,

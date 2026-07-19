@@ -372,6 +372,35 @@ object GroupAlertEnricher {
         }
     }
 
+    /**
+     * Populates/refreshes [EventSeriesStore] from the group calendar list we already
+     * fetched — occurrence ids + timing per series, plus the free deletion diff. Only
+     * REAL repeats are stored (a series with ≥2 listed occurrences, or one flagged
+     * `occurrenceKind=="occurrence"`), so one-off events don't bloat the store.
+     */
+    private fun reconcileOccurrenceStore(ctx: Context, groupId: String, events: JSONArray) {
+        val occBySeries = LinkedHashMap<String, ArrayList<Triple<String, Long, Long>>>()
+        val recurringSeries = HashSet<String>()
+        for (i in 0 until events.length()) {
+            val ev = events.optJSONObject(i) ?: continue
+            val sid = extractSeriesId(ev) ?: continue
+            val id = ev.optString("id", "").ifBlank { findIdWithPrefix(ev, "cal_").orEmpty() }
+            if (id.isBlank()) continue
+            if (ev.optString("occurrenceKind", "").equals("occurrence", true)) recurringSeries.add(sid)
+            occBySeries.getOrPut(sid) { ArrayList() }.add(
+                Triple(
+                    id,
+                    parseTimestampMs(ev.optString("startsAt", "")),
+                    parseTimestampMs(ev.optString("endsAt", ""))
+                )
+            )
+        }
+        for ((sid, occ) in occBySeries) {
+            if (occ.size < 2 && sid !in recurringSeries) continue
+            EventSeriesStore.reconcileFromList(ctx, groupId, sid, occ, listOk = true)
+        }
+    }
+
     private suspend fun enrichLocked(ctx: Context, groupId: String, allowResurface: Boolean): Boolean {
         try {
             // ---- Calendar events: match alerts by the cal_ id ----
@@ -398,6 +427,11 @@ object GroupAlertEnricher {
                     normTitle(e).takeIf { it.isNotBlank() }?.let { liveKeys.add("t:$it") }
                 }
                 detectRemovedEvents(ctx, groupId, liveKeys)
+                // Keep the per-series occurrence store fresh for the "Repeats" dialog —
+                // FREE, from the list we just fetched (occurrence ids + timing +
+                // deletion diff). Follow state is filled lazily; the representative's
+                // follow is written below in the loop (also free — already fetched).
+                reconcileOccurrenceStore(ctx, groupId, events)
             }
             if (events != null) {
                 for ((ev, isRecurringSeries) in collapseEventsByTitle(events)) {
@@ -440,6 +474,12 @@ object GroupAlertEnricher {
                     val following = InAppAlertState.followOverride(followKey)
                         ?: extractEventFollowing(src) ?: extractEventFollowing(ev)
                     val recurring = isRecurringSeries || extractRecurring(src) || extractRecurring(ev)
+                    // Keep the representative occurrence's follow fresh in the store
+                    // (free — already fetched) so the card's aggregate "Going" and the
+                    // dialog's nearest date reflect it without an extra call.
+                    if (recurring && seriesId != null && following != null) {
+                        EventSeriesStore.setFollowing(ctx, groupId, seriesId, evId, following)
+                    }
                     // Host/organizer is deliberately NOT shown on notifications, so
                     // we don't extract or resolve it (avoids a per-event REST call).
                     val organizerId: String? = null
