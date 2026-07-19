@@ -303,24 +303,25 @@ object GroupAlertEnricher {
     private const val ABSENT_STRIKES_TO_REMOVE = 2
 
     /**
-     * Detects DELETED events for [groupId] and flags their cards "Removed", trusting
-     * the AUTHORITATIVE group calendar list ([liveKeys], built from a non-null fetch
-     * — an emptied group returns [] not null). A not-yet-removed, non-ended,
-     * signed-up-or-upcoming event whose series is ABSENT from the list is a deletion
-     * candidate. It's flagged when EITHER the per-event tri-state fetch returns a
-     * clean 404/410 (fast path, ~1 sweep) OR the series stays absent for
-     * [ABSENT_STRIKES_TO_REMOVE] consecutive sweeps (the reliable path — VRChat's
-     * per-event endpoint keeps serving a freshly-deleted event as 200, so the
-     * confirm alone would miss it; the list drops it promptly). Presence in the list
-     * resets the strike. Only PAST-ended events are exempt (they're pruned, not
-     * flagged). Deduped per series; bounded per sweep.
+     * Detects DELETED events for [groupId] and flags their cards "Removed" by asking
+     * VRChat DIRECTLY whether each event still exists — `GET /calendar/{g}/{eventId}`
+     * → 404/410 = deleted, 200 = alive. This is the primary signal (per-event id), so
+     * it works even when VRChat's group calendar LIST lags and still shows the
+     * just-deleted event (gating on list-absence, as a first attempt did, meant such
+     * an event was never even 404-checked — the "second-deleted event never flags"
+     * bug). Blip protection: a network / 429 / 5xx reply is UNKNOWN and does NOT flag
+     * on its own; only when the direct check is inconclusive do we fall back to the
+     * list ([liveKeys]) — absent there for [ABSENT_STRIKES_TO_REMOVE] consecutive
+     * sweeps also flags. A definitive 200 (FOUND) or list-presence resets the strike.
+     * Scope: not-yet-removed, non-ended, signed-up-or-upcoming events (ended ones are
+     * pruned, not flagged). Deduped per series; the direct checks are bounded per sweep.
      */
     private suspend fun detectRemovedEvents(ctx: Context, groupId: String, liveKeys: Set<String>) {
         val groupKey = "event_$groupId"
         val g = InAppAlertState.groups.value.firstOrNull { it.groupId == groupKey } ?: return
         val now = System.currentTimeMillis()
         val seen = HashSet<String>()
-        var confirmsLeft = 10   // bound the per-sweep confirm fetches
+        var checksLeft = 10   // bound the per-sweep direct existence checks
         for (e in g.events) {
             if (e.removed) continue
             val evId = e.eventRefId ?: continue
@@ -333,28 +334,40 @@ object GroupAlertEnricher {
             val dedup = e.seriesId?.let { "s:$it" } ?: titleKey ?: "c:$evId"
             if (!seen.add(dedup)) continue
             val strikeKey = "$groupId|$dedup"
-            val present = liveKeys.contains("c:$evId") ||
+            val listPresent = liveKeys.contains("c:$evId") ||
                 (e.seriesId != null && liveKeys.contains("s:${e.seriesId}")) ||
                 (titleKey != null && liveKeys.contains(titleKey))
-            if (present) { absentStrikes.remove(strikeKey); continue }
-            // Absent from the authoritative list. Fast-path confirm (a clean 404/410
-            // flags immediately); otherwise the strike count carries the decision so
-            // a deleted event VRChat still serves as 200 is still caught.
-            val strikes = (absentStrikes[strikeKey] ?: 0) + 1
-            var deleted = false
-            if (confirmsLeft > 0) {
-                confirmsLeft--
-                val res = VrchatAuthManager.fetchCalendarEventResult(ctx, groupId, evId)
-                if (res.status == VrchatAuthManager.CalendarEventStatus.DELETED) deleted = true
+            // Ask VRChat directly. FOUND/DELETED are definitive; UNKNOWN (network /
+            // 429 / 5xx) means "couldn't tell" → fall back to the list.
+            var status = VrchatAuthManager.CalendarEventStatus.UNKNOWN
+            if (checksLeft > 0) {
+                checksLeft--
+                status = VrchatAuthManager.fetchCalendarEventResult(ctx, groupId, evId).status
                 kotlinx.coroutines.delay(250)
             }
-            if (deleted || strikes >= ABSENT_STRIKES_TO_REMOVE) {
-                absentStrikes.remove(strikeKey)
-                InAppAlertState.markSeriesRemoved(ctx, groupKey, e.seriesId, evId, normTitleStr(e.eventTitle))
-                Log.i(TAG, "markSeriesRemoved $groupId dedup=$dedup (deleted=$deleted strikes=$strikes)")
-            } else {
-                absentStrikes[strikeKey] = strikes
-                Log.i(TAG, "absent-strike $groupId dedup=$dedup strikes=$strikes")
+            when (status) {
+                VrchatAuthManager.CalendarEventStatus.DELETED -> {
+                    absentStrikes.remove(strikeKey)
+                    InAppAlertState.markSeriesRemoved(ctx, groupKey, e.seriesId, evId, normTitleStr(e.eventTitle))
+                    Log.i(TAG, "markSeriesRemoved $groupId dedup=$dedup (direct 404)")
+                }
+                VrchatAuthManager.CalendarEventStatus.FOUND -> absentStrikes.remove(strikeKey)
+                VrchatAuthManager.CalendarEventStatus.UNKNOWN -> {
+                    // Inconclusive direct check → lean on the list.
+                    if (listPresent) {
+                        absentStrikes.remove(strikeKey)
+                    } else {
+                        val strikes = (absentStrikes[strikeKey] ?: 0) + 1
+                        if (strikes >= ABSENT_STRIKES_TO_REMOVE) {
+                            absentStrikes.remove(strikeKey)
+                            InAppAlertState.markSeriesRemoved(ctx, groupKey, e.seriesId, evId, normTitleStr(e.eventTitle))
+                            Log.i(TAG, "markSeriesRemoved $groupId dedup=$dedup (list-absent x$strikes)")
+                        } else {
+                            absentStrikes[strikeKey] = strikes
+                            Log.i(TAG, "absent-strike $groupId dedup=$dedup strikes=$strikes")
+                        }
+                    }
+                }
             }
         }
     }
