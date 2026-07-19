@@ -41,6 +41,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -57,6 +58,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Login
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Close
@@ -99,6 +102,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.vrca.discord.DiscordRpcState
@@ -107,6 +111,7 @@ import com.vrca.ui.common.VrcaConfirmDialog
 import com.vrca.ui.common.VrcaDialogCopy
 import com.vrca.ui.viewmodel.VrcaViewModel
 import com.vrca.vrchat.InAppAlertEvent
+import com.vrca.vrchat.EventSeriesStore
 import com.vrca.vrchat.InstanceHistoryStore
 import com.vrca.vrchat.InAppAlertGroup
 import com.vrca.vrchat.InAppAlertState
@@ -537,7 +542,8 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
         InstanceListDialog(
             title = "Instance History (24h)",
             targets = historyTargets,
-            onDismiss = { showInstanceHistory = false }
+            onDismiss = { showInstanceHistory = false },
+            liveRefresh = false // history: one-time grab, no 15s re-fetch loop
         )
     }
 
@@ -874,9 +880,17 @@ private fun LazyListScope.inAppAlertSection(
                 if (visible.isEmpty()) continue
                 // A DELETED event leaves "Going" and becomes its own red "Removed"
                 // card in the normal area; it's never signed-up or grouped-in.
-                val followed = visible.filter { it.following == true && !it.removed }
+                // "Going" for a RECURRING series is the aggregate: subscribed to the
+                // representative OR any occurrence (from EventSeriesStore, updated by
+                // the per-occurrence Repeats dialog). Non-recurring keeps the flag.
+                fun isGoing(ev: InAppAlertEvent): Boolean {
+                    if (ev.following == true) return true
+                    return ev.recurring && !ev.seriesId.isNullOrBlank() && !ev.groupRefId.isNullOrBlank() &&
+                        EventSeriesStore.anySubscribed(ctx, ev.groupRefId!!, ev.seriesId!!)
+                }
+                val followed = visible.filter { isGoing(it) && !it.removed }
                 val removedEvts = visible.filter { it.removed }
-                val others = visible.filter { it.following != true && !it.removed }
+                val others = visible.filter { !isGoing(it) && !it.removed }
                 // Group the followed events by SERIES so a recurring event the user
                 // signed up for shows as ONE card — its ~50 occurrences, each
                 // independently marked following, would otherwise each spawn its own
@@ -1659,6 +1673,20 @@ private fun AlertEventBody(
     var calSending by remember { mutableStateOf(false) }
     var bodyExpanded by remember { mutableStateOf(false) }
 
+    // Tapping "↻ Repeats" opens the per-occurrence subscribe dialog. Only available
+    // when we have the stable ids it needs (group + series).
+    val canShowOccurrences = event.recurring &&
+        !event.seriesId.isNullOrBlank() && !event.groupRefId.isNullOrBlank()
+    var showOccurrences by remember(event.id) { mutableStateOf(false) }
+    if (showOccurrences && canShowOccurrences) {
+        EventOccurrencesDialog(
+            groupId = event.groupRefId!!,
+            seriesId = event.seriesId!!,
+            seriesTitle = event.eventTitle ?: "Repeating event",
+            onDismiss = { showOccurrences = false }
+        )
+    }
+
     // Rich display needs only a known start time; the calendar ACTION additionally
     // needs the cal_/grp_ ids (checked at the button below).
     val isRichEvent = event.startsAtMs > 0L
@@ -1765,14 +1793,21 @@ private fun AlertEventBody(
                         Surface(
                             color = Color.Black.copy(alpha = 0.55f),
                             shape = MaterialTheme.shapes.extraSmall,
-                            modifier = Modifier.align(Alignment.TopStart).padding(6.dp)
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .padding(6.dp)
+                                .then(if (canShowOccurrences) Modifier.clickable { showOccurrences = true } else Modifier)
                         ) {
-                            Text(
-                                "↻ Repeats",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color.White,
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                            )
+                            ) {
+                                Text(
+                                    if (canShowOccurrences) "↻ Repeats · view dates" else "↻ Repeats",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color.White
+                                )
+                            }
                         }
                     }
                     if (langCodes.isNotEmpty()) {
@@ -1928,9 +1963,6 @@ private fun AlertEventBody(
                     val metaParts = buildList {
                         if (event.interestedCount >= 0) add("${event.interestedCount} interested")
                         if (event.createdAtMs > 0) add("Posted ${eventDate(event.createdAtMs)}")
-                        // Recurring joins the muted meta line ONLY when there's no
-                        // banner to carry it in the top-left corner.
-                        if (event.recurring && event.imageUrl.isNullOrBlank()) add("↻ Repeats")
                     }
                     if (metaParts.isNotEmpty()) {
                         Spacer(Modifier.height(2.dp))
@@ -1939,6 +1971,30 @@ private fun AlertEventBody(
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.outline
                         )
+                    }
+                    // Recurring indicator on the meta block ONLY when there's no banner
+                    // to carry it top-left. Tappable → the per-occurrence dates dialog.
+                    if (event.recurring && event.imageUrl.isNullOrBlank()) {
+                        Spacer(Modifier.height(4.dp))
+                        Surface(
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                            shape = MaterialTheme.shapes.small,
+                            modifier = if (canShowOccurrences) Modifier.clickable { showOccurrences = true } else Modifier
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                Icon(Icons.Filled.Repeat, null, modifier = Modifier.size(13.dp),
+                                    tint = MaterialTheme.colorScheme.primary)
+                                Text(
+                                    if (canShowOccurrences) "Repeats · view dates" else "Repeats",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
                     }
                 } else {
                     // Plain alerts keep the relative-time footer. Rich events don't
@@ -2352,6 +2408,245 @@ private fun eventPhase(startsAtMs: Long, endsAtMs: Long, nowMs: Long): EventPhas
     else -> if (nowMs - startsAtMs <= 4L * 60 * 60 * 1000) EventPhase.LIVE else EventPhase.ENDED
 }
 
+/**
+ * "Repeats" dialog — lists every occurrence of a recurring series with its start time
+ * and a per-occurrence Subscribe toggle (matches VRChat's per-occurrence follow model).
+ * Styled like the invite/instance picker. Occurrence existence + timing come FREE from
+ * the group calendar list (reconciled into [EventSeriesStore], which also flags
+ * deletions); follow state is filled in lazily (nearest-upcoming first, paced) since
+ * the list omits it. Deleted occurrences show a red "Removed" tag; a fully-removed
+ * series shows a notice.
+ */
+@Composable
+private fun EventOccurrencesDialog(
+    groupId: String,
+    seriesId: String,
+    seriesTitle: String,
+    onDismiss: () -> Unit
+) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var storeTick by remember { mutableStateOf(0) }
+    var loading by remember { mutableStateOf(true) }
+    var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    // Per-row in-flight subscribe toggles (occurrenceId -> busy).
+    val busy = remember { mutableStateMapOf<String, Boolean>() }
+    LaunchedEffect(Unit) { while (true) { delay(1000); nowMs = System.currentTimeMillis() } }
+
+    // (a) reconcile the occurrence list (free deletion + timing), then (b) lazily fill
+    // in follow state for occurrences that don't have it yet (bounded + paced).
+    LaunchedEffect(groupId, seriesId) {
+        val list = VrchatAuthManager.fetchGroupCalendarEvents(ctx, groupId, 50)
+        if (list != null) {
+            val live = ArrayList<Triple<String, Long, Long>>()
+            for (i in 0 until list.length()) {
+                val ev = list.optJSONObject(i) ?: continue
+                if (com.vrca.vrchat.GroupAlertEnricher.extractSeriesId(ev) != seriesId) continue
+                val id = ev.optString("id", "")
+                if (id.isBlank()) continue
+                live.add(Triple(
+                    id,
+                    com.vrca.vrchat.GroupAlertEnricher.parseTimestampMs(ev.optString("startsAt", "")),
+                    com.vrca.vrchat.GroupAlertEnricher.parseTimestampMs(ev.optString("endsAt", ""))
+                ))
+            }
+            EventSeriesStore.reconcileFromList(ctx, groupId, seriesId, live, listOk = true)
+            storeTick++
+        }
+        val need = EventSeriesStore.idsNeedingFollow(ctx, groupId, seriesId, staleMs = 5 * 60 * 1000L).take(20)
+        for (id in need) {
+            if (busy[id] == true) continue // the user is toggling this one — don't clobber it
+            val res = VrchatAuthManager.fetchCalendarEventResult(ctx, groupId, id)
+            if (res.status == VrchatAuthManager.CalendarEventStatus.FOUND && busy[id] != true) {
+                val f = res.event?.let { com.vrca.vrchat.GroupAlertEnricher.extractEventFollowing(it) } ?: false
+                EventSeriesStore.setFollowing(ctx, groupId, seriesId, id, f)
+                storeTick++
+            }
+            delay(300)
+        }
+        loading = false
+    }
+
+    // Re-read once a minute too so ended occurrences drop as time passes.
+    val occs = remember(storeTick, nowMs / 60000) { EventSeriesStore.occurrences(ctx, groupId, seriesId) }
+    val allRemoved = remember(storeTick) { EventSeriesStore.allDeleted(ctx, groupId, seriesId) }
+    val goingCount = occs.count { it.following == true && !it.deleted }
+
+    fun toggle(occ: EventSeriesStore.Occurrence) {
+        if (busy[occ.id] == true) return
+        val target = occ.following != true
+        busy[occ.id] = true
+        // Optimistic — write to the store now so the row flips instantly.
+        EventSeriesStore.setFollowing(ctx, groupId, seriesId, occ.id, target)
+        storeTick++
+        scope.launch {
+            val r = VrchatAuthManager.setCalendarEventFollowing(ctx, groupId, occ.id, target)
+            if (!r.ok) {
+                EventSeriesStore.setFollowing(ctx, groupId, seriesId, occ.id, !target) // revert
+                storeTick++
+                Toast.makeText(ctx, r.error ?: "Couldn't update your calendar", Toast.LENGTH_LONG).show()
+            }
+            busy[occ.id] = false
+        }
+    }
+
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        ElevatedCard(
+            shape = MaterialTheme.shapes.large,
+            colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+            elevation = CardDefaults.elevatedCardElevation(defaultElevation = 6.dp),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).heightIn(max = 620.dp)
+        ) {
+            Column(Modifier.padding(18.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                        modifier = Modifier.size(36.dp)) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(Icons.Filled.Repeat, null, tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp))
+                        }
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(seriesTitle.ifBlank { "Repeating event" },
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            buildString {
+                                append("${occs.count { !it.deleted }} dates")
+                                if (goingCount > 0) append(" · going to $goingCount")
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Surface(onClick = onDismiss, shape = CircleShape,
+                        color = MaterialTheme.colorScheme.error.copy(alpha = 0.14f),
+                        modifier = Modifier.size(34.dp)) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(Icons.Filled.Close, "Close", tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(18.dp))
+                        }
+                    }
+                }
+                if (loading && occs.isEmpty()) {
+                    Spacer(Modifier.height(18.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Loading occurrences...", style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                Spacer(Modifier.height(14.dp))
+                when {
+                    allRemoved -> Text(
+                        "This event series was removed from VRChat.",
+                        style = MaterialTheme.typography.bodyMedium, color = Color(0xFFE05561))
+                    occs.isEmpty() && !loading -> Text(
+                        "No upcoming occurrences.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    else -> Column(
+                        Modifier.verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        for (occ in occs) OccurrenceRow(occ, nowMs, busy[occ.id] == true) { toggle(occ) }
+                    }
+                }
+                if (loading && occs.isNotEmpty()) {
+                    Spacer(Modifier.height(10.dp))
+                    Text("Checking which you're subscribed to...",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun OccurrenceRow(
+    occ: EventSeriesStore.Occurrence,
+    nowMs: Long,
+    busy: Boolean,
+    onToggle: () -> Unit
+) {
+    val red = Color(0xFFE05561)
+    val green = Color(0xFF4CAF50)
+    val following = occ.following == true
+    val phase = eventPhase(occ.startsAtMs, occ.endsAtMs, nowMs)
+    val accent = when {
+        occ.deleted -> red
+        following -> green
+        else -> MaterialTheme.colorScheme.primary
+    }
+    Surface(color = MaterialTheme.colorScheme.surface, shape = MaterialTheme.shapes.medium,
+        modifier = Modifier.fillMaxWidth()) {
+        Row(Modifier.padding(10.dp).height(IntrinsicSize.Min),
+            verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.width(4.dp).fillMaxHeight().clip(CircleShape)
+                .background(accent.copy(alpha = 0.85f)))
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    if (occ.startsAtMs > 0L) eventDateTime(occ.startsAtMs) else "Time TBD",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (occ.deleted) MaterialTheme.colorScheme.onSurfaceVariant
+                            else MaterialTheme.colorScheme.onSurface,
+                    textDecoration = if (occ.deleted) TextDecoration.LineThrough else null
+                )
+                Text(
+                    when {
+                        occ.deleted -> "Removed from VRChat"
+                        phase == EventPhase.LIVE -> "Live now"
+                        occ.startsAtMs > 0L -> formatRelativeTime(occ.startsAtMs, nowMs)
+                        else -> ""
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = when {
+                        occ.deleted -> red
+                        phase == EventPhase.LIVE -> green
+                        else -> MaterialTheme.colorScheme.outline
+                    }
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            when {
+                occ.deleted -> Surface(color = red.copy(alpha = 0.14f), shape = MaterialTheme.shapes.small) {
+                    Text("Removed", style = MaterialTheme.typography.labelMedium, color = red,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp))
+                }
+                else -> Surface(
+                    onClick = onToggle,
+                    shape = MaterialTheme.shapes.small,
+                    color = if (following) green.copy(alpha = 0.16f)
+                            else MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+                    enabled = !busy
+                ) {
+                    Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        if (busy) {
+                            CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 2.dp,
+                                color = if (following) green else MaterialTheme.colorScheme.primary)
+                        } else {
+                            Icon(if (following) Icons.Filled.Check else Icons.Filled.Add, null,
+                                modifier = Modifier.size(15.dp),
+                                tint = if (following) green else MaterialTheme.colorScheme.primary)
+                        }
+                        Text(if (following) "Going" else "Subscribe",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (following) green else MaterialTheme.colorScheme.primary)
+                    }
+                }
+            }
+        }
+    }
+}
+
 /** Pull tappable links out of an announcement body ("Visit link" buttons). */
 private fun extractBodyUrls(body: String): List<String> =
     Regex("https?://[^\\s)\\]}>\"']+").findAll(body)
@@ -2436,7 +2731,12 @@ private fun InstanceListDialog(
     title: String,
     targets: List<InstanceTarget>,
     onDismiss: () -> Unit,
-    emptyText: String = "Nothing to show yet."
+    emptyText: String = "Nothing to show yet.",
+    // Live pickers (invite / join) re-fetch every 15s so occupancy + open/closed
+    // track reality while the menu is open. Instance HISTORY doesn't need live
+    // occupancy — just "is it still joinable?" — so it does a ONE-TIME grab (no
+    // 15s loop), cutting its calls to a single pass.
+    liveRefresh: Boolean = true
 ) {
     val ctx = LocalContext.current
     // Resolved instance info, filled in INCREMENTALLY (newest target first) so the
@@ -2468,6 +2768,7 @@ private fun InstanceListDialog(
                     InAppAlertState.setInviteTargetImage(ctx, t.location, info.worldImageUrl)
                 }
             }
+            if (!liveRefresh) break // history: one grab, no continuous re-fetch
             delay(15_000)
         }
     }
