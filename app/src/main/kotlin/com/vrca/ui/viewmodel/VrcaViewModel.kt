@@ -107,8 +107,8 @@ class VrcaViewModel(
         // Manual Send takeover: a manual message pauses the automated chatbox
         // (Pinned/Cycle/Music/Time) for this long so people can read it. Extended
         // on every manual send / live keystroke; in Live mode it counts from the
-        // last change so the message stays up 10s after the final line.
-        private const val MANUAL_HOLD_MS = 10_000L
+        // last change so the message stays up 20s after the final line.
+        private const val MANUAL_HOLD_MS = 20_000L
         // Live-typing push cadence (matches the Music 0.5s refresh).
         private const val MANUAL_LIVE_TICK_MS = 500L
         // Live scroll window: newest N lines stay visible, older ones scroll off.
@@ -2174,9 +2174,13 @@ class VrcaViewModel(
                 if (wait <= 0) break
                 delay(wait)
             }
-            // Hold expired with no fresh manual activity: drop back to normal.
+            // Hold expired with no fresh manual activity: drop back to normal AND
+            // clear the input field so a fresh manual send starts empty (otherwise
+            // the stale text lingers and "retyping" appends to the old message).
             lastManualHoldText = ""
             lastManualLiveSent = null
+            messageText.value = TextFieldValue("", TextRange.Zero)
+            stashedMessage = ""
             remoteVrcaOsc.typing = false
             localVrcaOsc.typing = false
             if (!isBanned) rebuildAndMaybeSendCombined(forceSend = true, local = local, forceClearIfAllOff = true)
@@ -2222,13 +2226,16 @@ class VrcaViewModel(
                     manualHoldUntilMs = System.currentTimeMillis() + MANUAL_HOLD_MS
                     if (!typingOn) { osc.typing = true; typingOn = true }
                 } else if (!manualHoldActive()) {
-                    // Unchanged AND the 10s window elapsed: revert to the normal
-                    // chatbox HERE (the loop owns expiry in live mode) and stop.
-                    // A keystroke starts a fresh loop via onMessageTextChange.
+                    // Unchanged AND the hold window elapsed: revert to the normal
+                    // chatbox HERE (the loop owns expiry in live mode), CLEAR the
+                    // input field so retyping starts fresh, and stop. A keystroke
+                    // starts a fresh loop via onMessageTextChange.
                     if (typingOn) { osc.typing = false; typingOn = false }
                     manualHoldUntilMs = 0L
                     lastManualHoldText = ""
                     lastManualLiveSent = null
+                    messageText.value = TextFieldValue("", TextRange.Zero)
+                    stashedMessage = ""
                     rebuildAndMaybeSendCombined(forceSend = true, local = local, forceClearIfAllOff = true)
                     break
                 } else if (typingOn) {
