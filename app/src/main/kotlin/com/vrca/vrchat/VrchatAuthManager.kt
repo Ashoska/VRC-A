@@ -1201,7 +1201,10 @@ object VrchatAuthManager {
                         captureRolledCookies(context, rawCookies)
                         CalendarEventResult(CalendarEventStatus.FOUND, org.json.JSONObject(body))
                     }
-                    code == 404 -> CalendarEventResult(CalendarEventStatus.DELETED, null)
+                    // 404 Not Found / 410 Gone = deleted. (403 is deliberately NOT
+                    // treated as deleted — it can be a transient auth/permission
+                    // state, and a false "deleted" is worse than a slightly slower one.)
+                    code == 404 || code == 410 -> CalendarEventResult(CalendarEventStatus.DELETED, null)
                     else -> CalendarEventResult(CalendarEventStatus.UNKNOWN, null)
                 }
             } catch (e: Exception) {
@@ -1225,7 +1228,7 @@ object VrchatAuthManager {
             "$BASE/groups/$groupId/events?n=$n",
             "$BASE/groups/$groupId/calendar?n=$n"
         )
-        for (url in endpoints) {
+        for ((idx, url) in endpoints.withIndex()) {
             try {
                 val (code, body, rawCookies) = get(url, null, cookieHeader)
                 Log.i(TAG, "fetchGroupCalendarEvents($groupId) url=${url.substringAfter("groups/")} http=$code bodyHead=${body.take(80)}")
@@ -1243,7 +1246,15 @@ object VrchatAuthManager {
                     }
                     else -> null
                 }
-                if (result != null && result.length() > 0) return@withContext result
+                // The canonical endpoint (idx 0, /calendar/{groupId}) is
+                // AUTHORITATIVE: return its parsed list even when EMPTY. An emptied
+                // group is a valid 200 with results:[] — NOT a fetch failure — and
+                // deletion detection MUST tell those apart (previously an empty list
+                // fell through to the legacy 404 endpoints and returned null, so an
+                // all-events-deleted group looked like a network error and its
+                // deleted events could never be confirmed gone). Legacy fallbacks
+                // (idx 1/2) only "count" when non-empty.
+                if (result != null && (idx == 0 || result.length() > 0)) return@withContext result
             } catch (e: Exception) {
                 Log.w(TAG, "fetchGroupCalendarEvents($groupId) ${url.substringAfterLast("/")} failed", e)
             }

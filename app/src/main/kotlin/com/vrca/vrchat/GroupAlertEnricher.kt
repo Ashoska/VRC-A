@@ -293,55 +293,69 @@ object GroupAlertEnricher {
         }
     }
 
+    // Consecutive-sweep absence counter, keyed "groupId|series". A followed /
+    // upcoming event's series that stays ABSENT from the authoritative calendar
+    // list this many sweeps in a row is flagged deleted (the list is what the
+    // website shows; trusting it is more reliable than the per-event endpoint,
+    // which serves a just-deleted event as 200 for a while). Present-in-list
+    // resets it. In-memory (resets on process restart → re-confirms, harmless).
+    private val absentStrikes = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    private const val ABSENT_STRIKES_TO_REMOVE = 2
+
     /**
-     * Detects DELETED events for [groupId] (followed OR not) and flags their cards
-     * "Removed". A card is a candidate when it's a not-yet-removed event whose series
-     * is ABSENT from the freshly-fetched live calendar ([liveKeys]) AND it's still
-     * RELEVANT — signed up ([following]==true), UPCOMING, or unknown-timing. A clearly
-     * PAST non-followed event is skipped (it ended, it wasn't "removed", and
-     * re-confirming it every sweep is waste). A single tri-state fetch then CONFIRMS
-     * the deletion — only a real 404 flags it; a network / 429 / 5xx blip is UNKNOWN
-     * and flags nothing. Bounded: deduped per series and capped so a large group
-     * can't burst REST calls. Absent-from-list detection itself is FREE (the enricher
-     * already fetched that list to update every visible card), so the only added cost
-     * is the handful of 404-confirm fetches for events that actually went missing.
+     * Detects DELETED events for [groupId] and flags their cards "Removed", trusting
+     * the AUTHORITATIVE group calendar list ([liveKeys], built from a non-null fetch
+     * — an emptied group returns [] not null). A not-yet-removed, non-ended,
+     * signed-up-or-upcoming event whose series is ABSENT from the list is a deletion
+     * candidate. It's flagged when EITHER the per-event tri-state fetch returns a
+     * clean 404/410 (fast path, ~1 sweep) OR the series stays absent for
+     * [ABSENT_STRIKES_TO_REMOVE] consecutive sweeps (the reliable path — VRChat's
+     * per-event endpoint keeps serving a freshly-deleted event as 200, so the
+     * confirm alone would miss it; the list drops it promptly). Presence in the list
+     * resets the strike. Only PAST-ended events are exempt (they're pruned, not
+     * flagged). Deduped per series; bounded per sweep.
      */
     private suspend fun detectRemovedEvents(ctx: Context, groupId: String, liveKeys: Set<String>) {
         val groupKey = "event_$groupId"
         val g = InAppAlertState.groups.value.firstOrNull { it.groupId == groupKey } ?: return
         val now = System.currentTimeMillis()
         val seen = HashSet<String>()
-        val candidates = ArrayList<InAppAlertEvent>()
+        var confirmsLeft = 10   // bound the per-sweep confirm fetches
         for (e in g.events) {
             if (e.removed) continue
             val evId = e.eventRefId ?: continue
             // ENDED events are handled by the prune (they just vanish); the red
-            // "Removed" state is reserved for an event you might still attend that
-            // got cancelled. So only confirm NON-ended events here.
+            // "Removed" state is reserved for an event you might still attend.
             if (InAppAlertState.eventEnded(e, now)) continue
+            // Only flag things worth flagging: signed-up or clearly upcoming.
+            if (!(e.following == true || e.startsAtMs > now)) continue
             val titleKey = normTitleStr(e.eventTitle).takeIf { it.isNotBlank() }?.let { "t:$it" }
+            val dedup = e.seriesId?.let { "s:$it" } ?: titleKey ?: "c:$evId"
+            if (!seen.add(dedup)) continue
+            val strikeKey = "$groupId|$dedup"
             val present = liveKeys.contains("c:$evId") ||
                 (e.seriesId != null && liveKeys.contains("s:${e.seriesId}")) ||
                 (titleKey != null && liveKeys.contains(titleKey))
-            if (present) continue
-            // Dedup per SERIES: seriesId, else normalized title (repeating
-            // occurrences share it — this is what makes a deleted repeating series
-            // cost ONE confirm fetch instead of one per flooded occurrence), else
-            // the occurrence id.
-            val dedup = e.seriesId?.let { "s:$it" } ?: titleKey ?: "c:$evId"
-            if (!seen.add(dedup)) continue
-            candidates.add(e)
-            if (candidates.size >= 10) break
-        }
-        for (e in candidates) {
-            val evId = e.eventRefId ?: continue
-            val res = VrchatAuthManager.fetchCalendarEventResult(ctx, groupId, evId)
-            if (res.status == VrchatAuthManager.CalendarEventStatus.DELETED) {
-                InAppAlertState.markSeriesRemoved(
-                    ctx, groupKey, e.seriesId, evId, normTitleStr(e.eventTitle)
-                )
+            if (present) { absentStrikes.remove(strikeKey); continue }
+            // Absent from the authoritative list. Fast-path confirm (a clean 404/410
+            // flags immediately); otherwise the strike count carries the decision so
+            // a deleted event VRChat still serves as 200 is still caught.
+            val strikes = (absentStrikes[strikeKey] ?: 0) + 1
+            var deleted = false
+            if (confirmsLeft > 0) {
+                confirmsLeft--
+                val res = VrchatAuthManager.fetchCalendarEventResult(ctx, groupId, evId)
+                if (res.status == VrchatAuthManager.CalendarEventStatus.DELETED) deleted = true
+                kotlinx.coroutines.delay(250)
             }
-            kotlinx.coroutines.delay(250)
+            if (deleted || strikes >= ABSENT_STRIKES_TO_REMOVE) {
+                absentStrikes.remove(strikeKey)
+                InAppAlertState.markSeriesRemoved(ctx, groupKey, e.seriesId, evId, normTitleStr(e.eventTitle))
+                Log.i(TAG, "markSeriesRemoved $groupId dedup=$dedup (deleted=$deleted strikes=$strikes)")
+            } else {
+                absentStrikes[strikeKey] = strikes
+                Log.i(TAG, "absent-strike $groupId dedup=$dedup strikes=$strikes")
+            }
         }
     }
 
@@ -351,16 +365,16 @@ object GroupAlertEnricher {
             // Collapse recurring occurrences to ONE representative per series FIRST,
             // so the per-representative single-event fetch (below) is bounded to
             // ~1 call per series instead of one per flooded occurrence.
-            val events = VrchatAuthManager.fetchGroupCalendarEvents(ctx, groupId, 20)
-            // Series keys present in the LIVE calendar right now (by seriesId,
-            // cal_ id, and normalized title). Used below to detect a card whose
-            // event VRChat no longer lists — a deletion candidate confirmed by a
-            // 404 single-fetch before we flag it "Removed". Built even when the list
-            // is null/empty (an ALL-events-deleted group returns null): detection
-            // then runs with an empty set, and the per-event 404-confirm is the
-            // authoritative signal — a network blip returns UNKNOWN and flags
-            // nothing, so running on null is safe. This is the fix for a deleted
-            // followed event in an emptied group never flipping to "Removed".
+            // n=50 so a group with many upcoming events still lists a followed one
+            // (a followed event absent from an authoritative list is the deletion
+            // signal — see detectRemovedEvents).
+            val events = VrchatAuthManager.fetchGroupCalendarEvents(ctx, groupId, 50)
+            // Series keys present in the LIVE calendar right now (by seriesId, cal_
+            // id, and normalized title). A followed/upcoming card whose series is
+            // ABSENT from this AUTHORITATIVE list (an emptied group now returns []
+            // not null) is a deletion candidate. Only meaningful when the list
+            // actually fetched (`events != null`); a null list is a network error
+            // and detection is skipped so a blip can't false-flag.
             val liveKeys = HashSet<String>()
             if (events != null) {
                 for (i in 0 until events.length()) {
@@ -370,8 +384,8 @@ object GroupAlertEnricher {
                         .takeIf { it.isNotBlank() }?.let { liveKeys.add("c:$it") }
                     normTitle(e).takeIf { it.isNotBlank() }?.let { liveKeys.add("t:$it") }
                 }
+                detectRemovedEvents(ctx, groupId, liveKeys)
             }
-            detectRemovedEvents(ctx, groupId, liveKeys)
             if (events != null) {
                 for ((ev, isRecurringSeries) in collapseEventsByTitle(events)) {
                     val evId = ev.optString("id", "").ifBlank { findIdWithPrefix(ev, "cal_").orEmpty() }
