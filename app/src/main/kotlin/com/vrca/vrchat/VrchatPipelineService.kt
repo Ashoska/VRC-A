@@ -83,6 +83,10 @@ class VrchatPipelineService : Service() {
         // (while online + VRChat not in a major outage) before OSC is gated.
         // Rides out transient blips / brief VRChat outages.
         private const val AUTH_DEAD_CONFIRM_MS = 5 * 60 * 1000L
+        // Window for swallowing a duplicate/replayed friend-add event. Long enough to
+        // cover a WS reconnect replay; a real unfriend clears the stamp anyway, so an
+        // unfriend→refriend inside the window still notifies.
+        private const val FRIEND_ADD_DEDUP_MS = 5 * 60 * 1000L
         private const val PIPELINE_URL = "wss://pipeline.vrchat.cloud"
         private const val USER_AGENT = "VRC-A-Companion/1.0 (Android; companion app)"
 
@@ -165,6 +169,10 @@ class VrchatPipelineService : Service() {
     // Tracks user IDs for which an unfriend notification has already been fired
     // this session, so the real-time and offline-diff handlers don't both fire.
     private val notifiedUnfriendIds = mutableSetOf<String>()
+    // Last time a "New friend" notification fired per user, for a SHORT-WINDOW dedup
+    // of duplicate/replayed friend-add pipeline events (in-memory; friend-delete
+    // clears the entry so an unfriend→refriend still notifies immediately).
+    private val recentFriendAddMs = mutableMapOf<String, Long>()
     // Dedup-id retention: UNBOUNDED (deliberate). This one set holds EVERY dedup
     // key: V1/V2 notification ids, announcement content fingerprints (ann_fp_),
     // event fingerprints (evt_fp_), per-person friend-request keys (fr_)...
@@ -805,6 +813,23 @@ class VrchatPipelineService : Service() {
                     val displayName = user?.optString("displayName") ?: userId
                     friendsCache[userId] = entryFromUserJson(user, displayName)
                     persistFriendsCache()
+                    // SHORT-WINDOW dedup (not permanent): VRChat re-emits / replays the
+                    // friend-add pipeline event (notably on a WS reconnect), and this
+                    // notification carries no dedupId, so a duplicate fired "New friend"
+                    // twice ("New friend (2)"). Swallow a repeat within the window; a
+                    // genuine LATER re-add still fires (and friend-delete clears the
+                    // stamp so an unfriend→refriend notifies immediately).
+                    val nowMs = System.currentTimeMillis()
+                    val last = recentFriendAddMs[userId]
+                    if (last != null && nowMs - last < FRIEND_ADD_DEDUP_MS) {
+                        Log.d(TAG, "friend-add $userId within dedup window — skipping duplicate")
+                        return
+                    }
+                    recentFriendAddMs[userId] = nowMs
+                    // The friend request is now resolved (accepted) — clear its
+                    // permanent per-person dedup key so a FUTURE request from this
+                    // person (after a later unfriend/refriend) can notify again.
+                    clearSeenNotifId("fr_$userId")
                     fireEventNotification(
                         id = "newfriend_$userId".hashCode(),
                         title = "New friend",
@@ -842,6 +867,13 @@ class VrchatPipelineService : Service() {
 
                     friendsCache.remove(userId)
                     persistFriendsCache()
+                    // Unfriended → the friendship is over, so RESET the per-person
+                    // dedup state: clear the permanent friend-request key so a future
+                    // request from this person notifies again, and drop the friend-add
+                    // window stamp so an immediate re-friend fires "New friend" rather
+                    // than being swallowed as a duplicate.
+                    clearSeenNotifId("fr_$userId")
+                    recentFriendAddMs.remove(userId)
                     fireEventNotification(
                         id = "unfriend_$userId".hashCode(),
                         title = "Friend removed",
@@ -1951,6 +1983,18 @@ class VrchatPipelineService : Service() {
         prefs.edit().putString("ids_ordered", arr.toString()).commit()
     }
 
+    /**
+     * Removes a dedup id from [seenNotifIds] and persists — used to let a REPEATABLE
+     * per-person notification (a friend request) fire again after its previous
+     * instance was resolved. `seenNotifIds` is permanent by design (one-shot
+     * notifications), so the friend-request key `fr_<userId>` is cleared explicitly
+     * on accept (friend-add) and on unfriend (friend-delete). No-op if absent.
+     */
+    private fun clearSeenNotifId(id: String) {
+        val removed = synchronized(seenNotifIds) { seenNotifIds.remove(id) }
+        if (removed) persistSeenNotifIds()
+    }
+
 
     /**
      * Two-fetch confirmation: only fire unfriend notifications for IDs
@@ -2001,6 +2045,10 @@ class VrchatPipelineService : Service() {
                 null -> unverifiable++
             }
 
+            // Same per-person dedup reset as the real-time friend-delete path so a
+            // future friend request from this person notifies again.
+            clearSeenNotifId("fr_$userId")
+            recentFriendAddMs.remove(userId)
             val displayName = previousNames[userId]?.displayName?.takeIf { it.isNotBlank() } ?: "Someone"
             fireEventNotification(
                 id = "unfriend_offline_$userId".hashCode(),
