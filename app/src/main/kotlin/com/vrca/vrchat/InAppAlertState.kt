@@ -287,27 +287,40 @@ object InAppAlertState {
     // An event is live for up to 4h after start when it has no published end
     // time (matches the UI's eventPhase()).
     private const val LIVE_TAIL_MS = 4L * 60 * 60 * 1000
+    // An event card with NO known start/end (old cards from before rich timing, or
+    // a thin push not yet enriched) is treated as ended once its display / created
+    // timestamp is this old — a genuinely upcoming event always has startsAtMs set,
+    // so an untimed event this stale is junk. Generous so a freshly-fired
+    // not-yet-enriched card isn't pruned before the enricher fills its timing in.
+    private const val STALE_UNTIMED_MS = 24L * 60 * 60 * 1000
 
-    /** True once an event has clearly ENDED (past its end, or >4h past start with
-     *  no end). Unknown-timing events (no start AND no end) are never "ended". */
+    /** True once an event has clearly ENDED — past its end, >4h past start with no
+     *  end, or (no timing at all) its created/display time is older than
+     *  STALE_UNTIMED_MS. Only meaningful for EVENT cards; the prune gates on
+     *  event_ groups so non-event alerts never reach here. */
     fun eventEnded(e: InAppAlertEvent, nowMs: Long): Boolean = when {
         e.endsAtMs > 0L -> e.endsAtMs < nowMs
         e.startsAtMs > 0L -> nowMs - e.startsAtMs > LIVE_TAIL_MS
-        else -> false
+        else -> {
+            val ref = e.createdAtMs.takeIf { it > 0L } ?: e.timestampMs
+            ref > 0L && nowMs - ref > STALE_UNTIMED_MS
+        }
     }
 
     /**
-     * Removes events that have clearly ENDED from every group so concluded events
-     * stop cluttering "Going" / the notifications area (an event you were going to
-     * shouldn't sit in "Going" days after it finished). DELETED cards (`removed`)
-     * are KEPT — they show the red "Removed" state until the user dismisses them —
-     * and non-event alerts (no timing) are untouched. A recurring series keeps its
-     * upcoming occurrences and only sheds the past ones. Emptied groups are dropped.
-     * Returns true if anything changed.
+     * Removes ENDED events from EVENT groups so concluded events stop cluttering
+     * "Going" / the notifications area (an event you were going to shouldn't sit in
+     * "Going" days after it finished — including OLD cards with no start/end time,
+     * caught by the stale-untimed fallback). Only `event_*` groups are touched, so
+     * friend/bio/announcement alerts are never pruned. DELETED cards (`removed`) are
+     * KEPT (red "Removed" until dismissed). A recurring series keeps its upcoming
+     * occurrences and only sheds past ones. Emptied groups are dropped. Returns true
+     * if anything changed.
      */
     fun pruneEndedEvents(ctx: Context, nowMs: Long): Boolean {
         var changed = false
         val next = _groups.value.mapNotNull { g ->
+            if (!g.groupId.startsWith("event_")) return@mapNotNull g
             val kept = g.events.filter { it.removed || !eventEnded(it, nowMs) }
             when {
                 kept.size == g.events.size -> g
