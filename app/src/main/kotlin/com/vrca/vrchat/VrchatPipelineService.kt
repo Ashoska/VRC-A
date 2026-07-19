@@ -3316,7 +3316,74 @@ class VrchatPipelineService : Service() {
                 } catch (e: Exception) {
                     Log.w(TAG, "Group announcement poll failed", e)
                 }
+                // Clear friend-request keys for requests that were declined/rescinded
+                // (no pipeline event fires for those) so a future request re-notifies.
+                try {
+                    reconcileResolvedFriendRequests()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Friend-request reconcile failed", e)
+                }
             }
+        }
+    }
+
+    // Absence strikes for friend-request keys no longer in the pending list. 2 strikes
+    // before clearing so a partial/failed pending fetch can't spuriously clear a still-
+    // pending request (which would then re-fire it — the "duplicate" bug). In-memory.
+    private val resolvedFrStrikes = mutableMapOf<String, Int>()
+
+    /**
+     * Clears the permanent `fr_<uid>` friend-request dedup key for requests that have
+     * been RESOLVED without a hookable event — specifically DECLINED or RESCINDED
+     * (accept/unfriend are already cleared directly by friend-add/friend-delete).
+     * VRChat re-lists a pending request until it's resolved, so a person who still has
+     * a live `fr_` key but is NO LONGER in the pending friend-request list (and isn't
+     * now a friend) had their request resolved → clear it so a FUTURE request from
+     * them notifies again. Requires absence across 2 consecutive checks so a partial /
+     * failed pending fetch can't clear a still-pending request. Never acts on a failed
+     * fetch (ambiguous). Runs on the 5-min poll cadence.
+     */
+    private suspend fun reconcileResolvedFriendRequests() {
+        val pending = HashSet<String>()
+        var fetchedOk = false
+        VrchatAuthManager.fetchPendingNotifications(this)?.let { v1 ->
+            fetchedOk = true
+            for (i in 0 until v1.length()) {
+                val o = v1.optJSONObject(i) ?: continue
+                if (o.optString("type") == "friendRequest")
+                    o.optString("senderUserId").takeIf { it.isNotBlank() }?.let { pending.add(it) }
+            }
+        }
+        delay(300)
+        VrchatAuthManager.fetchPendingNotificationsV2(this)?.let { v2 ->
+            fetchedOk = true
+            for (i in 0 until v2.length()) {
+                val o = v2.optJSONObject(i) ?: continue
+                if (o.optString("type") == "friendRequest")
+                    o.optString("senderUserId").takeIf { it.isNotBlank() }?.let { pending.add(it) }
+            }
+        }
+        if (!fetchedOk) return // ambiguous — never clear on a failed fetch
+        val frUids = synchronized(seenNotifIds) {
+            seenNotifIds.filter { it.startsWith("fr_") }.map { it.substring(3) }
+        }
+        var cleared = 0
+        for (uid in frUids) {
+            if (uid.isBlank()) continue
+            if (pending.contains(uid) || friendsCache.containsKey(uid)) {
+                resolvedFrStrikes.remove(uid); continue
+            }
+            val strikes = (resolvedFrStrikes[uid] ?: 0) + 1
+            if (strikes >= 2) {
+                resolvedFrStrikes.remove(uid)
+                if (synchronized(seenNotifIds) { seenNotifIds.remove("fr_$uid") }) cleared++
+            } else {
+                resolvedFrStrikes[uid] = strikes
+            }
+        }
+        if (cleared > 0) {
+            persistSeenNotifIds()
+            Log.i(TAG, "Cleared $cleared resolved friend-request key(s) (declined/rescinded)")
         }
     }
 
