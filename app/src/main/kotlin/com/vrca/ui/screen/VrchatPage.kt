@@ -864,11 +864,19 @@ private fun LazyListScope.inAppAlertSection(
                 else -> "id:${ev.id}"
             }
             for (g in filtered) {
+                // Hide ENDED events at DISPLAY time (event groups only) so concluded
+                // events never even flash before the async prune removes them from
+                // storage. `removed` (red) cards are kept; non-event alerts untouched.
+                val isEventGroup = g.groupId.startsWith("event_")
+                val visible = if (isEventGroup)
+                    g.events.filter { it.removed || !InAppAlertState.eventEnded(it, nowMs) }
+                else g.events
+                if (visible.isEmpty()) continue
                 // A DELETED event leaves "Going" and becomes its own red "Removed"
                 // card in the normal area; it's never signed-up or grouped-in.
-                val followed = g.events.filter { it.following == true && !it.removed }
-                val removedEvts = g.events.filter { it.removed }
-                val others = g.events.filter { it.following != true && !it.removed }
+                val followed = visible.filter { it.following == true && !it.removed }
+                val removedEvts = visible.filter { it.removed }
+                val others = visible.filter { it.following != true && !it.removed }
                 // Group the followed events by SERIES so a recurring event the user
                 // signed up for shows as ONE card — its ~50 occurrences, each
                 // independently marked following, would otherwise each spawn its own
