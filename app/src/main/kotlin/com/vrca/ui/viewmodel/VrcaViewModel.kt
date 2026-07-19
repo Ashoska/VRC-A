@@ -1678,9 +1678,9 @@ class VrcaViewModel(
             // manual text). No active hold → revert to the normal chatbox now.
             if (manualHoldActive()) {
                 scheduleManualRevert(local)
-            } else if (!isBanned) {
+            } else {
                 lastManualHoldText = ""
-                rebuildAndMaybeSendCombined(forceSend = true, local = local, forceClearIfAllOff = true)
+                revertToNormalChatbox(local)
             }
         }
     }
@@ -2154,7 +2154,7 @@ class VrcaViewModel(
         stashedMessage = ""
         remoteVrcaOsc.typing = false
         localVrcaOsc.typing = false
-        if (!isBanned) rebuildAndMaybeSendCombined(forceSend = true, local = local, forceClearIfAllOff = true)
+        revertToNormalChatbox(local)
     }
 
     /** Arm/extend the 10s takeover for the message [shown] and schedule the
@@ -2164,6 +2164,27 @@ class VrcaViewModel(
         lastManualHoldText = shown
         combinedPreviewText = shown
         scheduleManualRevert(local)
+    }
+
+    /**
+     * Restore the chatbox after a manual-send hold ends (or on Clear). If the master
+     * OSC gate is ON, resume the automated output. If it's OFF, the manual message
+     * was a one-off (manual sends bypass the gate) — just CLEAR it from the chatbox
+     * and do NOT begin transmitting automated content. This is the fix for "sending
+     * a manual message while not Started makes automation send when the timer ends":
+     * `rebuildAndMaybeSendCombined(forceSend=true)` builds from the feature TOGGLES,
+     * not `oscSending`, so with a toggle on it would fire an automated send; every
+     * other caller guards it with `if (oscSending)` — the revert paths didn't.
+     */
+    private fun revertToNormalChatbox(local: Boolean) {
+        if (isBanned) return
+        if (oscSending) {
+            rebuildAndMaybeSendCombined(forceSend = true, local = local, forceClearIfAllOff = true)
+        } else {
+            clearChatbox(local)
+            // Preview returns to showing what WOULD be sent (the toggle content).
+            combinedPreviewText = buildCombinedText(null)
+        }
     }
 
     private fun scheduleManualRevert(local: Boolean) {
@@ -2183,7 +2204,7 @@ class VrcaViewModel(
             stashedMessage = ""
             remoteVrcaOsc.typing = false
             localVrcaOsc.typing = false
-            if (!isBanned) rebuildAndMaybeSendCombined(forceSend = true, local = local, forceClearIfAllOff = true)
+            revertToNormalChatbox(local)
         }
     }
 
@@ -2216,7 +2237,7 @@ class VrcaViewModel(
                     manualHoldUntilMs = 0L
                     lastManualHoldText = ""
                     lastManualLiveSent = null
-                    rebuildAndMaybeSendCombined(forceSend = true, local = local, forceClearIfAllOff = true)
+                    revertToNormalChatbox(local)
                     break
                 }
                 val changed = text != lastManualLiveSent
@@ -2236,7 +2257,7 @@ class VrcaViewModel(
                     lastManualLiveSent = null
                     messageText.value = TextFieldValue("", TextRange.Zero)
                     stashedMessage = ""
-                    rebuildAndMaybeSendCombined(forceSend = true, local = local, forceClearIfAllOff = true)
+                    revertToNormalChatbox(local)
                     break
                 } else if (typingOn) {
                     // Paused but still inside the 10s window: drop the typing dots,
