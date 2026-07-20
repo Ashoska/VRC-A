@@ -1117,7 +1117,18 @@ private const val WS_HOOK_JS = """
     if (window._vrca_ws_hooked) return;
     window._vrca_ws_hooked = true;
     window._vrca_gatewayWs = null;
-    window._vrca_activity = null;
+    // RESTORE the last activity from localStorage so a PAGE RELOAD (session
+    // recovery / cache maintenance) doesn't leave _vrca_activity null. The in-page
+    // re-assert interval (_vrca_pushInterval) runs even while the app is
+    // backgrounded — but only re-pushes when _vrca_activity is set. After a reload
+    // the fresh page had it null, and the native push that would set it is throttled
+    // by Chromium while backgrounded, so the RPC stayed absent until the app was
+    // foregrounded (the "reconnected but didn't reappear until I reopened" bug).
+    // Restoring here lets the JS re-assert re-land the RPC with no native push.
+    try {
+        var _saved = localStorage.getItem('_vrca_last_activity');
+        window._vrca_activity = _saved ? JSON.parse(_saved) : null;
+    } catch(e) { window._vrca_activity = null; }
     window._vrca_user_status = 'online';
     window._vrca_intended_status = 'online';
     window._vrca_asset_cache = {};
@@ -1331,6 +1342,9 @@ private const val MODULE_FINDER_JS = """
                 }
             }));
             window._vrca_lastSentMs = Date.now();
+            // Persist so a page reload can restore it (see the shim init) and
+            // re-assert the RPC without waiting on a throttled native push.
+            try { localStorage.setItem('_vrca_last_activity', JSON.stringify(activity)); } catch(e) {}
         };
 
         window.VRCA_setActivity = function(jsonStr) {
@@ -1403,6 +1417,8 @@ private const val MODULE_FINDER_JS = """
                 // activity after we've cleared it.
                 window._vrca_activityGen = (window._vrca_activityGen || 0) + 1;
                 window._vrca_activity = null;
+                // Don't let a reload restore a cleared activity.
+                try { localStorage.removeItem('_vrca_last_activity'); } catch(e) {}
                 var gw = window._vrca_gatewayWs;
                 if (!gw || gw.readyState !== 1) return 'no_gateway';
                 var origSend = window._vrca_origSend;

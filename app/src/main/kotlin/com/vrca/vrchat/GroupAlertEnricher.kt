@@ -348,8 +348,7 @@ object GroupAlertEnricher {
             when (status) {
                 VrchatAuthManager.CalendarEventStatus.DELETED -> {
                     absentStrikes.remove(strikeKey)
-                    InAppAlertState.markSeriesRemoved(ctx, groupKey, e.seriesId, evId, normTitleStr(e.eventTitle))
-                    Log.i(TAG, "markSeriesRemoved $groupId dedup=$dedup (direct 404)")
+                    removeOrAdvance(ctx, groupId, groupKey, e, evId, "direct 404")
                 }
                 VrchatAuthManager.CalendarEventStatus.FOUND -> absentStrikes.remove(strikeKey)
                 VrchatAuthManager.CalendarEventStatus.UNKNOWN -> {
@@ -360,8 +359,7 @@ object GroupAlertEnricher {
                         val strikes = (absentStrikes[strikeKey] ?: 0) + 1
                         if (strikes >= ABSENT_STRIKES_TO_REMOVE) {
                             absentStrikes.remove(strikeKey)
-                            InAppAlertState.markSeriesRemoved(ctx, groupKey, e.seriesId, evId, normTitleStr(e.eventTitle))
-                            Log.i(TAG, "markSeriesRemoved $groupId dedup=$dedup (list-absent x$strikes)")
+                            removeOrAdvance(ctx, groupId, groupKey, e, evId, "list-absent x$strikes")
                         } else {
                             absentStrikes[strikeKey] = strikes
                             Log.i(TAG, "absent-strike $groupId dedup=$dedup strikes=$strikes")
@@ -370,6 +368,24 @@ object GroupAlertEnricher {
                 }
             }
         }
+    }
+
+    /**
+     * The shown occurrence [evId] of card [e] is confirmed deleted. Records the
+     * deletion in the series store, then: if [e] is a RECURRING series that still has
+     * an upcoming occurrence, ROLLS the card forward to it (advanceSeriesIfUpcoming);
+     * otherwise (a one-off, or the whole series is gone) marks the card "Removed".
+     */
+    private fun removeOrAdvance(ctx: Context, groupId: String, groupKey: String, e: InAppAlertEvent, evId: String, why: String) {
+        val now = System.currentTimeMillis()
+        if (!e.seriesId.isNullOrBlank()) EventSeriesStore.markOccurrenceDeleted(ctx, groupId, e.seriesId, evId)
+        if (e.recurring && !e.seriesId.isNullOrBlank() &&
+            InAppAlertState.advanceSeriesIfUpcoming(ctx, groupKey, groupId, e.seriesId, now)) {
+            Log.i(TAG, "advanceSeries $groupId series=${e.seriesId} (occurrence deleted, $why)")
+            return
+        }
+        InAppAlertState.markSeriesRemoved(ctx, groupKey, e.seriesId, evId, normTitleStr(e.eventTitle))
+        Log.i(TAG, "markSeriesRemoved $groupId series=${e.seriesId} ($why)")
     }
 
     /**
@@ -410,7 +426,7 @@ object GroupAlertEnricher {
             // n=50 so a group with many upcoming events still lists a followed one
             // (a followed event absent from an authoritative list is the deletion
             // signal — see detectRemovedEvents).
-            val events = VrchatAuthManager.fetchGroupCalendarEvents(ctx, groupId, 50)
+            val events = VrchatAuthManager.fetchGroupCalendarEvents(ctx, groupId, 100)
             // Series keys present in the LIVE calendar right now (by seriesId, cal_
             // id, and normalized title). A followed/upcoming card whose series is
             // ABSENT from this AUTHORITATIVE list (an emptied group now returns []
@@ -426,12 +442,12 @@ object GroupAlertEnricher {
                         .takeIf { it.isNotBlank() }?.let { liveKeys.add("c:$it") }
                     normTitle(e).takeIf { it.isNotBlank() }?.let { liveKeys.add("t:$it") }
                 }
-                detectRemovedEvents(ctx, groupId, liveKeys)
-                // Keep the per-series occurrence store fresh for the "Repeats" dialog —
-                // FREE, from the list we just fetched (occurrence ids + timing +
-                // deletion diff). Follow state is filled lazily; the representative's
-                // follow is written below in the loop (also free — already fetched).
+                // Keep the per-series occurrence store fresh FIRST (FREE, from the list
+                // we just fetched: occurrence ids + timing + deletion diff) so that
+                // detectRemovedEvents below sees an up-to-date `nextUpcoming` when it
+                // decides whether to ADVANCE a recurring card or mark it removed.
                 reconcileOccurrenceStore(ctx, groupId, events)
+                detectRemovedEvents(ctx, groupId, liveKeys)
             }
             if (events != null) {
                 for ((ev, isRecurringSeries) in collapseEventsByTitle(events)) {
@@ -594,7 +610,7 @@ object GroupAlertEnricher {
             // ---- Posts/announcements: match alerts by normalized body ----
             // Same 250ms pacing the backfill uses between REST calls.
             kotlinx.coroutines.delay(250)
-            val posts = VrchatAuthManager.fetchGroupPosts(ctx, groupId, 10)
+            val posts = VrchatAuthManager.fetchGroupPosts(ctx, groupId, 50)
             if (posts != null) {
                 for (j in 0 until posts.length()) {
                     val post = posts.optJSONObject(j) ?: continue

@@ -2661,7 +2661,7 @@ class VrchatPipelineService : Service() {
                         // announcement — no separate fetchGroupAnnouncement
                         // call needed, and removing it eliminates duplicate
                         // ga_ vs gp_ dedup-ID firing for the same content).
-                        val posts = VrchatAuthManager.fetchGroupPosts(this@VrchatPipelineService, groupId, 20)
+                        val posts = VrchatAuthManager.fetchGroupPosts(this@VrchatPipelineService, groupId, 50)
                         if (posts != null) {
                             for (j in 0 until posts.length()) {
                                 val post = posts.optJSONObject(j) ?: continue
@@ -2717,7 +2717,7 @@ class VrchatPipelineService : Service() {
                         // Sweep group CALENDAR EVENTS too. Events created while
                         // closed don't reliably show up in notifications-v2, so
                         // without this they never surface on reopen.
-                        val events = VrchatAuthManager.fetchGroupCalendarEvents(this@VrchatPipelineService, groupId, 20)
+                        val events = VrchatAuthManager.fetchGroupCalendarEvents(this@VrchatPipelineService, groupId, 100)
                         if (events != null) {
                             // Collapse recurring occurrences to ONE representative per
                             // series (nearest upcoming) so a repeating event surfaces
@@ -2771,7 +2771,7 @@ class VrchatPipelineService : Service() {
         updatedMap: JSONObject
     ) {
         try {
-            val posts = VrchatAuthManager.fetchGroupPosts(this@VrchatPipelineService, groupId, 20)
+            val posts = VrchatAuthManager.fetchGroupPosts(this@VrchatPipelineService, groupId, 50)
             if (posts != null) {
                 for (j in 0 until posts.length()) {
                     val post = posts.optJSONObject(j) ?: continue
@@ -2789,7 +2789,7 @@ class VrchatPipelineService : Service() {
                 }
             }
             delay(250)
-            val events = VrchatAuthManager.fetchGroupCalendarEvents(this@VrchatPipelineService, groupId, 20)
+            val events = VrchatAuthManager.fetchGroupCalendarEvents(this@VrchatPipelineService, groupId, 100)
             if (events != null) {
                 for (j in 0 until events.length()) {
                     val ev = events.optJSONObject(j) ?: continue
@@ -2826,7 +2826,7 @@ class VrchatPipelineService : Service() {
                     if (createdAt.isNotBlank()) seenMap.put(groupId, createdAt)
                     // Seed recent post IDs too so the backfill/poll posts sweep
                     // doesn't fire a flood of pre-existing posts on first run.
-                    val posts = VrchatAuthManager.fetchGroupPosts(this@VrchatPipelineService, groupId, 20)
+                    val posts = VrchatAuthManager.fetchGroupPosts(this@VrchatPipelineService, groupId, 50)
                     if (posts != null) {
                         for (j in 0 until posts.length()) {
                             val post = posts.optJSONObject(j) ?: continue
@@ -2838,7 +2838,7 @@ class VrchatPipelineService : Service() {
                         }
                     }
                     // Seed existing calendar events too.
-                    val events = VrchatAuthManager.fetchGroupCalendarEvents(this@VrchatPipelineService, groupId, 20)
+                    val events = VrchatAuthManager.fetchGroupCalendarEvents(this@VrchatPipelineService, groupId, 100)
                     if (events != null) {
                         for (j in 0 until events.length()) {
                             val ev = events.optJSONObject(j) ?: continue
@@ -2878,7 +2878,7 @@ class VrchatPipelineService : Service() {
                 val gName = group.optString("name", "")
                 if (gName.isNotBlank()) groupNameCache[groupId] = gName
                 try {
-                    val posts = VrchatAuthManager.fetchGroupPosts(this@VrchatPipelineService, groupId, 20)
+                    val posts = VrchatAuthManager.fetchGroupPosts(this@VrchatPipelineService, groupId, 50)
                     if (posts != null) {
                         for (j in 0 until posts.length()) {
                             val post = posts.optJSONObject(j) ?: continue
@@ -2894,7 +2894,7 @@ class VrchatPipelineService : Service() {
                     // Upcoming events are intentionally NOT seeded — the backfill
                     // sweep right after fires them once so the user sees events
                     // they missed while closed; per-event dedup stops re-fires.
-                    val events = VrchatAuthManager.fetchGroupCalendarEvents(this@VrchatPipelineService, groupId, 20)
+                    val events = VrchatAuthManager.fetchGroupCalendarEvents(this@VrchatPipelineService, groupId, 100)
                     if (events != null) {
                         val now = System.currentTimeMillis()
                         for (j in 0 until events.length()) {
@@ -2943,7 +2943,7 @@ class VrchatPipelineService : Service() {
                 val groupId = group.optString("groupId", "").ifBlank { group.optString("id", "") }
                 if (groupId.isBlank()) continue
                 try {
-                    val events = VrchatAuthManager.fetchGroupCalendarEvents(this@VrchatPipelineService, groupId, 20)
+                    val events = VrchatAuthManager.fetchGroupCalendarEvents(this@VrchatPipelineService, groupId, 100)
                     if (events != null) {
                         for (j in 0 until events.length()) {
                             val ev = events.optJSONObject(j) ?: continue
@@ -3444,7 +3444,7 @@ class VrchatPipelineService : Service() {
                 // Posts endpoint includes the pinned announcement, so no
                 // separate fetchGroupAnnouncement call — eliminates the
                 // ga_ vs gp_ duplicate dedup-ID problem.
-                val posts = VrchatAuthManager.fetchGroupPosts(this, groupId, 20)
+                val posts = VrchatAuthManager.fetchGroupPosts(this, groupId, 50)
                 if (posts != null) {
                     for (j in 0 until posts.length()) {
                         val post = posts.optJSONObject(j) ?: continue
@@ -3494,7 +3494,7 @@ class VrchatPipelineService : Service() {
                         }
                     }
                 }
-                val events = VrchatAuthManager.fetchGroupCalendarEvents(this, groupId, 20)
+                val events = VrchatAuthManager.fetchGroupCalendarEvents(this, groupId, 100)
                 if (events != null) {
                     // Collapse recurring occurrences to the nearest-upcoming
                     // representative per series so a repeating event fires once,
@@ -3594,7 +3594,7 @@ class VrchatPipelineService : Service() {
                     VrchatAuthManager.fetchCalendarEvent(this, groupId, eventId)?.let { return it }
                 }
                 if (normTitle.isNotBlank()) {
-                    val list = VrchatAuthManager.fetchGroupCalendarEvents(this, groupId, 20)
+                    val list = VrchatAuthManager.fetchGroupCalendarEvents(this, groupId, 100)
                     if (list != null) {
                         val matches = ArrayList<JSONObject>()
                         for (i in 0 until list.length()) {

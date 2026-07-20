@@ -344,6 +344,32 @@ object InAppAlertState {
         return true
     }
 
+    /**
+     * Re-points a recurring series' card(s) in [groupKey] to the series' NEXT upcoming
+     * occurrence (from [EventSeriesStore]) and clears any `removed` flag. Used when the
+     * shown occurrence was DELETED but the series still has upcoming dates — the card
+     * ROLLS FORWARD instead of turning into a "Removed" card. Returns true if there was
+     * a next occurrence to advance to (so the caller skips marking it removed).
+     */
+    fun advanceSeriesIfUpcoming(ctx: Context, groupKey: String, groupId: String, seriesId: String, nowMs: Long): Boolean {
+        val nx = EventSeriesStore.nextUpcoming(ctx, groupId, seriesId, nowMs) ?: return false
+        enrichEvents(
+            ctx, groupKey,
+            match = { e -> !e.seriesId.isNullOrBlank() && e.seriesId == seriesId },
+            transform = { e ->
+                e.copy(
+                    eventRefId = nx.id,
+                    startsAtMs = nx.startsAtMs,
+                    endsAtMs = nx.endsAtMs,
+                    timestampMs = if (nx.startsAtMs > 0L) nx.startsAtMs else e.timestampMs,
+                    following = nx.following ?: e.following,
+                    removed = false
+                )
+            }
+        )
+        return true
+    }
+
     /** If [e] is a recurring event whose shown occurrence ended, returns a copy
      *  re-pointed at the series' next upcoming occurrence (so the card advances to the
      *  next date); null when it should be dropped (not recurring, or the series has no

@@ -181,6 +181,19 @@ object EventSeriesStore {
         persist(ctx)
     }
 
+    /** Flags a single occurrence deleted (confirmed 404) so it shows "Removed" in the
+     *  dialog and drops out of [nextUpcoming]. */
+    @Synchronized
+    fun markOccurrenceDeleted(ctx: Context, groupId: String, seriesId: String, id: String) {
+        if (groupId.isBlank() || seriesId.isBlank() || id.isBlank()) return
+        ensureLoaded(ctx)
+        val map = cache[key(groupId, seriesId)] ?: return
+        val o = map[id] ?: return
+        if (o.deleted) return
+        map[id] = o.copy(deleted = true, deletedAtMs = System.currentTimeMillis())
+        persist(ctx)
+    }
+
     /** Whether the user is subscribed to at least one live occurrence of the series. */
     @Synchronized
     fun anySubscribed(ctx: Context, groupId: String, seriesId: String): Boolean {
