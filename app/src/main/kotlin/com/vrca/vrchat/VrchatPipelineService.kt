@@ -2582,6 +2582,11 @@ class VrchatPipelineService : Service() {
                     val v1CatchUp = notifType == "friendRequest"
                     if (!v1CatchUp && v1CreatedMs > 0 &&
                         System.currentTimeMillis() - v1CreatedMs > 24L * 60 * 60 * 1000) continue
+                    // Self-invite dance: never surface the danced counterpart's friend
+                    // request via the backfill (the live path suppresses it but returns
+                    // BEFORE recording the fr_ dedup id, so the backfill would re-fire it).
+                    if (notifType == "friendRequest" &&
+                        SelfInviteStore.isFriendNotifSuppressed(this@VrchatPipelineService, senderUserId)) continue
                     when (notifType) {
                         "friendRequest" -> fireEventNotification(
                             id = "fr_$senderUserId".hashCode(),
