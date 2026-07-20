@@ -114,6 +114,7 @@ class UserPreferencesRepository(private val context: Context) {
         val TIME_FORMAT_24H          = booleanPreferencesKey("time_format_24h")
         // Now Playing progress bar+time line (default ON; OFF = title only)
         val MUSIC_SHOW_PROGRESS      = booleanPreferencesKey("music_show_progress")
+        val MUSIC_CLEAN_TITLES       = booleanPreferencesKey("music_clean_titles")
 
         val NOTIF_FRIEND_REQUEST       = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_FRIEND_REQUEST)
         val NOTIF_NEW_FRIEND           = booleanPreferencesKey(VrchatNotificationPrefs.KEY_NOTIF_NEW_FRIEND)
@@ -151,6 +152,7 @@ class UserPreferencesRepository(private val context: Context) {
         val NOTIF_BACKFILL_INITIALIZED   = booleanPreferencesKey("notif_backfill_initialized")
         val POSTS_EVENTS_BASELINE_V2     = booleanPreferencesKey("posts_events_baseline_v2")
         val CALENDAR_BASELINE_V3         = booleanPreferencesKey("calendar_baseline_v3")
+        val POSTS_EVENTS_BASELINE_V4     = booleanPreferencesKey("posts_events_baseline_v4")
 
         val TOS_ACCEPTED_VERSION  = intPreferencesKey("tos_accepted_version")
         val TOS_ACCEPTED_AT_EPOCH = longPreferencesKey("tos_accepted_at_epoch")
@@ -249,6 +251,7 @@ class UserPreferencesRepository(private val context: Context) {
     val mediaSourceYtMusic:     Flow<Boolean> = context.dataStore.data.map { it[Keys.MEDIA_SOURCE_YTMUSIC] ?: true }.distinctUntilChanged()
     val timeFormat24h:          Flow<Boolean> = context.dataStore.data.map { it[Keys.TIME_FORMAT_24H] ?: false }.distinctUntilChanged()
     val musicShowProgress:      Flow<Boolean> = context.dataStore.data.map { it[Keys.MUSIC_SHOW_PROGRESS] ?: true }.distinctUntilChanged()
+    val musicCleanTitles:       Flow<Boolean> = context.dataStore.data.map { it[Keys.MUSIC_CLEAN_TITLES] ?: true }.distinctUntilChanged()
 
     val notifFriendRequest:        Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_FRIEND_REQUEST]        ?: false }.distinctUntilChanged()
     val notifNewFriend:            Flow<Boolean> = context.dataStore.data.map { it[Keys.NOTIF_NEW_FRIEND]            ?: false }.distinctUntilChanged()
@@ -390,6 +393,7 @@ class UserPreferencesRepository(private val context: Context) {
     suspend fun saveMediaSourceYtMusic(v: Boolean)      = context.dataStore.edit { it[Keys.MEDIA_SOURCE_YTMUSIC] = v }
     suspend fun saveTimeFormat24h(v: Boolean)           = context.dataStore.edit { it[Keys.TIME_FORMAT_24H] = v }
     suspend fun saveMusicShowProgress(v: Boolean)       = context.dataStore.edit { it[Keys.MUSIC_SHOW_PROGRESS] = v }
+    suspend fun saveMusicCleanTitles(v: Boolean)        = context.dataStore.edit { it[Keys.MUSIC_CLEAN_TITLES] = v }
 
     suspend fun saveNotifFriendRequest(v: Boolean)        = context.dataStore.edit { it[Keys.NOTIF_FRIEND_REQUEST]        = v }
     suspend fun saveNotifNewFriend(v: Boolean)            = context.dataStore.edit { it[Keys.NOTIF_NEW_FRIEND]            = v }
@@ -427,6 +431,7 @@ class UserPreferencesRepository(private val context: Context) {
     suspend fun saveNotifBackfillInitialized(v: Boolean)  = context.dataStore.edit { it[Keys.NOTIF_BACKFILL_INITIALIZED]  = v }
     suspend fun savePostsEventsBaselineV2(v: Boolean)    = context.dataStore.edit { it[Keys.POSTS_EVENTS_BASELINE_V2]  = v }
     suspend fun saveCalendarBaselineV3(v: Boolean)       = context.dataStore.edit { it[Keys.CALENDAR_BASELINE_V3]      = v }
+    suspend fun savePostsEventsBaselineV4(v: Boolean)    = context.dataStore.edit { it[Keys.POSTS_EVENTS_BASELINE_V4]  = v }
 
     suspend fun saveSetupVrchatDone(v: Boolean) = context.dataStore.edit { it[Keys.SETUP_VRCHAT_DONE] = v }
     suspend fun saveSetupIpDone(v: Boolean)     = context.dataStore.edit { it[Keys.SETUP_IP_DONE]     = v }
