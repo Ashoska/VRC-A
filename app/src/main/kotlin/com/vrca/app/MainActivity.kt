@@ -45,6 +45,14 @@ class MainActivity : ComponentActivity() {
 
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
+        // Capture whether the runtime was ALREADY up when this open began — BEFORE
+        // KeepAliveService.start() below, whose ensureRuntimeViewModel() would flip
+        // runtimeVmAlive true and pollute the signal. A warm value here means the
+        // process was revived headlessly (OEM kill) or survived (Activity recreate),
+        // so VrcaApp skips the boot screen; a cold value (swipe-reopen / first
+        // install) shows it. See VrcaApplication.warmAtLastOpen.
+        VrcaApplication.warmAtLastOpen = VrcaApplication.runtimeVmAlive
+
         //Ensure device hash exists early (before any screen reads it).
         runCatching { ensureDeviceHash(applicationContext) }
 

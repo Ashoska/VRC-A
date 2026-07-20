@@ -47,13 +47,24 @@ class VrcaApplication : Application(), ViewModelStoreOwner {
         // `ensureRuntimeViewModel()` (OEM-kill revival). It survives Activity
         // destruction (process-static) but resets on a fresh process (swipe-kill
         // clears the ViewModelStore AND kills the process, and the VM's onCleared
-        // flips this false as a belt-and-suspenders reset). VrcaApp reads it to
-        // decide whether this Activity launch is a genuine COLD open (runtime not
-        // yet up → show the boot screen) or a WARM resume into an already-alive
-        // process (Activity recreated, or reopened after a headless OEM revival →
-        // skip the boot screen and drop straight into the app).
+        // flips this false as a belt-and-suspenders reset).
         @Volatile
         var runtimeVmAlive: Boolean = false
+
+        // Snapshot of [runtimeVmAlive] captured at the TOP of MainActivity.onCreate,
+        // BEFORE the Activity (re)starts KeepAliveService — whose onStartCommand calls
+        // ensureRuntimeViewModel() and would otherwise flip runtimeVmAlive true on
+        // EVERY open, racing VrcaApp's composition and making the live read useless.
+        // Captured pre-service-start, this reflects whether the process was ALREADY
+        // warm when the user opened the app:
+        //   • false → genuine COLD open (fresh process from a swipe-kill, or first
+        //     install) — nothing had created the runtime yet → SHOW the boot screen.
+        //   • true  → WARM resume — the runtime was already up from a headless OEM
+        //     revival or a surviving process (Activity recreate) → SKIP the boot
+        //     screen and drop straight into the app.
+        // VrcaApp reads THIS, not runtimeVmAlive directly.
+        @Volatile
+        var warmAtLastOpen: Boolean = false
     }
 
     // Process-lifetime ViewModelStore. Cleared only by AppShutdown on swipe.
