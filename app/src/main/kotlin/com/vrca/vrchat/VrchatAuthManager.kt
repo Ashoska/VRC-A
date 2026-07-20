@@ -997,9 +997,18 @@ object VrchatAuthManager {
      * catching bio/name/rank edits from friends on the website or phone. The full
      * sweep (default, both passes) additionally covers offline friends.
      */
-    suspend fun fetchFriends(context: Context, onlineOnly: Boolean = false): List<VrcFriend> = withContext(Dispatchers.IO) {
-        val cookieHeader = getCookieHeader(context) ?: return@withContext emptyList()
+    /**
+     * Fetches the friends list. **Returns null on a HARD failure** (no cookie, or not a
+     * single page ever returned 200 — session dead / rate-limited-out / all-errored) so
+     * callers can tell "the fetch failed" apart from "you genuinely have 0 friends".
+     * That distinction is what lets the unfriend-diff fire when your LAST friend is
+     * removed (empty list == real) without false-flagging every friend as removed when a
+     * fetch just failed (null == unknown, skip the diff / preserve the cache).
+     */
+    suspend fun fetchFriends(context: Context, onlineOnly: Boolean = false): List<VrcFriend>? = withContext(Dispatchers.IO) {
+        val cookieHeader = getCookieHeader(context) ?: return@withContext null
         val seen = mutableMapOf<String, VrcFriend>()
+        var gotAny200 = false
         val pageSize = 100
         val passes = if (onlineOnly) listOf(false) else listOf(false, true)
         for (offline in passes) {
@@ -1010,7 +1019,7 @@ object VrchatAuthManager {
                         "$BASE/auth/user/friends?offset=$offset&n=$pageSize&offline=$offline",
                         null, cookieHeader
                     )
-                    if (code == 200) captureRolledCookies(context, rawCookies)
+                    if (code == 200) { captureRolledCookies(context, rawCookies); gotAny200 = true }
                     if (code == 429) {
                         Log.w(TAG, "fetchFriends rate limited, waiting 5s")
                         kotlinx.coroutines.delay(5000)
@@ -1047,8 +1056,10 @@ object VrchatAuthManager {
                 Log.e(TAG, "fetchFriends(offline=$offline) failed", e)
             }
         }
-        Log.i(TAG, "fetchFriends total: ${seen.size}")
-        seen.values.toList()
+        Log.i(TAG, "fetchFriends total: ${seen.size} (gotAny200=$gotAny200)")
+        // Never received a valid page → the fetch FAILED (don't let callers read this as
+        // "0 friends"). A valid 200 with an empty array is a genuine zero and returns [].
+        if (!gotAny200) null else seen.values.toList()
     }
 
     // ------------------------------------------------------------------
@@ -1501,6 +1512,128 @@ object VrchatAuthManager {
             Log.w(TAG, "verifyStillFriend $userId failed", e)
             null
         }
+    }
+
+    /* =========================================================
+       Friend graph helpers (used by the admin self-invite flow —
+       see SelfInviteCoordinator). All are REST, session-authed.
+       ========================================================= */
+
+    data class FriendStatus(
+        val isFriend: Boolean,
+        val incomingRequest: Boolean,
+        val outgoingRequest: Boolean
+    )
+
+    /** GET /user/{userId}/friendStatus → {isFriend, incomingRequest, outgoingRequest}.
+     *  Null on a network/permission error so callers can tell "unknown" from "not friends". */
+    suspend fun getFriendStatus(context: Context, userId: String): FriendStatus? =
+        withContext(Dispatchers.IO) {
+            val uid = userId.trim()
+            if (uid.isBlank()) return@withContext null
+            val cookieHeader = getCookieHeader(context) ?: return@withContext null
+            try {
+                val (code, body, rawCookies) = get("$BASE/user/$uid/friendStatus", null, cookieHeader)
+                if (code == 200) {
+                    captureRolledCookies(context, rawCookies)
+                    val o = JSONObject(body)
+                    FriendStatus(
+                        isFriend = o.optBoolean("isFriend", false),
+                        incomingRequest = o.optBoolean("incomingRequest", false),
+                        outgoingRequest = o.optBoolean("outgoingRequest", false)
+                    )
+                } else null
+            } catch (e: Exception) {
+                Log.w(TAG, "getFriendStatus $uid failed", e)
+                null
+            }
+        }
+
+    /** POST /user/{userId}/friendRequest — sends a friend request. If the other party
+     *  already has an outgoing request to us, VRChat auto-befriends (mutual request). */
+    suspend fun sendFriendRequest(context: Context, userId: String): InviteResult =
+        withContext(Dispatchers.IO) {
+            val uid = userId.trim()
+            if (uid.isBlank()) return@withContext InviteResult(false, "Missing user id")
+            val cookieHeader = getCookieHeader(context)
+                ?: return@withContext InviteResult(false, "Not signed in to VRChat")
+            try {
+                val (code, respBody, rawCookies) = post("$BASE/user/$uid/friendRequest", "", cookieHeader)
+                if (code == 200) {
+                    captureRolledCookies(context, rawCookies)
+                    InviteResult(true)
+                } else {
+                    Log.w(TAG, "sendFriendRequest $uid returned $code body=${respBody.take(200)}")
+                    InviteResult(false, parseVrcError(respBody, code))
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "sendFriendRequest $uid failed", e)
+                InviteResult(false, "Network error")
+            }
+        }
+
+    /** DELETE /user/{userId}/friendRequest — cancels an outgoing (or rejects an
+     *  incoming) friend request. Used in dance cleanup so no request lingers if the
+     *  pair never auto-befriended. Best-effort; a 404 (no request) is treated as ok. */
+    suspend fun cancelFriendRequest(context: Context, userId: String): InviteResult =
+        withContext(Dispatchers.IO) {
+            val uid = userId.trim()
+            if (uid.isBlank()) return@withContext InviteResult(false, "Missing user id")
+            val cookieHeader = getCookieHeader(context)
+                ?: return@withContext InviteResult(false, "Not signed in to VRChat")
+            try {
+                val (code, respBody, rawCookies) = delete("$BASE/user/$uid/friendRequest", cookieHeader)
+                if (code == 200 || code == 404) {
+                    captureRolledCookies(context, rawCookies)
+                    InviteResult(true)
+                } else InviteResult(false, parseVrcError(respBody, code))
+            } catch (e: Exception) {
+                Log.w(TAG, "cancelFriendRequest $uid failed", e)
+                InviteResult(false, "Network error")
+            }
+        }
+
+    /** DELETE /auth/user/friends/{userId} — unfriends. A 404/200 both mean "not a
+     *  friend anymore" (success). Used by the dance cleanup + the pending-unfriend sweep. */
+    suspend fun unfriendUser(context: Context, userId: String): InviteResult =
+        withContext(Dispatchers.IO) {
+            val uid = userId.trim()
+            if (uid.isBlank()) return@withContext InviteResult(false, "Missing user id")
+            val cookieHeader = getCookieHeader(context)
+                ?: return@withContext InviteResult(false, "Not signed in to VRChat")
+            try {
+                val (code, respBody, rawCookies) = delete("$BASE/auth/user/friends/$uid", cookieHeader)
+                if (code == 200 || code == 404) {
+                    captureRolledCookies(context, rawCookies)
+                    InviteResult(true)
+                } else InviteResult(false, parseVrcError(respBody, code))
+            } catch (e: Exception) {
+                Log.w(TAG, "unfriendUser $uid failed", e)
+                InviteResult(false, "Network error")
+            }
+        }
+
+    private fun delete(
+        url: String,
+        cookieHeader: String?
+    ): Triple<Int, String, List<String>> {
+        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = "DELETE"
+            useCaches = false
+            setRequestProperty("User-Agent", USER_AGENT)
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("Cache-Control", "no-cache")
+            if (cookieHeader != null) setRequestProperty("Cookie", cookieHeader)
+            connectTimeout = 15_000
+            readTimeout = 15_000
+        }
+        val code = conn.responseCode
+        val body = try {
+            (if (code < 400) conn.inputStream else conn.errorStream)
+                ?.bufferedReader()?.readText() ?: ""
+        } catch (e: IOException) { "" }
+        val cookies = conn.headerFields["Set-Cookie"] ?: emptyList()
+        return Triple(code, body, cookies)
     }
 
     private fun get(

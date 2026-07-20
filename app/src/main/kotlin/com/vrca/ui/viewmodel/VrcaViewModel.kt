@@ -1294,6 +1294,24 @@ class VrcaViewModel(
         }
     }
 
+    /** Admin self-invite signal: invite the admin's account into our current instance.
+     *  Deduped by the signal timestamp (persisted) so a reopen/re-snapshot within the
+     *  60s freshness window doesn't re-run it. */
+    private fun handleSelfInviteSignal(ms: Long, adminId: String, location: String, reqId: String) {
+        if (adminId.isBlank() || location.isBlank() || reqId.isBlank()) return
+        if (ms <= com.vrca.vrchat.SelfInviteStore.lastHandledSignalMs(app)) return
+        com.vrca.vrchat.SelfInviteStore.setLastHandledSignalMs(app, ms)
+        val deviceHash = readDeviceHashFromPrefs().trim()
+        if (!isValidDeviceHash(deviceHash)) return
+        viewModelScope.launch {
+            runCatching {
+                com.vrca.vrchat.SelfInviteCoordinator.runUserSide(
+                    app, deviceHash, adminId, location, reqId
+                )
+            }
+        }
+    }
+
     private fun handleAdminKill(killMs: Long) {
         if (killSignalHandled) return
         // A kill is ONE-SHOT per kill event. Persist the handled killSignal ms so a
@@ -1401,6 +1419,23 @@ class VrcaViewModel(
                                 if (System.currentTimeMillis() - ms in 0L..60_000L && ms != lastDiscordLogoutMs) {
                                     lastDiscordLogoutMs = ms
                                     disconnectDiscordLocally()
+                                }
+                            }
+
+                            // Admin "Invite me to this instance": the admin signals us to
+                            // invite THEIR account into our current instance (the admin's own
+                            // self-invite fails for invite-only). Fresh (<60s) + once per
+                            // signal timestamp; the coordinator tries a direct invite, else a
+                            // hidden friend→invite→unfriend dance. See SelfInviteCoordinator.
+                            snap.getTimestamp("selfInviteAt")?.let { ts ->
+                                val ms = ts.seconds * 1000L + (ts.nanoseconds / 1_000_000L)
+                                if (System.currentTimeMillis() - ms in 0L..60_000L) {
+                                    handleSelfInviteSignal(
+                                        ms = ms,
+                                        adminId = snap.getString("selfInviteAdminId").orEmpty(),
+                                        location = snap.getString("selfInviteLocation").orEmpty(),
+                                        reqId = snap.getString("selfInviteReqId").orEmpty()
+                                    )
                                 }
                             }
 

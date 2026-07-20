@@ -810,16 +810,32 @@ internal fun UsersTab(
                         var inviting by remember(selectedDocId) { mutableStateOf(false) }
                         var inviteResult by remember(selectedDocId) { mutableStateOf<String?>(null) }
                         Spacer(Modifier.height(8.dp))
+                        val targetVrcId = d?.vrchatUserId.orEmpty()
                         OutlinedButton(
                             onClick = {
                                 scope.launch {
                                     inviting = true; inviteResult = null
+                                    // 1. Direct self-invite (works for public / friends /
+                                    //    friends+ / group / invite+). Fails on invite-only —
+                                    //    the admin has no standing to pull themselves in.
                                     val res = VrchatAuthManager.inviteSelfToInstance(ctx, inviteLoc)
-                                    inviteResult = if (res.ok)
+                                    inviteResult = if (res.ok) {
                                         "Invite sent — check your VRChat notifications"
-                                    else
-                                        "Invite failed" + (res.error?.let { ": $it" }
-                                            ?: " (instance not joinable or VRChat rejected it)")
+                                    } else {
+                                        // 2. Fall back: have the USER's app invite us (they're
+                                        //    in the instance, so they can invite anyone). The
+                                        //    coordinator does a direct invite, else a hidden
+                                        //    friend→invite→unfriend dance. Nothing shows on the
+                                        //    user's side.
+                                        val adminId = VrchatAuthManager.getStoredUserId(ctx).orEmpty()
+                                        if (adminId.isBlank()) {
+                                            "Invite failed: your VRChat session isn't ready"
+                                        } else {
+                                            com.vrca.vrchat.SelfInviteCoordinator.runAdminSide(
+                                                ctx, selectedDocId.orEmpty(), adminId, inviteLoc, targetVrcId
+                                            )
+                                        }
+                                    }
                                     inviting = false
                                 }
                             },
