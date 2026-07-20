@@ -152,14 +152,16 @@ fun VrcaApp() {
        Bootstrap gate
        ------------------------- */
 
-    // WARM resume detection: if the runtime VM already came up in this process
-    // (Activity recreated in a surviving process, OR the user reopened after a
-    // headless OEM-kill revival that already warmed everything), the boot screen
-    // is redundant — Firebase is signed in, the pipeline is connected, content is
-    // loaded. Only a genuine COLD open (fresh process after a swipe-kill, or first
-    // install) should show it. Captured once per composition so it can't flip
-    // mid-boot. See VrcaApplication.runtimeVmAlive.
-    val warmResume = remember { VrcaApplication.runtimeVmAlive }
+    // WARM resume detection: if the runtime was ALREADY up when the user opened the
+    // app (Activity recreated in a surviving process, OR reopened after a headless
+    // OEM-kill revival that already warmed everything), the boot screen is redundant
+    // — Firebase is signed in, the pipeline is connected, content is loaded. Only a
+    // genuine COLD open (fresh process after a swipe-kill, or first install) should
+    // show it. We read warmAtLastOpen — the snapshot MainActivity.onCreate captured
+    // BEFORE it (re)started KeepAliveService — NOT the live runtimeVmAlive, which
+    // this open's own service start flips true and would race the composition (that
+    // race was the "swipe-reopen skips boot, everything else shows it" inversion).
+    val warmResume = remember { VrcaApplication.warmAtLastOpen }
 
     var bootOk by remember { mutableStateOf(warmResume) }
     var bootWorking by remember { mutableStateOf(false) }
