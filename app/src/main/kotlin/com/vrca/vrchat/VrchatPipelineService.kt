@@ -2508,6 +2508,22 @@ class VrchatPipelineService : Service() {
                 calRepo.saveCalendarBaselineV3(true)
             }
 
+            // v4: the group posts/calendar fetch window was RAISED (posts 20->50,
+            // events ->100) because repeating events were crowding the old small
+            // window. That exposed OLDER posts + past events that were never in the
+            // seen baseline (seeded at the smaller window), so the catch-up path
+            // fired them as "new" — the "old announcements spam on the new version"
+            // regression. Re-seed the now-larger window once (all posts + PAST
+            // events only) so the newly-visible older items don't fire; genuinely
+            // upcoming events are still left unseeded so they surface once as intended.
+            val limitBumpBaselined = dataStore.data.first()[booleanPreferencesKey("posts_events_baseline_v4")] ?: false
+            if (!limitBumpBaselined) {
+                Log.i(TAG, "Migration: re-seeding posts + past events for the raised fetch window")
+                seedPostsAndEventsIntoExistingMap()
+                val v4Repo = com.vrca.data.UserPreferencesRepository(this@VrchatPipelineService)
+                v4Repo.savePostsEventsBaselineV4(true)
+            }
+
             // V1 notifications: friend requests, invites, votetokick, messages
             val v1 = VrchatAuthManager.fetchPendingNotifications(this@VrchatPipelineService)
             if (v1 != null) {
