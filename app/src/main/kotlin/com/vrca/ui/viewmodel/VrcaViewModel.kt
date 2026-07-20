@@ -2045,6 +2045,21 @@ class VrcaViewModel(
         else rebuildCombinedPreviewOnly()
     }
 
+    /** Now Playing title clean-up + one-line fitting (Media tab toggle). ON (default)
+     *  = TitleCleaner strips cruft ("(Official Music Video)" etc.), de-dups the artist,
+     *  and fits "artist — title" onto ONE chatbox line. OFF = the raw title/artist as
+     *  the player reports it (only a hard char cap so the protocol limit can't be
+     *  exceeded; the line may wrap in-game). DataStore-persisted, local-only. */
+    var musicCleanTitles by mutableStateOf(true)
+        private set
+
+    fun setMusicCleanTitlesFlag(enabled: Boolean) {
+        musicCleanTitles = enabled
+        viewModelScope.launch { userPreferencesRepository.saveMusicCleanTitles(enabled) }
+        if (oscSending) rebuildAndMaybeSendCombined(forceSend = true)
+        else rebuildCombinedPreviewOnly()
+    }
+
     fun onIpAddressChange(ip: String) {
         userInputIpState.value = ip
     }
@@ -2767,6 +2782,11 @@ class VrcaViewModel(
         viewModelScope.launch {
             userPreferencesRepository.musicShowProgress.collect {
                 musicShowProgress = it; rebuildCombinedPreviewOnly()
+            }
+        }
+        viewModelScope.launch {
+            userPreferencesRepository.musicCleanTitles.collect {
+                musicCleanTitles = it; rebuildCombinedPreviewOnly()
             }
         }
 
@@ -4505,7 +4525,8 @@ class VrcaViewModel(
 
         if (nowPlayingIsLive) {
             val maxLine = 42
-            val line1 = TitleCleaner.fitOneLine(safeTitle, safeArtist, maxLine)
+            val line1 = if (musicCleanTitles) TitleCleaner.fitOneLine(safeTitle, safeArtist, maxLine)
+                        else TitleCleaner.rawOneLine(safeTitle, safeArtist, VRC_MAX_CHARS)
             return listOfNotNull(line1.takeIf { it.isNotBlank() }, "● LIVE")
         }
 
@@ -4516,7 +4537,8 @@ class VrcaViewModel(
         val effectiveIsPlaying = if (nowPlayingSpecialActive || isSpotifyDj) true else nowPlayingIsPlaying
 
         val maxLine = 42
-        val line1 = TitleCleaner.fitOneLine(safeTitle, safeArtist, maxLine)
+        val line1 = if (musicCleanTitles) TitleCleaner.fitOneLine(safeTitle, safeArtist, maxLine)
+                    else TitleCleaner.rawOneLine(safeTitle, safeArtist, VRC_MAX_CHARS)
 
         // Media tab "Show progress bar" off → title only, no bar/time line.
         if (!musicShowProgress) return listOfNotNull(line1.takeIf { it.isNotBlank() })

@@ -167,6 +167,25 @@ object TitleCleaner {
         return truncate(titleAgg.ifBlank { title1 }, maxLine)
     }
 
+    /**
+     * The "filters off" path (Media → Now Playing "Clean up titles" toggle OFF):
+     * combine "artist — title" with NO cruft-stripping, artist-dedup, or one-line
+     * fitting. The only guard is a hard [maxChars] cap so the chatbox protocol limit
+     * can never be exceeded; the line is free to WRAP in-game (the user opted out of
+     * shortening, so we show the full raw metadata as reported by the player).
+     */
+    fun rawOneLine(rawTitle: String, rawArtist: String, maxChars: Int): String {
+        val t = rawTitle.trim()
+        val a = rawArtist.trim()
+        val combined = when {
+            a.isNotBlank() && t.isNotBlank() -> "$a — $t"
+            else -> t.ifBlank { a }
+        }
+        if (combined.length <= maxChars) return combined
+        val cut = (maxChars - 1).coerceAtLeast(0)
+        return combined.take(cut).trimEnd() + "…"
+    }
+
     private fun fitsOneLine(s: String, maxLine: Int): Boolean =
         s.length <= maxLine && visualWidth(s) <= VISUAL_LINE_UNITS
 
