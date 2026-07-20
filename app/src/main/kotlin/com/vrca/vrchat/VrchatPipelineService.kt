@@ -1756,8 +1756,12 @@ class VrchatPipelineService : Service() {
     // Friends cache
     // ------------------------------------------------------------------
 
-    private suspend fun loadFriendsCache() {
-        val friends = VrchatAuthManager.fetchFriends(this)
+    private suspend fun loadFriendsCache(): Boolean {
+        // A HARD fetch failure returns null — DON'T wipe the cache (that would make the
+        // next diff read every friend as "removed"). Only a genuine list (even empty,
+        // i.e. you really have 0 friends now) replaces the cache. Returns whether the
+        // fetch succeeded so the connect diff only runs on real data.
+        val friends = VrchatAuthManager.fetchFriends(this) ?: return false
         friendsCache.clear()
         friends.forEach {
             friendsCache[it.userId] = FriendCacheEntry(
@@ -1773,6 +1777,7 @@ class VrchatPipelineService : Service() {
         friendsCacheLoaded = true
         persistFriendsCache()
         Log.i(TAG, "Loaded ${friendsCache.size} friends into cache")
+        return true
     }
 
     // Fast cadence while the app is on-screen, slower steady cadence when
@@ -1840,8 +1845,9 @@ class VrchatPipelineService : Service() {
     private suspend fun refreshFriendsProfilesAndDiff(onlineOnly: Boolean) {
         if (!VrchatAuthManager.isLoggedIn(this) || !friendsCacheLoaded || isInWarmup()) return
         if (friendsCache.isEmpty()) return
-        val fresh = VrchatAuthManager.fetchFriends(this, onlineOnly = onlineOnly)
-        if (fresh.isEmpty()) return
+        // null = the fetch FAILED (skip so a dead session doesn't blank the diff); an
+        // empty list is a genuine 0 friends and just loops zero times below.
+        val fresh = VrchatAuthManager.fetchFriends(this, onlineOnly = onlineOnly) ?: return
 
         // Run the diff + cache write on the single-threaded pipeline dispatcher so it
         // is serialized with the live WebSocket handlers and can't clobber (or be
@@ -2033,7 +2039,15 @@ class VrchatPipelineService : Service() {
     ) {
         val now = System.currentTimeMillis()
         if (now - lastUnfriendDiffMs < 5 * 60 * 1000L) return
-        if (previousIds.isEmpty() || friendsCache.isEmpty()) return
+        // NOTE: do NOT bail when friendsCache is empty — an empty cache after a SUCCESSFUL
+        // fetch means you genuinely have 0 friends now (you unfriended your last one), and
+        // that removal must still fire. A failed fetch can't reach here empty because
+        // loadFriendsCache preserves the cache on failure. Each candidate is still gated
+        // by verifyStillFriend below, so a flap can't produce a false unfriend.
+        if (previousIds.isEmpty()) return
+        // Guard against a PARTIAL multi-page fetch (some pages 200, some errored → an
+        // incomplete list) reading as mass removals. previousIds.size==1 → 1*4/5==0, so
+        // the genuine 1→0 case passes; larger simultaneous drops wait for a clean fetch.
         if (friendsCache.size < previousIds.size * 4 / 5) {
             Log.w(TAG, "Skipping unfriend diff: fresh list (${friendsCache.size}) < 80% of previous (${previousIds.size})")
             return

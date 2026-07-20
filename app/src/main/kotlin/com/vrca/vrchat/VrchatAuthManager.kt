@@ -997,9 +997,18 @@ object VrchatAuthManager {
      * catching bio/name/rank edits from friends on the website or phone. The full
      * sweep (default, both passes) additionally covers offline friends.
      */
-    suspend fun fetchFriends(context: Context, onlineOnly: Boolean = false): List<VrcFriend> = withContext(Dispatchers.IO) {
-        val cookieHeader = getCookieHeader(context) ?: return@withContext emptyList()
+    /**
+     * Fetches the friends list. **Returns null on a HARD failure** (no cookie, or not a
+     * single page ever returned 200 — session dead / rate-limited-out / all-errored) so
+     * callers can tell "the fetch failed" apart from "you genuinely have 0 friends".
+     * That distinction is what lets the unfriend-diff fire when your LAST friend is
+     * removed (empty list == real) without false-flagging every friend as removed when a
+     * fetch just failed (null == unknown, skip the diff / preserve the cache).
+     */
+    suspend fun fetchFriends(context: Context, onlineOnly: Boolean = false): List<VrcFriend>? = withContext(Dispatchers.IO) {
+        val cookieHeader = getCookieHeader(context) ?: return@withContext null
         val seen = mutableMapOf<String, VrcFriend>()
+        var gotAny200 = false
         val pageSize = 100
         val passes = if (onlineOnly) listOf(false) else listOf(false, true)
         for (offline in passes) {
@@ -1010,7 +1019,7 @@ object VrchatAuthManager {
                         "$BASE/auth/user/friends?offset=$offset&n=$pageSize&offline=$offline",
                         null, cookieHeader
                     )
-                    if (code == 200) captureRolledCookies(context, rawCookies)
+                    if (code == 200) { captureRolledCookies(context, rawCookies); gotAny200 = true }
                     if (code == 429) {
                         Log.w(TAG, "fetchFriends rate limited, waiting 5s")
                         kotlinx.coroutines.delay(5000)
@@ -1047,8 +1056,10 @@ object VrchatAuthManager {
                 Log.e(TAG, "fetchFriends(offline=$offline) failed", e)
             }
         }
-        Log.i(TAG, "fetchFriends total: ${seen.size}")
-        seen.values.toList()
+        Log.i(TAG, "fetchFriends total: ${seen.size} (gotAny200=$gotAny200)")
+        // Never received a valid page → the fetch FAILED (don't let callers read this as
+        // "0 friends"). A valid 200 with an empty array is a genuine zero and returns [].
+        if (!gotAny200) null else seen.values.toList()
     }
 
     // ------------------------------------------------------------------
