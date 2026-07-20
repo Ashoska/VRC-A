@@ -1214,6 +1214,21 @@ private fun AlertGroupCard(
     val decorated = special || removed
     val ctx = LocalContext.current
     var expanded by remember { mutableStateOf(false) }
+    // The "Repeats" dialog's open-state lives HERE (card scope), NOT inside
+    // AlertEventBody — that body is wrapped in key(event.id, event), so every
+    // enrichment tick that changes the event data disposes+recreates it, which was
+    // slamming the dialog shut. Card scope is keyed by groupId, so it survives.
+    var occurrencesFor by remember { mutableStateOf<InAppAlertEvent?>(null) }
+    occurrencesFor?.let { oe ->
+        if (oe.recurring && !oe.seriesId.isNullOrBlank() && !oe.groupRefId.isNullOrBlank()) {
+            EventOccurrencesDialog(
+                groupId = oe.groupRefId!!,
+                seriesId = oe.seriesId!!,
+                seriesTitle = oe.eventTitle ?: "Repeating event",
+                onDismiss = { occurrencesFor = null }
+            )
+        } else occurrencesFor = null
+    }
     // Collapse recurring occurrences (VRChat auto-creates EVERY day of a repeat as
     // a separate calendar event — up to 50). Same-title events fold to the nearest
     // UPCOMING occurrence so the card shows ONE, not 50. Retroactive: fixes cards
@@ -1635,6 +1650,7 @@ private fun AlertGroupCard(
                                     onJoinEvent = { grpId ->
                                         openJoinPicker(grpId, event.eventTitle ?: group.title)
                                     },
+                                    onShowOccurrences = { occurrencesFor = event },
                                     onEventDismiss = onEventDismiss
                                 )
                             }
@@ -1666,6 +1682,7 @@ private fun AlertEventBody(
     showOpen: Boolean,
     joinLoading: Boolean,
     onJoinEvent: (String) -> Unit,
+    onShowOccurrences: () -> Unit = {},
     onEventDismiss: (() -> Unit)? = null
 ) {
     val ctx = LocalContext.current
@@ -1673,19 +1690,11 @@ private fun AlertEventBody(
     var calSending by remember { mutableStateOf(false) }
     var bodyExpanded by remember { mutableStateOf(false) }
 
-    // Tapping "↻ Repeats" opens the per-occurrence subscribe dialog. Only available
-    // when we have the stable ids it needs (group + series).
+    // Tapping "↻ Repeats" opens the per-occurrence subscribe dialog (owned by the
+    // parent card so an enrichment tick can't dismiss it). Only offered when we have
+    // the stable ids it needs (group + series).
     val canShowOccurrences = event.recurring &&
         !event.seriesId.isNullOrBlank() && !event.groupRefId.isNullOrBlank()
-    var showOccurrences by remember(event.id) { mutableStateOf(false) }
-    if (showOccurrences && canShowOccurrences) {
-        EventOccurrencesDialog(
-            groupId = event.groupRefId!!,
-            seriesId = event.seriesId!!,
-            seriesTitle = event.eventTitle ?: "Repeating event",
-            onDismiss = { showOccurrences = false }
-        )
-    }
 
     // Rich display needs only a known start time; the calendar ACTION additionally
     // needs the cal_/grp_ ids (checked at the button below).
@@ -1796,7 +1805,7 @@ private fun AlertEventBody(
                             modifier = Modifier
                                 .align(Alignment.TopStart)
                                 .padding(6.dp)
-                                .then(if (canShowOccurrences) Modifier.clickable { showOccurrences = true } else Modifier)
+                                .then(if (canShowOccurrences) Modifier.clickable { onShowOccurrences() } else Modifier)
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -1979,7 +1988,7 @@ private fun AlertEventBody(
                         Surface(
                             color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
                             shape = MaterialTheme.shapes.small,
-                            modifier = if (canShowOccurrences) Modifier.clickable { showOccurrences = true } else Modifier
+                            modifier = if (canShowOccurrences) Modifier.clickable { onShowOccurrences() } else Modifier
                         ) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
