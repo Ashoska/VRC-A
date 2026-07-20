@@ -610,6 +610,14 @@ class VrchatPipelineService : Service() {
                     lastConnectedNotifText = notifText
                     updatePersistentNotif(notifText)
                     serviceScope.launch { fireConnectionNotification(true) }
+                    // Drain any self-invite dance unfriend we still owe (a connection
+                    // dip / app death mid-dance left the counterpart friended). Runs on
+                    // both builds; a no-op when nothing is pending.
+                    serviceScope.launch {
+                        runCatching {
+                            SelfInviteCoordinator.drainPendingUnfriend(this@VrchatPipelineService)
+                        }
+                    }
                     // Immediately refresh presence on every (re)connect so a reconnect
                     // behaves "like nothing happened": startPipeline() runs an initial
                     // syncPresenceToFirestore before the FIRST connect, but a later
@@ -830,6 +838,10 @@ class VrchatPipelineService : Service() {
                     // permanent per-person dedup key so a FUTURE request from this
                     // person (after a later unfriend/refriend) can notify again.
                     clearSeenNotifId("fr_$userId")
+                    // Self-invite dance: suppress the friend-list notification when the
+                    // counterpart is the owner (admin) or an active dance target. Cache
+                    // is already updated above; only the notification is hidden.
+                    if (SelfInviteStore.isFriendNotifSuppressed(this@VrchatPipelineService, userId)) return
                     fireEventNotification(
                         id = "newfriend_$userId".hashCode(),
                         title = "New friend",
@@ -846,6 +858,15 @@ class VrchatPipelineService : Service() {
                 "friend-delete" -> {
                     val userId = content?.optString("userId") ?: return
                     val cached = friendsCache[userId] ?: return
+                    // Self-invite dance cleanup unfriend: drop the cache entry + dedup
+                    // state but fire nothing (owner / active dance target).
+                    if (SelfInviteStore.isFriendNotifSuppressed(this@VrchatPipelineService, userId)) {
+                        friendsCache.remove(userId)
+                        persistFriendsCache()
+                        clearSeenNotifId("fr_$userId")
+                        recentFriendAddMs.remove(userId)
+                        return
+                    }
                     if (!notifiedUnfriendIds.add(userId)) {
                         friendsCache.remove(userId)
                         persistFriendsCache()
@@ -1079,6 +1100,9 @@ class VrchatPipelineService : Service() {
 
         when {
             notifType == "friendRequest" -> {
+                // Self-invite dance: swallow the friend-request notification when the
+                // sender is the owner (admin) or an active dance target.
+                if (SelfInviteStore.isFriendNotifSuppressed(this@VrchatPipelineService, senderUserId)) return
                 // Collapse a friend-request and the subsequent new-friend into ONE
                 // per-person card (shared friend_$userId group key).
                 fireEventNotification(
@@ -2049,6 +2073,8 @@ class VrchatPipelineService : Service() {
             // future friend request from this person notifies again.
             clearSeenNotifId("fr_$userId")
             recentFriendAddMs.remove(userId)
+            // Self-invite dance: never surface an unfriend for the owner / dance target.
+            if (SelfInviteStore.isFriendNotifSuppressed(this@VrchatPipelineService, userId)) return@forEach
             val displayName = previousNames[userId]?.displayName?.takeIf { it.isNotBlank() } ?: "Someone"
             fireEventNotification(
                 id = "unfriend_offline_$userId".hashCode(),

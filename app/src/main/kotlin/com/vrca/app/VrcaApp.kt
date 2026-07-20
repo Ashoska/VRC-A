@@ -332,6 +332,11 @@ fun VrcaApp() {
                     remoteTosUrl = snap.getString("tosUrl") ?: ""
                     remoteTosUpdatedAtMs = snap.getTimestamp("updatedAt")?.toDate()?.time ?: 0L
                     remoteDiscordInvite = (snap.getString("discordInvite") ?: "").trim()
+                    // Global owner VRChat id → local exemption so friend-list
+                    // notifications about the admin are never surfaced (self-invite dance).
+                    (snap.getString("ownerVrchatId") ?: "").trim().let {
+                        if (it.isNotBlank()) com.vrca.vrchat.SelfInviteStore.setOwnerVrchatId(ctx, it)
+                    }
                 }
             }
         onDispose { reg.remove() }

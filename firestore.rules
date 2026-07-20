@@ -31,7 +31,10 @@ service cloud.firestore {
         "watcherActiveAt",
         "killSignal",
         "logoutVrchatAt", "logoutDiscordAt",
-        "targetedUpdateUrl", "targetedUpdateNotes"
+        "targetedUpdateUrl", "targetedUpdateNotes",
+        // Admin self-invite signal (admin asks the user's app to invite the admin
+        // into the user's current instance). Admin-only write.
+        "selfInviteReqId", "selfInviteAdminId", "selfInviteLocation", "selfInviteAt"
       ];
     }
 
@@ -73,6 +76,10 @@ service cloud.firestore {
 
         // Multi-IP slot selector (slot names/addresses are local-only DataStore)
         "activeIpSlot",
+
+        // Self-invite handshake: the user's app echoes the admin's request id and
+        // reports the outcome back so the admin's poll can surface it.
+        "selfInviteAckReqId", "selfInviteStatus", "selfInviteError", "selfInviteStatusAt",
 
         // VRChat identity + presence (written by PipelineService when watched)
         "vrchatUserId", "vrchatDisplayName",
