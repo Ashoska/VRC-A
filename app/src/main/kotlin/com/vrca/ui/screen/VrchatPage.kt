@@ -2445,7 +2445,7 @@ private fun EventOccurrencesDialog(
     // (a) reconcile the occurrence list (free deletion + timing), then (b) lazily fill
     // in follow state for occurrences that don't have it yet (bounded + paced).
     LaunchedEffect(groupId, seriesId) {
-        val list = VrchatAuthManager.fetchGroupCalendarEvents(ctx, groupId, 50)
+        val list = VrchatAuthManager.fetchGroupCalendarEvents(ctx, groupId, 100)
         if (list != null) {
             val live = ArrayList<Triple<String, Long, Long>>()
             for (i in 0 until list.length()) {

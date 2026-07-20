@@ -426,7 +426,7 @@ object GroupAlertEnricher {
             // n=50 so a group with many upcoming events still lists a followed one
             // (a followed event absent from an authoritative list is the deletion
             // signal — see detectRemovedEvents).
-            val events = VrchatAuthManager.fetchGroupCalendarEvents(ctx, groupId, 50)
+            val events = VrchatAuthManager.fetchGroupCalendarEvents(ctx, groupId, 100)
             // Series keys present in the LIVE calendar right now (by seriesId, cal_
             // id, and normalized title). A followed/upcoming card whose series is
             // ABSENT from this AUTHORITATIVE list (an emptied group now returns []
@@ -610,7 +610,7 @@ object GroupAlertEnricher {
             // ---- Posts/announcements: match alerts by normalized body ----
             // Same 250ms pacing the backfill uses between REST calls.
             kotlinx.coroutines.delay(250)
-            val posts = VrchatAuthManager.fetchGroupPosts(ctx, groupId, 10)
+            val posts = VrchatAuthManager.fetchGroupPosts(ctx, groupId, 50)
             if (posts != null) {
                 for (j in 0 until posts.length()) {
                     val post = posts.optJSONObject(j) ?: continue

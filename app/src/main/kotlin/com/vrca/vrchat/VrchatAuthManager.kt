@@ -1145,7 +1145,7 @@ object VrchatAuthManager {
         }
     }
 
-    suspend fun fetchGroupPosts(context: Context, groupId: String, n: Int = 10): org.json.JSONArray? = withContext(Dispatchers.IO) {
+    suspend fun fetchGroupPosts(context: Context, groupId: String, n: Int = 50): org.json.JSONArray? = withContext(Dispatchers.IO) {
         val cookieHeader = getCookieHeader(context) ?: return@withContext null
         try {
             val (code, body, rawCookies) = get(
@@ -1218,7 +1218,7 @@ object VrchatAuthManager {
     // the app was closed (they don't reliably appear in the per-user
     // notifications-v2 feed). Response may be a bare array or an object
     // wrapping the list under "results"/"events".
-    suspend fun fetchGroupCalendarEvents(context: Context, groupId: String, n: Int = 20): org.json.JSONArray? = withContext(Dispatchers.IO) {
+    suspend fun fetchGroupCalendarEvents(context: Context, groupId: String, n: Int = 100): org.json.JSONArray? = withContext(Dispatchers.IO) {
         val cookieHeader = getCookieHeader(context) ?: return@withContext null
         // Correct VRChat group-calendar endpoint is GET /calendar/{groupId}
         // (returns {"results":[...]}). The older /groups/{id}/events paths 404,
