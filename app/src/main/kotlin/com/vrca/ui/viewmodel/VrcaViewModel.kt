@@ -231,12 +231,6 @@ class VrcaViewModel(
     }
 
     override fun onCleared() {
-        // The runtime VM is being destroyed — only the swipe path clears the
-        // app-scoped ViewModelStore, so flag the runtime as down. This keeps the
-        // boot-skip logic honest if the process happens to outlive the store clear
-        // (a fresh process reopen after a swipe already resets the static, but this
-        // covers the in-process window before the kill lands).
-        com.vrca.app.VrcaApplication.runtimeVmAlive = false
         uiTickJob?.cancel()
         syncTriggerJob?.cancel()
         hourlyHeartbeatJob?.cancel()
@@ -2607,13 +2601,6 @@ class VrcaViewModel(
     private val cyclePresetEnabled = mutableStateListOf("", "", "", "", "")
 
     init {
-        // Mark the runtime as up in this process. VrcaApp reads this to skip the
-        // boot screen on a WARM resume (Activity recreated, or reopened after a
-        // headless OEM-kill revival that already created this VM) vs a genuine COLD
-        // open. Set here so it covers BOTH creation paths — the foreground
-        // viewModel(...) obtain and the headless ensureRuntimeViewModel().
-        com.vrca.app.VrcaApplication.runtimeVmAlive = true
-
         // Restore the last-synced baseline from the previous session so the
         // delta writer knows what Firestore already has. Enables cold-open
         // delta writes (only changed content + liveness) instead of full
