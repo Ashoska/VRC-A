@@ -152,16 +152,22 @@ fun VrcaApp() {
        Bootstrap gate
        ------------------------- */
 
-    // WARM resume detection: if the runtime was ALREADY up when the user opened the
-    // app (Activity recreated in a surviving process, OR reopened after a headless
-    // OEM-kill revival that already warmed everything), the boot screen is redundant
-    // — Firebase is signed in, the pipeline is connected, content is loaded. Only a
-    // genuine COLD open (fresh process after a swipe-kill, or first install) should
-    // show it. We read warmAtLastOpen — the snapshot MainActivity.onCreate captured
-    // BEFORE it (re)started KeepAliveService — NOT the live runtimeVmAlive, which
-    // this open's own service start flips true and would race the composition (that
-    // race was the "swipe-reopen skips boot, everything else shows it" inversion).
-    val warmResume = remember { VrcaApplication.warmAtLastOpen }
+    // Boot-screen gate: show it ONLY on a genuine, deliberate fresh start — a clean
+    // SWIPE-reopen — or when bootstrap has genuinely never run (first install / data
+    // cleared, i.e. no cached anon auth uid). EVERY other relaunch (OEM/force kill,
+    // Activity recreate, headless revival) is a recovery and drops straight into the
+    // app with no boot screen. This mirrors how the Quick Toggles / feature-session
+    // restore decide "clean swipe vs something else": the swipe flag (captured in
+    // MainActivity before it's cleared) is the same marker FeatureSessionStore keys
+    // on. `!everBootstrapped` keeps first install safe — bootstrap MUST run there to
+    // sign in anonymously + cache the auth uid the ban check reads; on any prior-used
+    // app the uid persists in prefs, so a swipe-less relaunch can safely skip boot.
+    val openedFromSwipe = remember { VrcaApplication.openedFromSwipe }
+    val everBootstrapped = remember {
+        ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
+            .getString("auth_uid", "").orEmpty().isNotBlank()
+    }
+    val warmResume = remember { !(openedFromSwipe || !everBootstrapped) }
 
     var bootOk by remember { mutableStateOf(warmResume) }
     var bootWorking by remember { mutableStateOf(false) }

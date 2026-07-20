@@ -45,13 +45,12 @@ class MainActivity : ComponentActivity() {
 
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
-        // Capture whether the runtime was ALREADY up when this open began — BEFORE
-        // KeepAliveService.start() below, whose ensureRuntimeViewModel() would flip
-        // runtimeVmAlive true and pollute the signal. A warm value here means the
-        // process was revived headlessly (OEM kill) or survived (Activity recreate),
-        // so VrcaApp skips the boot screen; a cold value (swipe-reopen / first
-        // install) shows it. See VrcaApplication.warmAtLastOpen.
-        VrcaApplication.warmAtLastOpen = VrcaApplication.runtimeVmAlive
+        // Capture whether this open follows a clean SWIPE — BEFORE clearSwipedAway()
+        // below wipes the flag. This is the signal VrcaApp uses to decide whether to
+        // show the boot screen (swipe = deliberate fresh start → show; anything else
+        // = a recovery → skip). Same swipe marker the feature-session restore uses.
+        VrcaApplication.openedFromSwipe =
+            runCatching { AppShutdown.isSwipedAway(applicationContext) }.getOrDefault(false)
 
         //Ensure device hash exists early (before any screen reads it).
         runCatching { ensureDeviceHash(applicationContext) }

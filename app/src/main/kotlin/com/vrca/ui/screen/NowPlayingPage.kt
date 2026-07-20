@@ -286,8 +286,7 @@ private fun NowPlayingCard(vm: VrcaViewModel, isBanned: Boolean, previewT: Float
         // Title formatting
         KitSectionHeader(title = "Formatting")
         ToggleRow(
-            label = "Clean up titles",
-            description = "Trims extras like \"(Official Music Video)\", drops a repeated artist, and fits the song onto one chatbox line. Turn off to show the full title exactly as the app reports it.",
+            label = "Filter Titles",
             checked = vm.musicCleanTitles,
             enabled = !isBanned
         ) { vm.setMusicCleanTitlesFlag(it) }

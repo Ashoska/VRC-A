@@ -42,29 +42,17 @@ class VrcaApplication : Application(), ViewModelStoreOwner {
         lateinit var instance: VrcaApplication
             private set
 
-        // True once the runtime VrcaViewModel has been constructed in THIS process,
-        // via either the foreground `viewModel(...)` obtain or a headless
-        // `ensureRuntimeViewModel()` (OEM-kill revival). It survives Activity
-        // destruction (process-static) but resets on a fresh process (swipe-kill
-        // clears the ViewModelStore AND kills the process, and the VM's onCleared
-        // flips this false as a belt-and-suspenders reset).
+        // Snapshot of AppShutdown.isSwipedAway() captured at the TOP of
+        // MainActivity.onCreate, BEFORE clearSwipedAway() wipes the flag. This is the
+        // SAME persistent swipe marker FeatureSessionStore.disarm() keys on to tell a
+        // deliberate swipe apart from an OS/OEM kill: true ONLY when the last shutdown
+        // was a clean user swipe (an OS/OEM/force kill never runs onTaskSwiped, so it
+        // stays false). VrcaApp uses it to show the boot screen ONLY on a genuine
+        // swipe-reopen (a deliberate fresh start) and skip it for every other relaunch
+        // (OEM/force kill, Activity recreate, headless revival), matching how the Quick
+        // Toggles decide whether to restore vs start clean.
         @Volatile
-        var runtimeVmAlive: Boolean = false
-
-        // Snapshot of [runtimeVmAlive] captured at the TOP of MainActivity.onCreate,
-        // BEFORE the Activity (re)starts KeepAliveService — whose onStartCommand calls
-        // ensureRuntimeViewModel() and would otherwise flip runtimeVmAlive true on
-        // EVERY open, racing VrcaApp's composition and making the live read useless.
-        // Captured pre-service-start, this reflects whether the process was ALREADY
-        // warm when the user opened the app:
-        //   • false → genuine COLD open (fresh process from a swipe-kill, or first
-        //     install) — nothing had created the runtime yet → SHOW the boot screen.
-        //   • true  → WARM resume — the runtime was already up from a headless OEM
-        //     revival or a surviving process (Activity recreate) → SKIP the boot
-        //     screen and drop straight into the app.
-        // VrcaApp reads THIS, not runtimeVmAlive directly.
-        @Volatile
-        var warmAtLastOpen: Boolean = false
+        var openedFromSwipe: Boolean = false
     }
 
     // Process-lifetime ViewModelStore. Cleared only by AppShutdown on swipe.
