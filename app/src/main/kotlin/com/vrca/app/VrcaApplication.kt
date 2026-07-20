@@ -41,6 +41,19 @@ class VrcaApplication : Application(), ViewModelStoreOwner {
         // absent when the VM is obtained against the app-scoped ViewModelStore.
         lateinit var instance: VrcaApplication
             private set
+
+        // True once the runtime VrcaViewModel has been constructed in THIS process,
+        // via either the foreground `viewModel(...)` obtain or a headless
+        // `ensureRuntimeViewModel()` (OEM-kill revival). It survives Activity
+        // destruction (process-static) but resets on a fresh process (swipe-kill
+        // clears the ViewModelStore AND kills the process, and the VM's onCleared
+        // flips this false as a belt-and-suspenders reset). VrcaApp reads it to
+        // decide whether this Activity launch is a genuine COLD open (runtime not
+        // yet up → show the boot screen) or a WARM resume into an already-alive
+        // process (Activity recreated, or reopened after a headless OEM revival →
+        // skip the boot screen and drop straight into the app).
+        @Volatile
+        var runtimeVmAlive: Boolean = false
     }
 
     // Process-lifetime ViewModelStore. Cleared only by AppShutdown on swipe.

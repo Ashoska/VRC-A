@@ -152,7 +152,16 @@ fun VrcaApp() {
        Bootstrap gate
        ------------------------- */
 
-    var bootOk by remember { mutableStateOf(false) }
+    // WARM resume detection: if the runtime VM already came up in this process
+    // (Activity recreated in a surviving process, OR the user reopened after a
+    // headless OEM-kill revival that already warmed everything), the boot screen
+    // is redundant — Firebase is signed in, the pipeline is connected, content is
+    // loaded. Only a genuine COLD open (fresh process after a swipe-kill, or first
+    // install) should show it. Captured once per composition so it can't flip
+    // mid-boot. See VrcaApplication.runtimeVmAlive.
+    val warmResume = remember { VrcaApplication.runtimeVmAlive }
+
+    var bootOk by remember { mutableStateOf(warmResume) }
     var bootWorking by remember { mutableStateOf(false) }
     var bootError by remember { mutableStateOf<String?>(null) }
     var bootAttempt by remember { mutableStateOf(0) } // increments on Retry
@@ -227,13 +236,18 @@ fun VrcaApp() {
        ------------------------- */
 
     var phase1BanId   by remember { mutableStateOf<String?>(null) }
-    var phase1Checked by remember { mutableStateOf(false) }
+    // On a WARM resume the phase-2 loading screen is skipped entirely (these seed
+    // true), but the ban-check LaunchedEffect below STILL runs (its key `bootOk` is
+    // true from the first composition, so it fires once) so phase1BanId is populated
+    // and the ban gate downstream still works — we just don't block the UI on it.
+    var phase1Checked by remember { mutableStateOf(warmResume) }
     // "Account status" now represents the ban/moderation check AND VRChat presence
-    // readiness. A logged-out user has no presence to wait for, so it starts ready.
-    var presenceReady by remember { mutableStateOf(!VrchatAuthManager.isLoggedIn(ctx)) }
+    // readiness. A logged-out user has no presence to wait for, so it starts ready;
+    // a warm resume means the pipeline is already connected, so it starts ready too.
+    var presenceReady by remember { mutableStateOf(warmResume || !VrchatAuthManager.isLoggedIn(ctx)) }
     // Holds the boot screen a beat after both land so its green "Account status"
     // tick is actually visible before the screen hands off to the app.
-    var phase1HoldDone by remember { mutableStateOf(false) }
+    var phase1HoldDone by remember { mutableStateOf(warmResume) }
 
     LaunchedEffect(bootOk) {
         if (!bootOk) return@LaunchedEffect
