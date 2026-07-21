@@ -46,6 +46,7 @@ object SelfInviteCoordinator {
 
     // Timing budgets.
     private const val INVITE_RETRY_STEP_MS = 1_000L
+    private const val INVITE_RETRY_MAX_STEP_MS = 3_000L
     private const val FRIEND_POLL_MAX_MS = 18_000L
     private const val ADMIN_POLL_STEP_MS = 1_000L
     private const val ADMIN_POLL_MAX_MS = 35_000L
@@ -131,11 +132,16 @@ object SelfInviteCoordinator {
         // RETRY the invite directly rather than polling friendStatus: the invite
         // succeeds the instant we're actually friends server-side (the admin's mutual
         // request lands), WITHOUT waiting for VRChat's friendStatus to propagate — that
-        // eventual-consistency lag was the ~10s stall before the invite fired.
+        // eventual-consistency lag was the ~10s stall before the invite fired. The delay
+        // RAMPS (1s → 3s) so the normal case still fires in ~2-3 tries while a
+        // never-forms failure can't hammer VRChat at 1/s (rate-limit / cookie-churn
+        // safety on the shared auth cookie the pipeline WebSocket also uses).
         var invited = false
         var waited = 0L
+        var step = INVITE_RETRY_STEP_MS
         while (!invited && waited < FRIEND_POLL_MAX_MS) {
-            delay(INVITE_RETRY_STEP_MS); waited += INVITE_RETRY_STEP_MS
+            delay(step); waited += step
+            step = (step + 500L).coerceAtMost(INVITE_RETRY_MAX_STEP_MS)
             res = VrchatAuthManager.inviteUserToInstance(ctx, adminId, location)
             if (res.ok) invited = true
         }
