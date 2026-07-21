@@ -6,7 +6,11 @@ import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
 import com.google.firebase.firestore.Source
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 
 /**
@@ -42,6 +46,7 @@ object SelfInviteCoordinator {
 
     // Timing budgets.
     private const val INVITE_RETRY_STEP_MS = 1_000L
+    private const val INVITE_RETRY_MAX_STEP_MS = 3_000L
     private const val FRIEND_POLL_MAX_MS = 18_000L
     private const val ADMIN_POLL_STEP_MS = 1_000L
     private const val ADMIN_POLL_MAX_MS = 35_000L
@@ -53,6 +58,25 @@ object SelfInviteCoordinator {
     private const val SUPPRESS_GRACE_MS = 8_000L
 
     private val db get() = FirebaseFirestore.getInstance()
+
+    // Process-lifetime scope for the DETACHED unfriend cleanup so it doesn't block the
+    // caller — the admin UI must acknowledge "invite sent" the instant it lands, not
+    // wait out the 10s+8s unfriend window. The cleanup survives the UI coroutine / VM
+    // being cancelled; the persisted pendingUnfriend backup + drain-on-connect is the
+    // ultimate safety net if this process dies first.
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** Fire-and-forget the temporary-friendship teardown so callers return immediately. */
+    private fun scheduleCleanup(ctx: Context, counterpartId: String) {
+        val appCtx = ctx.applicationContext
+        scope.launch {
+            delay(FORCE_UNFRIEND_DELAY_MS)
+            VrchatAuthManager.unfriendUser(appCtx, counterpartId)
+            VrchatAuthManager.cancelFriendRequest(appCtx, counterpartId)
+            delay(SUPPRESS_GRACE_MS)
+            SelfInviteStore.removePendingUnfriend(appCtx, counterpartId)
+        }
+    }
 
     /* ============================ USER SIDE ============================ */
 
@@ -108,11 +132,16 @@ object SelfInviteCoordinator {
         // RETRY the invite directly rather than polling friendStatus: the invite
         // succeeds the instant we're actually friends server-side (the admin's mutual
         // request lands), WITHOUT waiting for VRChat's friendStatus to propagate — that
-        // eventual-consistency lag was the ~10s stall before the invite fired.
+        // eventual-consistency lag was the ~10s stall before the invite fired. The delay
+        // RAMPS (1s → 3s) so the normal case still fires in ~2-3 tries while a
+        // never-forms failure can't hammer VRChat at 1/s (rate-limit / cookie-churn
+        // safety on the shared auth cookie the pipeline WebSocket also uses).
         var invited = false
         var waited = 0L
+        var step = INVITE_RETRY_STEP_MS
         while (!invited && waited < FRIEND_POLL_MAX_MS) {
-            delay(INVITE_RETRY_STEP_MS); waited += INVITE_RETRY_STEP_MS
+            delay(step); waited += step
+            step = (step + 500L).coerceAtMost(INVITE_RETRY_MAX_STEP_MS)
             res = VrchatAuthManager.inviteUserToInstance(ctx, adminId, location)
             if (res.ok) invited = true
         }
@@ -121,17 +150,11 @@ object SelfInviteCoordinator {
             if (invited) "" else (res.error ?: "Couldn't establish the invite link in time")
         )
 
-        // 3. Force-unfriend 10s after the invite, no matter the outcome. The persisted
-        //    pending-unfriend entry is the backup if this coroutine dies first; the
-        //    suppression is kept a grace window past the unfriend so the friend-delete
-        //    event is swallowed too.
-        if (!wasAlreadyFriend) {
-            delay(FORCE_UNFRIEND_DELAY_MS)
-            VrchatAuthManager.unfriendUser(ctx, adminId)
-            VrchatAuthManager.cancelFriendRequest(ctx, adminId) // in case they never auto-friended
-            delay(SUPPRESS_GRACE_MS)
-            SelfInviteStore.removePendingUnfriend(ctx, adminId)
-        }
+        // 3. Force-unfriend 10s after the invite, no matter the outcome — DETACHED so it
+        //    doesn't hold this coroutine. The persisted pending-unfriend entry is the
+        //    backup if the process dies first; the suppression is kept a grace window
+        //    past the unfriend so the friend-delete event is swallowed too.
+        if (!wasAlreadyFriend) scheduleCleanup(ctx, adminId)
     }
 
     /* ============================ ADMIN SIDE ============================ */
@@ -218,16 +241,11 @@ object SelfInviteCoordinator {
             }
         }
 
-        // Cleanup: unfriend the user we danced with (never a pre-existing friend). Keep
+        // Cleanup DETACHED so the admin UI acknowledges the result NOW instead of
+        // waiting out the 10s+8s unfriend window (that stuck spinner was the bug). Keeps
         // the suppression a grace window past the unfriend so the friend-delete event
         // (which arrives after the REST call returns) is swallowed on the admin side too.
-        if (tvid.isNotBlank() && !wasAlreadyFriend) {
-            delay(FORCE_UNFRIEND_DELAY_MS)
-            VrchatAuthManager.unfriendUser(ctx, tvid)
-            VrchatAuthManager.cancelFriendRequest(ctx, tvid)
-            delay(SUPPRESS_GRACE_MS)
-            SelfInviteStore.removePendingUnfriend(ctx, tvid)
-        }
+        if (tvid.isNotBlank() && !wasAlreadyFriend) scheduleCleanup(ctx, tvid)
         return result
     }
 
