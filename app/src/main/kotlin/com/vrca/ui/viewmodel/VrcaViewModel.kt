@@ -536,6 +536,9 @@ class VrcaViewModel(
         "cycleEnabled" to cycleEnabled,
         "spotifyEnabled" to spotifyEnabled,
         "timeEnabled" to timeEnabled,
+        // Master OSC Start/Stop gate, streamed with the watched 10s loop so the admin
+        // detail view's "Sending / Idle" indicator is live (rides this existing write).
+        "oscSending" to oscSending,
         "lastReportedTime" to if (timeEnabled) currentTimeString() else "",
         "lastTimeUpdateAt" to FieldValue.serverTimestamp(),
         "lastActiveAt" to FieldValue.serverTimestamp(),
@@ -658,6 +661,12 @@ class VrcaViewModel(
         put("spotifyPreset", spotifyPreset)
         put("timeEnabled", timeEnabled)
         put("timeMode", timeMode)
+        // Master OSC Start/Stop gate — whether the chatbox is ACTUALLY transmitting
+        // (distinct from the per-feature toggles, which only say what's configured).
+        // Display-only for the admin detail view; NOT in any apply path, so it never
+        // clobbers local runtime state. Rides the write that already happens (delta /
+        // hourly / watched 10s loop), so it costs zero extra writes.
+        put("oscSending", oscSending)
         put("afkPreset1", afkPresetTexts.getOrElse(0) { "" })
         put("afkPreset2", afkPresetTexts.getOrElse(1) { "" })
         put("afkPreset3", afkPresetTexts.getOrElse(2) { "" })
@@ -1281,6 +1290,7 @@ class VrcaViewModel(
     private val KEY_LAST_HANDLED_KILL_MS = "last_handled_kill_ms"
     private var lastVrchatLogoutMs: Long = 0L
     private var lastDiscordLogoutMs: Long = 0L
+    private var lastOscCommandMs: Long = 0L
 
     /** Admin remote-logout of VRChat: clears the session (incl. saved credentials, so
      *  auto-relogin can't revive it), which emits loggedOutSignal → OSC gate +
@@ -1419,6 +1429,20 @@ class VrcaViewModel(
                                 if (System.currentTimeMillis() - ms in 0L..60_000L && ms != lastDiscordLogoutMs) {
                                     lastDiscordLogoutMs = ms
                                     disconnectDiscordLocally()
+                                }
+                            }
+
+                            // Admin remote Start/Stop of THIS device's OSC sending
+                            // (device-only). Rides the existing moderation snapshot —
+                            // no bonus read. Fresh (<60s) + once per timestamp.
+                            snap.getTimestamp("oscCommandAt")?.let { ts ->
+                                val ms = ts.seconds * 1000L + (ts.nanoseconds / 1_000_000L)
+                                if (System.currentTimeMillis() - ms in 0L..60_000L && ms != lastOscCommandMs) {
+                                    lastOscCommandMs = ms
+                                    when (snap.getString("oscCommand")) {
+                                        "start" -> if (!oscSending) startSending()
+                                        "stop"  -> if (oscSending) stopSending()
+                                    }
                                 }
                             }
 

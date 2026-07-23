@@ -180,7 +180,10 @@ internal data class UserDetail(
     val updatedAt: Timestamp? = null,
     val isOnlineInApp: Boolean = false,
     val offlineAt: Timestamp? = null,
-    val killSignal: Timestamp? = null
+    val killSignal: Timestamp? = null,
+    // Master OSC Start/Stop gate — whether the chatbox is ACTUALLY transmitting to
+    // VRChat right now (rides the watched 10s loop / hourly delta; no bonus read).
+    val oscSending: Boolean = false
 )
 
 internal data class ModerationTarget(
@@ -194,6 +197,31 @@ internal data class ModerationTarget(
     val banned: Boolean = false,
     val warned: Boolean = false
 )
+
+/**
+ * Derives the instance TYPE (Public / Friends / Friends+ / Group / Invite / Invite+)
+ * from the synced `vrchatLocation` string alone — the same markers the public
+ * `parseInstanceType` reads (`~friends(` / `~hidden(` / `~group(` / `~private(` /
+ * `~canRequestInvite`), so it costs NO reads/writes and no VRChat call. Returns the
+ * label + an AdminTone for the chip, or null when the location is blank/redacted
+ * ("private") / non-`wrld_` so the caller can hide the chip.
+ */
+internal fun instanceTypeLabel(location: String): Pair<String, AdminTone>? {
+    val loc = location.trim()
+    if (loc.isBlank() || !loc.startsWith("wrld_") ||
+        loc == "private" || loc == "offline" || loc == "traveling"
+    ) return null
+    val after = loc.substringAfter(':', "")
+    return when {
+        after.contains("~friends(") -> "Friends" to AdminTone.Info
+        after.contains("~hidden(") -> "Friends+" to AdminTone.Info
+        after.contains("~group(") -> "Group" to AdminTone.Primary
+        after.contains("~private(") && after.contains("~canRequestInvite") -> "Invite+" to AdminTone.Warn
+        after.contains("~private(") -> "Invite" to AdminTone.Warn
+        after.isNotBlank() && !after.contains('~') -> "Public" to AdminTone.Success
+        else -> null
+    }
+}
 
 /**
  * Online is determined by LIVENESS FRESHNESS, not the `isOnlineInApp` flag.
@@ -440,7 +468,8 @@ internal fun UsersTab(
             updatedAt = snap.getTimestamp("updatedAt"),
             isOnlineInApp = snap.getBoolean("isOnlineInApp") ?: false,
             offlineAt = snap.getTimestamp("offlineAt"),
-            killSignal = snap.getTimestamp("killSignal")
+            killSignal = snap.getTimestamp("killSignal"),
+            oscSending = snap.getBoolean("oscSending") ?: false
         )
     }
     // Selected user detail: Phase 3 read model — the ONLY live read in the admin
@@ -1108,7 +1137,17 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                     val players = liveCount?.players ?: d.vrchatPlayerCount.toInt()
                     val capacity = liveCount?.capacity ?: d.vrchatCapacity.toInt()
                     val cnt = if (capacity > 0) "$players/$capacity" else "$players"
-                    Text("📍 ${d.vrchatWorld} ($cnt)", style = MaterialTheme.typography.bodySmall)
+                    // World line + instance-type chip (Public/Friends/Friends+/Group/
+                    // Invite/Invite+), derived locally from the synced location string.
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text("📍 ${d.vrchatWorld} ($cnt)", style = MaterialTheme.typography.bodySmall)
+                        instanceTypeLabel(d.vrchatLocation)?.let { (label, tone) ->
+                            StatusPill(label, tone)
+                        }
+                    }
                 }
                 val ctx = LocalContext.current
                 Text("ID: ${d.vrchatUserId}", fontFamily = FontFamily.Monospace,
@@ -1126,14 +1165,51 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
     }
 
     // ── Live Output + Feature Toggles ───────────────────────────────
+    // Device-only remote Start/Stop: one write per press (oscCommand + oscCommandAt)
+    // to THIS device's doc — no account-wide fan-out. The user's existing moderation
+    // listener acts on it; the synced `oscSending` reflects the new state within the
+    // 10s watched loop (no bonus read/write beyond this single command write).
+    fun sendOscCommand(cmd: String) {
+        if (docId.isBlank()) return
+        db.collection("users").document(docId).set(
+            mapOf(
+                "oscCommand" to cmd,
+                "oscCommandAt" to com.google.firebase.firestore.FieldValue.serverTimestamp()
+            ),
+            SetOptions.merge()
+        ).addOnFailureListener { e -> setError("Command failed: ${e.message}") }
+    }
     ElevatedCard {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            AdminCardHeader("Live Chatbox Output", Icons.Filled.Chat, AdminTone.Primary)
+            AdminCardHeader(
+                "Live Chatbox Output", Icons.Filled.Chat, AdminTone.Primary,
+                trailing = {
+                    // Is the chatbox ACTUALLY transmitting to VRChat right now (the
+                    // master Start/Stop gate), distinct from the per-feature toggles.
+                    StatusPill(
+                        if (d.oscSending) "SENDING" else "IDLE",
+                        if (d.oscSending) AdminTone.Success else AdminTone.Neutral
+                    )
+                }
+            )
             Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Text(d.combinedPreviewText.ifBlank { "(nothing sending)" },
                     modifier = Modifier.padding(10.dp),
                     fontFamily = FontFamily.Monospace,
                     style = MaterialTheme.typography.bodySmall)
+            }
+            // Remote Start/Stop of the user's OSC sending (device-only).
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { sendOscCommand("start") },
+                    enabled = !d.oscSending,
+                    modifier = Modifier.weight(1f)
+                ) { Text("Start sending", style = MaterialTheme.typography.labelMedium) }
+                OutlinedButton(
+                    onClick = { sendOscCommand("stop") },
+                    enabled = d.oscSending,
+                    modifier = Modifier.weight(1f)
+                ) { Text("Stop sending", style = MaterialTheme.typography.labelMedium) }
             }
             // Remote toggle chips
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
