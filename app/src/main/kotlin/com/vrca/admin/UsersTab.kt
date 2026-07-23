@@ -1179,6 +1179,23 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
             SetOptions.merge()
         ).addOnFailureListener { e -> setError("Command failed: ${e.message}") }
     }
+    // Optimistic Start/Stop: reflect the press INSTANTLY (the user's app applies it
+    // instantly too), then reconcile to the AUTHORITATIVE synced `oscSending` once the
+    // user's next liveness write lands — the watched 10s loop / 30s edit debounce /
+    // hourly delta all carry `oscSending`, so a genuine desync always self-corrects.
+    // The override is cleared when the synced value catches up to the command (success)
+    // OR after a 30s timeout (command didn't land → fall back to the real value).
+    // Keyed by docId so switching users resets it.
+    var optimisticSending by remember(docId) { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(d.oscSending) {
+        if (optimisticSending != null && d.oscSending == optimisticSending) optimisticSending = null
+    }
+    LaunchedEffect(optimisticSending) {
+        if (optimisticSending == null) return@LaunchedEffect
+        kotlinx.coroutines.delay(30_000)
+        optimisticSending = null
+    }
+    val shownSending = optimisticSending ?: d.oscSending
     ElevatedCard {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             AdminCardHeader(
@@ -1187,8 +1204,8 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                     // Is the chatbox ACTUALLY transmitting to VRChat right now (the
                     // master Start/Stop gate), distinct from the per-feature toggles.
                     StatusPill(
-                        if (d.oscSending) "SENDING" else "IDLE",
-                        if (d.oscSending) AdminTone.Success else AdminTone.Neutral
+                        if (shownSending) "SENDING" else "IDLE",
+                        if (shownSending) AdminTone.Success else AdminTone.Neutral
                     )
                 }
             )
@@ -1198,18 +1215,24 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                     fontFamily = FontFamily.Monospace,
                     style = MaterialTheme.typography.bodySmall)
             }
-            // Remote Start/Stop of the user's OSC sending (device-only).
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = { sendOscCommand("start") },
-                    enabled = !d.oscSending,
-                    modifier = Modifier.weight(1f)
-                ) { Text("Start sending", style = MaterialTheme.typography.labelMedium) }
-                OutlinedButton(
-                    onClick = { sendOscCommand("stop") },
-                    enabled = d.oscSending,
-                    modifier = Modifier.weight(1f)
-                ) { Text("Stop sending", style = MaterialTheme.typography.labelMedium) }
+            // Single Start/Stop toggle (like Home): flips optimistically on press,
+            // then the synced state reconciles it. Red while sending.
+            Button(
+                onClick = {
+                    val target = !shownSending
+                    optimisticSending = target
+                    sendOscCommand(if (target) "start" else "stop")
+                },
+                modifier = Modifier.fillMaxWidth(),
+                colors = if (shownSending)
+                    ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                else ButtonDefaults.buttonColors()
+            ) {
+                Text(
+                    if (shownSending) "Stop sending" else "Start sending",
+                    color = if (shownSending) MaterialTheme.colorScheme.onError
+                        else MaterialTheme.colorScheme.onPrimary
+                )
             }
             // Remote toggle chips
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
