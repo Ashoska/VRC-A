@@ -3104,24 +3104,45 @@ class VrchatPipelineService : Service() {
             InstanceHistoryStore.markCurrentLeft(this)
         }
 
-        // Refresh the instance occupancy the instant we world-hop, via a single
-        // lightweight GET /instances/{loc} (what the website does on a tab
-        // refresh). The WS location event carries no player count, so without
-        // this the count showed 0/stale until the heavy 3-call fetchPresence
-        // chain next succeeded — minutes apart on mobile. One call, fired only
-        // on the hop, so it adds no steady traffic.
+        // Refresh instance occupancy the instant we world-hop, via a single
+        // GET /instances/{loc} (what the website does on a tab refresh). The WS
+        // location event carries no player count, so without this the count showed
+        // 0/stale until the heavy 3-call fetchPresence chain next succeeded — minutes
+        // apart on mobile. One call, fired only on the hop, so it adds no steady
+        // traffic. We use fetchInstanceInfo (the SAME single request + count logic as
+        // fetchInstanceCount, just a richer parse) so the same call ALSO pre-loads the
+        // world thumbnail + instance type into the 24h history entry and caches the
+        // image bytes — so opening Instance History later shows the image/type chip
+        // INSTANTLY instead of fetching everything on the spot. Costs nothing extra:
+        // it's one call that was already being made, returning more of the response.
         if (location.startsWith("wrld_")) {
             serviceScope.launch {
-                val ic = VrchatAuthManager.fetchInstanceCount(this@VrchatPipelineService, location)
-                    ?: return@launch
-                val cur = VrchatPipelineState.presence ?: return@launch
-                if (cur.location == location &&
-                    (cur.instancePlayerCount != ic.players || cur.instanceCapacity != ic.capacity)
-                ) {
-                    VrchatPipelineState.presence = cur.copy(
-                        instancePlayerCount = ic.players,
-                        instanceCapacity = ic.capacity
+                val info = VrchatAuthManager.fetchInstanceInfo(this@VrchatPipelineService, location)
+                if (info.status == VrchatAuthManager.InstanceStatus.OPEN) {
+                    val cur = VrchatPipelineState.presence
+                    if (cur != null && cur.location == location &&
+                        (cur.instancePlayerCount != info.players || cur.instanceCapacity != info.capacity)
+                    ) {
+                        VrchatPipelineState.presence = cur.copy(
+                            instancePlayerCount = info.players,
+                            instanceCapacity = info.capacity
+                        )
+                    }
+                }
+                // Pre-store the thumbnail + type on the history entry (both fill in
+                // only when non-blank, so a CLOSED/INACCESSIBLE reply never wipes a
+                // prior value). Cache the image bytes so the picker loads it from disk.
+                if (info.worldImageUrl.isNotBlank() || info.instanceType.isNotBlank()) {
+                    InstanceHistoryStore.updateInfo(
+                        this@VrchatPipelineService,
+                        location,
+                        worldName = info.worldName,
+                        imageUrl = info.worldImageUrl,
+                        instanceType = info.instanceType
                     )
+                }
+                if (info.worldImageUrl.isNotBlank()) {
+                    AlertImageStore.ensureCached(this@VrchatPipelineService, info.worldImageUrl)
                 }
             }
         }

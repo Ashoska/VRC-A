@@ -54,11 +54,17 @@ object InstanceHistoryStore {
         val location: String,
         val worldName: String,
         val sessions: List<Session>, // chronological; newest last
-        // World thumbnail URL, learned the first time instance info resolves in the
-        // picker. The bytes persist in AlertImageStore until this entry ages out of
-        // the 24h window (the store's gc sees the reference vanish) — so reopening
-        // the history dialog shows images instantly instead of re-downloading.
-        val imageUrl: String = ""
+        // World thumbnail URL + the API instance type ("public"/"friends"/"hidden"/
+        // "group"/"invite"/"invite+"), grabbed ONCE the moment the user enters the
+        // instance (see the record-time fetch in VrchatPipelineService.applySelfLocation
+        // Event) so the history picker renders the image + type chip INSTANTLY instead of
+        // fetching everything on the spot when opened cold after a while. The image bytes
+        // persist in AlertImageStore until this entry ages out of the 24h window (the
+        // store's gc sees the reference vanish, deleting the file). Both fields also fill
+        // in later if the picker resolves fresher info. The type is derivable from the
+        // location string offline too (parseInstanceType), so it's a nice-to-have.
+        val imageUrl: String = "",
+        val instanceType: String = ""
     )
 
     /**
@@ -157,13 +163,33 @@ object InstanceHistoryStore {
     /** Records the world image URL for [location] (no-op when the location isn't in
      *  the 24h history). Called when the instance picker first resolves the info so
      *  the image persists (via AlertImageStore) for the entry's lifetime. */
-    fun updateImage(ctx: Context, location: String, imageUrl: String) {
-        if (location.isBlank() || imageUrl.isBlank()) return
+    fun updateImage(ctx: Context, location: String, imageUrl: String) =
+        updateInfo(ctx, location, worldName = null, imageUrl = imageUrl, instanceType = null)
+
+    /**
+     * Merges freshly-resolved instance metadata (world name / thumbnail URL / API
+     * instance type) onto the [location]'s history entry (no-op when it isn't in the
+     * 24h window). Each field only overwrites when a non-blank value is supplied, so a
+     * partial refresh never wipes what a fuller one already stored. Called both at
+     * record time (the entry pre-loads its image + type on entry) and by the picker.
+     */
+    fun updateInfo(
+        ctx: Context,
+        location: String,
+        worldName: String?,
+        imageUrl: String?,
+        instanceType: String?
+    ) {
+        if (location.isBlank()) return
         val entries = read(ctx).toMutableList()
         val idx = entries.indexOfFirst { it.location == location }
         if (idx < 0) return
-        if (entries[idx].imageUrl == imageUrl) return
-        entries[idx] = entries[idx].copy(imageUrl = imageUrl)
+        val e = entries[idx]
+        val newWorld = worldName?.takeIf { it.isNotBlank() } ?: e.worldName
+        val newImg = imageUrl?.takeIf { it.isNotBlank() } ?: e.imageUrl
+        val newType = instanceType?.takeIf { it.isNotBlank() } ?: e.instanceType
+        if (newWorld == e.worldName && newImg == e.imageUrl && newType == e.instanceType) return
+        entries[idx] = e.copy(worldName = newWorld, imageUrl = newImg, instanceType = newType)
         persist(ctx, entries)
     }
 
@@ -195,7 +221,8 @@ object InstanceHistoryStore {
                 location = o.optString("loc"),
                 worldName = o.optString("world"),
                 sessions = sessions,
-                imageUrl = o.optString("img")
+                imageUrl = o.optString("img"),
+                instanceType = o.optString("type")
             )
         }
         return out
@@ -219,6 +246,7 @@ object InstanceHistoryStore {
                 put("world", e.worldName)
                 put("sessions", sArr)
                 put("img", e.imageUrl)
+                put("type", e.instanceType)
             })
         }
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
