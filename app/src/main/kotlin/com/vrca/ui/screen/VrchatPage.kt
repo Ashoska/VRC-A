@@ -533,9 +533,11 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
                     location = e.location,
                     label = e.worldName.ifBlank { "Instance" },
                     timeLines = lines,
-                    // Stored world thumb (persisted via AlertImageStore for the
-                    // entry's 24h lifetime) renders instantly while live info loads.
-                    imageUrl = e.imageUrl
+                    // Stored world thumb + type (pre-loaded on instance entry, persisted
+                    // via AlertImageStore for the entry's 24h lifetime) render instantly
+                    // while live info loads — so opening history cold never looks bad.
+                    imageUrl = e.imageUrl,
+                    instanceType = e.instanceType
                 )
             }
         }
@@ -2390,7 +2392,12 @@ private data class InstanceTarget(
     val timeLines: List<String> = emptyList(),
     // Known world thumbnail (from a stored alert/history entry) so the row can
     // show the cached image INSTANTLY while the live info fetch is in flight.
-    val imageUrl: String = ""
+    val imageUrl: String = "",
+    // Pre-stored API instance type ("public"/"friends"/"hidden"/"group"/"invite"/
+    // "invite+") from history, so the type chip is correct instantly without waiting
+    // on the live fetch (parseInstanceType also derives it from the location as a
+    // fallback). Blank for non-history targets.
+    val instanceType: String = ""
 )
 
 private fun clockTime(ms: Long): String =
@@ -2773,8 +2780,17 @@ private fun InstanceListDialog(
                 // alert event) so the file stays referenced until that owner goes.
                 if (info.worldImageUrl.isNotBlank()) {
                     AlertImageStore.ensureCached(ctx, info.worldImageUrl)
-                    InstanceHistoryStore.updateImage(ctx, t.location, info.worldImageUrl)
                     InAppAlertState.setInviteTargetImage(ctx, t.location, info.worldImageUrl)
+                }
+                // Persist the freshest world name + thumbnail + type onto the history
+                // entry (no-op for non-history targets) so a later cold open is instant.
+                if (info.worldImageUrl.isNotBlank() || info.instanceType.isNotBlank()) {
+                    InstanceHistoryStore.updateInfo(
+                        ctx, t.location,
+                        worldName = info.worldName,
+                        imageUrl = info.worldImageUrl,
+                        instanceType = info.instanceType
+                    )
                 }
             }
             if (!liveRefresh) break // history: one grab, no continuous re-fetch
@@ -2890,7 +2906,7 @@ private fun InstanceRow(target: InstanceTarget, info: VrchatAuthManager.Instance
     val worldId = extractWorldId(target.location)
     val typeInfo = parseInstanceType(
         target.location,
-        info?.instanceType ?: "",
+        (info?.instanceType ?: "").ifBlank { target.instanceType },
         info?.ownerId ?: "",
         info?.groupId ?: ""
     )
