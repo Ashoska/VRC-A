@@ -214,7 +214,7 @@ service cloud.firestore {
       allow create, update: if isOwner()
         && request.resource.data.keys().hasOnly([
           "versionCode", "versionName", "downloadUrl",
-          "requiredMinCode", "notes",
+          "requiredMinCode", "notes", "bodyDoc",
           "publishedAt", "publishedByDevice"
         ])
         && (request.resource.data.versionCode is int || request.resource.data.versionCode is float)

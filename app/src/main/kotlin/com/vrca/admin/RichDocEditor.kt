@@ -1,0 +1,360 @@
+package com.vrca.admin
+
+import android.content.Context
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
+import androidx.compose.material.icons.automirrored.filled.Notes
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.HorizontalRule
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Title
+import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.runtime.snapshots.SnapshotStateList
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import com.vrca.richcontent.RichBlock
+import com.vrca.richcontent.RichDoc
+import com.vrca.richcontent.RichDocRenderer
+import com.vrca.richcontent.RichMediaStore
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
+import java.util.concurrent.TimeUnit
+
+/*
+ * Admin block editor (Phase 3). Authors a RichDoc as an ordered, reorderable list
+ * of blocks with a live preview using the SAME RichDocRenderer users see. Reused by
+ * both AnnouncementsTab and ReleasesTab. Reorder is via move up/down controls
+ * (drag-and-drop is a later polish). Image upload pushes to the public image-store
+ * GitHub repo via the Contents API with a UNIQUE filename per upload (never
+ * overwrite — jsDelivr caches hard, so a fresh URL = live edits show instantly and
+ * the old URL falls out of the reference set → auto-culled client-side).
+ *
+ * Firestore cost: ZERO. The editor is pure local state; media goes to GitHub, and
+ * saving the doc is the caller's single Firestore write.
+ */
+
+private const val IMG_REPO_OWNER = "Ashoska"
+private const val IMG_REPO_NAME = "VRC-A-Image-store"
+private const val IMG_REPO_BRANCH = "main"
+
+private fun extFor(ctx: Context, uri: Uri): String {
+    val mime = ctx.contentResolver.getType(uri).orEmpty()
+    return when {
+        mime.contains("png") -> "png"
+        mime.contains("gif") -> "gif"
+        mime.contains("webp") -> "webp"
+        mime.contains("jpeg") || mime.contains("jpg") -> "jpg"
+        else -> "png"
+    }
+}
+
+/**
+ * Uploads the picked image to `Ashoska/VRC-A-Image-store` via the GitHub Contents
+ * API and returns the jsDelivr CDN URL. Unique filename per upload. Throws with
+ * GitHub's own error text on failure so a token/permission problem is diagnosable
+ * on-device (the release PAT needs Contents:write on the image-store repo).
+ */
+internal suspend fun githubUploadImage(ctx: Context, uri: Uri, pat: String): String =
+    withContext(Dispatchers.IO) {
+        if (pat.isBlank()) throw Exception("GitHub token missing in this build.")
+        val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            ?: throw Exception("Could not read the selected image.")
+        val ext = extFor(ctx, uri)
+        val fileName = "rich_${System.currentTimeMillis()}.$ext"   // unique — never overwrite
+        val path = "rich/$fileName"
+        val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+        val payload = JSONObject().apply {
+            put("message", "VRC-A rich content: $fileName")
+            put("content", b64)
+            put("branch", IMG_REPO_BRANCH)
+        }.toString()
+        val client = OkHttpClient.Builder()
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(120, TimeUnit.SECONDS)
+            .writeTimeout(120, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
+            .build()
+        val req = Request.Builder()
+            .url("https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/contents/$path")
+            .header("Authorization", "Bearer $pat")
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .put(payload.toRequestBody("application/json".toMediaType()))
+            .build()
+        val resp = client.newCall(req).execute()
+        val body = resp.body?.string().orEmpty()
+        val code = resp.code
+        resp.close()
+        if (code in 200..299) {
+            "https://cdn.jsdelivr.net/gh/$IMG_REPO_OWNER/$IMG_REPO_NAME@$IMG_REPO_BRANCH/$path"
+        } else {
+            throw Exception("Image upload failed ($code): ${body.take(300)}")
+        }
+    }
+
+@Composable
+internal fun RichDocEditor(
+    blocks: SnapshotStateList<RichBlock>,
+    githubPat: String,
+    modifier: Modifier = Modifier
+) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var pendingImageIndex by remember { mutableIntStateOf(-1) }
+    var uploadingIndex by remember { mutableIntStateOf(-1) }
+    var uploadError by remember { mutableStateOf<String?>(null) }
+
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        val idx = pendingImageIndex
+        pendingImageIndex = -1
+        if (uri != null && idx in blocks.indices) {
+            scope.launch {
+                uploadError = null
+                uploadingIndex = idx
+                runCatching { githubUploadImage(ctx, uri, githubPat) }
+                    .onSuccess { url ->
+                        if (idx in blocks.indices) {
+                            (blocks[idx] as? RichBlock.Image)?.let { blocks[idx] = it.copy(url = url) }
+                        }
+                    }
+                    .onFailure { uploadError = it.message ?: "Upload failed" }
+                uploadingIndex = -1
+            }
+        }
+    }
+
+    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("Content blocks", style = MaterialTheme.typography.labelLarge)
+
+        blocks.forEachIndexed { index, block ->
+            BlockCard(
+                index = index,
+                count = blocks.size,
+                block = block,
+                uploading = uploadingIndex == index,
+                onChange = { if (index in blocks.indices) blocks[index] = it },
+                onMoveUp = {
+                    if (index > 0) { val t = blocks[index]; blocks[index] = blocks[index - 1]; blocks[index - 1] = t }
+                },
+                onMoveDown = {
+                    if (index < blocks.size - 1) { val t = blocks[index]; blocks[index] = blocks[index + 1]; blocks[index + 1] = t }
+                },
+                onDuplicate = { blocks.add(index + 1, block) },
+                onDelete = { if (index in blocks.indices) blocks.removeAt(index) },
+                onPickImage = { pendingImageIndex = index; picker.launch("image/*") }
+            )
+        }
+
+        uploadError?.let {
+            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
+
+        Text("Add block", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(
+            Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            AddBlockChip("Heading", Icons.Filled.Title) { blocks.add(RichBlock.Heading("")) }
+            AddBlockChip("Text", Icons.AutoMirrored.Filled.Notes) { blocks.add(RichBlock.Text("")) }
+            AddBlockChip("Bullets", Icons.AutoMirrored.Filled.FormatListBulleted) { blocks.add(RichBlock.Bullets(listOf(""))) }
+            AddBlockChip("Image", Icons.Filled.Image) { blocks.add(RichBlock.Image("")) }
+            AddBlockChip("Callout", Icons.Filled.Info) { blocks.add(RichBlock.Callout("info", "")) }
+            AddBlockChip("Video", Icons.Filled.Videocam) { blocks.add(RichBlock.Video("", null)) }
+            AddBlockChip("Divider", Icons.Filled.HorizontalRule) { blocks.add(RichBlock.Divider) }
+        }
+
+        if (blocks.isNotEmpty()) {
+            Text("Preview", style = MaterialTheme.typography.labelLarge)
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 2.dp,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Box(Modifier.padding(12.dp)) {
+                    RichDocRenderer(
+                        RichDoc(blocks = blocks.toList()),
+                        mediaScope = RichMediaStore.Scope.ANNOUNCEMENT
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun blockLabel(b: RichBlock): String = when (b) {
+    is RichBlock.Heading -> "Heading"
+    is RichBlock.Text -> "Text"
+    is RichBlock.Bullets -> "Bullets"
+    is RichBlock.Image -> "Image"
+    is RichBlock.Video -> "Video"
+    is RichBlock.Callout -> "Callout"
+    RichBlock.Divider -> "Divider"
+}
+
+@Composable
+private fun AddBlockChip(label: String, icon: ImageVector, onClick: () -> Unit) {
+    OutlinedButton(onClick = onClick, contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)) {
+        Icon(icon, null, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(label)
+    }
+}
+
+@Composable
+private fun BlockCard(
+    index: Int,
+    count: Int,
+    block: RichBlock,
+    uploading: Boolean,
+    onChange: (RichBlock) -> Unit,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit,
+    onDuplicate: () -> Unit,
+    onDelete: () -> Unit,
+    onPickImage: () -> Unit
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "${index + 1}. ${blockLabel(block)}",
+                    style = MaterialTheme.typography.labelLarge,
+                    modifier = Modifier.weight(1f)
+                )
+                IconButton(onClick = onMoveUp, enabled = index > 0) {
+                    Icon(Icons.Filled.ArrowUpward, "Move up")
+                }
+                IconButton(onClick = onMoveDown, enabled = index < count - 1) {
+                    Icon(Icons.Filled.ArrowDownward, "Move down")
+                }
+                IconButton(onClick = onDuplicate) { Icon(Icons.Filled.ContentCopy, "Duplicate") }
+                IconButton(onClick = onDelete) { Icon(Icons.Filled.Delete, "Delete") }
+            }
+
+            when (block) {
+                is RichBlock.Heading -> {
+                    OutlinedTextField(
+                        block.text, { onChange(block.copy(text = it)) },
+                        Modifier.fillMaxWidth(), label = { Text("Heading text") }, singleLine = true
+                    )
+                    OutlinedTextField(
+                        block.color ?: "", { onChange(block.copy(color = it.ifBlank { null })) },
+                        Modifier.fillMaxWidth(), label = { Text("Color hex, optional (e.g. #4CAF50)") }, singleLine = true
+                    )
+                }
+                is RichBlock.Text -> {
+                    OutlinedTextField(
+                        block.text, { onChange(block.copy(text = it)) },
+                        Modifier.fillMaxWidth(), label = { Text("Text") }, minLines = 2
+                    )
+                    Text(
+                        "**bold**  *italic*  [c=#ff5555]color[/c]  — links auto-detected",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                is RichBlock.Bullets -> {
+                    block.items.forEachIndexed { j, item ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            OutlinedTextField(
+                                item,
+                                { newV -> onChange(block.copy(items = block.items.toMutableList().also { it[j] = newV })) },
+                                Modifier.weight(1f), label = { Text("Item ${j + 1}") }, singleLine = true
+                            )
+                            IconButton(onClick = {
+                                val next = block.items.toMutableList().also { it.removeAt(j) }
+                                onChange(block.copy(items = next.ifEmpty { listOf("") }))
+                            }) { Icon(Icons.Filled.Delete, "Remove item") }
+                        }
+                    }
+                    OutlinedButton(onClick = { onChange(block.copy(items = block.items + "")) }) {
+                        Icon(Icons.Filled.Add, null); Spacer(Modifier.width(6.dp)); Text("Add item")
+                    }
+                }
+                is RichBlock.Image -> {
+                    OutlinedTextField(
+                        block.url, { onChange(block.copy(url = it)) },
+                        Modifier.fillMaxWidth(), label = { Text("Image URL") }, singleLine = true
+                    )
+                    Button(onClick = onPickImage, enabled = !uploading) {
+                        if (uploading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onPrimary
+                            )
+                            Spacer(Modifier.width(8.dp)); Text("Uploading")
+                        } else {
+                            Icon(Icons.Filled.Image, null); Spacer(Modifier.width(6.dp)); Text("Pick & upload")
+                        }
+                    }
+                }
+                is RichBlock.Video -> {
+                    OutlinedTextField(
+                        block.url, { onChange(block.copy(url = it)) },
+                        Modifier.fillMaxWidth(), label = { Text("Video URL (mp4)") }, singleLine = true
+                    )
+                    OutlinedTextField(
+                        block.poster ?: "", { onChange(block.copy(poster = it.ifBlank { null })) },
+                        Modifier.fillMaxWidth(), label = { Text("Poster image URL, optional") }, singleLine = true
+                    )
+                    Text(
+                        "Playback with audio ships in a later phase; the app shows a poster for now.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                is RichBlock.Callout -> {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf("info", "warn", "success").forEach { tone ->
+                            if (block.tone == tone) {
+                                Button(onClick = {}, contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp)) { Text(tone) }
+                            } else {
+                                OutlinedButton(
+                                    onClick = { onChange(block.copy(tone = tone)) },
+                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp)
+                                ) { Text(tone) }
+                            }
+                        }
+                    }
+                    OutlinedTextField(
+                        block.text, { onChange(block.copy(text = it)) },
+                        Modifier.fillMaxWidth(), label = { Text("Callout text") }, minLines = 2
+                    )
+                }
+                RichBlock.Divider -> Text(
+                    "A horizontal divider line.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
