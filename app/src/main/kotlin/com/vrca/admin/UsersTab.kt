@@ -63,6 +63,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -81,6 +82,8 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
 import com.google.firebase.firestore.Source
 import com.vrca.BuildConfig
+import com.vrca.richcontent.RichBlock
+import com.vrca.richcontent.RichDoc
 import com.vrca.app.SubLineCodec
 import com.vrca.vrchat.VrchatAuthManager
 import kotlinx.coroutines.delay
@@ -1501,6 +1504,8 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                 AdminRuntime.ingestPickedApk(ctx.applicationContext, docId, uri)
             }
 
+            val targetedBlocks = remember { mutableStateListOf<RichBlock>() }
+
             fun startTargetedUpload() {
                 val apkPath = tCachedApkPath
                 if (apkPath.isBlank()) return
@@ -1515,6 +1520,10 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                         val fileName = "chatbox-vrc-a-targeted-${tParsedName.ifBlank { tParsedCode.toString() }}.apk"
                             .replace(Regex("[^a-zA-Z0-9._-]"), "_")
 
+                        val releaseDoc = RichDoc(blocks = targetedBlocks.toList())
+                        val bodyDocJson = if (releaseDoc.blocks.isEmpty()) "" else releaseDoc.toJson()
+                        val notesPlain = targetNotes.trim().ifBlank { releaseDoc.toPlainText() }
+
                         tUploadPhase = "Creating GitHub release..."
                         val release = githubCreateRelease(
                             owner       = githubOwner,
@@ -1522,7 +1531,7 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                             pat         = githubPat,
                             tagName     = tagName,
                             releaseName = relName,
-                            body        = targetNotes.trim().ifBlank { "Targeted update for user" }
+                            body        = notesPlain.ifBlank { "Targeted update for user" }
                         )
 
                         tUploadPhase = "Uploading APK..."
@@ -1540,7 +1549,8 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                             "versionName"       to tParsedName.ifBlank { tParsedCode.toString() },
                             "downloadUrl"       to downloadUrl,
                             "requiredMinCode"   to 0L,
-                            "notes"             to targetNotes.trim(),
+                            "notes"             to notesPlain,
+                            "bodyDoc"           to bodyDocJson,
                             "publishedAt"       to com.google.firebase.firestore.FieldValue.serverTimestamp(),
                             "publishedByDevice" to BuildConfig.APPLICATION_ID
                         )
@@ -1558,6 +1568,7 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
 
                         // Clears the picked-APK holder and deletes the cached file.
                         AdminRuntime.clearPickedApk(docId)
+                        targetedBlocks.clear()
 
                     }.onFailure { e ->
                         val msg = e.message ?: "Upload failed"
@@ -1639,9 +1650,16 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                     value = targetNotes,
                     onValueChange = { targetNotes = it },
                     modifier = Modifier.fillMaxWidth(), singleLine = true,
-                    label = { Text("Update notes (optional)") },
+                    label = { Text("Plain notes (GitHub + legacy clients)") },
                     enabled = !tUploading
                 )
+
+                Text(
+                    "Rich in-app notes (optional) — shown in the update popup and What's New",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                RichDocEditor(blocks = targetedBlocks, githubPat = githubPat)
 
                 if (tUploading) {
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
