@@ -45,6 +45,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -129,25 +130,30 @@ fun RichDocRenderer(
 }
 
 /**
- * Text with inline markup + clickable auto-linkified URLs. Uses `Text` (which renders
- * every SpanStyle — bold/italic/color — reliably) plus tap-to-open, instead of the
- * deprecated `ClickableText` (which wasn't applying the bold/italic spans on-device).
+ * Text with inline markup (bold/italic/color) + tappable auto-linkified URLs.
+ *
+ * IMPORTANT: forces `FontFamily.SansSerif` (a real font with bold/italic variants).
+ * On some devices (Samsung) the default system font wasn't synthesizing weight/style
+ * from spans — only color rendered — so bold/italic showed as plain. SansSerif +
+ * the `FontSynthesis.All` on the spans gives Compose real variants to draw.
  */
 @Composable
 private fun RichText(raw: String, style: TextStyle, color: Color) {
     val linkColor = MaterialTheme.colorScheme.primary
     val annotated = remember(raw, linkColor) { buildInlineAnnotated(raw, linkColor) }
     val uriHandler = LocalUriHandler.current
-    var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    val layout = remember { mutableStateOf<TextLayoutResult?>(null) }
     Text(
         text = annotated,
-        style = style.copy(color = color),
-        onTextLayout = { layout = it },
+        color = color,
+        style = style.copy(fontFamily = FontFamily.SansSerif),
+        onTextLayout = { layout.value = it },
         modifier = Modifier.pointerInput(annotated) {
             detectTapGestures { pos ->
-                val lr = layout ?: return@detectTapGestures
-                annotated.urlAt(lr.getOffsetForPosition(pos))?.let {
-                    runCatching { uriHandler.openUri(it) }
+                layout.value?.let { lr ->
+                    annotated.urlAt(lr.getOffsetForPosition(pos))?.let {
+                        runCatching { uriHandler.openUri(it) }
+                    }
                 }
             }
         }
