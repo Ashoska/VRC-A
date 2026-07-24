@@ -1,5 +1,6 @@
 package com.vrca.richcontent
 
+import android.content.Context
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -61,6 +62,22 @@ import androidx.compose.ui.window.DialogProperties
  * [mediaScope] tells [RichImage] where to cache — announcements pass ANNOUNCEMENT
  * (persistent, admin-controlled cull), the update popup passes UPDATE (ephemeral).
  */
+@Volatile
+private var richGifLoader: coil.ImageLoader? = null
+private val richGifLoaderLock = Any()
+
+/** Coil loader with the GIF decoder registered, so uploaded .gif images animate. */
+private fun richImageLoader(ctx: Context): coil.ImageLoader =
+    richGifLoader ?: synchronized(richGifLoaderLock) {
+        richGifLoader ?: coil.ImageLoader.Builder(ctx.applicationContext)
+            .components {
+                if (android.os.Build.VERSION.SDK_INT >= 28) add(coil.decode.ImageDecoderDecoder.Factory())
+                else add(coil.decode.GifDecoder.Factory())
+            }
+            .build()
+            .also { richGifLoader = it }
+    }
+
 @Composable
 fun RichDocRenderer(
     doc: RichDoc,
@@ -193,6 +210,7 @@ private fun RichImage(url: String, scope: RichMediaStore.Scope) {
             model = file ?: url,
             contentDescription = null,
             contentScale = ContentScale.FillWidth,
+            imageLoader = richImageLoader(ctx),
             modifier = Modifier.fillMaxWidth()
         )
     }
@@ -220,7 +238,10 @@ private fun RichImage(url: String, scope: RichMediaStore.Scope) {
                 contentAlignment = Alignment.Center
             ) {
                 Image(
-                    painter = coil.compose.rememberAsyncImagePainter(model = file ?: url),
+                    painter = coil.compose.rememberAsyncImagePainter(
+                        model = file ?: url,
+                        imageLoader = richImageLoader(ctx)
+                    ),
                     contentDescription = null,
                     contentScale = ContentScale.Fit,
                     modifier = Modifier

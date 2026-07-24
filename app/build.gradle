@@ -216,6 +216,8 @@ dependencies {
 
     // Coil — async image loading for admin profile pictures
     implementation "io.coil-kt:coil-compose:2.6.0"
+    // GIF decoder so uploaded .gif rich-content images animate (public build).
+    implementation "io.coil-kt:coil-gif:2.6.0"
 
     // Media3 Transformer — ADMIN-ONLY on-device video transcode (1080p HEVC, small)
     // before rich-content upload. Not in the public APK (adminAppImplementation).
