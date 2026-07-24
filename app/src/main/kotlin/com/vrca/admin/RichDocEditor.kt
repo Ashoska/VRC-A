@@ -33,6 +33,9 @@ import com.vrca.richcontent.RichBlock
 import com.vrca.richcontent.RichDoc
 import com.vrca.richcontent.RichDocRenderer
 import com.vrca.richcontent.RichMediaStore
+import com.vrca.richcontent.resolveRichDoc
+import com.google.firebase.firestore.FirebaseFirestore
+import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -49,7 +52,7 @@ import java.util.concurrent.TimeUnit
  * both AnnouncementsTab and ReleasesTab. Reorder is via move up/down controls
  * (drag-and-drop is a later polish). Image upload pushes to the public image-store
  * GitHub repo via the Contents API with a UNIQUE filename per upload (never
- * overwrite — jsDelivr caches hard, so a fresh URL = live edits show instantly and
+ * overwrite — the raw CDN caches briefly, so a fresh URL = live edits show instantly and
  * the old URL falls out of the reference set → auto-culled client-side).
  *
  * Firestore cost: ZERO. The editor is pure local state; media goes to GitHub, and
@@ -73,7 +76,7 @@ private fun extFor(ctx: Context, uri: Uri): String {
 
 /**
  * Uploads the picked image to `Ashoska/VRC-A-Image-store` via the GitHub Contents
- * API and returns the jsDelivr CDN URL. Unique filename per upload. Throws with
+ * API and returns the raw.githubusercontent URL. Unique filename per upload. Throws with
  * GitHub's own error text on failure so a token/permission problem is diagnosable
  * on-device (the release PAT needs Contents:write on the image-store repo).
  */
@@ -107,7 +110,9 @@ private suspend fun uploadBytesToImageStore(bytes: ByteArray, ext: String, pat: 
         val code = resp.code
         resp.close()
         if (code in 200..299) {
-            "https://cdn.jsdelivr.net/gh/$IMG_REPO_OWNER/$IMG_REPO_NAME@$IMG_REPO_BRANCH/$path"
+            // raw.githubusercontent serves ANY file type/size (jsDelivr rejected video
+            // even at ~8MB). The client caches locally anyway, so this is the reliable host.
+            "https://raw.githubusercontent.com/$IMG_REPO_OWNER/$IMG_REPO_NAME/$IMG_REPO_BRANCH/$path"
         } else {
             throw Exception("Upload failed ($code): ${body.take(300)}")
         }
@@ -124,6 +129,126 @@ internal suspend fun githubUploadImage(ctx: Context, uri: Uri, pat: String): Str
 internal suspend fun githubUploadVideoBytes(bytes: ByteArray, pat: String): String =
     uploadBytesToImageStore(bytes, "mp4", pat)
 
+private const val IMG_RAW_PREFIX =
+    "https://raw.githubusercontent.com/$IMG_REPO_OWNER/$IMG_REPO_NAME/$IMG_REPO_BRANCH/"
+
+/**
+ * Deletes a file we uploaded (identified by its raw URL) from the image-store repo,
+ * so removed/replaced media doesn't accumulate as orphans. No-op for URLs not hosted
+ * in our repo. Best-effort — never throws.
+ */
+internal suspend fun githubDeleteFileByUrl(url: String, pat: String): Unit =
+    withContext(Dispatchers.IO) {
+        if (pat.isBlank() || !url.startsWith(IMG_RAW_PREFIX)) return@withContext
+        val path = url.removePrefix(IMG_RAW_PREFIX)
+        if (path.isBlank()) return@withContext
+        try {
+            val client = OkHttpClient.Builder()
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .readTimeout(30, TimeUnit.SECONDS)
+                .build()
+            val contentsUrl = "https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/contents/$path"
+            // 1. GET the file's SHA (required by the delete API).
+            val getReq = Request.Builder()
+                .url("$contentsUrl?ref=$IMG_REPO_BRANCH")
+                .header("Authorization", "Bearer $pat")
+                .header("Accept", "application/vnd.github+json")
+                .get()
+                .build()
+            val getResp = client.newCall(getReq).execute()
+            val getBody = getResp.body?.string().orEmpty()
+            val getCode = getResp.code
+            getResp.close()
+            if (getCode != 200) return@withContext
+            val sha = JSONObject(getBody).optString("sha")
+            if (sha.isBlank()) return@withContext
+            // 2. DELETE.
+            val delPayload = JSONObject().apply {
+                put("message", "VRC-A remove: $path")
+                put("sha", sha)
+                put("branch", IMG_REPO_BRANCH)
+            }.toString()
+            val delReq = Request.Builder()
+                .url(contentsUrl)
+                .header("Authorization", "Bearer $pat")
+                .header("Accept", "application/vnd.github+json")
+                .delete(delPayload.toRequestBody("application/json".toMediaType()))
+                .build()
+            client.newCall(delReq).execute().close()
+        } catch (_: Exception) {
+        }
+    }
+
+/** Best-effort deletes a batch of our-repo media URLs from the image-store repo. */
+internal suspend fun githubDeleteMedia(urls: List<String>, pat: String) {
+    for (u in urls) githubDeleteFileByUrl(u, pat)
+}
+
+/**
+ * Full orphan sweep: lists every file in the image-store `rich/` folder and deletes
+ * any whose raw URL isn't referenced by an announcement or release. Returns the count
+ * deleted. Owner-only (lists announcements + releases). Best-effort.
+ */
+internal suspend fun githubSweepOrphans(db: FirebaseFirestore, pat: String): Int =
+    withContext(Dispatchers.IO) {
+        if (pat.isBlank()) return@withContext 0
+        val referenced = HashSet<String>()
+        runCatching {
+            for (d in db.collection("announcements").get().await().documents) {
+                resolveRichDoc(d.getString("bodyDoc"), d.getString("body"))?.mediaUrls()
+                    ?.let { referenced.addAll(it) }
+            }
+        }
+        runCatching {
+            for (d in db.collection("releases").get().await().documents) {
+                resolveRichDoc(d.getString("bodyDoc"), d.getString("notes"))?.mediaUrls()
+                    ?.let { referenced.addAll(it) }
+            }
+        }
+        try {
+            val client = OkHttpClient.Builder()
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .readTimeout(30, TimeUnit.SECONDS)
+                .build()
+            val listReq = Request.Builder()
+                .url("https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/contents/rich?ref=$IMG_REPO_BRANCH")
+                .header("Authorization", "Bearer $pat")
+                .header("Accept", "application/vnd.github+json")
+                .get()
+                .build()
+            val listResp = client.newCall(listReq).execute()
+            val listBody = listResp.body?.string().orEmpty()
+            val listCode = listResp.code
+            listResp.close()
+            if (listCode != 200) return@withContext 0
+            val arr = org.json.JSONArray(listBody)
+            var deleted = 0
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                if (o.optString("type") != "file") continue
+                val path = o.optString("path")
+                val sha = o.optString("sha")
+                if (path.isBlank() || sha.isBlank()) continue
+                if ("$IMG_RAW_PREFIX$path" in referenced) continue
+                val delPayload = JSONObject().apply {
+                    put("message", "VRC-A sweep: $path"); put("sha", sha); put("branch", IMG_REPO_BRANCH)
+                }.toString()
+                val delReq = Request.Builder()
+                    .url("https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/contents/$path")
+                    .header("Authorization", "Bearer $pat")
+                    .header("Accept", "application/vnd.github+json")
+                    .delete(delPayload.toRequestBody("application/json".toMediaType()))
+                    .build()
+                val r = client.newCall(delReq).execute()
+                if (r.isSuccessful) deleted++
+                r.close()
+            }
+            deleted
+        } catch (_: Exception) {
+            0
+        }
+    }
+
 @Composable
 internal fun RichDocEditor(
     blocks: SnapshotStateList<RichBlock>,
@@ -134,6 +259,7 @@ internal fun RichDocEditor(
     val scope = rememberCoroutineScope()
     var pendingImageIndex by remember { mutableIntStateOf(-1) }
     var pendingVideoIndex by remember { mutableIntStateOf(-1) }
+    var pendingPosterIndex by remember { mutableIntStateOf(-1) }
     var uploadingIndex by remember { mutableIntStateOf(-1) }
     var uploadError by remember { mutableStateOf<String?>(null) }
 
@@ -156,6 +282,25 @@ internal fun RichDocEditor(
         }
     }
 
+    val posterPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        val idx = pendingPosterIndex
+        pendingPosterIndex = -1
+        if (uri != null && idx in blocks.indices) {
+            scope.launch {
+                uploadError = null
+                uploadingIndex = idx
+                runCatching { githubUploadImage(ctx, uri, githubPat) }
+                    .onSuccess { url ->
+                        if (idx in blocks.indices) {
+                            (blocks[idx] as? RichBlock.Video)?.let { blocks[idx] = it.copy(poster = url) }
+                        }
+                    }
+                    .onFailure { uploadError = it.message ?: "Poster upload failed" }
+                uploadingIndex = -1
+            }
+        }
+    }
+
     val videoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         val idx = pendingVideoIndex
         pendingVideoIndex = -1
@@ -165,7 +310,7 @@ internal fun RichDocEditor(
                 uploadingIndex = idx
                 runCatching {
                     // Admin build transcodes to small HEVC; public stub returns null →
-                    // fall back to the raw file. The size guard keeps us under jsDelivr's cap.
+                    // fall back to the raw file. The size guard keeps clips small so they cache fast.
                     val transcoded = transcodeVideoForUpload(ctx, uri)
                     val bytes = if (transcoded != null) {
                         val b = transcoded.readBytes(); runCatching { transcoded.delete() }; b
@@ -175,8 +320,8 @@ internal fun RichDocEditor(
                     }
                     if (bytes.size > 19_000_000) {
                         throw Exception(
-                            "Video is ${bytes.size / 1_000_000}MB after compression — keep it " +
-                                "shorter (jsDelivr limit ~20MB) or paste a URL instead."
+                            "Video is ${bytes.size / 1_000_000}MB after compression — please use a " +
+                                "shorter clip so it stays small and loads fast."
                         )
                     }
                     githubUploadVideoBytes(bytes, githubPat)
@@ -211,7 +356,8 @@ internal fun RichDocEditor(
                 onDuplicate = { blocks.add(index + 1, block) },
                 onDelete = { if (index in blocks.indices) blocks.removeAt(index) },
                 onPickImage = { pendingImageIndex = index; picker.launch("image/*") },
-                onPickVideo = { pendingVideoIndex = index; videoPicker.launch("video/*") }
+                onPickVideo = { pendingVideoIndex = index; videoPicker.launch("video/*") },
+                onPickPoster = { pendingPosterIndex = index; posterPicker.launch("image/*") }
             )
         }
 
@@ -283,7 +429,8 @@ private fun BlockCard(
     onDuplicate: () -> Unit,
     onDelete: () -> Unit,
     onPickImage: () -> Unit,
-    onPickVideo: () -> Unit
+    onPickVideo: () -> Unit,
+    onPickPoster: () -> Unit
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
@@ -347,10 +494,6 @@ private fun BlockCard(
                     }
                 }
                 is RichBlock.Image -> {
-                    OutlinedTextField(
-                        block.url, { onChange(block.copy(url = it)) },
-                        Modifier.fillMaxWidth(), label = { Text("Image URL") }, singleLine = true
-                    )
                     Button(onClick = onPickImage, enabled = !uploading) {
                         if (uploading) {
                             CircularProgressIndicator(
@@ -360,19 +503,12 @@ private fun BlockCard(
                             )
                             Spacer(Modifier.width(8.dp)); Text("Uploading")
                         } else {
-                            Icon(Icons.Filled.Image, null); Spacer(Modifier.width(6.dp)); Text("Pick & upload")
+                            Icon(Icons.Filled.Image, null); Spacer(Modifier.width(6.dp))
+                            Text(if (block.url.isBlank()) "Pick & upload image" else "Replace image")
                         }
                     }
                 }
                 is RichBlock.Video -> {
-                    OutlinedTextField(
-                        block.url, { onChange(block.copy(url = it)) },
-                        Modifier.fillMaxWidth(), label = { Text("Video URL (mp4)") }, singleLine = true
-                    )
-                    OutlinedTextField(
-                        block.poster ?: "", { onChange(block.copy(poster = it.ifBlank { null })) },
-                        Modifier.fillMaxWidth(), label = { Text("Poster image URL, optional") }, singleLine = true
-                    )
                     Button(onClick = onPickVideo, enabled = !uploading) {
                         if (uploading) {
                             CircularProgressIndicator(
@@ -382,14 +518,14 @@ private fun BlockCard(
                             )
                             Spacer(Modifier.width(8.dp)); Text("Processing")
                         } else {
-                            Icon(Icons.Filled.Videocam, null); Spacer(Modifier.width(6.dp)); Text("Pick & upload")
+                            Icon(Icons.Filled.Videocam, null); Spacer(Modifier.width(6.dp))
+                            Text(if (block.url.isBlank()) "Pick & upload video" else "Replace video")
                         }
                     }
-                    Text(
-                        "Compressed to HEVC on-device before upload. Keep clips short; you can also paste a URL.",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    OutlinedButton(onClick = onPickPoster, enabled = !uploading) {
+                        Icon(Icons.Filled.Image, null); Spacer(Modifier.width(6.dp))
+                        Text(if (block.poster.isNullOrBlank()) "Add poster image" else "Replace poster")
+                    }
                 }
                 is RichBlock.Callout -> {
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -409,10 +545,9 @@ private fun BlockCard(
                         Modifier.fillMaxWidth(), label = { Text("Callout text") }, minLines = 2
                     )
                 }
-                RichBlock.Divider -> Text(
-                    "A horizontal divider line.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                RichBlock.Divider -> Divider(
+                    color = MaterialTheme.colorScheme.outlineVariant,
+                    modifier = Modifier.padding(vertical = 4.dp)
                 )
             }
         }

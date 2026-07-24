@@ -1,8 +1,10 @@
 package com.vrca.richcontent
 
+import android.content.Context
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -18,9 +20,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.ClickableText
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -41,6 +43,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -59,6 +62,22 @@ import androidx.compose.ui.window.DialogProperties
  * [mediaScope] tells [RichImage] where to cache — announcements pass ANNOUNCEMENT
  * (persistent, admin-controlled cull), the update popup passes UPDATE (ephemeral).
  */
+@Volatile
+private var richGifLoader: coil.ImageLoader? = null
+private val richGifLoaderLock = Any()
+
+/** Coil loader with the GIF decoder registered, so uploaded .gif images animate. */
+private fun richImageLoader(ctx: Context): coil.ImageLoader =
+    richGifLoader ?: synchronized(richGifLoaderLock) {
+        richGifLoader ?: coil.ImageLoader.Builder(ctx.applicationContext)
+            .components {
+                if (android.os.Build.VERSION.SDK_INT >= 28) add(coil.decode.ImageDecoderDecoder.Factory())
+                else add(coil.decode.GifDecoder.Factory())
+            }
+            .build()
+            .also { richGifLoader = it }
+    }
+
 @Composable
 fun RichDocRenderer(
     doc: RichDoc,
@@ -99,7 +118,7 @@ fun RichDocRenderer(
                     }
                 }
                 is RichBlock.Image -> RichImage(block.url, mediaScope)
-                is RichBlock.Video -> RichVideo(block)
+                is RichBlock.Video -> RichVideo(block, mediaScope)
                 is RichBlock.Callout -> RichCallout(block)
                 RichBlock.Divider -> Divider(
                     color = MaterialTheme.colorScheme.outlineVariant
@@ -109,18 +128,27 @@ fun RichDocRenderer(
     }
 }
 
-/** Text with inline markup + clickable auto-linkified URLs (1.6-safe ClickableText). */
+/**
+ * Text with inline markup + clickable auto-linkified URLs. Uses `Text` (which renders
+ * every SpanStyle — bold/italic/color — reliably) plus tap-to-open, instead of the
+ * deprecated `ClickableText` (which wasn't applying the bold/italic spans on-device).
+ */
 @Composable
 private fun RichText(raw: String, style: TextStyle, color: Color) {
     val linkColor = MaterialTheme.colorScheme.primary
     val annotated = remember(raw, linkColor) { buildInlineAnnotated(raw, linkColor) }
     val uriHandler = LocalUriHandler.current
-    ClickableText(
+    var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    Text(
         text = annotated,
         style = style.copy(color = color),
-        onClick = { offset ->
-            annotated.urlAt(offset)?.let {
-                try { uriHandler.openUri(it) } catch (_: Exception) {}
+        onTextLayout = { layout = it },
+        modifier = Modifier.pointerInput(annotated) {
+            detectTapGestures { pos ->
+                val lr = layout ?: return@detectTapGestures
+                annotated.urlAt(lr.getOffsetForPosition(pos))?.let {
+                    runCatching { uriHandler.openUri(it) }
+                }
             }
         }
     )
@@ -130,13 +158,13 @@ private fun RichText(raw: String, style: TextStyle, color: Color) {
 @Composable
 private fun RichCallout(block: RichBlock.Callout) {
     val accent = when (block.tone.lowercase()) {
-        "success" -> Color(0xFF4CAF50)
-        "warn", "warning" -> Color(0xFFFFB300)
-        else -> MaterialTheme.colorScheme.primary
+        "success" -> Color(0xFF22C55E)          // clear green
+        "warn", "warning" -> Color(0xFFF59E0B)  // clear amber/orange
+        else -> Color(0xFF3B82F6)               // clear blue (info)
     }
     Surface(
         shape = RoundedCornerShape(12.dp),
-        color = accent.copy(alpha = 0.14f),
+        color = accent.copy(alpha = 0.18f),
         modifier = Modifier.fillMaxWidth()
     ) {
         Row(Modifier.padding(vertical = 10.dp, horizontal = 12.dp)) {
@@ -182,6 +210,7 @@ private fun RichImage(url: String, scope: RichMediaStore.Scope) {
             model = file ?: url,
             contentDescription = null,
             contentScale = ContentScale.FillWidth,
+            imageLoader = richImageLoader(ctx),
             modifier = Modifier.fillMaxWidth()
         )
     }
@@ -209,7 +238,10 @@ private fun RichImage(url: String, scope: RichMediaStore.Scope) {
                 contentAlignment = Alignment.Center
             ) {
                 Image(
-                    painter = coil.compose.rememberAsyncImagePainter(model = file ?: url),
+                    painter = coil.compose.rememberAsyncImagePainter(
+                        model = file ?: url,
+                        imageLoader = richImageLoader(ctx)
+                    ),
                     contentDescription = null,
                     contentScale = ContentScale.Fit,
                     modifier = Modifier
@@ -242,11 +274,20 @@ private object ActiveVideoState {
  * another video takes over.
  */
 @Composable
-private fun RichVideo(block: RichBlock.Video) {
+private fun RichVideo(block: RichBlock.Video, mediaScope: RichMediaStore.Scope) {
     val ctx = LocalContext.current
     val token = remember(block.url) { Any() }
     val playing = ActiveVideoState.playingKey === token
     val posterModel = block.poster?.let { RichMediaStore.resolve(ctx, it) ?: it }
+    // Prefetch the video into the local cache as soon as the card renders, so tapping
+    // play uses a LOCAL file (instant, no buffering) even on a bad connection.
+    var localFile by remember(block.url) { mutableStateOf(RichMediaStore.resolve(ctx, block.url)) }
+    LaunchedEffect(block.url) {
+        if (block.url.isNotBlank() && localFile == null) {
+            RichMediaStore.ensureCached(ctx, block.url, mediaScope)
+            localFile = RichMediaStore.resolve(ctx, block.url)
+        }
+    }
 
     Surface(
         shape = RoundedCornerShape(12.dp),
@@ -260,17 +301,35 @@ private fun RichVideo(block: RichBlock.Video) {
             contentAlignment = Alignment.Center
         ) {
             if (playing && block.url.isNotBlank()) {
+                var prepared by remember(block.url) { mutableStateOf(false) }
+                var failed by remember(block.url) { mutableStateOf(false) }
+                val lf = localFile
+                val playUri = if (lf != null) android.net.Uri.fromFile(lf)
+                    else android.net.Uri.parse(block.url)
                 AndroidView(
                     factory = { c ->
                         android.widget.VideoView(c).apply {
-                            setVideoURI(android.net.Uri.parse(block.url))
-                            setOnPreparedListener { mp -> mp.isLooping = false; start() }
+                            setVideoURI(playUri)
+                            setOnPreparedListener { mp -> prepared = true; mp.isLooping = false; start() }
                             setOnCompletionListener { ActiveVideoState.playingKey = null }
+                            setOnErrorListener { _, _, _ -> failed = true; true }
                         }
                     },
                     modifier = Modifier.fillMaxWidth().heightIn(min = 200.dp),
                     onRelease = { runCatching { it.stopPlayback() } }
                 )
+                // A local (pre-cached) file plays instantly; the spinner only shows if the
+                // prefetch hadn't finished and we had to fall back to streaming.
+                if (!prepared && !failed && lf == null) {
+                    CircularProgressIndicator(color = Color.White, modifier = Modifier.size(36.dp))
+                }
+                if (failed) {
+                    Text(
+                        "Couldn't play this video.",
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
             } else {
                 if (posterModel != null) {
                     coil.compose.AsyncImage(
