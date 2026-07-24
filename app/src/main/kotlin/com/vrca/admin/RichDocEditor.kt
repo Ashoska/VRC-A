@@ -126,6 +126,61 @@ internal suspend fun githubUploadImage(ctx: Context, uri: Uri, pat: String): Str
 internal suspend fun githubUploadVideoBytes(bytes: ByteArray, pat: String): String =
     uploadBytesToImageStore(bytes, "mp4", pat)
 
+private const val IMG_RAW_PREFIX =
+    "https://raw.githubusercontent.com/$IMG_REPO_OWNER/$IMG_REPO_NAME/$IMG_REPO_BRANCH/"
+
+/**
+ * Deletes a file we uploaded (identified by its raw URL) from the image-store repo,
+ * so removed/replaced media doesn't accumulate as orphans. No-op for URLs not hosted
+ * in our repo. Best-effort — never throws.
+ */
+internal suspend fun githubDeleteFileByUrl(url: String, pat: String): Unit =
+    withContext(Dispatchers.IO) {
+        if (pat.isBlank() || !url.startsWith(IMG_RAW_PREFIX)) return@withContext
+        val path = url.removePrefix(IMG_RAW_PREFIX)
+        if (path.isBlank()) return@withContext
+        try {
+            val client = OkHttpClient.Builder()
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .readTimeout(30, TimeUnit.SECONDS)
+                .build()
+            val contentsUrl = "https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/contents/$path"
+            // 1. GET the file's SHA (required by the delete API).
+            val getReq = Request.Builder()
+                .url("$contentsUrl?ref=$IMG_REPO_BRANCH")
+                .header("Authorization", "Bearer $pat")
+                .header("Accept", "application/vnd.github+json")
+                .get()
+                .build()
+            val getResp = client.newCall(getReq).execute()
+            val getBody = getResp.body?.string().orEmpty()
+            val getCode = getResp.code
+            getResp.close()
+            if (getCode != 200) return@withContext
+            val sha = JSONObject(getBody).optString("sha")
+            if (sha.isBlank()) return@withContext
+            // 2. DELETE.
+            val delPayload = JSONObject().apply {
+                put("message", "VRC-A remove: $path")
+                put("sha", sha)
+                put("branch", IMG_REPO_BRANCH)
+            }.toString()
+            val delReq = Request.Builder()
+                .url(contentsUrl)
+                .header("Authorization", "Bearer $pat")
+                .header("Accept", "application/vnd.github+json")
+                .delete(delPayload.toRequestBody("application/json".toMediaType()))
+                .build()
+            client.newCall(delReq).execute().close()
+        } catch (_: Exception) {
+        }
+    }
+
+/** Best-effort deletes a batch of our-repo media URLs from the image-store repo. */
+internal suspend fun githubDeleteMedia(urls: List<String>, pat: String) {
+    for (u in urls) githubDeleteFileByUrl(u, pat)
+}
+
 @Composable
 internal fun RichDocEditor(
     blocks: SnapshotStateList<RichBlock>,

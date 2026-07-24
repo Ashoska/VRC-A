@@ -207,6 +207,8 @@ internal fun AnnouncementsTab(
                                             )
                                         )
                                     } else {
+                                        val oldMedia = announcements.firstOrNull { it.id == target }
+                                            ?.let { resolveRichDoc(it.bodyDoc, it.body)?.mediaUrls() } ?: emptyList()
                                         db.collection("announcements").document(target)
                                             .set(data, SetOptions.merge()).await()
                                         val idx = announcements.indexOfFirst { it.id == target }
@@ -214,6 +216,9 @@ internal fun AnnouncementsTab(
                                             title = newTitle.trim(), body = plain, bodyDoc = bodyDocJson,
                                             active = newActive, priority = newPriority
                                         )
+                                        // Delete media that was in the old version but not the new one.
+                                        val newMedia = doc.mediaUrls()
+                                        githubDeleteMedia(oldMedia.filter { it !in newMedia }, githubPat)
                                     }
                                     resetForm()
                                     setGlobalLoading(false)
@@ -280,9 +285,11 @@ internal fun AnnouncementsTab(
                                         setGlobalLoading(true)
                                         setError(null)
                                         runCatching {
+                                            val media = resolveRichDoc(a.bodyDoc, a.body)?.mediaUrls() ?: emptyList()
                                             db.collection("announcements").document(a.id).delete().await()
                                             announcements.removeAll { it.id == a.id }
                                             if (editingId == a.id) resetForm()
+                                            githubDeleteMedia(media, githubPat)  // free the orphaned files
                                             setGlobalLoading(false)
                                         }.onFailure { e ->
                                             setGlobalLoading(false)
