@@ -3,6 +3,7 @@ package com.vrca.richcontent
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -18,9 +19,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.ClickableText
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -41,6 +42,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -109,18 +111,27 @@ fun RichDocRenderer(
     }
 }
 
-/** Text with inline markup + clickable auto-linkified URLs (1.6-safe ClickableText). */
+/**
+ * Text with inline markup + clickable auto-linkified URLs. Uses `Text` (which renders
+ * every SpanStyle — bold/italic/color — reliably) plus tap-to-open, instead of the
+ * deprecated `ClickableText` (which wasn't applying the bold/italic spans on-device).
+ */
 @Composable
 private fun RichText(raw: String, style: TextStyle, color: Color) {
     val linkColor = MaterialTheme.colorScheme.primary
     val annotated = remember(raw, linkColor) { buildInlineAnnotated(raw, linkColor) }
     val uriHandler = LocalUriHandler.current
-    ClickableText(
+    var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    Text(
         text = annotated,
         style = style.copy(color = color),
-        onClick = { offset ->
-            annotated.urlAt(offset)?.let {
-                try { uriHandler.openUri(it) } catch (_: Exception) {}
+        onTextLayout = { layout = it },
+        modifier = Modifier.pointerInput(annotated) {
+            detectTapGestures { pos ->
+                val lr = layout ?: return@detectTapGestures
+                annotated.urlAt(lr.getOffsetForPosition(pos))?.let {
+                    runCatching { uriHandler.openUri(it) }
+                }
             }
         }
     )
@@ -130,13 +141,13 @@ private fun RichText(raw: String, style: TextStyle, color: Color) {
 @Composable
 private fun RichCallout(block: RichBlock.Callout) {
     val accent = when (block.tone.lowercase()) {
-        "success" -> Color(0xFF4CAF50)
-        "warn", "warning" -> Color(0xFFFFB300)
-        else -> MaterialTheme.colorScheme.primary
+        "success" -> Color(0xFF22C55E)          // clear green
+        "warn", "warning" -> Color(0xFFF59E0B)  // clear amber/orange
+        else -> Color(0xFF3B82F6)               // clear blue (info)
     }
     Surface(
         shape = RoundedCornerShape(12.dp),
-        color = accent.copy(alpha = 0.14f),
+        color = accent.copy(alpha = 0.18f),
         modifier = Modifier.fillMaxWidth()
     ) {
         Row(Modifier.padding(vertical = 10.dp, horizontal = 12.dp)) {
@@ -260,17 +271,32 @@ private fun RichVideo(block: RichBlock.Video) {
             contentAlignment = Alignment.Center
         ) {
             if (playing && block.url.isNotBlank()) {
+                var prepared by remember(block.url) { mutableStateOf(false) }
+                var failed by remember(block.url) { mutableStateOf(false) }
                 AndroidView(
                     factory = { c ->
                         android.widget.VideoView(c).apply {
                             setVideoURI(android.net.Uri.parse(block.url))
-                            setOnPreparedListener { mp -> mp.isLooping = false; start() }
+                            setOnPreparedListener { mp -> prepared = true; mp.isLooping = false; start() }
                             setOnCompletionListener { ActiveVideoState.playingKey = null }
+                            setOnErrorListener { _, _, _ -> failed = true; true }
                         }
                     },
                     modifier = Modifier.fillMaxWidth().heightIn(min = 200.dp),
                     onRelease = { runCatching { it.stopPlayback() } }
                 )
+                // Buffering feedback (matters on slow connections — progressive play
+                // starts before the whole file arrives).
+                if (!prepared && !failed) {
+                    CircularProgressIndicator(color = Color.White, modifier = Modifier.size(36.dp))
+                }
+                if (failed) {
+                    Text(
+                        "Couldn't play this video.",
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
             } else {
                 if (posterModel != null) {
                     coil.compose.AsyncImage(

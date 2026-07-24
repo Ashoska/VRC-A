@@ -97,6 +97,25 @@ fun buildInlineAnnotated(raw: String, linkColor: Color): AnnotatedString = build
                 else { buf.append(raw[i]); i++ }
             }
             raw.startsWith("[/c]", i) -> { flush(); if (colorStack.isNotEmpty()) colorStack.removeLast(); i += 4 }
+            raw.startsWith("/c#", i) -> {
+                // Quick single-word color: /c#RRGGBB=word  (colors one word, no closing tag)
+                val eq = raw.indexOf('=', i)
+                val color = if (eq > i + 3) parseHexColor(raw.substring(i + 3, eq)) else null
+                if (color != null) {
+                    var end = eq + 1
+                    while (end < raw.length && !raw[end].isWhitespace()) end++
+                    val word = raw.substring(eq + 1, end)
+                    flush()
+                    withStyle(
+                        SpanStyle(
+                            fontWeight = if (bold) FontWeight.Bold else null,
+                            fontStyle = if (italic) FontStyle.Italic else null,
+                            color = color
+                        )
+                    ) { append(word) }
+                    i = end
+                } else { buf.append(raw[i]); i++ }
+            }
             raw[i] == '*' -> { flush(); italic = !italic; i += 1 }
             else -> { buf.append(raw[i]); i++ }
         }

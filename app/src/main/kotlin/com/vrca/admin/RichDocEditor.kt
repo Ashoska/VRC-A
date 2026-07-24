@@ -107,7 +107,9 @@ private suspend fun uploadBytesToImageStore(bytes: ByteArray, ext: String, pat: 
         val code = resp.code
         resp.close()
         if (code in 200..299) {
-            "https://cdn.jsdelivr.net/gh/$IMG_REPO_OWNER/$IMG_REPO_NAME@$IMG_REPO_BRANCH/$path"
+            // raw.githubusercontent serves ANY file type/size (jsDelivr rejected video
+            // even at ~8MB). The client caches locally anyway, so this is the reliable host.
+            "https://raw.githubusercontent.com/$IMG_REPO_OWNER/$IMG_REPO_NAME/$IMG_REPO_BRANCH/$path"
         } else {
             throw Exception("Upload failed ($code): ${body.take(300)}")
         }
@@ -385,11 +387,6 @@ private fun BlockCard(
                             Icon(Icons.Filled.Videocam, null); Spacer(Modifier.width(6.dp)); Text("Pick & upload")
                         }
                     }
-                    Text(
-                        "Compressed to HEVC on-device before upload. Keep clips short; you can also paste a URL.",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
                 }
                 is RichBlock.Callout -> {
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -409,10 +406,9 @@ private fun BlockCard(
                         Modifier.fillMaxWidth(), label = { Text("Callout text") }, minLines = 2
                     )
                 }
-                RichBlock.Divider -> Text(
-                    "A horizontal divider line.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                RichBlock.Divider -> Divider(
+                    color = MaterialTheme.colorScheme.outlineVariant,
+                    modifier = Modifier.padding(vertical = 4.dp)
                 )
             }
         }
