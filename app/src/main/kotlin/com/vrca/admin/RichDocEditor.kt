@@ -17,6 +17,7 @@ import androidx.compose.material.icons.automirrored.filled.Notes
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.HorizontalRule
+import androidx.compose.material.icons.filled.Gif
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Title
@@ -26,16 +27,8 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontStyle
-import androidx.compose.ui.text.font.FontSynthesis
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import com.vrca.richcontent.RichBlock
 import com.vrca.richcontent.RichDoc
@@ -82,46 +75,86 @@ private fun extFor(ctx: Context, uri: Uri): String {
     }
 }
 
+private const val MEDIA_RELEASE_TAG = "rich-media"
+
+@Volatile
+private var cachedMediaUploadUrl: String? = null
+
+private fun mimeForExt(ext: String): String = when (ext.lowercase()) {
+    "png" -> "image/png"
+    "jpg", "jpeg" -> "image/jpeg"
+    "gif" -> "image/gif"
+    "webp" -> "image/webp"
+    "mp4" -> "video/mp4"
+    else -> "application/octet-stream"
+}
+
 /**
- * Uploads the picked image to `Ashoska/VRC-A-Image-store` via the GitHub Contents
- * API and returns the raw.githubusercontent URL. Unique filename per upload. Throws with
- * GitHub's own error text on failure so a token/permission problem is diagnosable
- * on-device (the release PAT needs Contents:write on the image-store repo).
+ * Ensures the auto-managed `rich-media` release exists in the image-store repo and
+ * returns its asset upload_url template (cached process-wide). Media uploads as
+ * STREAMED release assets (raw bytes) rather than the base64 Contents API — no 33%
+ * base64 inflation, no giant in-memory JSON, and it streams like the fast APK upload
+ * (which is why APK pushes were near-instant while base64 media pushes crawled and
+ * saturated the connection).
  */
-/** Uploads raw bytes to the image-store repo under a unique `rich/rich_<ts>.<ext>`. */
+private suspend fun ensureMediaReleaseUploadUrl(pat: String): String {
+    cachedMediaUploadUrl?.let { return it }
+    return withContext(Dispatchers.IO) {
+        val client = OkHttpClient.Builder()
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .build()
+        val getReq = Request.Builder()
+            .url("https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/releases/tags/$MEDIA_RELEASE_TAG")
+            .header("Authorization", "Bearer $pat")
+            .header("Accept", "application/vnd.github+json")
+            .get()
+            .build()
+        val getResp = client.newCall(getReq).execute()
+        val getBody = getResp.body?.string().orEmpty()
+        val getCode = getResp.code
+        getResp.close()
+        if (getCode == 200) {
+            JSONObject(getBody).getString("upload_url").also { cachedMediaUploadUrl = it }
+        } else {
+            githubCreateRelease(
+                owner = IMG_REPO_OWNER, repo = IMG_REPO_NAME, pat = pat,
+                tagName = MEDIA_RELEASE_TAG, releaseName = "VRC-A Rich Media",
+                body = "Auto-managed rich-content media (images / videos / gifs)."
+            ).uploadUrl.also { cachedMediaUploadUrl = it }
+        }
+    }
+}
+
+/** Uploads raw bytes as a STREAMED release asset; returns the download URL. */
 private suspend fun uploadBytesToImageStore(bytes: ByteArray, ext: String, pat: String): String =
     withContext(Dispatchers.IO) {
         if (pat.isBlank()) throw Exception("GitHub token missing in this build.")
+        val template = ensureMediaReleaseUploadUrl(pat)
         val fileName = "rich_${System.currentTimeMillis()}.$ext"   // unique — never overwrite
-        val path = "rich/$fileName"
-        val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
-        val payload = JSONObject().apply {
-            put("message", "VRC-A rich content: $fileName")
-            put("content", b64)
-            put("branch", IMG_REPO_BRANCH)
-        }.toString()
+        val base = template.substringBefore("{")
+        val url = if (base.contains("?")) "$base&name=$fileName" else "$base?name=$fileName"
         val client = OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(180, TimeUnit.SECONDS)
-            .writeTimeout(180, TimeUnit.SECONDS)
+            .readTimeout(300, TimeUnit.SECONDS)
+            .writeTimeout(300, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build()
         val req = Request.Builder()
-            .url("https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/contents/$path")
+            .url(url)
             .header("Authorization", "Bearer $pat")
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
-            .put(payload.toRequestBody("application/json".toMediaType()))
+            .post(bytes.toRequestBody(mimeForExt(ext).toMediaType()))
             .build()
         val resp = client.newCall(req).execute()
         val body = resp.body?.string().orEmpty()
         val code = resp.code
         resp.close()
         if (code in 200..299) {
-            // raw.githubusercontent serves ANY file type/size (jsDelivr rejected video
-            // even at ~8MB). The client caches locally anyway, so this is the reliable host.
-            "https://raw.githubusercontent.com/$IMG_REPO_OWNER/$IMG_REPO_NAME/$IMG_REPO_BRANCH/$path"
+            JSONObject(body).getString("browser_download_url")
         } else {
+            if (code == 404) cachedMediaUploadUrl = null   // release vanished → recreate next time
             throw Exception("Upload failed ($code): ${body.take(300)}")
         }
     }
@@ -137,28 +170,27 @@ internal suspend fun githubUploadImage(ctx: Context, uri: Uri, pat: String): Str
 internal suspend fun githubUploadVideoBytes(bytes: ByteArray, pat: String): String =
     uploadBytesToImageStore(bytes, "mp4", pat)
 
-private const val IMG_RAW_PREFIX =
-    "https://raw.githubusercontent.com/$IMG_REPO_OWNER/$IMG_REPO_NAME/$IMG_REPO_BRANCH/"
+private const val MEDIA_DL_PREFIX =
+    "https://github.com/$IMG_REPO_OWNER/$IMG_REPO_NAME/releases/download/$MEDIA_RELEASE_TAG/"
 
 /**
- * Deletes a file we uploaded (identified by its raw URL) from the image-store repo,
- * so removed/replaced media doesn't accumulate as orphans. No-op for URLs not hosted
- * in our repo. Best-effort — never throws.
+ * Deletes a media file we uploaded (by its download URL) from the image-store repo's
+ * rich-media release, so removed/replaced media doesn't accumulate as orphans. No-op
+ * for URLs not hosted by us. Best-effort — never throws.
  */
 internal suspend fun githubDeleteFileByUrl(url: String, pat: String): Unit =
     withContext(Dispatchers.IO) {
-        if (pat.isBlank() || !url.startsWith(IMG_RAW_PREFIX)) return@withContext
-        val path = url.removePrefix(IMG_RAW_PREFIX)
-        if (path.isBlank()) return@withContext
+        if (pat.isBlank() || !url.startsWith(MEDIA_DL_PREFIX)) return@withContext
+        val name = url.removePrefix(MEDIA_DL_PREFIX)
+        if (name.isBlank()) return@withContext
         try {
             val client = OkHttpClient.Builder()
                 .connectTimeout(30, TimeUnit.SECONDS)
                 .readTimeout(30, TimeUnit.SECONDS)
                 .build()
-            val contentsUrl = "https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/contents/$path"
-            // 1. GET the file's SHA (required by the delete API).
+            // Find the asset id by name from the release, then delete it.
             val getReq = Request.Builder()
-                .url("$contentsUrl?ref=$IMG_REPO_BRANCH")
+                .url("https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/releases/tags/$MEDIA_RELEASE_TAG")
                 .header("Authorization", "Bearer $pat")
                 .header("Accept", "application/vnd.github+json")
                 .get()
@@ -168,19 +200,18 @@ internal suspend fun githubDeleteFileByUrl(url: String, pat: String): Unit =
             val getCode = getResp.code
             getResp.close()
             if (getCode != 200) return@withContext
-            val sha = JSONObject(getBody).optString("sha")
-            if (sha.isBlank()) return@withContext
-            // 2. DELETE.
-            val delPayload = JSONObject().apply {
-                put("message", "VRC-A remove: $path")
-                put("sha", sha)
-                put("branch", IMG_REPO_BRANCH)
-            }.toString()
+            val assets = JSONObject(getBody).optJSONArray("assets") ?: return@withContext
+            var assetId = -1L
+            for (i in 0 until assets.length()) {
+                val a = assets.optJSONObject(i) ?: continue
+                if (a.optString("name") == name) { assetId = a.optLong("id", -1L); break }
+            }
+            if (assetId < 0) return@withContext
             val delReq = Request.Builder()
-                .url(contentsUrl)
+                .url("https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/releases/assets/$assetId")
                 .header("Authorization", "Bearer $pat")
                 .header("Accept", "application/vnd.github+json")
-                .delete(delPayload.toRequestBody("application/json".toMediaType()))
+                .delete()
                 .build()
             client.newCall(delReq).execute().close()
         } catch (_: Exception) {
@@ -218,34 +249,29 @@ internal suspend fun githubSweepOrphans(db: FirebaseFirestore, pat: String): Int
                 .connectTimeout(30, TimeUnit.SECONDS)
                 .readTimeout(30, TimeUnit.SECONDS)
                 .build()
-            val listReq = Request.Builder()
-                .url("https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/contents/rich?ref=$IMG_REPO_BRANCH")
+            val getReq = Request.Builder()
+                .url("https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/releases/tags/$MEDIA_RELEASE_TAG")
                 .header("Authorization", "Bearer $pat")
                 .header("Accept", "application/vnd.github+json")
                 .get()
                 .build()
-            val listResp = client.newCall(listReq).execute()
-            val listBody = listResp.body?.string().orEmpty()
-            val listCode = listResp.code
-            listResp.close()
-            if (listCode != 200) return@withContext 0
-            val arr = org.json.JSONArray(listBody)
+            val getResp = client.newCall(getReq).execute()
+            val getBody = getResp.body?.string().orEmpty()
+            val getCode = getResp.code
+            getResp.close()
+            if (getCode != 200) return@withContext 0
+            val assets = JSONObject(getBody).optJSONArray("assets") ?: return@withContext 0
             var deleted = 0
-            for (i in 0 until arr.length()) {
-                val o = arr.optJSONObject(i) ?: continue
-                if (o.optString("type") != "file") continue
-                val path = o.optString("path")
-                val sha = o.optString("sha")
-                if (path.isBlank() || sha.isBlank()) continue
-                if ("$IMG_RAW_PREFIX$path" in referenced) continue
-                val delPayload = JSONObject().apply {
-                    put("message", "VRC-A sweep: $path"); put("sha", sha); put("branch", IMG_REPO_BRANCH)
-                }.toString()
+            for (i in 0 until assets.length()) {
+                val a = assets.optJSONObject(i) ?: continue
+                val dlUrl = a.optString("browser_download_url")
+                val assetId = a.optLong("id", -1L)
+                if (dlUrl.isBlank() || assetId < 0 || dlUrl in referenced) continue
                 val delReq = Request.Builder()
-                    .url("https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/contents/$path")
+                    .url("https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/releases/assets/$assetId")
                     .header("Authorization", "Bearer $pat")
                     .header("Accept", "application/vnd.github+json")
-                    .delete(delPayload.toRequestBody("application/json".toMediaType()))
+                    .delete()
                     .build()
                 val r = client.newCall(delReq).execute()
                 if (r.isSuccessful) deleted++
@@ -268,6 +294,7 @@ internal fun RichDocEditor(
     var pendingImageIndex by remember { mutableIntStateOf(-1) }
     var pendingVideoIndex by remember { mutableIntStateOf(-1) }
     var pendingPosterIndex by remember { mutableIntStateOf(-1) }
+    var pendingGifIndex by remember { mutableIntStateOf(-1) }
     var uploadingIndex by remember { mutableIntStateOf(-1) }
     var uploadError by remember { mutableStateOf<String?>(null) }
 
@@ -304,6 +331,25 @@ internal fun RichDocEditor(
                         }
                     }
                     .onFailure { uploadError = it.message ?: "Poster upload failed" }
+                uploadingIndex = -1
+            }
+        }
+    }
+
+    val gifPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        val idx = pendingGifIndex
+        pendingGifIndex = -1
+        if (uri != null && idx in blocks.indices) {
+            scope.launch {
+                uploadError = null
+                uploadingIndex = idx
+                runCatching { githubUploadImage(ctx, uri, githubPat) }
+                    .onSuccess { url ->
+                        if (idx in blocks.indices) {
+                            (blocks[idx] as? RichBlock.Gif)?.let { blocks[idx] = it.copy(url = url) }
+                        }
+                    }
+                    .onFailure { uploadError = it.message ?: "GIF upload failed" }
                 uploadingIndex = -1
             }
         }
@@ -346,20 +392,6 @@ internal fun RichDocEditor(
     }
 
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        // TEMP render check — hardcoded spans, NOT via our parser. If this line shows
-        // bold + italic + yellow, styled-span rendering works on the device and the
-        // issue is elsewhere; if it doesn't, it's a device/Compose span-render problem.
-        Text(
-            buildAnnotatedString {
-                append("check: Aa ")
-                withStyle(SpanStyle(fontWeight = FontWeight.Bold, fontFamily = FontFamily.SansSerif, fontSynthesis = FontSynthesis.All)) { append("Aa") }
-                append(" (bold?)  Aa ")
-                withStyle(SpanStyle(fontStyle = FontStyle.Italic, fontFamily = FontFamily.SansSerif, fontSynthesis = FontSynthesis.All)) { append("Aa") }
-                append(" (italic?)  ")
-                withStyle(SpanStyle(color = Color(0xFFFFEB3B))) { append("yellow") }
-            },
-            style = MaterialTheme.typography.bodyMedium
-        )
         Text("Content blocks", style = MaterialTheme.typography.labelLarge)
 
         blocks.forEachIndexed { index, block ->
@@ -379,7 +411,8 @@ internal fun RichDocEditor(
                 onDelete = { if (index in blocks.indices) blocks.removeAt(index) },
                 onPickImage = { pendingImageIndex = index; picker.launch("image/*") },
                 onPickVideo = { pendingVideoIndex = index; videoPicker.launch("video/*") },
-                onPickPoster = { pendingPosterIndex = index; posterPicker.launch("image/*") }
+                onPickPoster = { pendingPosterIndex = index; posterPicker.launch("image/*") },
+                onPickGif = { pendingGifIndex = index; gifPicker.launch("image/*") }
             )
         }
 
@@ -396,6 +429,7 @@ internal fun RichDocEditor(
             AddBlockChip("Text", Icons.AutoMirrored.Filled.Notes) { blocks.add(RichBlock.Text("")) }
             AddBlockChip("Bullets", Icons.AutoMirrored.Filled.FormatListBulleted) { blocks.add(RichBlock.Bullets(listOf(""))) }
             AddBlockChip("Image", Icons.Filled.Image) { blocks.add(RichBlock.Image("")) }
+            AddBlockChip("GIF", Icons.Filled.Gif) { blocks.add(RichBlock.Gif("")) }
             AddBlockChip("Callout", Icons.Filled.Info) { blocks.add(RichBlock.Callout("info", "")) }
             AddBlockChip("Video", Icons.Filled.Videocam) { blocks.add(RichBlock.Video("", null)) }
             AddBlockChip("Divider", Icons.Filled.HorizontalRule) { blocks.add(RichBlock.Divider) }
@@ -425,6 +459,7 @@ private fun blockLabel(b: RichBlock): String = when (b) {
     is RichBlock.Text -> "Text"
     is RichBlock.Bullets -> "Bullets"
     is RichBlock.Image -> "Image"
+    is RichBlock.Gif -> "GIF"
     is RichBlock.Video -> "Video"
     is RichBlock.Callout -> "Callout"
     RichBlock.Divider -> "Divider"
@@ -452,7 +487,8 @@ private fun BlockCard(
     onDelete: () -> Unit,
     onPickImage: () -> Unit,
     onPickVideo: () -> Unit,
-    onPickPoster: () -> Unit
+    onPickPoster: () -> Unit,
+    onPickGif: () -> Unit
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
@@ -527,6 +563,27 @@ private fun BlockCard(
                         } else {
                             Icon(Icons.Filled.Image, null); Spacer(Modifier.width(6.dp))
                             Text(if (block.url.isBlank()) "Pick & upload image" else "Replace image")
+                        }
+                    }
+                }
+                is RichBlock.Gif -> {
+                    OutlinedTextField(
+                        block.url, { onChange(block.copy(url = it)) },
+                        Modifier.fillMaxWidth(),
+                        label = { Text("GIF link (direct .gif URL, e.g. media.giphy.com/...)") },
+                        singleLine = true
+                    )
+                    Button(onClick = onPickGif, enabled = !uploading) {
+                        if (uploading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onPrimary
+                            )
+                            Spacer(Modifier.width(8.dp)); Text("Uploading")
+                        } else {
+                            Icon(Icons.Filled.Gif, null); Spacer(Modifier.width(6.dp))
+                            Text(if (block.url.isBlank()) "Pick & upload GIF" else "Replace GIF")
                         }
                     }
                 }

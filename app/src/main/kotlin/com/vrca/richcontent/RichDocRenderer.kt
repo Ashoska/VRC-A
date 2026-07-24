@@ -4,11 +4,12 @@ import android.content.Context
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -43,10 +44,11 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
-import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
@@ -119,6 +121,7 @@ fun RichDocRenderer(
                     }
                 }
                 is RichBlock.Image -> RichImage(block.url, mediaScope)
+                is RichBlock.Gif -> RichImage(block.url, mediaScope)
                 is RichBlock.Video -> RichVideo(block, mediaScope)
                 is RichBlock.Callout -> RichCallout(block)
                 RichBlock.Divider -> Divider(
@@ -132,32 +135,58 @@ fun RichDocRenderer(
 /**
  * Text with inline markup (bold/italic/color) + tappable auto-linkified URLs.
  *
- * IMPORTANT: forces `FontFamily.SansSerif` (a real font with bold/italic variants).
- * On some devices (Samsung) the default system font wasn't synthesizing weight/style
- * from spans — only color rendered — so bold/italic showed as plain. SansSerif +
- * the `FontSynthesis.All` on the spans gives Compose real variants to draw.
+ * Renders each styled run as its OWN `Text` with **parameter-level** fontWeight /
+ * fontStyle / color on `FontFamily.SansSerif` (a real font with bold/italic glyphs) —
+ * NOT `SpanStyle`. Some devices (Samsung system fonts) silently ignore per-span
+ * weight/style (only color came through), so this is the reliable path. Runs flow +
+ * wrap via `FlowRow`; `\n` splits into stacked rows so multi-line text stays intact.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun RichText(raw: String, style: TextStyle, color: Color) {
-    val linkColor = MaterialTheme.colorScheme.primary
-    val annotated = remember(raw, linkColor) { buildInlineAnnotated(raw, linkColor) }
+    val runs = remember(raw) { buildInlineRuns(raw) }
     val uriHandler = LocalUriHandler.current
-    val layout = remember { mutableStateOf<TextLayoutResult?>(null) }
-    Text(
-        text = annotated,
-        color = color,
-        style = style.copy(fontFamily = FontFamily.SansSerif),
-        onTextLayout = { layout.value = it },
-        modifier = Modifier.pointerInput(annotated) {
-            detectTapGestures { pos ->
-                layout.value?.let { lr ->
-                    annotated.urlAt(lr.getOffsetForPosition(pos))?.let {
-                        runCatching { uriHandler.openUri(it) }
+    val linkColor = MaterialTheme.colorScheme.primary
+    val richStyle = style.copy(fontFamily = FontFamily.SansSerif)
+
+    val lines = remember(runs) {
+        val out = ArrayList<ArrayList<InlineRun>>()
+        var cur = ArrayList<InlineRun>()
+        for (run in runs) {
+            val parts = run.text.split("\n")
+            parts.forEachIndexed { idx, part ->
+                if (idx > 0) { out.add(cur); cur = ArrayList() }
+                if (part.isNotEmpty()) cur.add(run.copy(text = part))
+            }
+        }
+        out.add(cur)
+        out
+    }
+
+    Column(Modifier.fillMaxWidth()) {
+        for (line in lines) {
+            if (line.isEmpty()) {
+                Text(" ", color = color, style = richStyle)  // preserve blank lines
+            } else {
+                FlowRow(Modifier.fillMaxWidth()) {
+                    for (run in line) {
+                        val url = run.url
+                        Text(
+                            text = run.text,
+                            color = if (url != null) linkColor else run.color ?: color,
+                            fontWeight = if (run.bold) FontWeight.Bold else null,
+                            fontStyle = if (run.italic) FontStyle.Italic else null,
+                            textDecoration = if (url != null) TextDecoration.Underline else null,
+                            style = richStyle,
+                            modifier = if (url != null) {
+                                Modifier.clickable { runCatching { uriHandler.openUri(url) } }
+                            } else Modifier
+                        )
                     }
                 }
             }
         }
-    )
+    }
 }
 
 /** Tinted highlight box. tone = info (primary) / warn (amber) / success (green). */
