@@ -52,7 +52,7 @@ import java.util.concurrent.TimeUnit
  * both AnnouncementsTab and ReleasesTab. Reorder is via move up/down controls
  * (drag-and-drop is a later polish). Image upload pushes to the public image-store
  * GitHub repo via the Contents API with a UNIQUE filename per upload (never
- * overwrite — jsDelivr caches hard, so a fresh URL = live edits show instantly and
+ * overwrite — the raw CDN caches briefly, so a fresh URL = live edits show instantly and
  * the old URL falls out of the reference set → auto-culled client-side).
  *
  * Firestore cost: ZERO. The editor is pure local state; media goes to GitHub, and
@@ -76,7 +76,7 @@ private fun extFor(ctx: Context, uri: Uri): String {
 
 /**
  * Uploads the picked image to `Ashoska/VRC-A-Image-store` via the GitHub Contents
- * API and returns the jsDelivr CDN URL. Unique filename per upload. Throws with
+ * API and returns the raw.githubusercontent URL. Unique filename per upload. Throws with
  * GitHub's own error text on failure so a token/permission problem is diagnosable
  * on-device (the release PAT needs Contents:write on the image-store repo).
  */
@@ -310,7 +310,7 @@ internal fun RichDocEditor(
                 uploadingIndex = idx
                 runCatching {
                     // Admin build transcodes to small HEVC; public stub returns null →
-                    // fall back to the raw file. The size guard keeps us under jsDelivr's cap.
+                    // fall back to the raw file. The size guard keeps clips small so they cache fast.
                     val transcoded = transcodeVideoForUpload(ctx, uri)
                     val bytes = if (transcoded != null) {
                         val b = transcoded.readBytes(); runCatching { transcoded.delete() }; b
@@ -320,8 +320,8 @@ internal fun RichDocEditor(
                     }
                     if (bytes.size > 19_000_000) {
                         throw Exception(
-                            "Video is ${bytes.size / 1_000_000}MB after compression — keep it " +
-                                "shorter (jsDelivr limit ~20MB) or paste a URL instead."
+                            "Video is ${bytes.size / 1_000_000}MB after compression — please use a " +
+                                "shorter clip so it stays small and loads fast."
                         )
                     }
                     githubUploadVideoBytes(bytes, githubPat)
