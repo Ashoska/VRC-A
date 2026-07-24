@@ -26,8 +26,14 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import com.vrca.richcontent.RichBlock
 import com.vrca.richcontent.RichDoc
@@ -338,6 +344,20 @@ internal fun RichDocEditor(
     }
 
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        // TEMP render check — hardcoded spans, NOT via our parser. If this line shows
+        // bold + italic + yellow, styled-span rendering works on the device and the
+        // issue is elsewhere; if it doesn't, it's a device/Compose span-render problem.
+        Text(
+            buildAnnotatedString {
+                append("render check → ")
+                withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append("BOLD") }
+                append("  ")
+                withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append("italic") }
+                append("  ")
+                withStyle(SpanStyle(color = Color(0xFFFFEB3B))) { append("yellow") }
+            },
+            style = MaterialTheme.typography.bodyMedium
+        )
         Text("Content blocks", style = MaterialTheme.typography.labelLarge)
 
         blocks.forEachIndexed { index, block ->
