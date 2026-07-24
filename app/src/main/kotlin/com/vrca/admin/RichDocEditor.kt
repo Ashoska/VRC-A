@@ -136,6 +136,7 @@ internal fun RichDocEditor(
     val scope = rememberCoroutineScope()
     var pendingImageIndex by remember { mutableIntStateOf(-1) }
     var pendingVideoIndex by remember { mutableIntStateOf(-1) }
+    var pendingPosterIndex by remember { mutableIntStateOf(-1) }
     var uploadingIndex by remember { mutableIntStateOf(-1) }
     var uploadError by remember { mutableStateOf<String?>(null) }
 
@@ -153,6 +154,25 @@ internal fun RichDocEditor(
                         }
                     }
                     .onFailure { uploadError = it.message ?: "Upload failed" }
+                uploadingIndex = -1
+            }
+        }
+    }
+
+    val posterPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        val idx = pendingPosterIndex
+        pendingPosterIndex = -1
+        if (uri != null && idx in blocks.indices) {
+            scope.launch {
+                uploadError = null
+                uploadingIndex = idx
+                runCatching { githubUploadImage(ctx, uri, githubPat) }
+                    .onSuccess { url ->
+                        if (idx in blocks.indices) {
+                            (blocks[idx] as? RichBlock.Video)?.let { blocks[idx] = it.copy(poster = url) }
+                        }
+                    }
+                    .onFailure { uploadError = it.message ?: "Poster upload failed" }
                 uploadingIndex = -1
             }
         }
@@ -213,7 +233,8 @@ internal fun RichDocEditor(
                 onDuplicate = { blocks.add(index + 1, block) },
                 onDelete = { if (index in blocks.indices) blocks.removeAt(index) },
                 onPickImage = { pendingImageIndex = index; picker.launch("image/*") },
-                onPickVideo = { pendingVideoIndex = index; videoPicker.launch("video/*") }
+                onPickVideo = { pendingVideoIndex = index; videoPicker.launch("video/*") },
+                onPickPoster = { pendingPosterIndex = index; posterPicker.launch("image/*") }
             )
         }
 
@@ -285,7 +306,8 @@ private fun BlockCard(
     onDuplicate: () -> Unit,
     onDelete: () -> Unit,
     onPickImage: () -> Unit,
-    onPickVideo: () -> Unit
+    onPickVideo: () -> Unit,
+    onPickPoster: () -> Unit
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
@@ -349,10 +371,6 @@ private fun BlockCard(
                     }
                 }
                 is RichBlock.Image -> {
-                    OutlinedTextField(
-                        block.url, { onChange(block.copy(url = it)) },
-                        Modifier.fillMaxWidth(), label = { Text("Image URL") }, singleLine = true
-                    )
                     Button(onClick = onPickImage, enabled = !uploading) {
                         if (uploading) {
                             CircularProgressIndicator(
@@ -362,19 +380,12 @@ private fun BlockCard(
                             )
                             Spacer(Modifier.width(8.dp)); Text("Uploading")
                         } else {
-                            Icon(Icons.Filled.Image, null); Spacer(Modifier.width(6.dp)); Text("Pick & upload")
+                            Icon(Icons.Filled.Image, null); Spacer(Modifier.width(6.dp))
+                            Text(if (block.url.isBlank()) "Pick & upload image" else "Replace image")
                         }
                     }
                 }
                 is RichBlock.Video -> {
-                    OutlinedTextField(
-                        block.url, { onChange(block.copy(url = it)) },
-                        Modifier.fillMaxWidth(), label = { Text("Video URL (mp4)") }, singleLine = true
-                    )
-                    OutlinedTextField(
-                        block.poster ?: "", { onChange(block.copy(poster = it.ifBlank { null })) },
-                        Modifier.fillMaxWidth(), label = { Text("Poster image URL, optional") }, singleLine = true
-                    )
                     Button(onClick = onPickVideo, enabled = !uploading) {
                         if (uploading) {
                             CircularProgressIndicator(
@@ -384,8 +395,13 @@ private fun BlockCard(
                             )
                             Spacer(Modifier.width(8.dp)); Text("Processing")
                         } else {
-                            Icon(Icons.Filled.Videocam, null); Spacer(Modifier.width(6.dp)); Text("Pick & upload")
+                            Icon(Icons.Filled.Videocam, null); Spacer(Modifier.width(6.dp))
+                            Text(if (block.url.isBlank()) "Pick & upload video" else "Replace video")
                         }
+                    }
+                    OutlinedButton(onClick = onPickPoster, enabled = !uploading) {
+                        Icon(Icons.Filled.Image, null); Spacer(Modifier.width(6.dp))
+                        Text(if (block.poster.isNullOrBlank()) "Add poster image" else "Replace poster")
                     }
                 }
                 is RichBlock.Callout -> {
