@@ -17,6 +17,7 @@ import androidx.compose.material.icons.automirrored.filled.Notes
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.HorizontalRule
+import androidx.compose.material.icons.filled.Gif
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Title
@@ -293,6 +294,7 @@ internal fun RichDocEditor(
     var pendingImageIndex by remember { mutableIntStateOf(-1) }
     var pendingVideoIndex by remember { mutableIntStateOf(-1) }
     var pendingPosterIndex by remember { mutableIntStateOf(-1) }
+    var pendingGifIndex by remember { mutableIntStateOf(-1) }
     var uploadingIndex by remember { mutableIntStateOf(-1) }
     var uploadError by remember { mutableStateOf<String?>(null) }
 
@@ -329,6 +331,25 @@ internal fun RichDocEditor(
                         }
                     }
                     .onFailure { uploadError = it.message ?: "Poster upload failed" }
+                uploadingIndex = -1
+            }
+        }
+    }
+
+    val gifPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        val idx = pendingGifIndex
+        pendingGifIndex = -1
+        if (uri != null && idx in blocks.indices) {
+            scope.launch {
+                uploadError = null
+                uploadingIndex = idx
+                runCatching { githubUploadImage(ctx, uri, githubPat) }
+                    .onSuccess { url ->
+                        if (idx in blocks.indices) {
+                            (blocks[idx] as? RichBlock.Gif)?.let { blocks[idx] = it.copy(url = url) }
+                        }
+                    }
+                    .onFailure { uploadError = it.message ?: "GIF upload failed" }
                 uploadingIndex = -1
             }
         }
@@ -390,7 +411,8 @@ internal fun RichDocEditor(
                 onDelete = { if (index in blocks.indices) blocks.removeAt(index) },
                 onPickImage = { pendingImageIndex = index; picker.launch("image/*") },
                 onPickVideo = { pendingVideoIndex = index; videoPicker.launch("video/*") },
-                onPickPoster = { pendingPosterIndex = index; posterPicker.launch("image/*") }
+                onPickPoster = { pendingPosterIndex = index; posterPicker.launch("image/*") },
+                onPickGif = { pendingGifIndex = index; gifPicker.launch("image/*") }
             )
         }
 
@@ -407,6 +429,7 @@ internal fun RichDocEditor(
             AddBlockChip("Text", Icons.AutoMirrored.Filled.Notes) { blocks.add(RichBlock.Text("")) }
             AddBlockChip("Bullets", Icons.AutoMirrored.Filled.FormatListBulleted) { blocks.add(RichBlock.Bullets(listOf(""))) }
             AddBlockChip("Image", Icons.Filled.Image) { blocks.add(RichBlock.Image("")) }
+            AddBlockChip("GIF", Icons.Filled.Gif) { blocks.add(RichBlock.Gif("")) }
             AddBlockChip("Callout", Icons.Filled.Info) { blocks.add(RichBlock.Callout("info", "")) }
             AddBlockChip("Video", Icons.Filled.Videocam) { blocks.add(RichBlock.Video("", null)) }
             AddBlockChip("Divider", Icons.Filled.HorizontalRule) { blocks.add(RichBlock.Divider) }
@@ -436,6 +459,7 @@ private fun blockLabel(b: RichBlock): String = when (b) {
     is RichBlock.Text -> "Text"
     is RichBlock.Bullets -> "Bullets"
     is RichBlock.Image -> "Image"
+    is RichBlock.Gif -> "GIF"
     is RichBlock.Video -> "Video"
     is RichBlock.Callout -> "Callout"
     RichBlock.Divider -> "Divider"
@@ -463,7 +487,8 @@ private fun BlockCard(
     onDelete: () -> Unit,
     onPickImage: () -> Unit,
     onPickVideo: () -> Unit,
-    onPickPoster: () -> Unit
+    onPickPoster: () -> Unit,
+    onPickGif: () -> Unit
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
@@ -538,6 +563,27 @@ private fun BlockCard(
                         } else {
                             Icon(Icons.Filled.Image, null); Spacer(Modifier.width(6.dp))
                             Text(if (block.url.isBlank()) "Pick & upload image" else "Replace image")
+                        }
+                    }
+                }
+                is RichBlock.Gif -> {
+                    OutlinedTextField(
+                        block.url, { onChange(block.copy(url = it)) },
+                        Modifier.fillMaxWidth(),
+                        label = { Text("GIF link (direct .gif URL, e.g. media.giphy.com/...)") },
+                        singleLine = true
+                    )
+                    Button(onClick = onPickGif, enabled = !uploading) {
+                        if (uploading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onPrimary
+                            )
+                            Spacer(Modifier.width(8.dp)); Text("Uploading")
+                        } else {
+                            Icon(Icons.Filled.Gif, null); Spacer(Modifier.width(6.dp))
+                            Text(if (block.url.isBlank()) "Pick & upload GIF" else "Replace GIF")
                         }
                     }
                 }

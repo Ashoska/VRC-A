@@ -121,6 +121,7 @@ fun RichDocRenderer(
                     }
                 }
                 is RichBlock.Image -> RichImage(block.url, mediaScope)
+                is RichBlock.Gif -> RichImage(block.url, mediaScope)
                 is RichBlock.Video -> RichVideo(block, mediaScope)
                 is RichBlock.Callout -> RichCallout(block)
                 RichBlock.Divider -> Divider(

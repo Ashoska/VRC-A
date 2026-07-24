@@ -26,6 +26,7 @@ sealed class RichBlock {
     data class Text(val text: String) : RichBlock()
     data class Bullets(val items: List<String>) : RichBlock()
     data class Image(val url: String) : RichBlock()
+    data class Gif(val url: String) : RichBlock()
     data class Video(val url: String, val poster: String? = null) : RichBlock()
     /** [tone] is one of "info" | "warn" | "success". */
     data class Callout(val tone: String, val text: String) : RichBlock()
@@ -43,6 +44,7 @@ data class RichDoc(
         val out = ArrayList<String>()
         for (b in blocks) when (b) {
             is RichBlock.Image -> b.url.takeIf { it.isNotBlank() }?.let { out += it }
+            is RichBlock.Gif -> b.url.takeIf { it.isNotBlank() }?.let { out += it }
             is RichBlock.Video -> {
                 b.url.takeIf { it.isNotBlank() }?.let { out += it }
                 b.poster?.takeIf { it.isNotBlank() }?.let { out += it }
@@ -61,7 +63,7 @@ data class RichDoc(
                 is RichBlock.Text -> stripInlineMarkup(b.text)
                 is RichBlock.Bullets -> b.items.joinToString("\n") { "• ${stripInlineMarkup(it)}" }
                 is RichBlock.Callout -> stripInlineMarkup(b.text)
-                is RichBlock.Image, is RichBlock.Video, RichBlock.Divider -> ""
+                is RichBlock.Image, is RichBlock.Gif, is RichBlock.Video, RichBlock.Divider -> ""
             }
             if (line.isNotBlank()) { if (sb.isNotEmpty()) sb.append('\n'); sb.append(line) }
         }
@@ -80,6 +82,7 @@ data class RichDoc(
                 is RichBlock.Text -> { o.put("t", "text"); o.put("text", b.text) }
                 is RichBlock.Bullets -> { o.put("t", "bullets"); o.put("items", JSONArray(b.items)) }
                 is RichBlock.Image -> { o.put("t", "image"); o.put("url", b.url) }
+                is RichBlock.Gif -> { o.put("t", "gif"); o.put("url", b.url) }
                 is RichBlock.Video -> {
                     o.put("t", "video"); o.put("url", b.url)
                     b.poster?.takeIf { it.isNotBlank() }?.let { o.put("poster", it) }
@@ -118,6 +121,7 @@ fun parseRichDoc(json: String?): RichDoc? {
                     if (items.isNotEmpty()) blocks += RichBlock.Bullets(items)
                 }
                 "image" -> o.optString("url").takeIf { it.isNotBlank() }?.let { blocks += RichBlock.Image(it) }
+                "gif" -> o.optString("url").takeIf { it.isNotBlank() }?.let { blocks += RichBlock.Gif(it) }
                 "video" -> o.optString("url").takeIf { it.isNotBlank() }?.let {
                     blocks += RichBlock.Video(it, o.optString("poster").ifBlank { null })
                 }
