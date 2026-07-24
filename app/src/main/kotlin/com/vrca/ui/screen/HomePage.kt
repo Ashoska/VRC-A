@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.PowerManager
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
@@ -61,16 +62,19 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.key
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
@@ -91,6 +95,87 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+/**
+ * A single in-app announcement (Phase 4): collapsible status-banner-style card, NOT
+ * dismissable, rich body via the shared RichDocRenderer. Unread NEW dot until first
+ * expanded; priority > 0 auto-expands. Media served from the ann/ cache.
+ */
+@Composable
+private fun AnnouncementCard(a: AnnouncementUi) {
+    val ctx = LocalContext.current
+    val doc = remember(a.bodyDoc, a.body) {
+        com.vrca.richcontent.resolveRichDoc(a.bodyDoc, a.body)
+    }
+    var expanded by rememberSaveable(a.id) { mutableStateOf(a.priority > 0) }
+    val unseen = a.id !in com.vrca.ui.common.AnnouncementSeenState.seen
+    LaunchedEffect(expanded) {
+        if (expanded) com.vrca.ui.common.AnnouncementSeenState.markSeen(ctx, a.id)
+    }
+    ElevatedCard(
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer
+        )
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(
+                Modifier.fillMaxWidth().clickable { expanded = !expanded },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (unseen) {
+                    Box(
+                        Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text(
+                    a.title.ifBlank { "Announcement" },
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.weight(1f)
+                )
+                if (a.priority != 0) {
+                    Text(
+                        "P${a.priority}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.width(6.dp))
+                }
+                Icon(
+                    if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                    contentDescription = if (expanded) "Collapse" else "Expand"
+                )
+            }
+            if (expanded) {
+                if (doc != null) {
+                    com.vrca.richcontent.RichDocRenderer(
+                        doc,
+                        mediaScope = com.vrca.richcontent.RichMediaStore.Scope.ANNOUNCEMENT
+                    )
+                } else if (a.body.isNotBlank()) {
+                    Text(a.body, style = MaterialTheme.typography.bodyMedium)
+                }
+            } else {
+                val preview = remember(doc, a.body) {
+                    (doc?.toPlainText() ?: a.body).lineSequence()
+                        .firstOrNull { it.isNotBlank() }.orEmpty()
+                }
+                if (preview.isNotBlank()) {
+                    Text(
+                        preview,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -180,31 +265,21 @@ internal fun HomePage(
         UiPrefs.writeHomeCardOrder(ctx, order)
     }
 
-    val topAnnouncements = remember(announcements) {
-        announcements
-            .sortedWith(compareByDescending<AnnouncementUi> { it.priority }.thenByDescending { it.createdAt })
-            .take(3)
+    val sortedAnnouncements = remember(announcements) {
+        announcements.sortedWith(
+            compareByDescending<AnnouncementUi> { it.priority }.thenByDescending { it.createdAt }
+        )
     }
 
     PageContainer {
-        if (topAnnouncements.isNotEmpty()) {
+        if (sortedAnnouncements.isNotEmpty()) {
             SectionCard(
                 title = "Announcements",
                 subtitle = "Latest updates from the app team."
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    topAnnouncements.forEach { a ->
-                        ElevatedCard(
-                            colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
-                        ) {
-                            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Text(a.title.ifBlank { "Announcement" }, style = MaterialTheme.typography.titleSmall)
-                                Text(
-                                    a.body.ifBlank { "" },
-                                    style = MaterialTheme.typography.bodyMedium
-                                )
-                            }
-                        }
+                    sortedAnnouncements.forEach { a ->
+                        key(a.id) { AnnouncementCard(a) }
                     }
                 }
             }
