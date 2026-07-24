@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.ClickableText
 import androidx.compose.material.icons.Icons
@@ -43,6 +44,7 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 
@@ -97,7 +99,7 @@ fun RichDocRenderer(
                     }
                 }
                 is RichBlock.Image -> RichImage(block.url, mediaScope)
-                is RichBlock.Video -> RichVideoPlaceholder(block)
+                is RichBlock.Video -> RichVideo(block)
                 is RichBlock.Callout -> RichCallout(block)
                 RichBlock.Divider -> Divider(
                     color = MaterialTheme.colorScheme.outlineVariant
@@ -225,14 +227,27 @@ private fun RichImage(url: String, scope: RichMediaStore.Scope) {
 }
 
 /**
- * Inert video placeholder for Phase 1 — poster (if any) + a play glyph + a "Video"
- * label. Real tap-to-play with audio (built-in VideoView, single active player)
- * lands in Phase 5.
+ * Process-scoped "which video is playing" token so only ONE video plays at a time
+ * (Phase 5). Starting a video sets [playingKey] to that card's token; every other
+ * RichVideo observes it and drops back to its poster (releasing its player).
+ */
+private object ActiveVideoState {
+    var playingKey by mutableStateOf<Any?>(null)
+}
+
+/**
+ * Video block (Phase 5): poster + play button; tap plays inline WITH AUDIO via the
+ * built-in VideoView (zero dependencies). Single active player — a new play stops
+ * any other. The player is released when it leaves the composition (onRelease) or
+ * another video takes over.
  */
 @Composable
-private fun RichVideoPlaceholder(block: RichBlock.Video) {
+private fun RichVideo(block: RichBlock.Video) {
     val ctx = LocalContext.current
+    val token = remember(block.url) { Any() }
+    val playing = ActiveVideoState.playingKey === token
     val posterModel = block.poster?.let { RichMediaStore.resolve(ctx, it) ?: it }
+
     Surface(
         shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -241,36 +256,46 @@ private fun RichVideoPlaceholder(block: RichBlock.Video) {
         Box(
             Modifier
                 .fillMaxWidth()
-                .heightIn(min = 180.dp),
+                .heightIn(min = 200.dp),
             contentAlignment = Alignment.Center
         ) {
-            if (posterModel != null) {
-                coil.compose.AsyncImage(
-                    model = posterModel,
-                    contentDescription = null,
-                    contentScale = ContentScale.FillWidth,
-                    modifier = Modifier.fillMaxWidth()
+            if (playing && block.url.isNotBlank()) {
+                AndroidView(
+                    factory = { c ->
+                        android.widget.VideoView(c).apply {
+                            setVideoURI(android.net.Uri.parse(block.url))
+                            setOnPreparedListener { mp -> mp.isLooping = false; start() }
+                            setOnCompletionListener { ActiveVideoState.playingKey = null }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 200.dp),
+                    onRelease = { runCatching { it.stopPlayback() } }
                 )
-            }
-            Icon(
-                Icons.Filled.PlayCircle,
-                contentDescription = "Video",
-                tint = Color.White.copy(alpha = 0.92f),
-                modifier = Modifier.size(56.dp)
-            )
-            Surface(
-                shape = RoundedCornerShape(6.dp),
-                color = Color.Black.copy(alpha = 0.45f),
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .padding(8.dp)
-            ) {
-                Text(
-                    "Video",
-                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color.White
-                )
+            } else {
+                if (posterModel != null) {
+                    coil.compose.AsyncImage(
+                        model = posterModel,
+                        contentDescription = null,
+                        contentScale = ContentScale.FillWidth,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+                Surface(
+                    shape = CircleShape,
+                    color = Color.Black.copy(alpha = 0.45f),
+                    modifier = Modifier
+                        .size(64.dp)
+                        .clickable { if (block.url.isNotBlank()) ActiveVideoState.playingKey = token }
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            Icons.Filled.PlayCircle,
+                            contentDescription = "Play",
+                            tint = Color.White,
+                            modifier = Modifier.size(48.dp)
+                        )
+                    }
+                }
             }
         }
     }

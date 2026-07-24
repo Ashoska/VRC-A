@@ -77,12 +77,10 @@ private fun extFor(ctx: Context, uri: Uri): String {
  * GitHub's own error text on failure so a token/permission problem is diagnosable
  * on-device (the release PAT needs Contents:write on the image-store repo).
  */
-internal suspend fun githubUploadImage(ctx: Context, uri: Uri, pat: String): String =
+/** Uploads raw bytes to the image-store repo under a unique `rich/rich_<ts>.<ext>`. */
+private suspend fun uploadBytesToImageStore(bytes: ByteArray, ext: String, pat: String): String =
     withContext(Dispatchers.IO) {
         if (pat.isBlank()) throw Exception("GitHub token missing in this build.")
-        val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-            ?: throw Exception("Could not read the selected image.")
-        val ext = extFor(ctx, uri)
         val fileName = "rich_${System.currentTimeMillis()}.$ext"   // unique — never overwrite
         val path = "rich/$fileName"
         val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
@@ -93,8 +91,8 @@ internal suspend fun githubUploadImage(ctx: Context, uri: Uri, pat: String): Str
         }.toString()
         val client = OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(120, TimeUnit.SECONDS)
-            .writeTimeout(120, TimeUnit.SECONDS)
+            .readTimeout(180, TimeUnit.SECONDS)
+            .writeTimeout(180, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build()
         val req = Request.Builder()
@@ -111,9 +109,20 @@ internal suspend fun githubUploadImage(ctx: Context, uri: Uri, pat: String): Str
         if (code in 200..299) {
             "https://cdn.jsdelivr.net/gh/$IMG_REPO_OWNER/$IMG_REPO_NAME@$IMG_REPO_BRANCH/$path"
         } else {
-            throw Exception("Image upload failed ($code): ${body.take(300)}")
+            throw Exception("Upload failed ($code): ${body.take(300)}")
         }
     }
+
+internal suspend fun githubUploadImage(ctx: Context, uri: Uri, pat: String): String =
+    withContext(Dispatchers.IO) {
+        val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            ?: throw Exception("Could not read the selected image.")
+        uploadBytesToImageStore(bytes, extFor(ctx, uri), pat)
+    }
+
+/** Uploads an already-transcoded (or raw) video's bytes as `.mp4`. */
+internal suspend fun githubUploadVideoBytes(bytes: ByteArray, pat: String): String =
+    uploadBytesToImageStore(bytes, "mp4", pat)
 
 @Composable
 internal fun RichDocEditor(
@@ -124,6 +133,7 @@ internal fun RichDocEditor(
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var pendingImageIndex by remember { mutableIntStateOf(-1) }
+    var pendingVideoIndex by remember { mutableIntStateOf(-1) }
     var uploadingIndex by remember { mutableIntStateOf(-1) }
     var uploadError by remember { mutableStateOf<String?>(null) }
 
@@ -141,6 +151,42 @@ internal fun RichDocEditor(
                         }
                     }
                     .onFailure { uploadError = it.message ?: "Upload failed" }
+                uploadingIndex = -1
+            }
+        }
+    }
+
+    val videoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        val idx = pendingVideoIndex
+        pendingVideoIndex = -1
+        if (uri != null && idx in blocks.indices) {
+            scope.launch {
+                uploadError = null
+                uploadingIndex = idx
+                runCatching {
+                    // Admin build transcodes to small HEVC; public stub returns null →
+                    // fall back to the raw file. The size guard keeps us under jsDelivr's cap.
+                    val transcoded = transcodeVideoForUpload(ctx, uri)
+                    val bytes = if (transcoded != null) {
+                        val b = transcoded.readBytes(); runCatching { transcoded.delete() }; b
+                    } else {
+                        ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                            ?: throw Exception("Could not read the selected video.")
+                    }
+                    if (bytes.size > 19_000_000) {
+                        throw Exception(
+                            "Video is ${bytes.size / 1_000_000}MB after compression — keep it " +
+                                "shorter (jsDelivr limit ~20MB) or paste a URL instead."
+                        )
+                    }
+                    githubUploadVideoBytes(bytes, githubPat)
+                }
+                    .onSuccess { url ->
+                        if (idx in blocks.indices) {
+                            (blocks[idx] as? RichBlock.Video)?.let { blocks[idx] = it.copy(url = url) }
+                        }
+                    }
+                    .onFailure { uploadError = it.message ?: "Video upload failed" }
                 uploadingIndex = -1
             }
         }
@@ -164,7 +210,8 @@ internal fun RichDocEditor(
                 },
                 onDuplicate = { blocks.add(index + 1, block) },
                 onDelete = { if (index in blocks.indices) blocks.removeAt(index) },
-                onPickImage = { pendingImageIndex = index; picker.launch("image/*") }
+                onPickImage = { pendingImageIndex = index; picker.launch("image/*") },
+                onPickVideo = { pendingVideoIndex = index; videoPicker.launch("video/*") }
             )
         }
 
@@ -235,7 +282,8 @@ private fun BlockCard(
     onMoveDown: () -> Unit,
     onDuplicate: () -> Unit,
     onDelete: () -> Unit,
-    onPickImage: () -> Unit
+    onPickImage: () -> Unit,
+    onPickVideo: () -> Unit
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
@@ -325,8 +373,20 @@ private fun BlockCard(
                         block.poster ?: "", { onChange(block.copy(poster = it.ifBlank { null })) },
                         Modifier.fillMaxWidth(), label = { Text("Poster image URL, optional") }, singleLine = true
                     )
+                    Button(onClick = onPickVideo, enabled = !uploading) {
+                        if (uploading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onPrimary
+                            )
+                            Spacer(Modifier.width(8.dp)); Text("Processing")
+                        } else {
+                            Icon(Icons.Filled.Videocam, null); Spacer(Modifier.width(6.dp)); Text("Pick & upload")
+                        }
+                    }
                     Text(
-                        "Playback with audio ships in a later phase; the app shows a poster for now.",
+                        "Compressed to HEVC on-device before upload. Keep clips short; you can also paste a URL.",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
