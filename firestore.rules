@@ -210,7 +210,7 @@ service cloud.firestore {
 
     match /releases/{docId} {
       allow get:  if true;
-      allow list: if false;
+      allow list: if isOwner();  // owner enumerates for the media-orphan sweep
       allow create, update: if isOwner()
         && request.resource.data.keys().hasOnly([
           "versionCode", "versionName", "downloadUrl",

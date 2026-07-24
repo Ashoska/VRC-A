@@ -33,6 +33,9 @@ import com.vrca.richcontent.RichBlock
 import com.vrca.richcontent.RichDoc
 import com.vrca.richcontent.RichDocRenderer
 import com.vrca.richcontent.RichMediaStore
+import com.vrca.richcontent.resolveRichDoc
+import com.google.firebase.firestore.FirebaseFirestore
+import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -180,6 +183,71 @@ internal suspend fun githubDeleteFileByUrl(url: String, pat: String): Unit =
 internal suspend fun githubDeleteMedia(urls: List<String>, pat: String) {
     for (u in urls) githubDeleteFileByUrl(u, pat)
 }
+
+/**
+ * Full orphan sweep: lists every file in the image-store `rich/` folder and deletes
+ * any whose raw URL isn't referenced by an announcement or release. Returns the count
+ * deleted. Owner-only (lists announcements + releases). Best-effort.
+ */
+internal suspend fun githubSweepOrphans(db: FirebaseFirestore, pat: String): Int =
+    withContext(Dispatchers.IO) {
+        if (pat.isBlank()) return@withContext 0
+        val referenced = HashSet<String>()
+        runCatching {
+            for (d in db.collection("announcements").get().await().documents) {
+                resolveRichDoc(d.getString("bodyDoc"), d.getString("body"))?.mediaUrls()
+                    ?.let { referenced.addAll(it) }
+            }
+        }
+        runCatching {
+            for (d in db.collection("releases").get().await().documents) {
+                resolveRichDoc(d.getString("bodyDoc"), d.getString("notes"))?.mediaUrls()
+                    ?.let { referenced.addAll(it) }
+            }
+        }
+        try {
+            val client = OkHttpClient.Builder()
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .readTimeout(30, TimeUnit.SECONDS)
+                .build()
+            val listReq = Request.Builder()
+                .url("https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/contents/rich?ref=$IMG_REPO_BRANCH")
+                .header("Authorization", "Bearer $pat")
+                .header("Accept", "application/vnd.github+json")
+                .get()
+                .build()
+            val listResp = client.newCall(listReq).execute()
+            val listBody = listResp.body?.string().orEmpty()
+            val listCode = listResp.code
+            listResp.close()
+            if (listCode != 200) return@withContext 0
+            val arr = org.json.JSONArray(listBody)
+            var deleted = 0
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                if (o.optString("type") != "file") continue
+                val path = o.optString("path")
+                val sha = o.optString("sha")
+                if (path.isBlank() || sha.isBlank()) continue
+                if ("$IMG_RAW_PREFIX$path" in referenced) continue
+                val delPayload = JSONObject().apply {
+                    put("message", "VRC-A sweep: $path"); put("sha", sha); put("branch", IMG_REPO_BRANCH)
+                }.toString()
+                val delReq = Request.Builder()
+                    .url("https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/contents/$path")
+                    .header("Authorization", "Bearer $pat")
+                    .header("Accept", "application/vnd.github+json")
+                    .delete(delPayload.toRequestBody("application/json".toMediaType()))
+                    .build()
+                val r = client.newCall(delReq).execute()
+                if (r.isSuccessful) deleted++
+                r.close()
+            }
+            deleted
+        } catch (_: Exception) {
+            0
+        }
+    }
 
 @Composable
 internal fun RichDocEditor(

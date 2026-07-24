@@ -244,6 +244,18 @@ internal fun AnnouncementsTab(
                         ) { Text("Refresh") }
                     }
                 }
+
+                OutlinedButton(
+                    onClick = {
+                        scope.launch {
+                            setGlobalLoading(true); setError(null)
+                            val n = githubSweepOrphans(db, githubPat)
+                            setGlobalLoading(false)
+                            setError(if (n > 0) "Removed $n unused file(s) from storage." else "No unused files found.")
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("Clean up unused storage") }
             }
         }
 

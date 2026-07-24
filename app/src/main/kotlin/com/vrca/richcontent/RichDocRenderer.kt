@@ -118,7 +118,7 @@ fun RichDocRenderer(
                     }
                 }
                 is RichBlock.Image -> RichImage(block.url, mediaScope)
-                is RichBlock.Video -> RichVideo(block)
+                is RichBlock.Video -> RichVideo(block, mediaScope)
                 is RichBlock.Callout -> RichCallout(block)
                 RichBlock.Divider -> Divider(
                     color = MaterialTheme.colorScheme.outlineVariant
@@ -274,11 +274,20 @@ private object ActiveVideoState {
  * another video takes over.
  */
 @Composable
-private fun RichVideo(block: RichBlock.Video) {
+private fun RichVideo(block: RichBlock.Video, mediaScope: RichMediaStore.Scope) {
     val ctx = LocalContext.current
     val token = remember(block.url) { Any() }
     val playing = ActiveVideoState.playingKey === token
     val posterModel = block.poster?.let { RichMediaStore.resolve(ctx, it) ?: it }
+    // Prefetch the video into the local cache as soon as the card renders, so tapping
+    // play uses a LOCAL file (instant, no buffering) even on a bad connection.
+    var localFile by remember(block.url) { mutableStateOf(RichMediaStore.resolve(ctx, block.url)) }
+    LaunchedEffect(block.url) {
+        if (block.url.isNotBlank() && localFile == null) {
+            RichMediaStore.ensureCached(ctx, block.url, mediaScope)
+            localFile = RichMediaStore.resolve(ctx, block.url)
+        }
+    }
 
     Surface(
         shape = RoundedCornerShape(12.dp),
@@ -294,10 +303,13 @@ private fun RichVideo(block: RichBlock.Video) {
             if (playing && block.url.isNotBlank()) {
                 var prepared by remember(block.url) { mutableStateOf(false) }
                 var failed by remember(block.url) { mutableStateOf(false) }
+                val lf = localFile
+                val playUri = if (lf != null) android.net.Uri.fromFile(lf)
+                    else android.net.Uri.parse(block.url)
                 AndroidView(
                     factory = { c ->
                         android.widget.VideoView(c).apply {
-                            setVideoURI(android.net.Uri.parse(block.url))
+                            setVideoURI(playUri)
                             setOnPreparedListener { mp -> prepared = true; mp.isLooping = false; start() }
                             setOnCompletionListener { ActiveVideoState.playingKey = null }
                             setOnErrorListener { _, _, _ -> failed = true; true }
@@ -306,9 +318,9 @@ private fun RichVideo(block: RichBlock.Video) {
                     modifier = Modifier.fillMaxWidth().heightIn(min = 200.dp),
                     onRelease = { runCatching { it.stopPlayback() } }
                 )
-                // Buffering feedback (matters on slow connections — progressive play
-                // starts before the whole file arrives).
-                if (!prepared && !failed) {
+                // A local (pre-cached) file plays instantly; the spinner only shows if the
+                // prefetch hadn't finished and we had to fall back to streaming.
+                if (!prepared && !failed && lf == null) {
                     CircularProgressIndicator(color = Color.White, modifier = Modifier.size(36.dp))
                 }
                 if (failed) {
