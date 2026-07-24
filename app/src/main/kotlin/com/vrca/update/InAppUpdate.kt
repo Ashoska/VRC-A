@@ -27,7 +27,9 @@ data class ReleaseInfo(
     val versionName: String,
     val downloadUrl: String,
     val requiredMinCode: Long,
-    val notes: String
+    val notes: String,
+    /** Rich-content JSON (Phase 2). Blank on legacy docs → falls back to [notes]. */
+    val bodyDoc: String = ""
 )
 
 sealed class ReleaseCheckResult {
@@ -47,6 +49,7 @@ private fun parseReleaseSnap(
     val downloadUrl = snap.getString("downloadUrl").orEmpty()
     val requiredMin = snap.getLong("requiredMinCode") ?: 0L
     val notes       = snap.getString("notes").orEmpty()
+    val bodyDoc     = snap.getString("bodyDoc").orEmpty()
 
     if (downloadUrl.isBlank() || latestCode <= currentVersionCode) return null
 
@@ -55,7 +58,8 @@ private fun parseReleaseSnap(
         versionName     = versionName,
         downloadUrl     = downloadUrl,
         requiredMinCode = requiredMin,
-        notes           = notes
+        notes           = notes,
+        bodyDoc         = bodyDoc
     )
     // ALL updates are forced — both global (releases/latest) and directed
     // (releases/{deviceHash}). Any newer versionCode hard-walls the user until

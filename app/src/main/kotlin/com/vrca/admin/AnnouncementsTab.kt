@@ -13,7 +13,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Campaign
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -44,6 +46,9 @@ import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.SetOptions
+import com.vrca.richcontent.RichBlock
+import com.vrca.richcontent.RichDoc
+import com.vrca.richcontent.resolveRichDoc
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 
@@ -53,6 +58,7 @@ internal data class AnnouncementRow(
     val body: String,
     val active: Boolean,
     val priority: Int,
+    val bodyDoc: String,
     val createdAt: Timestamp?
 )
 
@@ -65,16 +71,32 @@ internal fun AnnouncementsTab(
 ) {
     val scope = rememberCoroutineScope()
     val announcements = remember { mutableStateListOf<AnnouncementRow>() }
+    val githubPat = BuildConfig.GITHUB_PAT
 
     var newTitle by rememberSaveable { mutableStateOf("") }
-    var newBody by rememberSaveable { mutableStateOf("") }
     var newActive by rememberSaveable { mutableStateOf(true) }
     var newPriority by rememberSaveable { mutableIntStateOf(0) }
+    var editingId by rememberSaveable { mutableStateOf<String?>(null) }
+    // The rich body being authored. One write; media on GitHub; zero Firestore reads.
+    val blocks = remember { mutableStateListOf<RichBlock>() }
+
+    fun resetForm() {
+        newTitle = ""; newActive = true; newPriority = 0
+        editingId = null; blocks.clear()
+    }
+
+    fun loadIntoEditor(a: AnnouncementRow, asCopy: Boolean) {
+        newTitle = a.title
+        newActive = a.active
+        newPriority = a.priority
+        blocks.clear()
+        resolveRichDoc(a.bodyDoc, a.body)?.let { blocks.addAll(it.blocks) }
+        editingId = if (asCopy) null else a.id
+    }
 
     suspend fun refresh() {
         setGlobalLoading(true)
         setError(null)
-
         runCatching {
             val snap = db.collection("announcements")
                 .orderBy("createdAt", Query.Direction.DESCENDING)
@@ -91,11 +113,11 @@ internal fun AnnouncementsTab(
                         body = (d.getString("body") ?: "").trim(),
                         active = d.getBoolean("active") ?: true,
                         priority = (d.getLong("priority") ?: 0L).toInt(),
+                        bodyDoc = d.getString("bodyDoc") ?: "",
                         createdAt = d.getTimestamp("createdAt")
                     )
                 )
             }
-
             setGlobalLoading(false)
         }.onFailure { e ->
             setGlobalLoading(false)
@@ -116,7 +138,10 @@ internal fun AnnouncementsTab(
                 Modifier.padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                AdminCardHeader("Announcements", Icons.Filled.Campaign, AdminTone.Info)
+                AdminCardHeader(
+                    if (editingId == null) "Announcements" else "Editing announcement",
+                    Icons.Filled.Campaign, AdminTone.Info
+                )
 
                 OutlinedTextField(
                     value = newTitle,
@@ -126,13 +151,7 @@ internal fun AnnouncementsTab(
                     label = { Text("Title") }
                 )
 
-                OutlinedTextField(
-                    value = newBody,
-                    onValueChange = { newBody = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    minLines = 3,
-                    label = { Text("Body") }
-                )
+                RichDocEditor(blocks = blocks, githubPat = githubPat)
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -161,39 +180,64 @@ internal fun AnnouncementsTab(
                             scope.launch {
                                 setGlobalLoading(true)
                                 setError(null)
-
                                 runCatching {
-                                    val data = hashMapOf(
+                                    val doc = RichDoc(blocks = blocks.toList())
+                                    val bodyDocJson = if (doc.blocks.isEmpty()) "" else doc.toJson()
+                                    val plain = doc.toPlainText()
+                                    val data = hashMapOf<String, Any>(
                                         "title" to newTitle.trim(),
-                                        "body" to newBody.trim(),
+                                        "body" to plain,
+                                        "bodyDoc" to bodyDocJson,
                                         "active" to newActive,
                                         "priority" to newPriority,
-                                        "createdAt" to FieldValue.serverTimestamp(),
                                         "updatedAt" to FieldValue.serverTimestamp(),
                                         "createdByDevice" to createdByDevice,
                                         "createdByAppId" to BuildConfig.APPLICATION_ID
                                     )
-                                    db.collection("announcements").add(data).await()
-
-                                    newTitle = ""
-                                    newBody = ""
-                                    newActive = true
-                                    newPriority = 0
-                                    refresh()
+                                    val target = editingId
+                                    if (target == null) {
+                                        // ONE write. No re-read — optimistically prepend the row.
+                                        data["createdAt"] = FieldValue.serverTimestamp()
+                                        val ref = db.collection("announcements").add(data).await()
+                                        announcements.add(
+                                            0,
+                                            AnnouncementRow(
+                                                ref.id, newTitle.trim(), plain, newActive,
+                                                newPriority, bodyDocJson, Timestamp.now()
+                                            )
+                                        )
+                                    } else {
+                                        db.collection("announcements").document(target)
+                                            .set(data, SetOptions.merge()).await()
+                                        val idx = announcements.indexOfFirst { it.id == target }
+                                        if (idx >= 0) announcements[idx] = announcements[idx].copy(
+                                            title = newTitle.trim(), body = plain, bodyDoc = bodyDocJson,
+                                            active = newActive, priority = newPriority
+                                        )
+                                    }
+                                    resetForm()
+                                    setGlobalLoading(false)
                                 }.onFailure { e ->
                                     setGlobalLoading(false)
                                     setError(e.message ?: "Failed to publish")
                                 }
                             }
                         },
-                        enabled = newTitle.trim().isNotBlank() && newBody.trim().isNotBlank(),
+                        enabled = newTitle.trim().isNotBlank() && blocks.isNotEmpty(),
                         modifier = Modifier.weight(1f)
-                    ) { Text("Publish") }
+                    ) { Text(if (editingId == null) "Publish" else "Update") }
 
-                    OutlinedButton(
-                        onClick = { scope.launch { refresh() } },
-                        modifier = Modifier.weight(1f)
-                    ) { Text("Refresh") }
+                    if (editingId != null) {
+                        OutlinedButton(
+                            onClick = { resetForm() },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Cancel") }
+                    } else {
+                        OutlinedButton(
+                            onClick = { scope.launch { refresh() } },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Refresh") }
+                    }
                 }
             }
         }
@@ -220,6 +264,7 @@ internal fun AnnouncementsTab(
                                     StatusPill(if (a.active) "LIVE" else "DRAFT",
                                         if (a.active) AdminTone.Success else AdminTone.Neutral)
                                     StatusPill("P${a.priority}", AdminTone.Info)
+                                    if (a.bodyDoc.isNotBlank()) StatusPill("RICH", AdminTone.Primary)
                                 }
                                 Text(
                                     formatTimestamp(a.createdAt),
@@ -236,7 +281,9 @@ internal fun AnnouncementsTab(
                                         setError(null)
                                         runCatching {
                                             db.collection("announcements").document(a.id).delete().await()
-                                            refresh()
+                                            announcements.removeAll { it.id == a.id }
+                                            if (editingId == a.id) resetForm()
+                                            setGlobalLoading(false)
                                         }.onFailure { e ->
                                             setGlobalLoading(false)
                                             setError(e.message ?: "Failed to delete announcement")
@@ -250,6 +297,23 @@ internal fun AnnouncementsTab(
 
                         if (a.body.isNotBlank()) {
                             Text(a.body, style = MaterialTheme.typography.bodyMedium)
+                        }
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            OutlinedButton(
+                                onClick = { loadIntoEditor(a, asCopy = false) },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(Icons.Filled.Edit, null, modifier = Modifier.height(16.dp))
+                                Spacer(Modifier.height(0.dp)); Text(" Edit")
+                            }
+                            OutlinedButton(
+                                onClick = { loadIntoEditor(a, asCopy = true) },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(Icons.Filled.ContentCopy, null, modifier = Modifier.height(16.dp))
+                                Text(" Copy")
+                            }
                         }
 
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -268,7 +332,9 @@ internal fun AnnouncementsTab(
                                                     SetOptions.merge()
                                                 )
                                                 .await()
-                                            refresh()
+                                            val idx = announcements.indexOfFirst { it.id == a.id }
+                                            if (idx >= 0) announcements[idx] = announcements[idx].copy(active = !a.active)
+                                            setGlobalLoading(false)
                                         }.onFailure { e ->
                                             setGlobalLoading(false)
                                             setError(e.message ?: "Failed to toggle active")
@@ -284,23 +350,26 @@ internal fun AnnouncementsTab(
                                         setGlobalLoading(true)
                                         setError(null)
                                         runCatching {
+                                            val next = a.priority - 1
                                             db.collection("announcements").document(a.id)
                                                 .set(
                                                     mapOf(
-                                                        "priority" to (a.priority - 1),
+                                                        "priority" to next,
                                                         "updatedAt" to FieldValue.serverTimestamp()
                                                     ),
                                                     SetOptions.merge()
                                                 )
                                                 .await()
-                                            refresh()
+                                            val idx = announcements.indexOfFirst { it.id == a.id }
+                                            if (idx >= 0) announcements[idx] = announcements[idx].copy(priority = next)
+                                            setGlobalLoading(false)
                                         }.onFailure { e ->
                                             setGlobalLoading(false)
                                             setError(e.message ?: "Failed to change priority")
                                         }
                                     }
                                 }
-                            ) { Text("Priority -") }
+                            ) { Text("P-") }
 
                             OutlinedButton(
                                 onClick = {
@@ -308,23 +377,26 @@ internal fun AnnouncementsTab(
                                         setGlobalLoading(true)
                                         setError(null)
                                         runCatching {
+                                            val next = a.priority + 1
                                             db.collection("announcements").document(a.id)
                                                 .set(
                                                     mapOf(
-                                                        "priority" to (a.priority + 1),
+                                                        "priority" to next,
                                                         "updatedAt" to FieldValue.serverTimestamp()
                                                     ),
                                                     SetOptions.merge()
                                                 )
                                                 .await()
-                                            refresh()
+                                            val idx = announcements.indexOfFirst { it.id == a.id }
+                                            if (idx >= 0) announcements[idx] = announcements[idx].copy(priority = next)
+                                            setGlobalLoading(false)
                                         }.onFailure { e ->
                                             setGlobalLoading(false)
                                             setError(e.message ?: "Failed to change priority")
                                         }
                                     }
                                 }
-                            ) { Text("Priority +") }
+                            ) { Text("P+") }
                         }
                     }
                 }

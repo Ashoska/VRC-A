@@ -38,6 +38,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -52,6 +53,8 @@ import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
 import com.vrca.BuildConfig
+import com.vrca.richcontent.RichBlock
+import com.vrca.richcontent.RichDoc
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
@@ -339,6 +342,7 @@ internal fun ReleasesTab(
     // ---- optional fields ----
     var editRequiredMin by rememberSaveable { mutableStateOf("") }
     var editNotes       by rememberSaveable { mutableStateOf("") }
+    val releaseBlocks = remember { mutableStateListOf<RichBlock>() }
 
     // ---- upload state ----
     var uploadPhase     by remember { mutableStateOf("") }
@@ -408,6 +412,12 @@ internal fun ReleasesTab(
                 val fileName = "chatbox-vrc-a-${relName}.apk"
                     .replace(Regex("[^a-zA-Z0-9._-]"), "_")
 
+                // Rich in-app notes (Phase 3): one doc, media on GitHub. notes is the
+                // plaintext fallback for the GitHub release body + legacy/old clients.
+                val releaseDoc = RichDoc(blocks = releaseBlocks.toList())
+                val bodyDocJson = if (releaseDoc.blocks.isEmpty()) "" else releaseDoc.toJson()
+                val notesPlain = editNotes.trim().ifBlank { releaseDoc.toPlainText() }
+
                 // Step 1: create GitHub release
                 uploadPhase = "Creating GitHub release..."
                 val release = githubCreateRelease(
@@ -416,7 +426,7 @@ internal fun ReleasesTab(
                     pat         = githubPat,
                     tagName     = tagName,
                     releaseName = relName,
-                    body        = editNotes.trim().ifBlank { "Release $relName" }
+                    body        = notesPlain.ifBlank { "Release $relName" }
                 )
 
                 // Step 2: upload APK asset with progress
@@ -436,7 +446,8 @@ internal fun ReleasesTab(
                     "versionName"       to parsedName,
                     "downloadUrl"       to downloadUrl,
                     "requiredMinCode"   to (editRequiredMin.toLongOrNull() ?: 0L),
-                    "notes"             to editNotes.trim(),
+                    "notes"             to notesPlain,
+                    "bodyDoc"           to bodyDocJson,
                     "publishedAt"       to FieldValue.serverTimestamp(),
                     "publishedByDevice" to BuildConfig.APPLICATION_ID
                 )
@@ -451,6 +462,7 @@ internal fun ReleasesTab(
                 // clean up temp file
                 runCatching { apkFile.delete() }
                 cachedApkPath = ""; pickedFileName = ""; parsedCode = 0L; parsedName = ""
+                releaseBlocks.clear()
 
             }.onFailure { e ->
                 setError(e.message ?: "Upload failed")
@@ -610,9 +622,16 @@ internal fun ReleasesTab(
                         value = editNotes,
                         onValueChange = { editNotes = it },
                         modifier = Modifier.fillMaxWidth(), minLines = 3,
-                        label = { Text("Release notes (optional)") },
+                        label = { Text("Plain release notes (GitHub + legacy clients)") },
                         enabled = !uploading
                     )
+
+                    Text(
+                        "Rich in-app notes (optional) — shown in the update popup and What's New",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    RichDocEditor(blocks = releaseBlocks, githubPat = githubPat)
 
                     if (uploading) {
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {

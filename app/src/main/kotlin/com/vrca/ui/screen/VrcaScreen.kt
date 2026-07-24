@@ -37,6 +37,9 @@ import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Gavel
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Settings
@@ -183,6 +186,7 @@ internal data class AnnouncementUi(
     val body: String,
     val active: Boolean,
     val priority: Int,
+    val bodyDoc: String,
     val createdAt: Timestamp?
 )
 
@@ -307,6 +311,7 @@ fun VrcaScreen(
                         body = d.getString("body") ?: "",
                         active = d.getBoolean("active") ?: true,
                         priority = (d.getLong("priority") ?: 0L).toInt(),
+                        bodyDoc = d.getString("bodyDoc") ?: "",
                         createdAt = d.getTimestamp("createdAt")
                     )
                 }.sortedWith(
@@ -315,6 +320,22 @@ fun VrcaScreen(
                 )
             }
         onDispose { reg.remove() }
+    }
+
+    // Announcement rich media: prefetch into the ann/ cache and cull anything no
+    // longer referenced by an active announcement (an admin removing/swapping media
+    // frees the user's storage on the next snapshot). Zero Firestore cost.
+    LaunchedEffect(announcements) {
+        com.vrca.ui.common.AnnouncementSeenState.ensureLoaded(ctx)
+        val urls = announcements.flatMap {
+            com.vrca.richcontent.resolveRichDoc(it.bodyDoc, it.body)?.mediaUrls() ?: emptyList()
+        }
+        urls.forEach {
+            com.vrca.richcontent.RichMediaStore.ensureCachedAsync(
+                ctx, it, com.vrca.richcontent.RichMediaStore.Scope.ANNOUNCEMENT
+            )
+        }
+        com.vrca.richcontent.RichMediaStore.gcAnnouncements(ctx, urls.toSet())
     }
 
     // --- Moderation state comes from ViewModel ---
@@ -1022,8 +1043,8 @@ internal fun VrchatStatusBanner() {
                     }
                 }
                 Icon(
-                    imageVector = if (StatusBannerState.expanded) Icons.Filled.KeyboardArrowUp
-                        else Icons.Filled.KeyboardArrowDown,
+                    imageVector = if (StatusBannerState.expanded) Icons.Filled.ExpandLess
+                        else Icons.Filled.ExpandMore,
                     contentDescription = if (StatusBannerState.expanded) "Collapse" else "Expand",
                     tint = onContainerColor,
                     modifier = Modifier.size(20.dp)
@@ -1134,18 +1155,29 @@ internal fun VrchatStatusBanner() {
                         shape = MaterialTheme.shapes.small,
                         color = innerCardColor,
                         shadowElevation = 1.dp,
-                        modifier = Modifier.clickable {
+                        modifier = Modifier.fillMaxWidth().clickable {
                             val intent = Intent(Intent.ACTION_VIEW,
                                 Uri.parse("https://status.vrchat.com"))
                             ctx.startActivity(intent)
                         }
                     ) {
-                        Text(
-                            "View VRChat Status Page",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = onContainerColor,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
-                        )
+                        Row(
+                            Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.OpenInNew,
+                                contentDescription = null,
+                                tint = onContainerColor,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                "View VRChat Status Page",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = onContainerColor
+                            )
+                        }
                     }
                 }
             }

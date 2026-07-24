@@ -70,6 +70,10 @@ import com.vrca.ui.viewmodel.VrcaViewModel
 import com.vrca.update.ReleaseCheckResult
 import com.vrca.update.ReleaseInfo
 import com.vrca.update.checkFirestoreRelease
+import com.vrca.richcontent.RichDocRenderer
+import com.vrca.richcontent.RichMediaStore
+import com.vrca.richcontent.WhatsNewStore
+import com.vrca.richcontent.resolveRichDoc
 import com.vrca.vrchat.VrchatAuthManager
 import com.vrca.vrchat.VrchatBanChecker
 import com.vrca.vrchat.VrchatPipelineService
@@ -412,7 +416,8 @@ fun VrcaApp() {
                             versionName     = snap.getString("versionName").orEmpty(),
                             downloadUrl     = url,
                             requiredMinCode = snap.getLong("requiredMinCode") ?: 0L,
-                            notes           = snap.getString("notes").orEmpty()
+                            notes           = snap.getString("notes").orEmpty(),
+                            bodyDoc         = snap.getString("bodyDoc").orEmpty()
                         )
                         // All directed releases are forced automatically.
                         releaseCheckResult = ReleaseCheckResult.UpdateAvailable(
@@ -437,6 +442,17 @@ fun VrcaApp() {
                 val url = snap.getString("downloadUrl").orEmpty()
                 if (url.isBlank()) return@addSnapshotListener
                 val code = snap.getLong("versionCode") ?: return@addSnapshotListener
+                // Cache patch notes for the currently-installed version so Settings →
+                // What's New can show them offline. Zero extra read — this listener
+                // already holds the doc; only the doc describing THIS version matches.
+                if (code == BuildConfig.VERSION_CODE.toLong()) {
+                    WhatsNewStore.cache(
+                        ctx, code,
+                        snap.getString("versionName").orEmpty(),
+                        snap.getString("bodyDoc").orEmpty(),
+                        snap.getString("notes").orEmpty()
+                    )
+                }
                 if (code <= BuildConfig.VERSION_CODE) return@addSnapshotListener
                 val curCode = (releaseCheckResult as? ReleaseCheckResult.UpdateAvailable)?.info?.versionCode ?: 0L
                 if (code <= curCode) return@addSnapshotListener
@@ -446,7 +462,8 @@ fun VrcaApp() {
                         versionName = snap.getString("versionName").orEmpty(),
                         downloadUrl = url,
                         requiredMinCode = snap.getLong("requiredMinCode") ?: 0L,
-                        notes = snap.getString("notes").orEmpty()
+                        notes = snap.getString("notes").orEmpty(),
+                        bodyDoc = snap.getString("bodyDoc").orEmpty()
                     ),
                     forced = true
                 )
@@ -783,7 +800,17 @@ private fun UpdateDialog(
     onDismiss: () -> Unit,
     onDownload: (String) -> Unit
 ) {
-    val noteBlocks = remember(info.notes) { parseTosBlocks(info.notes) }
+    // Rich patch notes (Phase 2): prefer bodyDoc JSON, fall back to legacy `notes`.
+    val doc = remember(info.bodyDoc, info.notes) { resolveRichDoc(info.bodyDoc, info.notes) }
+    // Update-media lifecycle: pull referenced media while the popup is shown, cull
+    // it the moment the dialog leaves the composition (save space).
+    val dialogMediaCtx = LocalContext.current
+    DisposableEffect(doc) {
+        doc?.mediaUrls()?.forEach {
+            RichMediaStore.ensureCachedAsync(dialogMediaCtx, it, RichMediaStore.Scope.UPDATE)
+        }
+        onDispose { RichMediaStore.clearUpdateMedia(dialogMediaCtx) }
+    }
 
     androidx.compose.ui.window.Dialog(
         onDismissRequest = { if (!forced) onDismiss() }
@@ -822,8 +849,10 @@ private fun UpdateDialog(
                     }
                 }
 
-                // Release notes — bounded height + scroll so long logs never clip
-                if (info.notes.isNotBlank()) {
+                // Rich patch notes — bounded height + scroll so long logs never clip.
+                // Admin builds the layout (headings/text/images/etc); block order gives
+                // the "hero image on top" look naturally.
+                if (doc != null) {
                     val screenH = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp
                     Surface(
                         shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
@@ -833,11 +862,11 @@ private fun UpdateDialog(
                         Column(
                             Modifier
                                 .fillMaxWidth()
-                                .heightIn(max = (screenH * 0.45f).dp)
+                                .heightIn(max = (screenH * 0.5f).dp)
                                 .verticalScroll(rememberScrollState())
                                 .padding(12.dp)
                         ) {
-                            StyledBlocks(noteBlocks)
+                            RichDocRenderer(doc, mediaScope = RichMediaStore.Scope.UPDATE)
                         }
                     }
                 }
