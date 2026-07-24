@@ -4,10 +4,11 @@ import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
 import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
 
 /**
  * On-demand cache for rich-content media (announcement/update images, videos,
@@ -32,6 +33,26 @@ object RichMediaStore {
     private const val ROOT = "rich_media"
 
     enum class Scope(val dirName: String) { ANNOUNCEMENT("ann"), UPDATE("upd") }
+
+    /**
+     * Shared OkHttp client that FOLLOWS REDIRECTS across hosts + protocols. This is
+     * essential: media URLs are GitHub release-download links
+     * (`github.com/.../releases/download/rich-media/<file>`) that 302-redirect to
+     * `objects.githubusercontent.com`. HttpURLConnection would not reliably follow
+     * that cross-host redirect, so a video never cached locally and MediaPlayer
+     * couldn't stream the redirect either. Generous timeouts so a multi-MB video on
+     * a slow connection isn't cut off mid-download.
+     */
+    private val httpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .retryOnConnectionFailure(true)
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .callTimeout(120, TimeUnit.SECONDS)
+            .build()
+    }
 
     private fun root(ctx: Context): File = File(ctx.filesDir, ROOT)
     private fun scopeDir(ctx: Context, scope: Scope): File =
@@ -67,24 +88,29 @@ object RichMediaStore {
             val f = fileFor(ctx, url, scope)
             if (f.exists() && f.length() > 0) return@withContext f
             try {
-                val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-                    requestMethod = "GET"
-                    instanceFollowRedirects = true
-                    connectTimeout = 15_000
-                    readTimeout = 20_000
-                    useCaches = false
-                    setRequestProperty("User-Agent", "VRC-A/1.0")
-                }
-                try {
-                    if (conn.responseCode != 200) {
-                        Log.w(TAG, "download ${conn.responseCode} for ${url.take(80)}")
+                val req = Request.Builder()
+                    .url(url)
+                    .header("User-Agent", "VRC-A/1.0")
+                    .header("Accept", "*/*")
+                    .get()
+                    .build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        Log.w(TAG, "download ${resp.code} for ${url.take(80)}")
+                        return@withContext null
+                    }
+                    val body = resp.body ?: run {
+                        Log.w(TAG, "empty body for ${url.take(80)}")
                         return@withContext null
                     }
                     val tmp = File(f.parentFile, "${f.name}.part")
-                    conn.inputStream.use { input -> tmp.outputStream().use { input.copyTo(it) } }
-                    if (tmp.length() > 0 && tmp.renameTo(f)) f else { tmp.delete(); null }
-                } finally {
-                    conn.disconnect()
+                    body.byteStream().use { input -> tmp.outputStream().use { input.copyTo(it) } }
+                    if (tmp.length() > 0 && tmp.renameTo(f)) {
+                        Log.i(TAG, "cached ${tmp.length()}B for ${url.take(80)}")
+                        f
+                    } else {
+                        tmp.delete(); null
+                    }
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "download failed for ${url.take(80)}", e)

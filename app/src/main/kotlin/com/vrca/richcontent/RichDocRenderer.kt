@@ -32,6 +32,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -69,7 +70,16 @@ import androidx.compose.ui.window.DialogProperties
 private var richGifLoader: coil.ImageLoader? = null
 private val richGifLoaderLock = Any()
 
-/** Coil loader with the GIF decoder registered, so uploaded .gif images animate. */
+/**
+ * Coil loader with the GIF decoder registered, so uploaded .gif images animate.
+ *
+ * `allowHardware(false)` is REQUIRED for reliable GIF animation: a hardware-backed
+ * `AnimatedImageDrawable` doesn't push its per-frame invalidations to Compose's
+ * software canvas on many devices, so the GIF only advances when some other redraw
+ * happens (scroll / touch) — the reported "only animates while I'm touching the
+ * screen" bug. Software bitmaps invalidate correctly. Thumbnails are small, so the
+ * extra memory is negligible.
+ */
 private fun richImageLoader(ctx: Context): coil.ImageLoader =
     richGifLoader ?: synchronized(richGifLoaderLock) {
         richGifLoader ?: coil.ImageLoader.Builder(ctx.applicationContext)
@@ -77,6 +87,7 @@ private fun richImageLoader(ctx: Context): coil.ImageLoader =
                 if (android.os.Build.VERSION.SDK_INT >= 28) add(coil.decode.ImageDecoderDecoder.Factory())
                 else add(coil.decode.GifDecoder.Factory())
             }
+            .allowHardware(false)
             .build()
             .also { richGifLoader = it }
     }
@@ -341,18 +352,23 @@ private fun RichVideo(block: RichBlock.Video, mediaScope: RichMediaStore.Scope) 
                 val lf = localFile
                 val playUri = if (lf != null) android.net.Uri.fromFile(lf)
                     else android.net.Uri.parse(block.url)
-                AndroidView(
-                    factory = { c ->
-                        android.widget.VideoView(c).apply {
-                            setVideoURI(playUri)
-                            setOnPreparedListener { mp -> prepared = true; mp.isLooping = false; start() }
-                            setOnCompletionListener { ActiveVideoState.playingKey = null }
-                            setOnErrorListener { _, _, _ -> failed = true; true }
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 200.dp),
-                    onRelease = { runCatching { it.stopPlayback() } }
-                )
+                // Key on the URI so a late-arriving cached file (prefetch finished after
+                // the user tapped play) rebuilds the VideoView onto the local file
+                // instead of staying stuck on a failed stream attempt.
+                key(playUri) {
+                    AndroidView(
+                        factory = { c ->
+                            android.widget.VideoView(c).apply {
+                                setVideoURI(playUri)
+                                setOnPreparedListener { mp -> prepared = true; mp.isLooping = false; start() }
+                                setOnCompletionListener { ActiveVideoState.playingKey = null }
+                                setOnErrorListener { _, _, _ -> failed = true; true }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 200.dp),
+                        onRelease = { runCatching { it.stopPlayback() } }
+                    )
+                }
                 // A local (pre-cached) file plays instantly; the spinner only shows if the
                 // prefetch hadn't finished and we had to fall back to streaming.
                 if (!prepared && !failed && lf == null) {
