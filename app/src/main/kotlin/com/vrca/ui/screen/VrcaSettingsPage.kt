@@ -3,6 +3,8 @@ package com.vrca.ui.screen
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,6 +13,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -21,6 +24,7 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.NewReleases
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Power
 import androidx.compose.material.icons.filled.Refresh
@@ -32,6 +36,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -41,6 +46,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
@@ -143,7 +149,15 @@ internal fun SettingsPage(
                 subtitle = "Walk through OSC, IP, permissions and notifications again.",
                 primary = "Start"
             ) { com.vrca.ui.onboarding.OnboardingState.replayRequested.value = true }
+            var showWhatsNew by remember { mutableStateOf(false) }
+            SettingsRow(
+                icon = Icons.Filled.NewReleases,
+                title = "What's New",
+                subtitle = "Patch notes for your current version.",
+                primary = "View"
+            ) { showWhatsNew = true }
             StorageRow()
+            if (showWhatsNew) WhatsNewDialog(onDismiss = { showWhatsNew = false })
         }
 
         // -- Notifications (moved here from the VRChat tab — configuration,
@@ -365,6 +379,77 @@ private fun HelpFaqRow(question: String, answer: String) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(bottom = 10.dp)
             )
+        }
+    }
+}
+
+/** Settings → What's New: the installed version's patch notes, offline, via the
+ *  shared rich-content renderer. Media pulls on open, culls on close (upd scope). */
+@Composable
+private fun WhatsNewDialog(onDismiss: () -> Unit) {
+    val ctx = LocalContext.current
+    val whatsNew = remember {
+        com.vrca.richcontent.WhatsNewStore.forVersion(ctx, BuildConfig.VERSION_CODE.toLong())
+    }
+    DisposableEffect(whatsNew) {
+        whatsNew?.doc?.mediaUrls()?.forEach {
+            com.vrca.richcontent.RichMediaStore.ensureCachedAsync(
+                ctx, it, com.vrca.richcontent.RichMediaStore.Scope.UPDATE
+            )
+        }
+        onDispose { com.vrca.richcontent.RichMediaStore.clearUpdateMedia(ctx) }
+    }
+    com.vrca.ui.common.VrcaCardDialog(onDismiss = onDismiss) {
+        Column(
+            Modifier.padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    "What's New",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Surface(
+                    shape = MaterialTheme.shapes.large,
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                ) {
+                    Text(
+                        BuildConfig.VERSION_NAME,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+            val wn = whatsNew
+            if (wn != null) {
+                val screenH = LocalConfiguration.current.screenHeightDp
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = (screenH * 0.55f).dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    com.vrca.richcontent.RichDocRenderer(
+                        wn.doc,
+                        mediaScope = com.vrca.richcontent.RichMediaStore.Scope.UPDATE
+                    )
+                }
+            } else {
+                Text(
+                    "Patch notes for your version will appear here after your next update.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = onDismiss) { Text("Close") }
+            }
         }
     }
 }
