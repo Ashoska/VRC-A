@@ -74,46 +74,86 @@ private fun extFor(ctx: Context, uri: Uri): String {
     }
 }
 
+private const val MEDIA_RELEASE_TAG = "rich-media"
+
+@Volatile
+private var cachedMediaUploadUrl: String? = null
+
+private fun mimeForExt(ext: String): String = when (ext.lowercase()) {
+    "png" -> "image/png"
+    "jpg", "jpeg" -> "image/jpeg"
+    "gif" -> "image/gif"
+    "webp" -> "image/webp"
+    "mp4" -> "video/mp4"
+    else -> "application/octet-stream"
+}
+
 /**
- * Uploads the picked image to `Ashoska/VRC-A-Image-store` via the GitHub Contents
- * API and returns the raw.githubusercontent URL. Unique filename per upload. Throws with
- * GitHub's own error text on failure so a token/permission problem is diagnosable
- * on-device (the release PAT needs Contents:write on the image-store repo).
+ * Ensures the auto-managed `rich-media` release exists in the image-store repo and
+ * returns its asset upload_url template (cached process-wide). Media uploads as
+ * STREAMED release assets (raw bytes) rather than the base64 Contents API — no 33%
+ * base64 inflation, no giant in-memory JSON, and it streams like the fast APK upload
+ * (which is why APK pushes were near-instant while base64 media pushes crawled and
+ * saturated the connection).
  */
-/** Uploads raw bytes to the image-store repo under a unique `rich/rich_<ts>.<ext>`. */
+private suspend fun ensureMediaReleaseUploadUrl(pat: String): String {
+    cachedMediaUploadUrl?.let { return it }
+    return withContext(Dispatchers.IO) {
+        val client = OkHttpClient.Builder()
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .build()
+        val getReq = Request.Builder()
+            .url("https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/releases/tags/$MEDIA_RELEASE_TAG")
+            .header("Authorization", "Bearer $pat")
+            .header("Accept", "application/vnd.github+json")
+            .get()
+            .build()
+        val getResp = client.newCall(getReq).execute()
+        val getBody = getResp.body?.string().orEmpty()
+        val getCode = getResp.code
+        getResp.close()
+        if (getCode == 200) {
+            JSONObject(getBody).getString("upload_url").also { cachedMediaUploadUrl = it }
+        } else {
+            githubCreateRelease(
+                owner = IMG_REPO_OWNER, repo = IMG_REPO_NAME, pat = pat,
+                tagName = MEDIA_RELEASE_TAG, releaseName = "VRC-A Rich Media",
+                body = "Auto-managed rich-content media (images / videos / gifs)."
+            ).uploadUrl.also { cachedMediaUploadUrl = it }
+        }
+    }
+}
+
+/** Uploads raw bytes as a STREAMED release asset; returns the download URL. */
 private suspend fun uploadBytesToImageStore(bytes: ByteArray, ext: String, pat: String): String =
     withContext(Dispatchers.IO) {
         if (pat.isBlank()) throw Exception("GitHub token missing in this build.")
+        val template = ensureMediaReleaseUploadUrl(pat)
         val fileName = "rich_${System.currentTimeMillis()}.$ext"   // unique — never overwrite
-        val path = "rich/$fileName"
-        val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
-        val payload = JSONObject().apply {
-            put("message", "VRC-A rich content: $fileName")
-            put("content", b64)
-            put("branch", IMG_REPO_BRANCH)
-        }.toString()
+        val base = template.substringBefore("{")
+        val url = if (base.contains("?")) "$base&name=$fileName" else "$base?name=$fileName"
         val client = OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(180, TimeUnit.SECONDS)
-            .writeTimeout(180, TimeUnit.SECONDS)
+            .readTimeout(300, TimeUnit.SECONDS)
+            .writeTimeout(300, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build()
         val req = Request.Builder()
-            .url("https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/contents/$path")
+            .url(url)
             .header("Authorization", "Bearer $pat")
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
-            .put(payload.toRequestBody("application/json".toMediaType()))
+            .post(bytes.toRequestBody(mimeForExt(ext).toMediaType()))
             .build()
         val resp = client.newCall(req).execute()
         val body = resp.body?.string().orEmpty()
         val code = resp.code
         resp.close()
         if (code in 200..299) {
-            // raw.githubusercontent serves ANY file type/size (jsDelivr rejected video
-            // even at ~8MB). The client caches locally anyway, so this is the reliable host.
-            "https://raw.githubusercontent.com/$IMG_REPO_OWNER/$IMG_REPO_NAME/$IMG_REPO_BRANCH/$path"
+            JSONObject(body).getString("browser_download_url")
         } else {
+            if (code == 404) cachedMediaUploadUrl = null   // release vanished → recreate next time
             throw Exception("Upload failed ($code): ${body.take(300)}")
         }
     }
@@ -129,28 +169,27 @@ internal suspend fun githubUploadImage(ctx: Context, uri: Uri, pat: String): Str
 internal suspend fun githubUploadVideoBytes(bytes: ByteArray, pat: String): String =
     uploadBytesToImageStore(bytes, "mp4", pat)
 
-private const val IMG_RAW_PREFIX =
-    "https://raw.githubusercontent.com/$IMG_REPO_OWNER/$IMG_REPO_NAME/$IMG_REPO_BRANCH/"
+private const val MEDIA_DL_PREFIX =
+    "https://github.com/$IMG_REPO_OWNER/$IMG_REPO_NAME/releases/download/$MEDIA_RELEASE_TAG/"
 
 /**
- * Deletes a file we uploaded (identified by its raw URL) from the image-store repo,
- * so removed/replaced media doesn't accumulate as orphans. No-op for URLs not hosted
- * in our repo. Best-effort — never throws.
+ * Deletes a media file we uploaded (by its download URL) from the image-store repo's
+ * rich-media release, so removed/replaced media doesn't accumulate as orphans. No-op
+ * for URLs not hosted by us. Best-effort — never throws.
  */
 internal suspend fun githubDeleteFileByUrl(url: String, pat: String): Unit =
     withContext(Dispatchers.IO) {
-        if (pat.isBlank() || !url.startsWith(IMG_RAW_PREFIX)) return@withContext
-        val path = url.removePrefix(IMG_RAW_PREFIX)
-        if (path.isBlank()) return@withContext
+        if (pat.isBlank() || !url.startsWith(MEDIA_DL_PREFIX)) return@withContext
+        val name = url.removePrefix(MEDIA_DL_PREFIX)
+        if (name.isBlank()) return@withContext
         try {
             val client = OkHttpClient.Builder()
                 .connectTimeout(30, TimeUnit.SECONDS)
                 .readTimeout(30, TimeUnit.SECONDS)
                 .build()
-            val contentsUrl = "https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/contents/$path"
-            // 1. GET the file's SHA (required by the delete API).
+            // Find the asset id by name from the release, then delete it.
             val getReq = Request.Builder()
-                .url("$contentsUrl?ref=$IMG_REPO_BRANCH")
+                .url("https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/releases/tags/$MEDIA_RELEASE_TAG")
                 .header("Authorization", "Bearer $pat")
                 .header("Accept", "application/vnd.github+json")
                 .get()
@@ -160,19 +199,18 @@ internal suspend fun githubDeleteFileByUrl(url: String, pat: String): Unit =
             val getCode = getResp.code
             getResp.close()
             if (getCode != 200) return@withContext
-            val sha = JSONObject(getBody).optString("sha")
-            if (sha.isBlank()) return@withContext
-            // 2. DELETE.
-            val delPayload = JSONObject().apply {
-                put("message", "VRC-A remove: $path")
-                put("sha", sha)
-                put("branch", IMG_REPO_BRANCH)
-            }.toString()
+            val assets = JSONObject(getBody).optJSONArray("assets") ?: return@withContext
+            var assetId = -1L
+            for (i in 0 until assets.length()) {
+                val a = assets.optJSONObject(i) ?: continue
+                if (a.optString("name") == name) { assetId = a.optLong("id", -1L); break }
+            }
+            if (assetId < 0) return@withContext
             val delReq = Request.Builder()
-                .url(contentsUrl)
+                .url("https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/releases/assets/$assetId")
                 .header("Authorization", "Bearer $pat")
                 .header("Accept", "application/vnd.github+json")
-                .delete(delPayload.toRequestBody("application/json".toMediaType()))
+                .delete()
                 .build()
             client.newCall(delReq).execute().close()
         } catch (_: Exception) {
@@ -210,34 +248,29 @@ internal suspend fun githubSweepOrphans(db: FirebaseFirestore, pat: String): Int
                 .connectTimeout(30, TimeUnit.SECONDS)
                 .readTimeout(30, TimeUnit.SECONDS)
                 .build()
-            val listReq = Request.Builder()
-                .url("https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/contents/rich?ref=$IMG_REPO_BRANCH")
+            val getReq = Request.Builder()
+                .url("https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/releases/tags/$MEDIA_RELEASE_TAG")
                 .header("Authorization", "Bearer $pat")
                 .header("Accept", "application/vnd.github+json")
                 .get()
                 .build()
-            val listResp = client.newCall(listReq).execute()
-            val listBody = listResp.body?.string().orEmpty()
-            val listCode = listResp.code
-            listResp.close()
-            if (listCode != 200) return@withContext 0
-            val arr = org.json.JSONArray(listBody)
+            val getResp = client.newCall(getReq).execute()
+            val getBody = getResp.body?.string().orEmpty()
+            val getCode = getResp.code
+            getResp.close()
+            if (getCode != 200) return@withContext 0
+            val assets = JSONObject(getBody).optJSONArray("assets") ?: return@withContext 0
             var deleted = 0
-            for (i in 0 until arr.length()) {
-                val o = arr.optJSONObject(i) ?: continue
-                if (o.optString("type") != "file") continue
-                val path = o.optString("path")
-                val sha = o.optString("sha")
-                if (path.isBlank() || sha.isBlank()) continue
-                if ("$IMG_RAW_PREFIX$path" in referenced) continue
-                val delPayload = JSONObject().apply {
-                    put("message", "VRC-A sweep: $path"); put("sha", sha); put("branch", IMG_REPO_BRANCH)
-                }.toString()
+            for (i in 0 until assets.length()) {
+                val a = assets.optJSONObject(i) ?: continue
+                val dlUrl = a.optString("browser_download_url")
+                val assetId = a.optLong("id", -1L)
+                if (dlUrl.isBlank() || assetId < 0 || dlUrl in referenced) continue
                 val delReq = Request.Builder()
-                    .url("https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/contents/$path")
+                    .url("https://api.github.com/repos/$IMG_REPO_OWNER/$IMG_REPO_NAME/releases/assets/$assetId")
                     .header("Authorization", "Bearer $pat")
                     .header("Accept", "application/vnd.github+json")
-                    .delete(delPayload.toRequestBody("application/json".toMediaType()))
+                    .delete()
                     .build()
                 val r = client.newCall(delReq).execute()
                 if (r.isSuccessful) deleted++
