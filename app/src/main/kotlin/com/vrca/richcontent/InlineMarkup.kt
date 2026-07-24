@@ -5,6 +5,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontSynthesis
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withStyle
@@ -60,6 +61,7 @@ fun buildInlineAnnotated(raw: String, linkColor: Color): AnnotatedString = build
     fun styleNow(): SpanStyle = SpanStyle(
         fontWeight = if (bold) FontWeight.Bold else null,
         fontStyle = if (italic) FontStyle.Italic else null,
+        fontSynthesis = FontSynthesis.All,
         color = colorStack.lastOrNull() ?: Color.Unspecified
     )
 
@@ -110,6 +112,7 @@ fun buildInlineAnnotated(raw: String, linkColor: Color): AnnotatedString = build
                         SpanStyle(
                             fontWeight = if (bold) FontWeight.Bold else null,
                             fontStyle = if (italic) FontStyle.Italic else null,
+                            fontSynthesis = FontSynthesis.All,
                             color = color
                         )
                     ) { append(word) }
