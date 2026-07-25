@@ -218,6 +218,77 @@ object AdminRuntime {
         editorSeeded -= key
     }
 
+    // ---- Media upload (runs on the PROCESS scope) -----------------------
+    // The upload MUST run here, not on the editor's composition scope: the file
+    // picker recreates the Activity, which cancels the composition scope mid-upload
+    // → the block never got its URL ("I pick a file but it doesn't appear as
+    // added"). Running on AdminRuntime.scope (process lifetime) means the upload
+    // completes across the recreation and writes the URL straight into the
+    // process-lifetime block list, which the recomposed editor observes. Same
+    // reason the APK copy/parse runs here.
+    enum class MediaKind { IMAGE, GIF, POSTER, VIDEO }
+
+    private val uploadingTags = MutableStateFlow<Set<String>>(emptySet())
+    val uploadingTagsState: StateFlow<Set<String>> get() = uploadingTags.asStateFlow()
+    private val uploadErrors = MutableStateFlow<Map<String, String>>(emptyMap())
+    val uploadErrorsState: StateFlow<Map<String, String>> get() = uploadErrors.asStateFlow()
+
+    fun clearUploadError(editorKey: String, index: Int) {
+        uploadErrors.value = uploadErrors.value - "$editorKey#$index"
+    }
+
+    fun uploadMediaBlock(
+        appContext: Context,
+        editorKey: String,
+        index: Int,
+        uri: Uri,
+        kind: MediaKind,
+        pat: String
+    ) {
+        val tag = "$editorKey#$index"
+        uploadingTags.value = uploadingTags.value + tag
+        uploadErrors.value = uploadErrors.value - tag
+        scope.launch {
+            try {
+                val url = when (kind) {
+                    MediaKind.IMAGE, MediaKind.GIF, MediaKind.POSTER ->
+                        githubUploadImage(appContext, uri, pat)
+                    MediaKind.VIDEO -> {
+                        // Admin build transcodes to small H.264; public stub returns null
+                        // → raw file. Size guard keeps clips small so they cache fast.
+                        val transcoded = transcodeVideoForUpload(appContext, uri)
+                        val bytes = if (transcoded != null) {
+                            val b = transcoded.readBytes(); runCatching { transcoded.delete() }; b
+                        } else {
+                            appContext.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                                ?: throw Exception("Could not read the selected video.")
+                        }
+                        if (bytes.size > 19_000_000) throw Exception(
+                            "Video is ${bytes.size / 1_000_000}MB after compression — please use a " +
+                                "shorter clip so it stays small and loads fast."
+                        )
+                        githubUploadVideoBytes(bytes, pat)
+                    }
+                }
+                val list = editorBlocksFor(editorKey)
+                if (index in list.indices) {
+                    val b = list[index]
+                    list[index] = when {
+                        kind == MediaKind.POSTER && b is com.vrca.richcontent.RichBlock.Video -> b.copy(poster = url)
+                        b is com.vrca.richcontent.RichBlock.Image -> b.copy(url = url)
+                        b is com.vrca.richcontent.RichBlock.Gif -> b.copy(url = url)
+                        b is com.vrca.richcontent.RichBlock.Video -> b.copy(url = url)
+                        else -> b
+                    }
+                }
+            } catch (e: Throwable) {
+                uploadErrors.value = uploadErrors.value + (tag to (e.message ?: "Upload failed"))
+            } finally {
+                uploadingTags.value = uploadingTags.value - tag
+            }
+        }
+    }
+
     private suspend fun runBrowseHeartbeatLoop() {
         var browsingStartedAt = 0L
         while (true) {
