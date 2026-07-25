@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -30,6 +31,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -349,10 +351,11 @@ private object ActiveVideoState {
 
 /**
  * Video block (Phase 5): poster + play button; tap plays inline WITH AUDIO via the
- * built-in VideoView (zero dependencies). Single active player — a new play stops
- * any other. The player is released when it leaves the composition (onRelease) or
- * another video takes over.
+ * Media3 ExoPlayer (reliable inside Compose; VideoView's SurfaceView rendered
+ * black). Single active player — a new play stops any other. The player is released
+ * when it leaves the composition (DisposableEffect) or another video takes over.
  */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
 private fun RichVideo(block: RichBlock.Video, mediaScope: RichMediaStore.Scope) {
     val ctx = LocalContext.current
@@ -387,42 +390,55 @@ private fun RichVideo(block: RichBlock.Video, mediaScope: RichMediaStore.Scope) 
             contentAlignment = Alignment.Center
         ) {
             if (playing && block.url.isNotBlank()) {
-                var prepared by remember(block.url) { mutableStateOf(false) }
-                var failed by remember(block.url) { mutableStateOf(false) }
-                var errCode by remember(block.url) { mutableStateOf("") }
+                var playError by remember(block.url) { mutableStateOf<String?>(null) }
+                var aspect by remember(block.url) { mutableStateOf(16f / 9f) }
                 val lf = localFile
                 val playUri = if (lf != null) android.net.Uri.fromFile(lf)
                     else android.net.Uri.parse(block.url)
-                // Key on the URI so a late-arriving cached file (prefetch finished after
-                // the user tapped play) rebuilds the VideoView onto the local file
-                // instead of staying stuck on a failed stream attempt.
-                key(playUri) {
-                    AndroidView(
-                        factory = { c ->
-                            android.widget.VideoView(c).apply {
-                                setVideoURI(playUri)
-                                setOnPreparedListener { mp -> prepared = true; mp.isLooping = false; start() }
-                                setOnCompletionListener { ActiveVideoState.playingKey = null }
-                                setOnErrorListener { _, what, extra ->
-                                    failed = true; errCode = "what=$what extra=$extra"; true
+                // ExoPlayer (Media3) rendering into a TextureView plays reliably inside
+                // Compose where VideoView's SurfaceView rendered black; onPlayerError
+                // reports the exact reason if anything's still wrong.
+                val exo = remember(playUri) {
+                    androidx.media3.exoplayer.ExoPlayer.Builder(ctx).build().apply {
+                        setMediaItem(androidx.media3.common.MediaItem.fromUri(playUri))
+                        prepare()
+                        playWhenReady = true
+                        addListener(object : androidx.media3.common.Player.Listener {
+                            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                                playError = "${error.errorCodeName} (${error.errorCode})"
+                            }
+                            override fun onVideoSizeChanged(vs: androidx.media3.common.VideoSize) {
+                                if (vs.width > 0 && vs.height > 0) {
+                                    val par = if (vs.pixelWidthHeightRatio > 0f) vs.pixelWidthHeightRatio else 1f
+                                    aspect = (vs.width * par) / vs.height
                                 }
                             }
-                        },
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 200.dp),
-                        onRelease = { runCatching { it.stopPlayback() } }
-                    )
+                            override fun onPlaybackStateChanged(state: Int) {
+                                if (state == androidx.media3.common.Player.STATE_ENDED) {
+                                    ActiveVideoState.playingKey = null
+                                }
+                            }
+                        })
+                    }
                 }
-                // A local (pre-cached) file plays instantly; the spinner only shows if the
-                // prefetch hadn't finished and we had to fall back to streaming.
-                if (!prepared && !failed && lf == null) {
-                    CircularProgressIndicator(color = Color.White, modifier = Modifier.size(36.dp))
-                }
-                if (failed) {
+                DisposableEffect(exo) { onDispose { runCatching { exo.release() } } }
+                AndroidView(
+                    factory = { c ->
+                        android.view.TextureView(c).also { tv -> exo.setVideoTextureView(tv) }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(aspect.coerceIn(0.5f, 2.5f))
+                )
+                playError?.let { err ->
                     Text(
-                        "Couldn't play this video ($errCode) · ${cacheStatus ?: "no cache"} · ${if (lf != null) "local" else "stream"}",
+                        "Couldn't play this video: $err · ${cacheStatus ?: "no cache"} · ${if (lf != null) "local" else "stream"}",
                         color = Color.White,
                         style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(8.dp)
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .background(Color.Black.copy(alpha = 0.6f))
+                            .padding(8.dp)
                     )
                 }
             } else {
