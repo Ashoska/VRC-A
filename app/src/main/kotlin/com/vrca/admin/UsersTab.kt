@@ -1682,7 +1682,7 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                RichDocEditor(blocks = targetedBlocks, githubPat = githubPat)
+                RichDocEditor(blocks = targetedBlocks, githubPat = githubPat, editorKey = targetKey)
 
                 if (tUploading) {
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {

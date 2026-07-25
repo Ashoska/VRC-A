@@ -288,35 +288,28 @@ internal suspend fun githubSweepOrphans(db: FirebaseFirestore, pat: String): Int
 internal fun RichDocEditor(
     blocks: SnapshotStateList<RichBlock>,
     githubPat: String,
+    editorKey: String,
     modifier: Modifier = Modifier
 ) {
     val ctx = LocalContext.current
-    val scope = rememberCoroutineScope()
     // Saveable so the picker callback lands on the right block after the Activity
     // is recreated on return from the file picker.
     var pendingImageIndex by rememberSaveable { mutableIntStateOf(-1) }
     var pendingVideoIndex by rememberSaveable { mutableIntStateOf(-1) }
     var pendingPosterIndex by rememberSaveable { mutableIntStateOf(-1) }
     var pendingGifIndex by rememberSaveable { mutableIntStateOf(-1) }
-    var uploadingIndex by remember { mutableIntStateOf(-1) }
-    var uploadError by remember { mutableStateOf<String?>(null) }
+    // Uploads run on AdminRuntime.scope (process lifetime) so they COMPLETE across
+    // the Activity recreation the picker triggers (a composition scope would be
+    // cancelled mid-upload → the block never gets its URL). Progress/errors are read
+    // back from AdminRuntime so they survive the recreation too.
+    val uploadingTags by AdminRuntime.uploadingTagsState.collectAsState()
+    val uploadErrors by AdminRuntime.uploadErrorsState.collectAsState()
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         val idx = pendingImageIndex
         pendingImageIndex = -1
         if (uri != null && idx in blocks.indices) {
-            scope.launch {
-                uploadError = null
-                uploadingIndex = idx
-                runCatching { githubUploadImage(ctx, uri, githubPat) }
-                    .onSuccess { url ->
-                        if (idx in blocks.indices) {
-                            (blocks[idx] as? RichBlock.Image)?.let { blocks[idx] = it.copy(url = url) }
-                        }
-                    }
-                    .onFailure { uploadError = it.message ?: "Upload failed" }
-                uploadingIndex = -1
-            }
+            AdminRuntime.uploadMediaBlock(ctx.applicationContext, editorKey, idx, uri, AdminRuntime.MediaKind.IMAGE, githubPat)
         }
     }
 
@@ -324,18 +317,7 @@ internal fun RichDocEditor(
         val idx = pendingPosterIndex
         pendingPosterIndex = -1
         if (uri != null && idx in blocks.indices) {
-            scope.launch {
-                uploadError = null
-                uploadingIndex = idx
-                runCatching { githubUploadImage(ctx, uri, githubPat) }
-                    .onSuccess { url ->
-                        if (idx in blocks.indices) {
-                            (blocks[idx] as? RichBlock.Video)?.let { blocks[idx] = it.copy(poster = url) }
-                        }
-                    }
-                    .onFailure { uploadError = it.message ?: "Poster upload failed" }
-                uploadingIndex = -1
-            }
+            AdminRuntime.uploadMediaBlock(ctx.applicationContext, editorKey, idx, uri, AdminRuntime.MediaKind.POSTER, githubPat)
         }
     }
 
@@ -343,18 +325,7 @@ internal fun RichDocEditor(
         val idx = pendingGifIndex
         pendingGifIndex = -1
         if (uri != null && idx in blocks.indices) {
-            scope.launch {
-                uploadError = null
-                uploadingIndex = idx
-                runCatching { githubUploadImage(ctx, uri, githubPat) }
-                    .onSuccess { url ->
-                        if (idx in blocks.indices) {
-                            (blocks[idx] as? RichBlock.Gif)?.let { blocks[idx] = it.copy(url = url) }
-                        }
-                    }
-                    .onFailure { uploadError = it.message ?: "GIF upload failed" }
-                uploadingIndex = -1
-            }
+            AdminRuntime.uploadMediaBlock(ctx.applicationContext, editorKey, idx, uri, AdminRuntime.MediaKind.GIF, githubPat)
         }
     }
 
@@ -362,35 +333,7 @@ internal fun RichDocEditor(
         val idx = pendingVideoIndex
         pendingVideoIndex = -1
         if (uri != null && idx in blocks.indices) {
-            scope.launch {
-                uploadError = null
-                uploadingIndex = idx
-                runCatching {
-                    // Admin build transcodes to small HEVC; public stub returns null →
-                    // fall back to the raw file. The size guard keeps clips small so they cache fast.
-                    val transcoded = transcodeVideoForUpload(ctx, uri)
-                    val bytes = if (transcoded != null) {
-                        val b = transcoded.readBytes(); runCatching { transcoded.delete() }; b
-                    } else {
-                        ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                            ?: throw Exception("Could not read the selected video.")
-                    }
-                    if (bytes.size > 19_000_000) {
-                        throw Exception(
-                            "Video is ${bytes.size / 1_000_000}MB after compression — please use a " +
-                                "shorter clip so it stays small and loads fast."
-                        )
-                    }
-                    githubUploadVideoBytes(bytes, githubPat)
-                }
-                    .onSuccess { url ->
-                        if (idx in blocks.indices) {
-                            (blocks[idx] as? RichBlock.Video)?.let { blocks[idx] = it.copy(url = url) }
-                        }
-                    }
-                    .onFailure { uploadError = it.message ?: "Video upload failed" }
-                uploadingIndex = -1
-            }
+            AdminRuntime.uploadMediaBlock(ctx.applicationContext, editorKey, idx, uri, AdminRuntime.MediaKind.VIDEO, githubPat)
         }
     }
 
@@ -402,7 +345,7 @@ internal fun RichDocEditor(
                 index = index,
                 count = blocks.size,
                 block = block,
-                uploading = uploadingIndex == index,
+                uploading = "$editorKey#$index" in uploadingTags,
                 onChange = { if (index in blocks.indices) blocks[index] = it },
                 onMoveUp = {
                     if (index > 0) { val t = blocks[index]; blocks[index] = blocks[index - 1]; blocks[index - 1] = t }
@@ -419,8 +362,9 @@ internal fun RichDocEditor(
             )
         }
 
-        uploadError?.let {
-            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        // Show any upload error for THIS editor's blocks.
+        uploadErrors.entries.filter { it.key.startsWith("$editorKey#") }.forEach { (_, msg) ->
+            Text(msg, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         }
 
         Text("Add block", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)

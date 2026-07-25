@@ -90,6 +90,7 @@ import android.os.Environment
 import androidx.compose.foundation.layout.Box
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.NewReleases
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Divider
@@ -813,28 +814,51 @@ private fun UpdateDialog(
     }
 
     androidx.compose.ui.window.Dialog(
-        onDismissRequest = { if (!forced) onDismiss() }
+        onDismissRequest = { if (!forced) onDismiss() },
+        properties = androidx.compose.ui.window.DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnBackPress = !forced,
+            dismissOnClickOutside = !forced
+        )
     ) {
+        // Full-screen sheet (small inset so the rounded corners still read as a card).
         ElevatedCard(
-            shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp),
             colors = androidx.compose.material3.CardDefaults.elevatedCardColors(
                 containerColor = MaterialTheme.colorScheme.surface
-            )
+            ),
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(10.dp)
         ) {
             Column(
-                modifier = Modifier.padding(20.dp),
+                modifier = Modifier.fillMaxSize().padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                // Header: title + version pill
+                // Header: icon + title + version pill
                 Row(
                     Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
+                    Surface(
+                        shape = androidx.compose.foundation.shape.CircleShape,
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+                        modifier = Modifier.size(44.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                Icons.Filled.NewReleases,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
                     Text(
                         if (forced) "Update Required" else "Update Available",
-                        style = MaterialTheme.typography.titleLarge,
-                        color = MaterialTheme.colorScheme.onSurface
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.weight(1f)
                     )
                     Surface(
                         shape = MaterialTheme.shapes.large,
@@ -842,41 +866,42 @@ private fun UpdateDialog(
                     ) {
                         Text(
                             info.versionName,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                            style = MaterialTheme.typography.labelMedium,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+                            style = MaterialTheme.typography.labelLarge,
                             color = MaterialTheme.colorScheme.primary
                         )
-                    }
-                }
-
-                // Rich patch notes — bounded height + scroll so long logs never clip.
-                // Admin builds the layout (headings/text/images/etc); block order gives
-                // the "hero image on top" look naturally.
-                if (doc != null) {
-                    val screenH = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp
-                    Surface(
-                        shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        tonalElevation = 1.dp
-                    ) {
-                        Column(
-                            Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = (screenH * 0.5f).dp)
-                                .verticalScroll(rememberScrollState())
-                                .padding(12.dp)
-                        ) {
-                            RichDocRenderer(doc, mediaScope = RichMediaStore.Scope.UPDATE)
-                        }
                     }
                 }
 
                 if (forced) {
                     Text(
                         "This update is required to continue using the app.",
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.error
                     )
+                }
+
+                // Rich patch notes — takes ALL remaining vertical space (weight) so the
+                // notes area is large and scrolls; block order gives the "hero image on
+                // top" look naturally. Empty state still pushes the actions to the bottom.
+                if (doc != null) {
+                    Surface(
+                        shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        tonalElevation = 1.dp,
+                        modifier = Modifier.fillMaxWidth().weight(1f)
+                    ) {
+                        Column(
+                            Modifier
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState())
+                                .padding(16.dp)
+                        ) {
+                            RichDocRenderer(doc, mediaScope = RichMediaStore.Scope.UPDATE)
+                        }
+                    }
+                } else {
+                    Spacer(Modifier.weight(1f))
                 }
 
                 // Error message

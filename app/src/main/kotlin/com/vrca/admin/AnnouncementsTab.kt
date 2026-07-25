@@ -77,8 +77,10 @@ internal fun AnnouncementsTab(
     var newActive by rememberSaveable { mutableStateOf(true) }
     var newPriority by rememberSaveable { mutableIntStateOf(0) }
     var editingId by rememberSaveable { mutableStateOf<String?>(null) }
-    // The rich body being authored. One write; media on GitHub; zero Firestore reads.
-    val blocks = remember { mutableStateListOf<RichBlock>() }
+    // The rich body being authored. Backed by AdminRuntime (PROCESS lifetime) so the
+    // content + in-flight media uploads survive the media picker recreating the
+    // Activity. One write; media on GitHub; zero Firestore reads.
+    val blocks = remember { AdminRuntime.editorBlocksFor("announcement") }
 
     fun resetForm() {
         newTitle = ""; newActive = true; newPriority = 0
@@ -151,7 +153,7 @@ internal fun AnnouncementsTab(
                     label = { Text("Title") }
                 )
 
-                RichDocEditor(blocks = blocks, githubPat = githubPat)
+                RichDocEditor(blocks = blocks, githubPat = githubPat, editorKey = "announcement")
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
