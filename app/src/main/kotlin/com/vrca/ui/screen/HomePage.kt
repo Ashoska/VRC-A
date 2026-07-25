@@ -136,14 +136,8 @@ private fun AnnouncementCard(a: AnnouncementUi) {
                     style = MaterialTheme.typography.titleSmall,
                     modifier = Modifier.weight(1f)
                 )
-                if (a.priority != 0) {
-                    Text(
-                        "P${a.priority}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(Modifier.width(6.dp))
-                }
+                // Priority drives sort order + auto-expand only — deliberately NOT
+                // shown to end users (an internal admin ranking, not display content).
                 Icon(
                     if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
                     contentDescription = if (expanded) "Collapse" else "Expand"
