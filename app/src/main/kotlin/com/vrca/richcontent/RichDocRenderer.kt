@@ -71,6 +71,10 @@ import androidx.compose.ui.window.DialogProperties
 private var richGifLoader: coil.ImageLoader? = null
 private val richGifLoaderLock = Any()
 
+/** Max on-screen height for any single media block, so a tall (portrait) image /
+ *  gif / video is sized down instead of taking up the whole screen. */
+private val MAX_MEDIA_HEIGHT = 380.dp
+
 /** Coil loader with the GIF decoder registered, so uploaded .gif images animate. */
 private fun richImageLoader(ctx: Context): coil.ImageLoader =
     richGifLoader ?: synchronized(richGifLoaderLock) {
@@ -83,6 +87,19 @@ private fun richImageLoader(ctx: Context): coil.ImageLoader =
             .also { richGifLoader = it }
     }
 
+/** An image/gif block that can be paired side-by-side with an adjacent one. */
+private fun RichBlock.isPairableImage(): Boolean =
+    this is RichBlock.Image || this is RichBlock.Gif
+
+@Composable
+private fun PairableImage(block: RichBlock, scope: RichMediaStore.Scope, modifier: Modifier) {
+    when (block) {
+        is RichBlock.Image -> RichImage(block.url, scope, animate = false, modifier = modifier)
+        is RichBlock.Gif -> RichImage(block.url, scope, animate = true, modifier = modifier)
+        else -> {}
+    }
+}
+
 @Composable
 fun RichDocRenderer(
     doc: RichDoc,
@@ -90,7 +107,25 @@ fun RichDocRenderer(
     mediaScope: RichMediaStore.Scope = RichMediaStore.Scope.ANNOUNCEMENT
 ) {
     Column(modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        doc.blocks.forEach { block ->
+        val blocks = doc.blocks
+        var i = 0
+        while (i < blocks.size) {
+            val block = blocks[i]
+            val next = blocks.getOrNull(i + 1)
+            // Two consecutive image/gif blocks render SIDE BY SIDE (each half width,
+            // sized down). Put any other block between them to keep them stacked.
+            if (block.isPairableImage() && next != null && next.isPairableImage()) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    PairableImage(block, mediaScope, Modifier.weight(1f))
+                    PairableImage(next, mediaScope, Modifier.weight(1f))
+                }
+                i += 2
+                continue
+            }
             when (block) {
                 is RichBlock.Heading -> {
                     val color = parseHexColor(block.color) ?: MaterialTheme.colorScheme.primary
@@ -130,6 +165,7 @@ fun RichDocRenderer(
                     color = MaterialTheme.colorScheme.outlineVariant
                 )
             }
+            i += 1
         }
     }
 }
@@ -234,7 +270,12 @@ private fun RichCallout(block: RichBlock.Callout) {
  * runs while the composable is present (i.e. the card is expanded).
  */
 @Composable
-private fun RichImage(url: String, scope: RichMediaStore.Scope, animate: Boolean = false) {
+private fun RichImage(
+    url: String,
+    scope: RichMediaStore.Scope,
+    animate: Boolean = false,
+    modifier: Modifier = Modifier
+) {
     val ctx = LocalContext.current
     if (url.isBlank()) return  // unfilled editor block — nothing to show
     var file by remember(url) { mutableStateOf(RichMediaStore.resolve(ctx, url)) }
@@ -260,18 +301,22 @@ private fun RichImage(url: String, scope: RichMediaStore.Scope, animate: Boolean
     Surface(
         shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .clickable { fullscreen = true }
     ) {
         // model = local file once cached, else the URL (Coil network fallback).
+        // ContentScale.Fit + a max-height cap so a TALL (portrait) image/gif is
+        // sized down (letterboxed, centered) instead of taking up the whole screen;
+        // a wide image still fills the width.
         coil.compose.AsyncImage(
             model = file ?: url,
             contentDescription = null,
-            contentScale = ContentScale.FillWidth,
+            contentScale = ContentScale.Fit,
             imageLoader = richImageLoader(ctx),
             modifier = Modifier
                 .fillMaxWidth()
+                .heightIn(max = MAX_MEDIA_HEIGHT)
                 .then(
                     if (animate) Modifier.drawWithContent {
                         // Read the tick INSIDE the draw lambda so the draw phase re-runs
@@ -406,9 +451,12 @@ private fun RichVideo(block: RichBlock.Video, mediaScope: RichMediaStore.Scope) 
                     factory = { c ->
                         android.view.TextureView(c).also { tv -> exo.setVideoTextureView(tv) }
                     },
+                    // Cap height so a tall (portrait) video is sized down instead of
+                    // filling the screen; matchHeightConstraintsFirst lets a tall clip fit
+                    // the height cap (narrower, centered) while a wide clip fills the width.
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(aspect.coerceIn(0.5f, 2.5f))
+                        .heightIn(max = MAX_MEDIA_HEIGHT)
+                        .aspectRatio(aspect.coerceIn(0.5f, 2.5f), matchHeightConstraintsFirst = true)
                 )
                 if (playFailed) {
                     Text(
@@ -423,8 +471,8 @@ private fun RichVideo(block: RichBlock.Video, mediaScope: RichMediaStore.Scope) 
                     coil.compose.AsyncImage(
                         model = posterModel,
                         contentDescription = null,
-                        contentScale = ContentScale.FillWidth,
-                        modifier = Modifier.fillMaxWidth()
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxWidth().heightIn(max = MAX_MEDIA_HEIGHT)
                     )
                 }
                 Surface(
