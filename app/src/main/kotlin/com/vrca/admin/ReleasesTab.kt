@@ -342,10 +342,12 @@ internal fun ReleasesTab(
 
     // ---- optional fields ----
     var editRequiredMin by rememberSaveable { mutableStateOf("") }
-    var editNotes       by rememberSaveable { mutableStateOf("") }
-    // Saveable so the rich update-log content survives the Activity recreation the
-    // media file-picker triggers (plain remember would reset it → lost content).
-    val releaseBlocks = rememberRichBlocks()
+    // editNotes + releaseBlocks are backed by AdminRuntime (PROCESS lifetime) so the
+    // rich update-log content survives the media picker recreating the Activity. The
+    // detail/editor subtree is briefly disposed on recreation, past Compose's
+    // saved-state restoration window, so rememberSaveable was NOT enough (it cleared).
+    var editNotes       by remember { AdminRuntime.editorNotesFor("release") }
+    val releaseBlocks = remember { AdminRuntime.editorBlocksFor("release") }
 
     // ---- upload state ----
     var uploadPhase     by remember { mutableStateOf("") }
@@ -354,11 +356,9 @@ internal fun ReleasesTab(
     var uploadDone      by remember { mutableStateOf(false) }
 
     // Seed the editor from the currently-published release exactly ONCE so the admin
-    // EDITS the live content instead of starting blank. Guarded (rememberSaveable) so
-    // the LaunchedEffect(Unit) re-run on an Activity recreation (media picker) never
-    // re-seeds over the admin's in-progress edits.
-    var editorSeeded by rememberSaveable { mutableStateOf(false) }
-
+    // EDITS the live content instead of starting blank. The "seeded" flag lives in
+    // AdminRuntime (process lifetime) so the LaunchedEffect(Unit) re-run on an
+    // Activity recreation (media picker) never re-seeds over in-progress edits.
     suspend fun loadCurrent() {
         setGlobalLoading(true)
         runCatching {
@@ -370,7 +370,7 @@ internal fun ReleasesTab(
                 liveRequiredMin = snap.getLong("requiredMinCode") ?: 0L
                 liveNotes       = snap.getString("notes").orEmpty()
                 livePublishedAt = snap.getTimestamp("publishedAt")
-                if (!editorSeeded) {
+                if (!AdminRuntime.isEditorSeeded("release")) {
                     if (editNotes.isBlank()) editNotes = liveNotes
                     if (releaseBlocks.isEmpty()) {
                         resolveRichDoc(snap.getString("bodyDoc"), liveNotes)?.blocks?.let {
@@ -379,7 +379,7 @@ internal fun ReleasesTab(
                     }
                 }
             }
-            editorSeeded = true
+            AdminRuntime.markEditorSeeded("release")
             loaded = true
         }.onFailure { e -> setError(e.message ?: "Failed to load release") }
         setGlobalLoading(false)
@@ -480,7 +480,7 @@ internal fun ReleasesTab(
                 // clean up temp file
                 runCatching { apkFile.delete() }
                 cachedApkPath = ""; pickedFileName = ""; parsedCode = 0L; parsedName = ""
-                releaseBlocks.clear()
+                AdminRuntime.clearEditor("release")  // blocks + notes + seeded flag
 
             }.onFailure { e ->
                 setError(e.message ?: "Upload failed")
@@ -491,10 +491,15 @@ internal fun ReleasesTab(
         }
     }
 
+    // Saveable so the scroll position is RESTORED after the media picker recreates the
+    // Activity (a plain rememberScrollState reset the admin to the top).
+    val releaseScroll = rememberSaveable(saver = androidx.compose.foundation.ScrollState.Saver) {
+        androidx.compose.foundation.ScrollState(0)
+    }
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .verticalScroll(rememberScrollState()),
+            .verticalScroll(releaseScroll),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
 

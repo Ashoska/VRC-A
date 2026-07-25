@@ -181,6 +181,43 @@ object AdminRuntime {
         }
     }
 
+    // ---- Rich-content editor state (PROCESS LIFETIME) --------------------
+    // The release / targeted-release rich editors must survive the Activity
+    // being recreated when returning from the media file picker. rememberSaveable
+    // is NOT enough here: on recreation `sharedUsers` resets empty, so the detail
+    // view (gated on the user being present) is DISPOSED, and by the time it
+    // re-composes Compose's saved-state restoration window has passed → the saved
+    // blocks are dropped (the same reason the APK pick uses AdminRuntime). So the
+    // editor's block list + plaintext notes + a one-shot "seeded" flag live here,
+    // keyed by an editor id ("release" for the global editor, "targeted:<docId>"
+    // per user). They persist until explicitly cleared (on publish) or the process
+    // dies (fresh session → re-seeded from the live doc).
+    private val editorBlocks = HashMap<String, androidx.compose.runtime.snapshots.SnapshotStateList<com.vrca.richcontent.RichBlock>>()
+    private val editorNotes = HashMap<String, androidx.compose.runtime.MutableState<String>>()
+    private val editorSeeded = HashSet<String>()
+
+    @Synchronized
+    fun editorBlocksFor(key: String): androidx.compose.runtime.snapshots.SnapshotStateList<com.vrca.richcontent.RichBlock> =
+        editorBlocks.getOrPut(key) { androidx.compose.runtime.mutableStateListOf() }
+
+    @Synchronized
+    fun editorNotesFor(key: String): androidx.compose.runtime.MutableState<String> =
+        editorNotes.getOrPut(key) { androidx.compose.runtime.mutableStateOf("") }
+
+    @Synchronized
+    fun isEditorSeeded(key: String): Boolean = key in editorSeeded
+
+    @Synchronized
+    fun markEditorSeeded(key: String) { editorSeeded += key }
+
+    /** Reset an editor's persisted state (call after a successful publish). */
+    @Synchronized
+    fun clearEditor(key: String) {
+        editorBlocks[key]?.clear()
+        editorNotes[key]?.value = ""
+        editorSeeded -= key
+    }
+
     private suspend fun runBrowseHeartbeatLoop() {
         var browsingStartedAt = 0L
         while (true) {

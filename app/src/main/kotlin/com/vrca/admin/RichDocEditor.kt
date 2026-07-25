@@ -24,7 +24,6 @@ import androidx.compose.material.icons.filled.Title
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
@@ -36,7 +35,6 @@ import com.vrca.richcontent.RichBlock
 import com.vrca.richcontent.RichDoc
 import com.vrca.richcontent.RichDocRenderer
 import com.vrca.richcontent.RichMediaStore
-import com.vrca.richcontent.parseRichDoc
 import com.vrca.richcontent.resolveRichDoc
 import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.tasks.await
@@ -285,27 +283,6 @@ internal suspend fun githubSweepOrphans(db: FirebaseFirestore, pat: String): Int
             0
         }
     }
-
-/**
- * A block list that SURVIVES an Activity recreation (the file picker routinely
- * evicts the heavy admin app while DocumentsUI is foreground, and on return the
- * Activity is rebuilt). Serialised to JSON via [RichDoc.toJson] and restored with
- * `keepBlankMedia = true` so an unfilled media block the admin is mid-upload into
- * isn't dropped (which would shift indices and orphan the upload). Pass a key
- * (e.g. the target user's docId) so switching targets resets the editor.
- */
-private val richBlocksSaver: Saver<SnapshotStateList<RichBlock>, String> = Saver(
-    save = { RichDoc(blocks = it.toList()).toJson() },
-    restore = { json ->
-        mutableStateListOf<RichBlock>().apply {
-            parseRichDoc(json, keepBlankMedia = true)?.blocks?.let { addAll(it) }
-        }
-    }
-)
-
-@Composable
-internal fun rememberRichBlocks(vararg keys: Any?): SnapshotStateList<RichBlock> =
-    rememberSaveable(*keys, saver = richBlocksSaver) { mutableStateListOf() }
 
 @Composable
 internal fun RichDocEditor(

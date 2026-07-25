@@ -331,7 +331,12 @@ fun AdminScreen() {
     // fetch once on tab entry (and on manual refresh / page-size bump via
     // `refreshTick`) and let the admin pull-to-refresh for fresh data. Aggregate
     // stats (below) and the selected-user 10s detail poll cover the live needs.
-    var sharedUsers by remember { mutableStateOf<List<UserRow>>(emptyList()) }
+    // Seed SYNCHRONOUSLY from the on-disk directory cache (not empty) so that when the
+    // media file picker recreates the Activity, the directory is populated from frame
+    // one — otherwise the selected-user detail view (gated on the user being present)
+    // is DISPOSED for a frame, losing its saveable scroll/editor state and bouncing the
+    // admin back to the top. The async refresh below still runs and replaces this.
+    var sharedUsers by remember { mutableStateOf<List<UserRow>>(UsersDirectoryCache.load(ctx)) }
     // Default fetch ceiling raised from 500 → 2000 so the whole base loads (no
     // "only the 500 most-recently-active show" cap); +500 can still raise it.
     var sharedLiveLimit by rememberSaveable { mutableIntStateOf(2000) }

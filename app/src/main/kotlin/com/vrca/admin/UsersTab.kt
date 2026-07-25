@@ -593,8 +593,14 @@ internal fun UsersTab(
             killSignal   = if (d != null) d.killSignal else rawRow.killSignal,
             isOnlineInApp = d?.isOnlineInApp ?: rawRow.isOnlineInApp
         )
+        // Saveable + keyed by user so the scroll position is RESTORED after the media
+        // picker recreates the Activity (a plain rememberScrollState reset to the top);
+        // switching users still starts at the top.
+        val detailScroll = rememberSaveable(rawRow.docId, saver = androidx.compose.foundation.ScrollState.Saver) {
+            androidx.compose.foundation.ScrollState(0)
+        }
         Column(
-            modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+            modifier = Modifier.fillMaxWidth().verticalScroll(detailScroll),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             // Back row sits above the identity card for a clear hierarchy.
@@ -1445,18 +1451,17 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
             // Targeted update push
             val ctx = LocalContext.current
             var targetUrl by remember { mutableStateOf("") }
-            // Saveable + keyed by user so an in-progress note edit survives the media
-            // picker's Activity recreation (and resets when switching users).
-            var targetNotes by rememberSaveable(docId) { mutableStateOf("") }
+            // targetNotes + targetedBlocks are backed by AdminRuntime (PROCESS lifetime),
+            // keyed per user, so they survive the media picker recreating the Activity.
+            // rememberSaveable was NOT enough: on recreation `sharedUsers` resets empty,
+            // so this whole detail subtree is DISPOSED past Compose's saved-state
+            // restoration window and the saved content is dropped (same reason the APK
+            // pick uses AdminRuntime). Declared BEFORE the seeding LaunchedEffect.
+            val targetKey = "targeted:$docId"
+            var targetNotes by remember(docId) { AdminRuntime.editorNotesFor(targetKey) }
+            val targetedBlocks = remember(docId) { AdminRuntime.editorBlocksFor(targetKey) }
             var hasTargeted by remember { mutableStateOf(false) }
             var loadedTarget by remember { mutableStateOf(false) }
-            // Guard so the LaunchedEffect(docId) re-run on recreation doesn't RE-SEED
-            // the editor over in-progress edits; only seeds on first open per user.
-            var seededTargetDocId by rememberSaveable { mutableStateOf("") }
-            // Saveable (keyed by user) so the rich note content survives the Activity
-            // recreation the media file-picker triggers; resets when switching users.
-            // Declared BEFORE the seeding LaunchedEffect that populates it.
-            val targetedBlocks = rememberRichBlocks(docId)
 
             // APK picker state is held in AdminRuntime (process lifetime) so it
             // survives the admin Activity being recreated when returning from the
@@ -1497,7 +1502,7 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                         // Seed the EDITABLE fields from the existing targeted release
                         // exactly ONCE per user (so the admin edits its content), never
                         // re-seeding on the picker's recreation which would wipe edits.
-                        if (seededTargetDocId != docId) {
+                        if (!AdminRuntime.isEditorSeeded(targetKey)) {
                             val notes = snap.getString("notes").orEmpty()
                             if (hasTargeted) targetNotes = notes
                             if (targetedBlocks.isEmpty()) {
@@ -1507,7 +1512,7 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                             }
                         }
                     }
-                    seededTargetDocId = docId
+                    AdminRuntime.markEditorSeeded(targetKey)
                     loadedTarget = true
                 }
             }
@@ -1586,7 +1591,7 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
 
                         // Clears the picked-APK holder and deletes the cached file.
                         AdminRuntime.clearPickedApk(docId)
-                        targetedBlocks.clear()
+                        AdminRuntime.clearEditor(targetKey)  // blocks + notes + seeded flag
 
                     }.onFailure { e ->
                         val msg = e.message ?: "Upload failed"
