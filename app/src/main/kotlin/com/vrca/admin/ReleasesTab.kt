@@ -55,6 +55,7 @@ import com.google.firebase.firestore.SetOptions
 import com.vrca.BuildConfig
 import com.vrca.richcontent.RichBlock
 import com.vrca.richcontent.RichDoc
+import com.vrca.richcontent.resolveRichDoc
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
@@ -352,6 +353,12 @@ internal fun ReleasesTab(
     var uploading       by remember { mutableStateOf(false) }
     var uploadDone      by remember { mutableStateOf(false) }
 
+    // Seed the editor from the currently-published release exactly ONCE so the admin
+    // EDITS the live content instead of starting blank. Guarded (rememberSaveable) so
+    // the LaunchedEffect(Unit) re-run on an Activity recreation (media picker) never
+    // re-seeds over the admin's in-progress edits.
+    var editorSeeded by rememberSaveable { mutableStateOf(false) }
+
     suspend fun loadCurrent() {
         setGlobalLoading(true)
         runCatching {
@@ -363,7 +370,16 @@ internal fun ReleasesTab(
                 liveRequiredMin = snap.getLong("requiredMinCode") ?: 0L
                 liveNotes       = snap.getString("notes").orEmpty()
                 livePublishedAt = snap.getTimestamp("publishedAt")
+                if (!editorSeeded) {
+                    if (editNotes.isBlank()) editNotes = liveNotes
+                    if (releaseBlocks.isEmpty()) {
+                        resolveRichDoc(snap.getString("bodyDoc"), liveNotes)?.blocks?.let {
+                            releaseBlocks.clear(); releaseBlocks.addAll(it)
+                        }
+                    }
+                }
             }
+            editorSeeded = true
             loaded = true
         }.onFailure { e -> setError(e.message ?: "Failed to load release") }
         setGlobalLoading(false)

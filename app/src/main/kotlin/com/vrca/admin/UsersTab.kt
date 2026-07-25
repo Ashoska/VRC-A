@@ -84,6 +84,7 @@ import com.google.firebase.firestore.Source
 import com.vrca.BuildConfig
 import com.vrca.richcontent.RichBlock
 import com.vrca.richcontent.RichDoc
+import com.vrca.richcontent.resolveRichDoc
 import com.vrca.app.SubLineCodec
 import com.vrca.vrchat.VrchatAuthManager
 import kotlinx.coroutines.delay
@@ -1444,9 +1445,18 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
             // Targeted update push
             val ctx = LocalContext.current
             var targetUrl by remember { mutableStateOf("") }
-            var targetNotes by remember { mutableStateOf("") }
+            // Saveable + keyed by user so an in-progress note edit survives the media
+            // picker's Activity recreation (and resets when switching users).
+            var targetNotes by rememberSaveable(docId) { mutableStateOf("") }
             var hasTargeted by remember { mutableStateOf(false) }
             var loadedTarget by remember { mutableStateOf(false) }
+            // Guard so the LaunchedEffect(docId) re-run on recreation doesn't RE-SEED
+            // the editor over in-progress edits; only seeds on first open per user.
+            var seededTargetDocId by rememberSaveable { mutableStateOf("") }
+            // Saveable (keyed by user) so the rich note content survives the Activity
+            // recreation the media file-picker triggers; resets when switching users.
+            // Declared BEFORE the seeding LaunchedEffect that populates it.
+            val targetedBlocks = rememberRichBlocks(docId)
 
             // APK picker state is held in AdminRuntime (process lifetime) so it
             // survives the admin Activity being recreated when returning from the
@@ -1483,11 +1493,21 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                     if (snap.exists()) {
                         val url = snap.getString("downloadUrl").orEmpty()
                         hasTargeted = url.isNotBlank()
-                        if (hasTargeted) {
-                            targetUrl = url
-                            targetNotes = snap.getString("notes").orEmpty()
+                        if (hasTargeted) targetUrl = url
+                        // Seed the EDITABLE fields from the existing targeted release
+                        // exactly ONCE per user (so the admin edits its content), never
+                        // re-seeding on the picker's recreation which would wipe edits.
+                        if (seededTargetDocId != docId) {
+                            val notes = snap.getString("notes").orEmpty()
+                            if (hasTargeted) targetNotes = notes
+                            if (targetedBlocks.isEmpty()) {
+                                resolveRichDoc(snap.getString("bodyDoc"), notes)?.blocks?.let {
+                                    targetedBlocks.clear(); targetedBlocks.addAll(it)
+                                }
+                            }
                         }
                     }
+                    seededTargetDocId = docId
                     loadedTarget = true
                 }
             }
@@ -1503,10 +1523,6 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                 // context — the Activity may not survive.
                 AdminRuntime.ingestPickedApk(ctx.applicationContext, docId, uri)
             }
-
-            // Saveable (keyed by user) so the rich note content survives the Activity
-            // recreation the media file-picker triggers; resets when switching users.
-            val targetedBlocks = rememberRichBlocks(docId)
 
             fun startTargetedUpload() {
                 val apkPath = tCachedApkPath
