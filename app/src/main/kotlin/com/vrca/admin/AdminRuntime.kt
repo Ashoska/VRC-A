@@ -243,7 +243,8 @@ object AdminRuntime {
         index: Int,
         uri: Uri,
         kind: MediaKind,
-        pat: String
+        pat: String,
+        slot: Int = 0
     ) {
         val tag = "$editorKey#$index"
         uploadingTags.value = uploadingTags.value + tag
@@ -280,8 +281,8 @@ object AdminRuntime {
                     val b = list[index]
                     list[index] = when {
                         kind == MediaKind.POSTER && b is com.vrca.richcontent.RichBlock.Video -> b.copy(poster = url)
-                        b is com.vrca.richcontent.RichBlock.Image -> b.copy(url = url)
-                        b is com.vrca.richcontent.RichBlock.Gif -> b.copy(url = url)
+                        b is com.vrca.richcontent.RichBlock.Image -> if (slot == 1) b.copy(url2 = url) else b.copy(url = url)
+                        b is com.vrca.richcontent.RichBlock.Gif -> if (slot == 1) b.copy(url2 = url) else b.copy(url = url)
                         b is com.vrca.richcontent.RichBlock.Video -> b.copy(url = url)
                         else -> b
                     }

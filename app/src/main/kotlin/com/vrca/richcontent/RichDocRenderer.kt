@@ -87,16 +87,21 @@ private fun richImageLoader(ctx: Context): coil.ImageLoader =
             .also { richGifLoader = it }
     }
 
-/** An image/gif block that can be paired side-by-side with an adjacent one. */
-private fun RichBlock.isPairableImage(): Boolean =
-    this is RichBlock.Image || this is RichBlock.Gif
-
+/** Renders one image/gif block: full-width when it has one URL, or SIDE BY SIDE
+ *  (each half width) when the admin added a second image to the same block. */
 @Composable
-private fun PairableImage(block: RichBlock, scope: RichMediaStore.Scope, modifier: Modifier) {
-    when (block) {
-        is RichBlock.Image -> RichImage(block.url, scope, animate = false, modifier = modifier)
-        is RichBlock.Gif -> RichImage(block.url, scope, animate = true, modifier = modifier)
-        else -> {}
+private fun RichImageOrPair(url: String, url2: String?, scope: RichMediaStore.Scope, animate: Boolean) {
+    if (!url2.isNullOrBlank()) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            RichImage(url, scope, animate, Modifier.weight(1f))
+            RichImage(url2, scope, animate, Modifier.weight(1f))
+        }
+    } else {
+        RichImage(url, scope, animate)
     }
 }
 
@@ -107,25 +112,7 @@ fun RichDocRenderer(
     mediaScope: RichMediaStore.Scope = RichMediaStore.Scope.ANNOUNCEMENT
 ) {
     Column(modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        val blocks = doc.blocks
-        var i = 0
-        while (i < blocks.size) {
-            val block = blocks[i]
-            val next = blocks.getOrNull(i + 1)
-            // Two consecutive image/gif blocks render SIDE BY SIDE (each half width,
-            // sized down). Put any other block between them to keep them stacked.
-            if (block.isPairableImage() && next != null && next.isPairableImage()) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.Top
-                ) {
-                    PairableImage(block, mediaScope, Modifier.weight(1f))
-                    PairableImage(next, mediaScope, Modifier.weight(1f))
-                }
-                i += 2
-                continue
-            }
+        doc.blocks.forEach { block ->
             when (block) {
                 is RichBlock.Heading -> {
                     val color = parseHexColor(block.color) ?: MaterialTheme.colorScheme.primary
@@ -157,15 +144,14 @@ fun RichDocRenderer(
                         }
                     }
                 }
-                is RichBlock.Image -> RichImage(block.url, mediaScope, animate = false)
-                is RichBlock.Gif -> RichImage(block.url, mediaScope, animate = true)
+                is RichBlock.Image -> RichImageOrPair(block.url, block.url2, mediaScope, animate = false)
+                is RichBlock.Gif -> RichImageOrPair(block.url, block.url2, mediaScope, animate = true)
                 is RichBlock.Video -> RichVideo(block, mediaScope)
                 is RichBlock.Callout -> RichCallout(block)
                 RichBlock.Divider -> Divider(
                     color = MaterialTheme.colorScheme.outlineVariant
                 )
             }
-            i += 1
         }
     }
 }

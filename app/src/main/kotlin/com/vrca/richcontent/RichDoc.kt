@@ -25,8 +25,9 @@ sealed class RichBlock {
     data class Heading(val text: String, val color: String? = null) : RichBlock()
     data class Text(val text: String) : RichBlock()
     data class Bullets(val items: List<String>) : RichBlock()
-    data class Image(val url: String) : RichBlock()
-    data class Gif(val url: String) : RichBlock()
+    /** [url2] optional: when set, the two images render SIDE BY SIDE (each half width). */
+    data class Image(val url: String, val url2: String? = null) : RichBlock()
+    data class Gif(val url: String, val url2: String? = null) : RichBlock()
     data class Video(val url: String, val poster: String? = null) : RichBlock()
     /** [tone] is one of "info" | "warn" | "success". */
     data class Callout(val tone: String, val text: String) : RichBlock()
@@ -43,8 +44,14 @@ data class RichDoc(
     fun mediaUrls(): List<String> {
         val out = ArrayList<String>()
         for (b in blocks) when (b) {
-            is RichBlock.Image -> b.url.takeIf { it.isNotBlank() }?.let { out += it }
-            is RichBlock.Gif -> b.url.takeIf { it.isNotBlank() }?.let { out += it }
+            is RichBlock.Image -> {
+                b.url.takeIf { it.isNotBlank() }?.let { out += it }
+                b.url2?.takeIf { it.isNotBlank() }?.let { out += it }
+            }
+            is RichBlock.Gif -> {
+                b.url.takeIf { it.isNotBlank() }?.let { out += it }
+                b.url2?.takeIf { it.isNotBlank() }?.let { out += it }
+            }
             is RichBlock.Video -> {
                 b.url.takeIf { it.isNotBlank() }?.let { out += it }
                 b.poster?.takeIf { it.isNotBlank() }?.let { out += it }
@@ -81,8 +88,14 @@ data class RichDoc(
                 }
                 is RichBlock.Text -> { o.put("t", "text"); o.put("text", b.text) }
                 is RichBlock.Bullets -> { o.put("t", "bullets"); o.put("items", JSONArray(b.items)) }
-                is RichBlock.Image -> { o.put("t", "image"); o.put("url", b.url) }
-                is RichBlock.Gif -> { o.put("t", "gif"); o.put("url", b.url) }
+                is RichBlock.Image -> {
+                    o.put("t", "image"); o.put("url", b.url)
+                    b.url2?.takeIf { it.isNotBlank() }?.let { o.put("url2", it) }
+                }
+                is RichBlock.Gif -> {
+                    o.put("t", "gif"); o.put("url", b.url)
+                    b.url2?.takeIf { it.isNotBlank() }?.let { o.put("url2", it) }
+                }
                 is RichBlock.Video -> {
                     o.put("t", "video"); o.put("url", b.url)
                     b.poster?.takeIf { it.isNotBlank() }?.let { o.put("poster", it) }
@@ -129,8 +142,8 @@ fun parseRichDoc(json: String?, keepBlankMedia: Boolean = false): RichDoc? {
                     if (items.isNotEmpty()) blocks += RichBlock.Bullets(items)
                     else if (keepBlankMedia) blocks += RichBlock.Bullets(listOf(""))
                 }
-                "image" -> o.optString("url").let { if (keepBlankMedia || it.isNotBlank()) blocks += RichBlock.Image(it) }
-                "gif" -> o.optString("url").let { if (keepBlankMedia || it.isNotBlank()) blocks += RichBlock.Gif(it) }
+                "image" -> o.optString("url").let { if (keepBlankMedia || it.isNotBlank()) blocks += RichBlock.Image(it, o.optString("url2").ifBlank { null }) }
+                "gif" -> o.optString("url").let { if (keepBlankMedia || it.isNotBlank()) blocks += RichBlock.Gif(it, o.optString("url2").ifBlank { null }) }
                 "video" -> o.optString("url").let {
                     if (keepBlankMedia || it.isNotBlank()) blocks += RichBlock.Video(it, o.optString("poster").ifBlank { null })
                 }
