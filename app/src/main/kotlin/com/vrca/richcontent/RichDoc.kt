@@ -96,8 +96,16 @@ data class RichDoc(
     }
 }
 
-/** Parses a stored `bodyDoc` JSON string. Returns null on blank/garbage/empty. */
-fun parseRichDoc(json: String?): RichDoc? {
+/**
+ * Parses a stored `bodyDoc` JSON string. Returns null on blank/garbage/empty.
+ *
+ * [keepBlankMedia] keeps image/gif/video blocks whose URL is still blank — used
+ * only by the admin EDITOR's saved-state restore (so an unfilled media block the
+ * admin just added, and is about to upload into, survives an Activity recreation
+ * caused by the file picker). Render/publish paths leave it false so a blank media
+ * block never reaches a user-facing surface or a `bodyDoc` write.
+ */
+fun parseRichDoc(json: String?, keepBlankMedia: Boolean = false): RichDoc? {
     if (json.isNullOrBlank()) return null
     return try {
         val root = JSONObject(json)
@@ -119,11 +127,12 @@ fun parseRichDoc(json: String?): RichDoc? {
                         itemsArr.optString(j).takeIf { it.isNotBlank() }?.let { items += it }
                     }
                     if (items.isNotEmpty()) blocks += RichBlock.Bullets(items)
+                    else if (keepBlankMedia) blocks += RichBlock.Bullets(listOf(""))
                 }
-                "image" -> o.optString("url").takeIf { it.isNotBlank() }?.let { blocks += RichBlock.Image(it) }
-                "gif" -> o.optString("url").takeIf { it.isNotBlank() }?.let { blocks += RichBlock.Gif(it) }
-                "video" -> o.optString("url").takeIf { it.isNotBlank() }?.let {
-                    blocks += RichBlock.Video(it, o.optString("poster").ifBlank { null })
+                "image" -> o.optString("url").let { if (keepBlankMedia || it.isNotBlank()) blocks += RichBlock.Image(it) }
+                "gif" -> o.optString("url").let { if (keepBlankMedia || it.isNotBlank()) blocks += RichBlock.Gif(it) }
+                "video" -> o.optString("url").let {
+                    if (keepBlankMedia || it.isNotBlank()) blocks += RichBlock.Video(it, o.optString("poster").ifBlank { null })
                 }
                 "callout" -> blocks += RichBlock.Callout(
                     o.optString("tone").ifBlank { "info" },

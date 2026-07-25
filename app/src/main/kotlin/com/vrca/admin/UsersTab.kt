@@ -1504,7 +1504,9 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                 AdminRuntime.ingestPickedApk(ctx.applicationContext, docId, uri)
             }
 
-            val targetedBlocks = remember { mutableStateListOf<RichBlock>() }
+            // Saveable (keyed by user) so the rich note content survives the Activity
+            // recreation the media file-picker triggers; resets when switching users.
+            val targetedBlocks = rememberRichBlocks(docId)
 
             fun startTargetedUpload() {
                 val apkPath = tCachedApkPath

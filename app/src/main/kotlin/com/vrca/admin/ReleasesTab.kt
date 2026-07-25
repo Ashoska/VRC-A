@@ -342,7 +342,9 @@ internal fun ReleasesTab(
     // ---- optional fields ----
     var editRequiredMin by rememberSaveable { mutableStateOf("") }
     var editNotes       by rememberSaveable { mutableStateOf("") }
-    val releaseBlocks = remember { mutableStateListOf<RichBlock>() }
+    // Saveable so the rich update-log content survives the Activity recreation the
+    // media file-picker triggers (plain remember would reset it → lost content).
+    val releaseBlocks = rememberRichBlocks()
 
     // ---- upload state ----
     var uploadPhase     by remember { mutableStateOf("") }
