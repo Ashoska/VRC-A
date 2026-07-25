@@ -298,6 +298,9 @@ internal fun RichDocEditor(
     var pendingVideoIndex by rememberSaveable { mutableIntStateOf(-1) }
     var pendingPosterIndex by rememberSaveable { mutableIntStateOf(-1) }
     var pendingGifIndex by rememberSaveable { mutableIntStateOf(-1) }
+    // Which slot (0 = primary, 1 = the optional second side-by-side image/gif).
+    var pendingImageSlot by rememberSaveable { mutableIntStateOf(0) }
+    var pendingGifSlot by rememberSaveable { mutableIntStateOf(0) }
     // Uploads run on AdminRuntime.scope (process lifetime) so they COMPLETE across
     // the Activity recreation the picker triggers (a composition scope would be
     // cancelled mid-upload → the block never gets its URL). Progress/errors are read
@@ -307,9 +310,10 @@ internal fun RichDocEditor(
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         val idx = pendingImageIndex
-        pendingImageIndex = -1
+        val slot = pendingImageSlot
+        pendingImageIndex = -1; pendingImageSlot = 0
         if (uri != null && idx in blocks.indices) {
-            AdminRuntime.uploadMediaBlock(ctx.applicationContext, editorKey, idx, uri, AdminRuntime.MediaKind.IMAGE, githubPat)
+            AdminRuntime.uploadMediaBlock(ctx.applicationContext, editorKey, idx, uri, AdminRuntime.MediaKind.IMAGE, githubPat, slot)
         }
     }
 
@@ -323,9 +327,10 @@ internal fun RichDocEditor(
 
     val gifPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         val idx = pendingGifIndex
-        pendingGifIndex = -1
+        val slot = pendingGifSlot
+        pendingGifIndex = -1; pendingGifSlot = 0
         if (uri != null && idx in blocks.indices) {
-            AdminRuntime.uploadMediaBlock(ctx.applicationContext, editorKey, idx, uri, AdminRuntime.MediaKind.GIF, githubPat)
+            AdminRuntime.uploadMediaBlock(ctx.applicationContext, editorKey, idx, uri, AdminRuntime.MediaKind.GIF, githubPat, slot)
         }
     }
 
@@ -355,10 +360,10 @@ internal fun RichDocEditor(
                 },
                 onDuplicate = { blocks.add(index + 1, block) },
                 onDelete = { if (index in blocks.indices) blocks.removeAt(index) },
-                onPickImage = { pendingImageIndex = index; picker.launch("image/*") },
+                onPickImage = { slot -> pendingImageIndex = index; pendingImageSlot = slot; picker.launch("image/*") },
                 onPickVideo = { pendingVideoIndex = index; videoPicker.launch("video/*") },
                 onPickPoster = { pendingPosterIndex = index; posterPicker.launch("image/*") },
-                onPickGif = { pendingGifIndex = index; gifPicker.launch("image/*") }
+                onPickGif = { slot -> pendingGifIndex = index; pendingGifSlot = slot; gifPicker.launch("image/*") }
             )
         }
 
@@ -432,10 +437,10 @@ private fun BlockCard(
     onMoveDown: () -> Unit,
     onDuplicate: () -> Unit,
     onDelete: () -> Unit,
-    onPickImage: () -> Unit,
+    onPickImage: (Int) -> Unit,
     onPickVideo: () -> Unit,
     onPickPoster: () -> Unit,
-    onPickGif: () -> Unit
+    onPickGif: (Int) -> Unit
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
@@ -499,7 +504,7 @@ private fun BlockCard(
                     }
                 }
                 is RichBlock.Image -> {
-                    Button(onClick = onPickImage, enabled = !uploading) {
+                    Button(onClick = { onPickImage(0) }, enabled = !uploading) {
                         if (uploading) {
                             CircularProgressIndicator(
                                 modifier = Modifier.size(16.dp),
@@ -512,6 +517,16 @@ private fun BlockCard(
                             Text(if (block.url.isBlank()) "Pick & upload image" else "Replace image")
                         }
                     }
+                    // Optional SECOND image → the two render side by side (each half width).
+                    OutlinedButton(onClick = { onPickImage(1) }, enabled = !uploading) {
+                        Icon(Icons.Filled.Image, null); Spacer(Modifier.width(6.dp))
+                        Text(if (block.url2.isNullOrBlank()) "Add second image (side by side)" else "Replace second image")
+                    }
+                    if (!block.url2.isNullOrBlank()) {
+                        TextButton(onClick = { onChange(block.copy(url2 = null)) }) {
+                            Text("Remove second image")
+                        }
+                    }
                 }
                 is RichBlock.Gif -> {
                     OutlinedTextField(
@@ -520,7 +535,7 @@ private fun BlockCard(
                         label = { Text("GIF link (direct .gif URL, e.g. media.giphy.com/...)") },
                         singleLine = true
                     )
-                    Button(onClick = onPickGif, enabled = !uploading) {
+                    Button(onClick = { onPickGif(0) }, enabled = !uploading) {
                         if (uploading) {
                             CircularProgressIndicator(
                                 modifier = Modifier.size(16.dp),
@@ -531,6 +546,16 @@ private fun BlockCard(
                         } else {
                             Icon(Icons.Filled.Gif, null); Spacer(Modifier.width(6.dp))
                             Text(if (block.url.isBlank()) "Pick & upload GIF" else "Replace GIF")
+                        }
+                    }
+                    // Optional SECOND gif → the two render side by side (each half width).
+                    OutlinedButton(onClick = { onPickGif(1) }, enabled = !uploading) {
+                        Icon(Icons.Filled.Gif, null); Spacer(Modifier.width(6.dp))
+                        Text(if (block.url2.isNullOrBlank()) "Add second GIF (side by side)" else "Replace second GIF")
+                    }
+                    if (!block.url2.isNullOrBlank()) {
+                        TextButton(onClick = { onChange(block.copy(url2 = null)) }) {
+                            Text("Remove second GIF")
                         }
                     }
                 }

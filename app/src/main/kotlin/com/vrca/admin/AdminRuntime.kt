@@ -243,7 +243,8 @@ object AdminRuntime {
         index: Int,
         uri: Uri,
         kind: MediaKind,
-        pat: String
+        pat: String,
+        slot: Int = 0
     ) {
         val tag = "$editorKey#$index"
         uploadingTags.value = uploadingTags.value + tag
@@ -256,7 +257,12 @@ object AdminRuntime {
                     MediaKind.VIDEO -> {
                         // Admin build transcodes to small H.264; public stub returns null
                         // → raw file. Size guard keeps clips small so they cache fast.
-                        val transcoded = transcodeVideoForUpload(appContext, uri)
+                        // Media3 Transformer MUST be created + accessed on a Looper thread
+                        // (main), NOT this IO worker — otherwise it throws "Transformer is
+                        // accessed on the wrong thread". The network upload stays on IO.
+                        val transcoded = kotlinx.coroutines.withContext(Dispatchers.Main) {
+                            transcodeVideoForUpload(appContext, uri)
+                        }
                         val bytes = if (transcoded != null) {
                             val b = transcoded.readBytes(); runCatching { transcoded.delete() }; b
                         } else {
@@ -275,8 +281,8 @@ object AdminRuntime {
                     val b = list[index]
                     list[index] = when {
                         kind == MediaKind.POSTER && b is com.vrca.richcontent.RichBlock.Video -> b.copy(poster = url)
-                        b is com.vrca.richcontent.RichBlock.Image -> b.copy(url = url)
-                        b is com.vrca.richcontent.RichBlock.Gif -> b.copy(url = url)
+                        b is com.vrca.richcontent.RichBlock.Image -> if (slot == 1) b.copy(url2 = url) else b.copy(url = url)
+                        b is com.vrca.richcontent.RichBlock.Gif -> if (slot == 1) b.copy(url2 = url) else b.copy(url = url)
                         b is com.vrca.richcontent.RichBlock.Video -> b.copy(url = url)
                         else -> b
                     }

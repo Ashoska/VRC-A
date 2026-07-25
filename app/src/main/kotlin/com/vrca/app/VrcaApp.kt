@@ -389,6 +389,11 @@ fun VrcaApp() {
     if (!BuildConfig.IS_ADMIN_BUILD) {
         val prefs = remember { ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE) }
         val deviceHash = remember { prefs.getString("device_id_hash", "") ?: "" }
+        // The version each release SOURCE last surfaced, so that when the admin RETRACTS
+        // (deletes) a release doc we can drop the popup if it's currently showing THAT
+        // release — instead of leaving the bad update on screen until an app restart.
+        var lastTargetedCode by remember { mutableStateOf(0L) }
+        var lastGlobalCode by remember { mutableStateOf(0L) }
 
         LaunchedEffect(Unit) {
             releaseCheckResult = checkFirestoreRelease(BuildConfig.VERSION_CODE, deviceHash)
@@ -401,7 +406,17 @@ fun VrcaApp() {
                     .collection("releases").document(deviceHash)
                 val reg = releaseDocRef
                     .addSnapshotListener { snap, _ ->
-                        if (snap == null || !snap.exists()) return@addSnapshotListener
+                        if (snap == null || !snap.exists()) {
+                            // Doc gone (admin RETRACTED it, or the self-delete below): if the
+                            // popup is currently showing THIS targeted release, drop it and
+                            // lift the forced-OSC gate right now — don't wait for a restart.
+                            val cur = releaseCheckResult as? ReleaseCheckResult.UpdateAvailable
+                            if (cur != null && lastTargetedCode > 0L && cur.info.versionCode == lastTargetedCode) {
+                                releaseCheckResult = ReleaseCheckResult.UpToDate
+                            }
+                            lastTargetedCode = 0L
+                            return@addSnapshotListener
+                        }
                         val url = snap.getString("downloadUrl").orEmpty()
                         if (url.isBlank()) return@addSnapshotListener
                         val code = snap.getLong("versionCode") ?: return@addSnapshotListener
@@ -421,6 +436,7 @@ fun VrcaApp() {
                             bodyDoc         = snap.getString("bodyDoc").orEmpty()
                         )
                         // All directed releases are forced automatically.
+                        lastTargetedCode = code
                         releaseCheckResult = ReleaseCheckResult.UpdateAvailable(
                             info, forced = true
                         )
@@ -439,7 +455,16 @@ fun VrcaApp() {
             val latestRef = FirebaseFirestore.getInstance()
                 .collection("releases").document("latest")
             val reg = latestRef.addSnapshotListener { snap, _ ->
-                if (snap == null || !snap.exists()) return@addSnapshotListener
+                if (snap == null || !snap.exists()) {
+                    // Admin RETRACTED the global release: if the popup is currently showing
+                    // THIS global release, drop it (and lift the forced-OSC gate) now.
+                    val cur = releaseCheckResult as? ReleaseCheckResult.UpdateAvailable
+                    if (cur != null && lastGlobalCode > 0L && cur.info.versionCode == lastGlobalCode) {
+                        releaseCheckResult = ReleaseCheckResult.UpToDate
+                    }
+                    lastGlobalCode = 0L
+                    return@addSnapshotListener
+                }
                 val url = snap.getString("downloadUrl").orEmpty()
                 if (url.isBlank()) return@addSnapshotListener
                 val code = snap.getLong("versionCode") ?: return@addSnapshotListener
@@ -457,6 +482,7 @@ fun VrcaApp() {
                 if (code <= BuildConfig.VERSION_CODE) return@addSnapshotListener
                 val curCode = (releaseCheckResult as? ReleaseCheckResult.UpdateAvailable)?.info?.versionCode ?: 0L
                 if (code <= curCode) return@addSnapshotListener
+                lastGlobalCode = code
                 releaseCheckResult = ReleaseCheckResult.UpdateAvailable(
                     ReleaseInfo(
                         versionCode = code,
@@ -875,7 +901,7 @@ private fun UpdateDialog(
 
                 if (forced) {
                     Text(
-                        "This update is required to continue using the app.",
+                        "This update is required.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.error
                     )
@@ -987,7 +1013,7 @@ private fun UpdateDialog(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        "Download failed? Tap here to download in your browser",
+                        "Click here if download failed.",
                         style = MaterialTheme.typography.bodySmall
                     )
                 }
