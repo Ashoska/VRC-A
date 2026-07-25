@@ -70,16 +70,7 @@ import androidx.compose.ui.window.DialogProperties
 private var richGifLoader: coil.ImageLoader? = null
 private val richGifLoaderLock = Any()
 
-/**
- * Coil loader with the GIF decoder registered, so uploaded .gif images animate.
- *
- * `allowHardware(false)` is REQUIRED for reliable GIF animation: a hardware-backed
- * `AnimatedImageDrawable` doesn't push its per-frame invalidations to Compose's
- * software canvas on many devices, so the GIF only advances when some other redraw
- * happens (scroll / touch) — the reported "only animates while I'm touching the
- * screen" bug. Software bitmaps invalidate correctly. Thumbnails are small, so the
- * extra memory is negligible.
- */
+/** Coil loader with the GIF decoder registered, so uploaded .gif images animate. */
 private fun richImageLoader(ctx: Context): coil.ImageLoader =
     richGifLoader ?: synchronized(richGifLoaderLock) {
         richGifLoader ?: coil.ImageLoader.Builder(ctx.applicationContext)
@@ -87,7 +78,6 @@ private fun richImageLoader(ctx: Context): coil.ImageLoader =
                 if (android.os.Build.VERSION.SDK_INT >= 28) add(coil.decode.ImageDecoderDecoder.Factory())
                 else add(coil.decode.GifDecoder.Factory())
             }
-            .allowHardware(false)
             .build()
             .also { richGifLoader = it }
     }
@@ -236,6 +226,7 @@ private fun RichImage(url: String, scope: RichMediaStore.Scope) {
     val ctx = LocalContext.current
     var file by remember(url) { mutableStateOf(RichMediaStore.resolve(ctx, url)) }
     var fullscreen by rememberSaveable(url) { mutableStateOf(false) }
+    var loadError by remember(url) { mutableStateOf<String?>(null) }
 
     LaunchedEffect(url) {
         if (file == null && url.isNotBlank()) {
@@ -257,7 +248,17 @@ private fun RichImage(url: String, scope: RichMediaStore.Scope) {
             contentDescription = null,
             contentScale = ContentScale.FillWidth,
             imageLoader = richImageLoader(ctx),
+            onError = { loadError = it.result.throwable.message ?: it.result.throwable.javaClass.simpleName },
+            onSuccess = { loadError = null },
             modifier = Modifier.fillMaxWidth()
+        )
+    }
+    loadError?.let { err ->
+        Text(
+            "Media load error: $err",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.fillMaxWidth().padding(top = 2.dp)
         )
     }
 
@@ -328,10 +329,16 @@ private fun RichVideo(block: RichBlock.Video, mediaScope: RichMediaStore.Scope) 
     // Prefetch the video into the local cache as soon as the card renders, so tapping
     // play uses a LOCAL file (instant, no buffering) even on a bad connection.
     var localFile by remember(block.url) { mutableStateOf(RichMediaStore.resolve(ctx, block.url)) }
+    var cacheStatus by remember(block.url) {
+        mutableStateOf(RichMediaStore.resolve(ctx, block.url)?.let { "cached ${it.length()}B" })
+    }
     LaunchedEffect(block.url) {
         if (block.url.isNotBlank() && localFile == null) {
-            RichMediaStore.ensureCached(ctx, block.url, mediaScope)
-            localFile = RichMediaStore.resolve(ctx, block.url)
+            cacheStatus = "downloading…"
+            val f = RichMediaStore.ensureCached(ctx, block.url, mediaScope)
+            localFile = f
+            cacheStatus = if (f != null && f.length() > 0) "cached ${f.length()}B"
+                else "download failed (will stream)"
         }
     }
 
@@ -349,6 +356,7 @@ private fun RichVideo(block: RichBlock.Video, mediaScope: RichMediaStore.Scope) 
             if (playing && block.url.isNotBlank()) {
                 var prepared by remember(block.url) { mutableStateOf(false) }
                 var failed by remember(block.url) { mutableStateOf(false) }
+                var errCode by remember(block.url) { mutableStateOf("") }
                 val lf = localFile
                 val playUri = if (lf != null) android.net.Uri.fromFile(lf)
                     else android.net.Uri.parse(block.url)
@@ -362,7 +370,9 @@ private fun RichVideo(block: RichBlock.Video, mediaScope: RichMediaStore.Scope) 
                                 setVideoURI(playUri)
                                 setOnPreparedListener { mp -> prepared = true; mp.isLooping = false; start() }
                                 setOnCompletionListener { ActiveVideoState.playingKey = null }
-                                setOnErrorListener { _, _, _ -> failed = true; true }
+                                setOnErrorListener { _, what, extra ->
+                                    failed = true; errCode = "what=$what extra=$extra"; true
+                                }
                             }
                         },
                         modifier = Modifier.fillMaxWidth().heightIn(min = 200.dp),
@@ -376,9 +386,10 @@ private fun RichVideo(block: RichBlock.Video, mediaScope: RichMediaStore.Scope) 
                 }
                 if (failed) {
                     Text(
-                        "Couldn't play this video.",
+                        "Couldn't play this video ($errCode) · ${cacheStatus ?: "no cache"} · ${if (lf != null) "local" else "stream"}",
                         color = Color.White,
-                        style = MaterialTheme.typography.bodySmall
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(8.dp)
                     )
                 }
             } else {
@@ -406,6 +417,19 @@ private fun RichVideo(block: RichBlock.Video, mediaScope: RichMediaStore.Scope) 
                         )
                     }
                 }
+            }
+            // Download/cache status (shown on the poster too) so the whole chain is
+            // visible before playback: downloading… / cached NB / download failed.
+            cacheStatus?.let { s ->
+                Text(
+                    s,
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .background(Color.Black.copy(alpha = 0.5f))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                )
             }
         }
     }
