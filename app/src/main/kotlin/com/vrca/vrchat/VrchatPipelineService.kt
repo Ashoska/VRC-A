@@ -1928,14 +1928,29 @@ class VrchatPipelineService : Service() {
             // Merge profile fields onto the LATEST cache entry (a concurrent WS
             // friend-location/update may have refreshed presence during a fire
             // suspend) — preserve the live presence fields (location/world/status)
-            // the WebSocket events own.
+            // the WebSocket events own WHILE ONLINE.
+            //
+            // REST is AUTHORITATIVE for the OFFLINE direction: this full sweep
+            // includes the offline=true pass, so a friend listed with
+            // status="offline" here IS offline. If the cache still shows them
+            // online, a friend-offline WS event was MISSED (the socket is
+            // throttled/dropped while the app is backgrounded) — reconcile the
+            // entry to offline so the friends-online count stops drifting too HIGH
+            // mid-session (previously only a reopen's full reload fixed it). Only
+            // the offline direction is reconciled here; a friend's live world/
+            // status while ONLINE stays WS-owned (the WS is more real-time and
+            // this fetch can be seconds stale). Silent — no late offline
+            // notification, matching how a reopen reload updates state quietly.
             val latest = friendsCache[userId] ?: prev
+            val restOffline = f.status.equals("offline", true)
             friendsCache[userId] = latest.copy(
                 displayName = f.displayName,
                 statusDescription = f.statusDescription,
                 avatarThumb = f.avatarThumb,
                 bio = f.bio,
-                trustRank = f.trustRank
+                trustRank = f.trustRank,
+                status = if (restOffline) "offline" else latest.status,
+                location = if (restOffline) "offline" else latest.location
             )
             changed = true
         }
@@ -1956,19 +1971,33 @@ class VrchatPipelineService : Service() {
      *  from the cache on every mutation, no API call. "Online" = any non-offline
      *  status (in-game or website-active), matching VRChat's own sidebar.
      *
-     *  Counts by status OR location: the WebSocket friend-online /
-     *  friend-location payloads don't always carry a `user.status` field (the
-     *  user object is optional), so a status-only predicate never changed the
-     *  count on live events — it only refreshed when the REST friends reload
-     *  ran on reconnect, i.e. "the count only updates when I reopen the app".
-     *  A live location (wrld_/private/traveling) proves online even when the
-     *  event omitted status; friend-offline explicitly stamps both fields. */
+     *  `status` is AUTHORITATIVE: "offline" ⇒ offline; any other non-blank value
+     *  (active/join me/ask me/busy) ⇒ online. This is the key to not over-counting:
+     *  a friend-update that sets status="offline" while leaving a STALE world in
+     *  `location` (VRChat frequently updates only one field) now correctly reads
+     *  offline. `location` is only consulted when status is BLANK — the WebSocket
+     *  friend-online / friend-location payloads don't always carry `user.status`
+     *  (the user object is optional), so a live world location (wrld_/private/
+     *  traveling) proves online when status was omitted.
+     *
+     *  location="offline" is NOT treated as an offline signal on its own — VRChat
+     *  uses it for a friend who is ONLINE on the website but not in any world, so
+     *  keying offline off location would DROP website-active friends. Only
+     *  status="offline" (stamped by friend-offline / friend-update) marks offline.
+     *  Residual: a genuinely MISSED friend-offline (WS throttled while
+     *  backgrounded) leaves status stale-online until the periodic REST reconcile
+     *  (below) or a reconnect/reopen corrects it. */
     private fun publishFriendsOnline() {
         val total = friendsCache.size
         if (total == 0) return
-        val online = friendsCache.values.count {
-            (it.status.isNotBlank() && !it.status.equals("offline", true)) ||
-                (it.location.isNotBlank() && !it.location.equals("offline", true))
+        val online = friendsCache.values.count { entry ->
+            when {
+                entry.status.equals("offline", true) -> false          // authoritative offline
+                entry.status.isNotBlank() -> true                      // authoritative online
+                // status blank → fall back to a live world location
+                entry.location.isNotBlank() && !entry.location.equals("offline", true) -> true
+                else -> false
+            }
         }
         VrchatPipelineState.friendsOnline = online to total
     }

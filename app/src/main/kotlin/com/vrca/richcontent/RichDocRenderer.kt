@@ -24,7 +24,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayCircle
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -34,7 +33,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -231,17 +229,16 @@ private fun RichCallout(block: RichBlock.Callout) {
  * wraps its content in `AnimatedVisibility`: once the expand animation settles,
  * nothing forces a redraw, so Coil's `AnimatedImageDrawable` frames stop advancing
  * until an external redraw (scroll/touch) — the "GIF freezes until I touch the
- * screen" bug. Reading the ticker inside a `graphicsLayer` block invalidates the
- * draw each frame (no recomposition), so the drawable's advancing frames show. The
- * ticker only runs while the composable is present (i.e. the card is expanded).
+ * screen" bug. Reading the ticker inside `drawWithContent` re-runs the draw each
+ * frame (no recomposition), so the drawable's advancing frames show. The ticker only
+ * runs while the composable is present (i.e. the card is expanded).
  */
 @Composable
 private fun RichImage(url: String, scope: RichMediaStore.Scope, animate: Boolean = false) {
     val ctx = LocalContext.current
-    if (url.isBlank()) return  // unfilled editor block — nothing to show, no error
+    if (url.isBlank()) return  // unfilled editor block — nothing to show
     var file by remember(url) { mutableStateOf(RichMediaStore.resolve(ctx, url)) }
     var fullscreen by rememberSaveable(url) { mutableStateOf(false) }
-    var loadError by remember(url) { mutableStateOf<String?>(null) }
 
     LaunchedEffect(url) {
         if (file == null && url.isNotBlank()) {
@@ -273,8 +270,6 @@ private fun RichImage(url: String, scope: RichMediaStore.Scope, animate: Boolean
             contentDescription = null,
             contentScale = ContentScale.FillWidth,
             imageLoader = richImageLoader(ctx),
-            onError = { loadError = it.result.throwable.message ?: it.result.throwable.javaClass.simpleName },
-            onSuccess = { loadError = null },
             modifier = Modifier
                 .fillMaxWidth()
                 .then(
@@ -286,14 +281,6 @@ private fun RichImage(url: String, scope: RichMediaStore.Scope, animate: Boolean
                         drawContent()
                     } else Modifier
                 )
-        )
-    }
-    loadError?.let { err ->
-        Text(
-            "Media load error: $err",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.error,
-            modifier = Modifier.fillMaxWidth().padding(top = 2.dp)
         )
     }
 
@@ -365,16 +352,10 @@ private fun RichVideo(block: RichBlock.Video, mediaScope: RichMediaStore.Scope) 
     // Prefetch the video into the local cache as soon as the card renders, so tapping
     // play uses a LOCAL file (instant, no buffering) even on a bad connection.
     var localFile by remember(block.url) { mutableStateOf(RichMediaStore.resolve(ctx, block.url)) }
-    var cacheStatus by remember(block.url) {
-        mutableStateOf(RichMediaStore.resolve(ctx, block.url)?.let { "cached ${it.length()}B" })
-    }
     LaunchedEffect(block.url) {
         if (block.url.isNotBlank() && localFile == null) {
-            cacheStatus = "downloading…"
-            val f = RichMediaStore.ensureCached(ctx, block.url, mediaScope)
-            localFile = f
-            cacheStatus = if (f != null && f.length() > 0) "cached ${f.length()}B"
-                else "download failed (will stream)"
+            RichMediaStore.ensureCached(ctx, block.url, mediaScope)
+            localFile = RichMediaStore.resolve(ctx, block.url)
         }
     }
 
@@ -390,14 +371,13 @@ private fun RichVideo(block: RichBlock.Video, mediaScope: RichMediaStore.Scope) 
             contentAlignment = Alignment.Center
         ) {
             if (playing && block.url.isNotBlank()) {
-                var playError by remember(block.url) { mutableStateOf<String?>(null) }
+                var playFailed by remember(block.url) { mutableStateOf(false) }
                 var aspect by remember(block.url) { mutableStateOf(16f / 9f) }
                 val lf = localFile
                 val playUri = if (lf != null) android.net.Uri.fromFile(lf)
                     else android.net.Uri.parse(block.url)
                 // ExoPlayer (Media3) rendering into a TextureView plays reliably inside
-                // Compose where VideoView's SurfaceView rendered black; onPlayerError
-                // reports the exact reason if anything's still wrong.
+                // Compose where VideoView's SurfaceView rendered black.
                 val exo = remember(playUri) {
                     androidx.media3.exoplayer.ExoPlayer.Builder(ctx).build().apply {
                         setMediaItem(androidx.media3.common.MediaItem.fromUri(playUri))
@@ -405,7 +385,7 @@ private fun RichVideo(block: RichBlock.Video, mediaScope: RichMediaStore.Scope) 
                         playWhenReady = true
                         addListener(object : androidx.media3.common.Player.Listener {
                             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                                playError = "${error.errorCodeName} (${error.errorCode})"
+                                playFailed = true
                             }
                             override fun onVideoSizeChanged(vs: androidx.media3.common.VideoSize) {
                                 if (vs.width > 0 && vs.height > 0) {
@@ -430,15 +410,12 @@ private fun RichVideo(block: RichBlock.Video, mediaScope: RichMediaStore.Scope) 
                         .fillMaxWidth()
                         .aspectRatio(aspect.coerceIn(0.5f, 2.5f))
                 )
-                playError?.let { err ->
+                if (playFailed) {
                     Text(
-                        "Couldn't play this video: $err · ${cacheStatus ?: "no cache"} · ${if (lf != null) "local" else "stream"}",
+                        "Couldn't play this video.",
                         color = Color.White,
                         style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier
-                            .align(Alignment.BottomStart)
-                            .background(Color.Black.copy(alpha = 0.6f))
-                            .padding(8.dp)
+                        modifier = Modifier.padding(8.dp)
                     )
                 }
             } else {
@@ -466,19 +443,6 @@ private fun RichVideo(block: RichBlock.Video, mediaScope: RichMediaStore.Scope) 
                         )
                     }
                 }
-            }
-            // Download/cache status (shown on the poster too) so the whole chain is
-            // visible before playback: downloading… / cached NB / download failed.
-            cacheStatus?.let { s ->
-                Text(
-                    s,
-                    color = Color.White,
-                    style = MaterialTheme.typography.labelSmall,
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .background(Color.Black.copy(alpha = 0.5f))
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                )
             }
         }
     }
