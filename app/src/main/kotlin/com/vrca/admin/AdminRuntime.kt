@@ -256,7 +256,12 @@ object AdminRuntime {
                     MediaKind.VIDEO -> {
                         // Admin build transcodes to small H.264; public stub returns null
                         // → raw file. Size guard keeps clips small so they cache fast.
-                        val transcoded = transcodeVideoForUpload(appContext, uri)
+                        // Media3 Transformer MUST be created + accessed on a Looper thread
+                        // (main), NOT this IO worker — otherwise it throws "Transformer is
+                        // accessed on the wrong thread". The network upload stays on IO.
+                        val transcoded = kotlinx.coroutines.withContext(Dispatchers.Main) {
+                            transcodeVideoForUpload(appContext, uri)
+                        }
                         val bytes = if (transcoded != null) {
                             val b = transcoded.readBytes(); runCatching { transcoded.delete() }; b
                         } else {
