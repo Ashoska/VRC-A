@@ -39,6 +39,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -121,8 +122,8 @@ fun RichDocRenderer(
                         }
                     }
                 }
-                is RichBlock.Image -> RichImage(block.url, mediaScope)
-                is RichBlock.Gif -> RichImage(block.url, mediaScope)
+                is RichBlock.Image -> RichImage(block.url, mediaScope, animate = false)
+                is RichBlock.Gif -> RichImage(block.url, mediaScope, animate = true)
                 is RichBlock.Video -> RichVideo(block, mediaScope)
                 is RichBlock.Callout -> RichCallout(block)
                 RichBlock.Divider -> Divider(
@@ -220,10 +221,22 @@ private fun RichCallout(block: RichBlock.Callout) {
     }
 }
 
-/** Full-width image, own intrinsic ratio, local-file-first, tap → pinch-zoom. */
+/**
+ * Full-width image, own intrinsic ratio, local-file-first, tap → pinch-zoom.
+ *
+ * When [animate] is true (GIF blocks) a per-frame ticker forces the image to redraw
+ * continuously while it's on screen. This is REQUIRED because the announcement card
+ * wraps its content in `AnimatedVisibility`: once the expand animation settles,
+ * nothing forces a redraw, so Coil's `AnimatedImageDrawable` frames stop advancing
+ * until an external redraw (scroll/touch) — the "GIF freezes until I touch the
+ * screen" bug. Reading the ticker inside a `graphicsLayer` block invalidates the
+ * draw each frame (no recomposition), so the drawable's advancing frames show. The
+ * ticker only runs while the composable is present (i.e. the card is expanded).
+ */
 @Composable
-private fun RichImage(url: String, scope: RichMediaStore.Scope) {
+private fun RichImage(url: String, scope: RichMediaStore.Scope, animate: Boolean = false) {
     val ctx = LocalContext.current
+    if (url.isBlank()) return  // unfilled editor block — nothing to show, no error
     var file by remember(url) { mutableStateOf(RichMediaStore.resolve(ctx, url)) }
     var fullscreen by rememberSaveable(url) { mutableStateOf(false) }
     var loadError by remember(url) { mutableStateOf<String?>(null) }
@@ -232,6 +245,16 @@ private fun RichImage(url: String, scope: RichMediaStore.Scope) {
         if (file == null && url.isNotBlank()) {
             RichMediaStore.ensureCached(ctx, url, scope)
             file = RichMediaStore.resolve(ctx, url)
+        }
+    }
+
+    val frameTick = remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    if (animate) {
+        LaunchedEffect(Unit) {
+            while (true) {
+                androidx.compose.runtime.withFrameMillis { }
+                frameTick.intValue++
+            }
         }
     }
 
@@ -250,7 +273,17 @@ private fun RichImage(url: String, scope: RichMediaStore.Scope) {
             imageLoader = richImageLoader(ctx),
             onError = { loadError = it.result.throwable.message ?: it.result.throwable.javaClass.simpleName },
             onSuccess = { loadError = null },
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(
+                    if (animate) Modifier.drawWithContent {
+                        // Read the tick INSIDE the draw lambda so the draw phase re-runs
+                        // every frame; drawContent() then re-rasterises the drawable's
+                        // current (advanced) frame even with zero recomposition.
+                        frameTick.intValue
+                        drawContent()
+                    } else Modifier
+                )
         )
     }
     loadError?.let { err ->
@@ -325,7 +358,7 @@ private fun RichVideo(block: RichBlock.Video, mediaScope: RichMediaStore.Scope) 
     val ctx = LocalContext.current
     val token = remember(block.url) { Any() }
     val playing = ActiveVideoState.playingKey === token
-    val posterModel = block.poster?.let { RichMediaStore.resolve(ctx, it) ?: it }
+    val posterModel = block.poster?.takeIf { it.isNotBlank() }?.let { RichMediaStore.resolve(ctx, it) ?: it }
     // Prefetch the video into the local cache as soon as the card renders, so tapping
     // play uses a LOCAL file (instant, no buffering) even on a bad connection.
     var localFile by remember(block.url) { mutableStateOf(RichMediaStore.resolve(ctx, block.url)) }
