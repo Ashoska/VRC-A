@@ -1292,6 +1292,13 @@ class VrcaViewModel(
     private var lastDiscordLogoutMs: Long = 0L
     private var lastOscCommandMs: Long = 0L
 
+    /** Clock-skew tolerance for the "fresh admin command" gates (kill / logout /
+     *  osc start-stop). These compare a SERVER timestamp to the local wall clock; a
+     *  device clock lagging the server makes the delta negative on the first
+     *  snapshot, so without this tolerance the command was skipped until the next
+     *  10-30s poll advanced the clock. 2 min covers typical mobile clock drift. */
+    private val CMD_SKEW_TOLERANCE_MS = 120_000L
+
     /** Admin remote-logout of VRChat: clears the session (incl. saved credentials, so
      *  auto-relogin can't revive it), which emits loggedOutSignal → OSC gate +
      *  releaseAccountLock (frees the single-session lock), then stops the pipeline. */
@@ -1412,21 +1419,25 @@ class VrcaViewModel(
                                 val ageMs = System.currentTimeMillis() - killMs
                                 // Age window blocks an ANCIENT killSignal (e.g. reinstall);
                                 // the per-kill dedup inside handleAdminKill blocks a REOPEN
-                                // re-triggering the same fresh one.
-                                if (ageMs in 0L..60_000L) handleAdminKill(killMs)
+                                // re-triggering the same fresh one. The NEGATIVE lower bound
+                                // tolerates clock skew: the admin writes a SERVER timestamp,
+                                // and if this device's clock lags the server the age is
+                                // negative on the first snapshot — without the tolerance the
+                                // signal was skipped until the next poll advanced the clock.
+                                if (ageMs in -CMD_SKEW_TOLERANCE_MS..60_000L) handleAdminKill(killMs)
                             }
 
                             // Admin remote-logout signals (fresh + once per timestamp).
                             snap.getTimestamp("logoutVrchatAt")?.let { ts ->
                                 val ms = ts.seconds * 1000L + (ts.nanoseconds / 1_000_000L)
-                                if (System.currentTimeMillis() - ms in 0L..60_000L && ms != lastVrchatLogoutMs) {
+                                if (System.currentTimeMillis() - ms in -CMD_SKEW_TOLERANCE_MS..60_000L && ms != lastVrchatLogoutMs) {
                                     lastVrchatLogoutMs = ms
                                     handleAdminVrchatLogout()
                                 }
                             }
                             snap.getTimestamp("logoutDiscordAt")?.let { ts ->
                                 val ms = ts.seconds * 1000L + (ts.nanoseconds / 1_000_000L)
-                                if (System.currentTimeMillis() - ms in 0L..60_000L && ms != lastDiscordLogoutMs) {
+                                if (System.currentTimeMillis() - ms in -CMD_SKEW_TOLERANCE_MS..60_000L && ms != lastDiscordLogoutMs) {
                                     lastDiscordLogoutMs = ms
                                     disconnectDiscordLocally()
                                 }
@@ -1435,9 +1446,14 @@ class VrcaViewModel(
                             // Admin remote Start/Stop of THIS device's OSC sending
                             // (device-only). Rides the existing moderation snapshot —
                             // no bonus read. Fresh (<60s) + once per timestamp.
+                            // The NEGATIVE lower bound tolerates clock skew: oscCommandAt is
+                            // a SERVER timestamp, so a device clock lagging the server made
+                            // (now - ms) negative on the admin's write snapshot → the command
+                            // was skipped and only applied on the next 10-30s poll once the
+                            // clock advanced. Tolerating skew applies it on the first snapshot.
                             snap.getTimestamp("oscCommandAt")?.let { ts ->
                                 val ms = ts.seconds * 1000L + (ts.nanoseconds / 1_000_000L)
-                                if (System.currentTimeMillis() - ms in 0L..60_000L && ms != lastOscCommandMs) {
+                                if (System.currentTimeMillis() - ms in -CMD_SKEW_TOLERANCE_MS..60_000L && ms != lastOscCommandMs) {
                                     lastOscCommandMs = ms
                                     when (snap.getString("oscCommand")) {
                                         "start" -> if (!oscSending) startSending()
