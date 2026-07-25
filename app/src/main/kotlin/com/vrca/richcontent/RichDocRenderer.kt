@@ -191,12 +191,12 @@ private fun RichText(raw: String, style: TextStyle, color: Color) {
     }
 }
 
-/** Tinted highlight box. tone = info (primary) / warn (amber) / success (green). */
+/** Tinted highlight box. tone = info (blue) / warn (red-orange) / success (green). */
 @Composable
 private fun RichCallout(block: RichBlock.Callout) {
     val accent = when (block.tone.lowercase()) {
         "success" -> Color(0xFF22C55E)          // clear green
-        "warn", "warning" -> Color(0xFFF59E0B)  // clear amber/orange
+        "warn", "warning" -> Color(0xFFF4511E)  // red-orange (reads as a warning)
         else -> Color(0xFF3B82F6)               // clear blue (info)
     }
     Surface(
