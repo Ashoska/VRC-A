@@ -90,7 +90,7 @@ import android.os.Environment
 import androidx.compose.foundation.layout.Box
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.NewReleases
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Divider
@@ -874,7 +874,7 @@ private fun UpdateDialog(
                     ) {
                         Box(contentAlignment = Alignment.Center) {
                             Icon(
-                                Icons.Filled.NewReleases,
+                                Icons.Filled.SystemUpdate,
                                 contentDescription = null,
                                 tint = MaterialTheme.colorScheme.primary
                             )
@@ -899,13 +899,7 @@ private fun UpdateDialog(
                     }
                 }
 
-                if (forced) {
-                    Text(
-                        "This update is required.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.error
-                    )
-                }
+                // (The "Update Required" title already states this — no redundant line.)
 
                 // Rich patch notes — takes ALL remaining vertical space (weight) so the
                 // notes area is large and scrolls; block order gives the "hero image on
@@ -954,34 +948,16 @@ private fun UpdateDialog(
                     )
                 }
 
-                // Actions: forced = single full-width Download; legacy = Later + Download
-                if (forced) {
-                    Button(
-                        onClick = { if (!downloading) onDownload(info.downloadUrl) },
-                        enabled = !downloading,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        if (downloading) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.height(18.dp).widthIn(max = 18.dp),
-                                strokeWidth = 2.dp,
-                                color = MaterialTheme.colorScheme.onPrimary
-                            )
-                            Spacer(Modifier.widthIn(min = 8.dp))
-                            Text("Downloading")
-                        } else {
-                            Text(if (error != null) "Retry Download" else "Download Update")
-                        }
-                    }
-                } else {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End)
-                    ) {
-                        OutlinedButton(onClick = onDismiss) { Text("Later") }
+                // Actions pinned at the bottom: the Download button and the browser
+                // fallback link sit tight together (a compact clickable Text instead of a
+                // TextButton, which reserves a 48dp min-height and left a weird big gap).
+                val dialogCtx = LocalContext.current
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (forced) {
                         Button(
                             onClick = { if (!downloading) onDownload(info.downloadUrl) },
-                            enabled = !downloading
+                            enabled = !downloading,
+                            modifier = Modifier.fillMaxWidth()
                         ) {
                             if (downloading) {
                                 CircularProgressIndicator(
@@ -992,29 +968,50 @@ private fun UpdateDialog(
                                 Spacer(Modifier.widthIn(min = 8.dp))
                                 Text("Downloading")
                             } else {
-                                Text(if (error != null) "Retry" else "Download")
+                                Text(if (error != null) "Retry Download" else "Download Update")
+                            }
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End)
+                        ) {
+                            OutlinedButton(onClick = onDismiss) { Text("Later") }
+                            Button(
+                                onClick = { if (!downloading) onDownload(info.downloadUrl) },
+                                enabled = !downloading
+                            ) {
+                                if (downloading) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.height(18.dp).widthIn(max = 18.dp),
+                                        strokeWidth = 2.dp,
+                                        color = MaterialTheme.colorScheme.onPrimary
+                                    )
+                                    Spacer(Modifier.widthIn(min = 8.dp))
+                                    Text("Downloading")
+                                } else {
+                                    Text(if (error != null) "Retry" else "Download")
+                                }
                             }
                         }
                     }
-                }
 
-                // Manual fallback: always-visible link that opens the release URL in the
-                // browser, for devices where the in-app DownloadManager flow fails.
-                val dialogCtx = LocalContext.current
-                TextButton(
-                    onClick = {
-                        runCatching {
-                            dialogCtx.startActivity(
-                                Intent(Intent.ACTION_VIEW, Uri.parse(info.downloadUrl))
-                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            )
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
                     Text(
                         "Click here if download failed.",
-                        style = MaterialTheme.typography.bodySmall
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                runCatching {
+                                    dialogCtx.startActivity(
+                                        Intent(Intent.ACTION_VIEW, Uri.parse(info.downloadUrl))
+                                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    )
+                                }
+                            }
+                            .padding(vertical = 6.dp)
                     )
                 }
             }
