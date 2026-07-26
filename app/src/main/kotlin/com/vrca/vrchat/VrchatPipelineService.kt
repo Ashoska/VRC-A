@@ -4543,6 +4543,15 @@ object VrchatPipelineState {
         get() = _authDead.value
         set(value) { _authDead.value = value }
 
+    // DEBUG ONLY: the raw image/URL fields from the self VRChat user JSON, so we can
+    // map VRChat's newer "Profile Icon" / "Banner" to the right keys (userIcon came
+    // back empty even with a Profile Icon set). Shown in Settings → Debug.
+    private val _profileFieldsDebug = MutableStateFlow("")
+    val profileFieldsDebugFlow: StateFlow<String> = _profileFieldsDebug.asStateFlow()
+    var profileFieldsDebug: String
+        get() = _profileFieldsDebug.value
+        set(value) { _profileFieldsDebug.value = value }
+
     // (online, total) friends from the local friends cache — fed by the service
     // on every cache mutation, ZERO extra API calls. Null until the cache loads.
     private val _friendsOnline = MutableStateFlow<Pair<Int, Int>?>(null)
