@@ -290,13 +290,7 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
                     ) {
                         SelfAvatar(
                             name = (p?.displayName ?: displayName).ifBlank { "?" },
-                            // Profile Icon (userIcon) first; fall back to the worn avatar's
-                            // thumbnail (a real image) rather than the BANNER — never show
-                            // the wide banner cropped into the circle. (VRChat's newer
-                            // "Profile Icon" comes back empty in userIcon; the correct field
-                            // is being identified via Settings → Debug and will be mapped here.)
-                            picUrl = p?.profilePicUrl.orEmpty()
-                                .ifBlank { p?.currentAvatarThumbnailUrl.orEmpty() },
+                            picUrl = p?.profilePicUrl.orEmpty(),
                             statusColor = statusColor
                         )
                         Column(Modifier.weight(1f)) {
