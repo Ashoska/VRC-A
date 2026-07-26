@@ -539,6 +539,11 @@ class VrcaViewModel(
         // Master OSC Start/Stop gate, streamed with the watched 10s loop so the admin
         // detail view's "Sending / Idle" indicator is live (rides this existing write).
         "oscSending" to oscSending,
+        // App version streamed with the watched 10s loop too, so a watched user's
+        // version in the admin panel updates within ~10s of an update (rides this
+        // existing write — 0 extra cost).
+        "versionName" to BuildConfig.VERSION_NAME,
+        "versionCode" to BuildConfig.VERSION_CODE,
         "lastReportedTime" to if (timeEnabled) currentTimeString() else "",
         "lastTimeUpdateAt" to FieldValue.serverTimestamp(),
         "lastActiveAt" to FieldValue.serverTimestamp(),
@@ -651,6 +656,13 @@ class VrcaViewModel(
     }
 
     private fun captureStateForSync(): Map<String, Any?> = buildMap {
+        // App version rides the delta write so the admin directory reflects an UPDATE
+        // reliably. It was previously written ONLY by the bootstrap cold-boot write
+        // (VrcaApp `safeUser`), which runs on a clean swipe-reopen / fresh install and
+        // is throttled 20 min — so a user who only warm-resumes could stay on a stale
+        // version in the panel. Piggybacks on the write that already fires → 0 extra cost.
+        put("versionName", BuildConfig.VERSION_NAME)
+        put("versionCode", BuildConfig.VERSION_CODE)
         put("afkEnabled", afkEnabled)
         put("afkMessage", afkMessage.trim())
         put("cycleEnabled", cycleEnabled)

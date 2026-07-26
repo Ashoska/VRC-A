@@ -24,6 +24,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -34,6 +35,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -41,6 +43,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -55,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import kotlinx.coroutines.launch
 
 /**
  * Renders a [RichDoc] as a responsive vertical block stack. Shared by the Update
@@ -75,13 +79,31 @@ private val richGifLoaderLock = Any()
  *  gif / video is sized down instead of taking up the whole screen. */
 private val MAX_MEDIA_HEIGHT = 380.dp
 
-/** Coil loader with the GIF decoder registered, so uploaded .gif images animate. */
+/**
+ * Coil loader with the GIF decoder registered, so uploaded .gif images animate.
+ * Disk + memory caches are CAPPED (its own `rich_image_cache` dir so it doesn't
+ * collide with [com.vrca.admin.VrchatImageLoader]'s `image_cache`) — without a
+ * cap Coil defaults its disk cache to 2% of free space (hundreds of MB), a silent
+ * cache grower. Most rich media loads from the local [RichMediaStore] file anyway;
+ * this only bounds the network-fallback path.
+ */
 private fun richImageLoader(ctx: Context): coil.ImageLoader =
     richGifLoader ?: synchronized(richGifLoaderLock) {
         richGifLoader ?: coil.ImageLoader.Builder(ctx.applicationContext)
             .components {
                 if (android.os.Build.VERSION.SDK_INT >= 28) add(coil.decode.ImageDecoderDecoder.Factory())
                 else add(coil.decode.GifDecoder.Factory())
+            }
+            .memoryCache {
+                coil.memory.MemoryCache.Builder(ctx.applicationContext)
+                    .maxSizeBytes(12 * 1024 * 1024)
+                    .build()
+            }
+            .diskCache {
+                coil.disk.DiskCache.Builder()
+                    .directory(ctx.applicationContext.cacheDir.resolve("rich_image_cache"))
+                    .maxSizeBytes(15L * 1024 * 1024)
+                    .build()
             }
             .build()
             .also { richGifLoader = it }
@@ -368,10 +390,13 @@ private object ActiveVideoState {
 }
 
 /**
- * Video block (Phase 5): poster + play button; tap plays inline WITH AUDIO via the
- * Media3 ExoPlayer (reliable inside Compose; VideoView's SurfaceView rendered
- * black). Single active player — a new play stops any other. The player is released
- * when it leaves the composition (DisposableEffect) or another video takes over.
+ * Video block: poster + play button; tap plays inline WITH AUDIO via Media3
+ * ExoPlayer (into a TextureView — reliable in Compose). Single active player.
+ *
+ * DOWNLOAD-FIRST: the clip is played ONLY from the fully-downloaded local file —
+ * NEVER streamed from the URL. Play is disabled until the download completes (a
+ * spinner shows meanwhile). Streaming a not-yet-complete/remote clip caused
+ * playback issues, so this removes the URL fallback entirely for video.
  */
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
@@ -379,14 +404,39 @@ private fun RichVideo(block: RichBlock.Video, mediaScope: RichMediaStore.Scope) 
     val ctx = LocalContext.current
     val token = remember(block.url) { Any() }
     val playing = ActiveVideoState.playingKey === token
+    val retryScope = rememberCoroutineScope()
     val posterModel = block.poster?.takeIf { it.isNotBlank() }?.let { RichMediaStore.resolve(ctx, it) ?: it }
-    // Prefetch the video into the local cache as soon as the card renders, so tapping
-    // play uses a LOCAL file (instant, no buffering) even on a bad connection.
+    // Download the whole clip up front. Play only becomes available once localFile
+    // is set (fully downloaded). No URL streaming.
     var localFile by remember(block.url) { mutableStateOf(RichMediaStore.resolve(ctx, block.url)) }
+    var downloadFailed by remember(block.url) { mutableStateOf(false) }
     LaunchedEffect(block.url) {
         if (block.url.isNotBlank() && localFile == null) {
-            RichMediaStore.ensureCached(ctx, block.url, mediaScope)
-            localFile = RichMediaStore.resolve(ctx, block.url)
+            downloadFailed = false
+            val f = RichMediaStore.ensureCached(ctx, block.url, mediaScope)
+            localFile = f
+            downloadFailed = (f == null)
+        }
+    }
+    val ready = localFile != null
+
+    // When there's NO poster, extract a real frame from the downloaded clip so the
+    // idle card shows the video's first frame instead of a black box.
+    var videoFrame by remember(block.url) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    LaunchedEffect(localFile) {
+        val f = localFile
+        if (posterModel == null && f != null && videoFrame == null) {
+            videoFrame = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                val mmr = android.media.MediaMetadataRetriever()
+                try {
+                    mmr.setDataSource(f.absolutePath)
+                    mmr.getFrameAtTime(0, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                } catch (_: Throwable) {
+                    null
+                } finally {
+                    runCatching { mmr.release() }
+                }
+            }
         }
     }
 
@@ -401,12 +451,10 @@ private fun RichVideo(block: RichBlock.Video, mediaScope: RichMediaStore.Scope) 
                 .heightIn(min = 200.dp),
             contentAlignment = Alignment.Center
         ) {
-            if (playing && block.url.isNotBlank()) {
+            if (playing && ready) {
                 var playFailed by remember(block.url) { mutableStateOf(false) }
                 var aspect by remember(block.url) { mutableStateOf(16f / 9f) }
-                val lf = localFile
-                val playUri = if (lf != null) android.net.Uri.fromFile(lf)
-                    else android.net.Uri.parse(block.url)
+                val playUri = android.net.Uri.fromFile(localFile!!)  // local file ONLY
                 // ExoPlayer (Media3) rendering into a TextureView plays reliably inside
                 // Compose where VideoView's SurfaceView rendered black.
                 val exo = remember(playUri) {
@@ -453,6 +501,7 @@ private fun RichVideo(block: RichBlock.Video, mediaScope: RichMediaStore.Scope) 
                     )
                 }
             } else {
+                val frame = videoFrame
                 if (posterModel != null) {
                     coil.compose.AsyncImage(
                         model = posterModel,
@@ -460,21 +509,67 @@ private fun RichVideo(block: RichBlock.Video, mediaScope: RichMediaStore.Scope) 
                         contentScale = ContentScale.Fit,
                         modifier = Modifier.fillMaxWidth().heightIn(max = MAX_MEDIA_HEIGHT)
                     )
+                } else if (frame != null) {
+                    // No poster → show the video's own first frame instead of black.
+                    Image(
+                        bitmap = frame.asImageBitmap(),
+                        contentDescription = null,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxWidth().heightIn(max = MAX_MEDIA_HEIGHT)
+                    )
                 }
-                Surface(
-                    shape = CircleShape,
-                    color = Color.Black.copy(alpha = 0.45f),
-                    modifier = Modifier
-                        .size(64.dp)
-                        .clickable { if (block.url.isNotBlank()) ActiveVideoState.playingKey = token }
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            Icons.Filled.PlayCircle,
-                            contentDescription = "Play",
-                            tint = Color.White,
-                            modifier = Modifier.size(48.dp)
-                        )
+                when {
+                    // Still downloading — play is DISABLED until the clip is fully on
+                    // the device (no streaming). Spinner + "Downloading" label.
+                    !ready && !downloadFailed -> {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            CircularProgressIndicator(color = Color.White, modifier = Modifier.size(40.dp))
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "Downloading video…",
+                                color = Color.White,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                    // Download failed — offer a retry (re-arms the LaunchedEffect by
+                    // clearing localFile is unnecessary; just re-trigger the fetch).
+                    downloadFailed -> {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                "Couldn't download this video.",
+                                color = Color.White,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.padding(8.dp)
+                            )
+                            androidx.compose.material3.OutlinedButton(onClick = {
+                                downloadFailed = false
+                                retryScope.launch {
+                                    val f = RichMediaStore.ensureCached(ctx, block.url, mediaScope)
+                                    localFile = f
+                                    downloadFailed = (f == null)
+                                }
+                            }) { Text("Retry") }
+                        }
+                    }
+                    // Ready — the play button appears and works (local file).
+                    else -> {
+                        Surface(
+                            shape = CircleShape,
+                            color = Color.Black.copy(alpha = 0.45f),
+                            modifier = Modifier
+                                .size(64.dp)
+                                .clickable { ActiveVideoState.playingKey = token }
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    Icons.Filled.PlayCircle,
+                                    contentDescription = "Play",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(48.dp)
+                                )
+                            }
+                        }
                     }
                 }
             }

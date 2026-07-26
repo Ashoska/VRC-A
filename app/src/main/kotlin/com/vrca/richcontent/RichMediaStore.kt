@@ -118,6 +118,33 @@ object RichMediaStore {
             }
         }
 
+    /**
+     * Reconcile a scope to EXACTLY the currently-referenced media: delete every file
+     * whose URL isn't in [referencedUrls], and nothing else. This is the whole culling
+     * model — purely REFERENCE-based, NO size cap / LRU eviction, so active media is
+     * NEVER evicted (required now that video plays from the local file only, with no
+     * URL-streaming fallback — an evicted active video would break). Storage is thus
+     * exactly "the media of your active content"; when the admin removes/swaps
+     * content, the next reconcile frees it. [gcAnnouncements] is this for ann/.
+     */
+    private fun reconcile(ctx: Context, scope: Scope, referencedUrls: Set<String>) {
+        try {
+            val keep = referencedUrls.asSequence()
+                .filter { it.isNotBlank() }
+                .map { keyFor(it) }
+                .toHashSet()
+            val files = scopeDir(ctx, scope).listFiles() ?: return
+            var removed = 0
+            for (file in files) {
+                val key = file.name.removeSuffix(".bin").removeSuffix(".part")
+                if (key !in keep) { if (file.delete()) removed++ }
+            }
+            if (removed > 0) Log.i(TAG, "reconcile($scope) removed $removed unreferenced file(s)")
+        } catch (e: Throwable) {
+            Log.w(TAG, "reconcile($scope) failed", e)
+        }
+    }
+
     /** Fire-and-forget [ensureCached] from non-suspend contexts. */
     fun ensureCachedAsync(ctx: Context, url: String?, scope: Scope) {
         if (url.isNullOrBlank()) return
@@ -127,25 +154,19 @@ object RichMediaStore {
         }.start()
     }
 
-    /** Deletes announcement-scoped files whose URL isn't in [referencedUrls]. */
-    fun gcAnnouncements(ctx: Context, referencedUrls: Set<String>) {
-        Thread {
-            try {
-                val keep = referencedUrls.asSequence()
-                    .filter { it.isNotBlank() }
-                    .map { keyFor(it) }
-                    .toHashSet()
-                val files = scopeDir(ctx, Scope.ANNOUNCEMENT).listFiles() ?: return@Thread
-                var removed = 0
-                for (file in files) {
-                    val key = file.name.removeSuffix(".bin").removeSuffix(".part")
-                    if (key !in keep) { if (file.delete()) removed++ }
-                }
-                if (removed > 0) Log.i(TAG, "gc removed $removed unreferenced media file(s)")
-            } catch (e: Throwable) {
-                Log.w(TAG, "gcAnnouncements failed", e)
-            }
-        }.start()
+    /**
+     * Cull ann/ down to EXACTLY the media referenced by the active announcements.
+     * Purely reference-based (no size limits) — [referencedUrls] is the FULL set of
+     * media URLs across every active announcement, so anything else is genuinely
+     * orphaned (a removed/swapped announcement) and safe to delete.
+     *
+     * [confirmed] MUST be true — the caller has actually loaded the announcements
+     * list. Never cull on an unconfirmed/empty set (that would delete all cached
+     * media before the list loads, forcing a needless re-download of active media).
+     */
+    fun gcAnnouncements(ctx: Context, referencedUrls: Set<String>, confirmed: Boolean = true) {
+        if (!confirmed) return
+        Thread { reconcile(ctx, Scope.ANNOUNCEMENT, referencedUrls) }.start()
     }
 
     /** Wipes all update-scoped media (called on update popup / What's New close). */

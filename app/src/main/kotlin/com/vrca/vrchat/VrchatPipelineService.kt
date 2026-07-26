@@ -3185,11 +3185,22 @@ class VrchatPipelineService : Service() {
         val status = user.optString("status", prev.status).ifBlank { prev.status }
         val statusDesc = user.optString("statusDescription", prev.statusDescription)
         val state = user.optString("state", prev.state).ifBlank { prev.state }
+        // A profile-icon / banner change arrives as a user-update. If the payload
+        // carries the new userIcon / profilePicOverride, adopt it (and persist the
+        // icon) so the circle updates instantly; otherwise KEEP the previous value
+        // (never blank it — the payload often omits these fields).
+        val icon = user.optString("userIcon", "")
+        val banner = user.optString("profilePicOverride", "")
+        if (icon.isNotBlank()) {
+            runCatching { VrchatAuthManager.storeProfilePic(this, icon) }
+        }
         VrchatPipelineState.presence = prev.copy(
             status = status,
             statusDescription = statusDesc,
             state = state,
-            isOnlineInVRChat = state != "offline"
+            isOnlineInVRChat = state != "offline",
+            profilePicUrl = icon.ifBlank { prev.profilePicUrl },
+            bannerUrl = banner.ifBlank { prev.bannerUrl }
         )
         pushSelfPresenceToFirestoreIfWatched()
     }
@@ -4542,6 +4553,15 @@ object VrchatPipelineState {
     var authDead: Boolean
         get() = _authDead.value
         set(value) { _authDead.value = value }
+
+    // DEBUG ONLY: the raw image/URL fields from the self VRChat user JSON, so we can
+    // map VRChat's newer "Profile Icon" / "Banner" to the right keys (userIcon came
+    // back empty even with a Profile Icon set). Shown in Settings → Debug.
+    private val _profileFieldsDebug = MutableStateFlow("")
+    val profileFieldsDebugFlow: StateFlow<String> = _profileFieldsDebug.asStateFlow()
+    var profileFieldsDebug: String
+        get() = _profileFieldsDebug.value
+        set(value) { _profileFieldsDebug.value = value }
 
     // (online, total) friends from the local friends cache — fed by the service
     // on every cache mutation, ZERO extra API calls. Null until the cache loads.
