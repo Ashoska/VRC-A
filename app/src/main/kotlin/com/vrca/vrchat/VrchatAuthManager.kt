@@ -125,6 +125,11 @@ object VrchatAuthManager {
     fun getStoredProfilePic(context: Context): String =
         getPrefs(context)?.getString(KEY_PROFILE_PIC, "")?.trim().orEmpty()
 
+    /** Persist the last-known-good VRChat profile icon (userIcon) URL. */
+    fun storeProfilePic(context: Context, pic: String) {
+        if (pic.isNotBlank()) getPrefs(context)?.edit()?.putString(KEY_PROFILE_PIC, pic)?.apply()
+    }
+
     /**
      * Cheap one-shot refresh of the stored VRChat+ profile picture via /auth/user.
      * Lets the admin directory show a logged-in user's pfp WITHOUT needing to
@@ -918,9 +923,13 @@ object VrchatAuthManager {
                 location == "traveling"
 
             // Persist the profile pic so self-sync can include it even when the
-            // user isn't currently being watched (the directory needs it).
+            // user isn't currently being watched (the directory needs it). If this
+            // fetch didn't carry a userIcon (e.g. only /users/{id} landed, which omits
+            // it), keep the last-known-good so the icon never resets to initials.
             if (profilePic.isNotBlank()) {
                 getPrefs(context)?.edit()?.putString(KEY_PROFILE_PIC, profilePic)?.apply()
+            } else {
+                profilePic = getStoredProfilePic(context)
             }
 
             VrcUserPresence(
@@ -991,7 +1000,12 @@ object VrchatAuthManager {
                 currentAvatarThumbnailUrl = uj.optString("currentAvatarThumbnailImageUrl", ""),
                 isOnlineInVRChat = isOnline,
                 worldImageUrl = "",
-                profilePicUrl = uj.optString("userIcon", ""),
+                // /users/{id} does NOT return userIcon (only /auth/user does), so it
+                // would blank the profile icon every time this light fallback runs
+                // (constant on mobile) — the "icon resets to initials" bug. Fall back
+                // to the last-known-good stored icon so it persists. (The banner,
+                // profilePicOverride, IS returned here, which is why it tracked fine.)
+                profilePicUrl = uj.optString("userIcon", "").ifBlank { getStoredProfilePic(context) },
                 bannerUrl = uj.optString("profilePicOverride", ""),
                 trustRank = extractTrustRankFromTags(uj.optJSONArray("tags"))
             )
