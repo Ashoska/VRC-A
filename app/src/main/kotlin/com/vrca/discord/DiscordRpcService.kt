@@ -102,6 +102,14 @@ class DiscordRpcService : Service() {
         // event on a flaky connection) from wiping the offline counter and
         // restarting it from 0 — a genuine visit still clears it after ~3 min.
         private const val OFFLINE_CLEAR_CONFIRM_MS = 3L * 60 * 1000
+        // A raw "in VRChat" presence must hold this long before the RPC acts on it.
+        // Right after an app restart / UPDATE the app can briefly report a STALE
+        // "in a world" (a persisted/replayed presence) for a second before the true
+        // state lands — that 1s blip would flip the RPC online and disturb the
+        // not-in-VRChat counter. Requiring the online state to persist ignores the
+        // blip entirely (display AND counter). Not update-specific — same guard for
+        // an OEM-kill revival / reboot / any restart with a stale first presence.
+        private const val ONLINE_FLICKER_DEBOUNCE_MS = 10_000L
         private const val SESSION_CHECK_INTERVAL_MS = 30_000L
         private const val MAX_CONSECUTIVE_PUSH_FAILURES = 5
         // How many CONSECUTIVE 30s health checks a state must persist before we do a
@@ -187,6 +195,9 @@ class DiscordRpcService : Service() {
 
     private var onlineStartEpochMs = 0L
     private var offlineStartEpochMs = 0L
+    // Wall-clock time the CURRENT continuous "in VRChat" run began (0 = offline).
+    // Used to debounce a brief stale-online blip on restart (ONLINE_FLICKER_DEBOUNCE_MS).
+    private var onlineSinceMs = 0L
     private val rpcPrefs by lazy {
         applicationContext.getSharedPreferences("discord_rpc_state", Context.MODE_PRIVATE)
     }
@@ -933,9 +944,16 @@ class DiscordRpcService : Service() {
 
     private fun buildActivityJson(): JSONObject {
         val vrcPresence = VrchatPipelineState.presence
-        val isOnline = vrcPresence?.isOnlineInVRChat == true
-
         val nowMs = System.currentTimeMillis()
+        // Debounce a BRIEF stale "in VRChat" blip (e.g. a presence reported for a
+        // second right after an app restart / update) — require the online state to
+        // hold for ONLINE_FLICKER_DEBOUNCE_MS before the RPC treats it as online.
+        // A 1s flicker never reaches the threshold, so it can't flip the display
+        // online or restart the not-in-VRChat counter. onlineSinceMs is in-memory
+        // (resets on process start), so a stale first presence must sustain to count.
+        val rawOnline = vrcPresence?.isOnlineInVRChat == true
+        if (rawOnline) { if (onlineSinceMs == 0L) onlineSinceMs = nowMs } else onlineSinceMs = 0L
+        val isOnline = rawOnline && (nowMs - onlineSinceMs) >= ONLINE_FLICKER_DEBOUNCE_MS
         // Two independent elapsed counters, each resolved from PERSISTED state on
         // EVERY tick of its state (see resolveElapsedStart):
         //   • in-VRChat   counter → online_start_epoch / last_online_seen
