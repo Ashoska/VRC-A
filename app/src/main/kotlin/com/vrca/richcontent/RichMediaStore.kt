@@ -119,11 +119,24 @@ object RichMediaStore {
             }
         }
 
-    /** Hard total-size cap across BOTH scopes (backstop). Normal active-announcement
-     *  media sits well under this; it only bites pathological accumulation (lots of
-     *  video-heavy content), evicting the OLDEST files first (they re-download on next
-     *  view). ann/ removals are still culled promptly by gcAnnouncements. */
-    private const val TOTAL_CAP_BYTES = 48L * 1024 * 1024
+    /**
+     * Total-size backstop across BOTH scopes. This is NOT the primary bound — the
+     * primary bound is REFERENCE-based (gcAnnouncements culls media no active
+     * announcement references; upd/ is wiped on cold start), so normal storage is
+     * just "the media of your active announcements/updates". The cap only guards a
+     * runaway (e.g. a bug orphaning files) and is deliberately GENEROUS so it never
+     * fights active content.
+     *
+     * CRITICAL: it NEVER evicts files touched in the last [EVICT_PROTECT_MS] — so a
+     * big announcement/update being viewed or downloaded RIGHT NOW is never thrashed
+     * (its own downloads can't evict each other). If everything is recent (a large
+     * active announcement), we simply exceed the cap for now — the media is in use,
+     * displays fine, and is freed by reference-culling once the content is removed.
+     * And even an evicted/uncached file still DISPLAYS via the renderer's network
+     * fallback (image `?: url` / video streams the URL), so nothing ever breaks.
+     */
+    private const val TOTAL_CAP_BYTES = 256L * 1024 * 1024   // generous runaway backstop
+    private const val EVICT_PROTECT_MS = 30L * 60 * 1000     // never evict media touched in last 30 min
 
     private fun enforceTotalCap(ctx: Context) {
         try {
@@ -132,11 +145,15 @@ object RichMediaStore {
                 .filter { it.isFile }
             var total = files.sumOf { it.length() }
             if (total <= TOTAL_CAP_BYTES) return
-            files.sortedBy { it.lastModified() }.forEach { file ->
-                if (total <= TOTAL_CAP_BYTES) return
-                val len = file.length()
-                if (file.delete()) total -= len
-            }
+            val now = System.currentTimeMillis()
+            // Oldest first, but skip anything recently touched (active content).
+            files.filter { now - it.lastModified() > EVICT_PROTECT_MS }
+                .sortedBy { it.lastModified() }
+                .forEach { file ->
+                    if (total <= TOTAL_CAP_BYTES) return
+                    val len = file.length()
+                    if (file.delete()) total -= len
+                }
             Log.i(TAG, "enforceTotalCap evicted down to ${total / 1024}KB")
         } catch (e: Throwable) {
             Log.w(TAG, "enforceTotalCap failed", e)
