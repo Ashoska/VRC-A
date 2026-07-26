@@ -290,7 +290,16 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
                     ) {
                         SelfAvatar(
                             name = (p?.displayName ?: displayName).ifBlank { "?" },
-                            picUrl = p?.profilePicUrl.orEmpty(),
+                            // userIcon (the dedicated VRChat+ icon) first, but MOST users
+                            // don't set one — so fall back to profilePicOverride (their
+                            // actual profile picture, the field VRChat updates when you
+                            // change your pfp) and then the worn avatar's thumbnail. Only
+                            // then show the name initial. Without this fallback, changing
+                            // your VRChat profile picture (which is profilePicOverride)
+                            // left the round avatar on the initials because userIcon was blank.
+                            picUrl = p?.profilePicUrl.orEmpty()
+                                .ifBlank { p?.bannerUrl.orEmpty() }
+                                .ifBlank { p?.currentAvatarThumbnailUrl.orEmpty() },
                             statusColor = statusColor
                         )
                         Column(Modifier.weight(1f)) {
