@@ -325,17 +325,6 @@ internal fun SettingsPage(
 
                         Text("Last sent to VRChat (ms): ${vm.lastSentToVrchatAtMs}",
                             style = MaterialTheme.typography.bodySmall)
-
-                        val profileFields by com.vrca.vrchat.VrchatPipelineState
-                            .profileFieldsDebugFlow.collectAsState()
-                        Text("VRChat profile image fields", style = MaterialTheme.typography.labelMedium)
-                        SelectionContainer {
-                            Text(
-                                text = profileFields.ifBlank { "(open the VRChat tab first)" },
-                                fontFamily = FontFamily.Monospace,
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        }
                     }
                 }
             }
