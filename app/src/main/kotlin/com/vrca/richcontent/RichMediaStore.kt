@@ -107,7 +107,6 @@ object RichMediaStore {
                     body.byteStream().use { input -> tmp.outputStream().use { input.copyTo(it) } }
                     if (tmp.length() > 0 && tmp.renameTo(f)) {
                         Log.i(TAG, "cached ${tmp.length()}B for ${url.take(80)}")
-                        enforceTotalCap(ctx)   // backstop so the store can't balloon
                         f
                     } else {
                         tmp.delete(); null
@@ -120,43 +119,29 @@ object RichMediaStore {
         }
 
     /**
-     * Total-size backstop across BOTH scopes. This is NOT the primary bound — the
-     * primary bound is REFERENCE-based (gcAnnouncements culls media no active
-     * announcement references; upd/ is wiped on cold start), so normal storage is
-     * just "the media of your active announcements/updates". The cap only guards a
-     * runaway (e.g. a bug orphaning files) and is deliberately GENEROUS so it never
-     * fights active content.
-     *
-     * CRITICAL: it NEVER evicts files touched in the last [EVICT_PROTECT_MS] — so a
-     * big announcement/update being viewed or downloaded RIGHT NOW is never thrashed
-     * (its own downloads can't evict each other). If everything is recent (a large
-     * active announcement), we simply exceed the cap for now — the media is in use,
-     * displays fine, and is freed by reference-culling once the content is removed.
-     * And even an evicted/uncached file still DISPLAYS via the renderer's network
-     * fallback (image `?: url` / video streams the URL), so nothing ever breaks.
+     * Reconcile a scope to EXACTLY the currently-referenced media: delete every file
+     * whose URL isn't in [referencedUrls], and nothing else. This is the whole culling
+     * model — purely REFERENCE-based, NO size cap / LRU eviction, so active media is
+     * NEVER evicted (required now that video plays from the local file only, with no
+     * URL-streaming fallback — an evicted active video would break). Storage is thus
+     * exactly "the media of your active content"; when the admin removes/swaps
+     * content, the next reconcile frees it. [gcAnnouncements] is this for ann/.
      */
-    private const val TOTAL_CAP_BYTES = 256L * 1024 * 1024   // generous runaway backstop
-    private const val EVICT_PROTECT_MS = 30L * 60 * 1000     // never evict media touched in last 30 min
-
-    private fun enforceTotalCap(ctx: Context) {
+    private fun reconcile(ctx: Context, scope: Scope, referencedUrls: Set<String>) {
         try {
-            val files = Scope.entries
-                .flatMap { scopeDir(ctx, it).listFiles()?.toList() ?: emptyList() }
-                .filter { it.isFile }
-            var total = files.sumOf { it.length() }
-            if (total <= TOTAL_CAP_BYTES) return
-            val now = System.currentTimeMillis()
-            // Oldest first, but skip anything recently touched (active content).
-            files.filter { now - it.lastModified() > EVICT_PROTECT_MS }
-                .sortedBy { it.lastModified() }
-                .forEach { file ->
-                    if (total <= TOTAL_CAP_BYTES) return
-                    val len = file.length()
-                    if (file.delete()) total -= len
-                }
-            Log.i(TAG, "enforceTotalCap evicted down to ${total / 1024}KB")
+            val keep = referencedUrls.asSequence()
+                .filter { it.isNotBlank() }
+                .map { keyFor(it) }
+                .toHashSet()
+            val files = scopeDir(ctx, scope).listFiles() ?: return
+            var removed = 0
+            for (file in files) {
+                val key = file.name.removeSuffix(".bin").removeSuffix(".part")
+                if (key !in keep) { if (file.delete()) removed++ }
+            }
+            if (removed > 0) Log.i(TAG, "reconcile($scope) removed $removed unreferenced file(s)")
         } catch (e: Throwable) {
-            Log.w(TAG, "enforceTotalCap failed", e)
+            Log.w(TAG, "reconcile($scope) failed", e)
         }
     }
 
@@ -169,25 +154,19 @@ object RichMediaStore {
         }.start()
     }
 
-    /** Deletes announcement-scoped files whose URL isn't in [referencedUrls]. */
-    fun gcAnnouncements(ctx: Context, referencedUrls: Set<String>) {
-        Thread {
-            try {
-                val keep = referencedUrls.asSequence()
-                    .filter { it.isNotBlank() }
-                    .map { keyFor(it) }
-                    .toHashSet()
-                val files = scopeDir(ctx, Scope.ANNOUNCEMENT).listFiles() ?: return@Thread
-                var removed = 0
-                for (file in files) {
-                    val key = file.name.removeSuffix(".bin").removeSuffix(".part")
-                    if (key !in keep) { if (file.delete()) removed++ }
-                }
-                if (removed > 0) Log.i(TAG, "gc removed $removed unreferenced media file(s)")
-            } catch (e: Throwable) {
-                Log.w(TAG, "gcAnnouncements failed", e)
-            }
-        }.start()
+    /**
+     * Cull ann/ down to EXACTLY the media referenced by the active announcements.
+     * Purely reference-based (no size limits) — [referencedUrls] is the FULL set of
+     * media URLs across every active announcement, so anything else is genuinely
+     * orphaned (a removed/swapped announcement) and safe to delete.
+     *
+     * [confirmed] MUST be true — the caller has actually loaded the announcements
+     * list. Never cull on an unconfirmed/empty set (that would delete all cached
+     * media before the list loads, forcing a needless re-download of active media).
+     */
+    fun gcAnnouncements(ctx: Context, referencedUrls: Set<String>, confirmed: Boolean = true) {
+        if (!confirmed) return
+        Thread { reconcile(ctx, Scope.ANNOUNCEMENT, referencedUrls) }.start()
     }
 
     /** Wipes all update-scoped media (called on update popup / What's New close). */

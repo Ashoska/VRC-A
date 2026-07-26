@@ -288,6 +288,10 @@ fun VrcaScreen(
     }
 
     var announcements by remember { mutableStateOf<List<AnnouncementUi>>(emptyList()) }
+    // True once the announcements listener has actually delivered a snapshot, so the
+    // media cull never runs on the initial empty list (which would wipe all cached
+    // announcement media before the list loads, forcing a needless re-download).
+    var announcementsLoaded by remember { mutableStateOf(false) }
 
     // Announcements (in-app display) — FOREGROUND-scoped snapshot listener: it
     // attaches while this screen is composed (app open) and detaches on
@@ -318,6 +322,7 @@ fun VrcaScreen(
                     compareByDescending<AnnouncementUi> { it.priority }
                         .thenByDescending { it.createdAt }
                 )
+                announcementsLoaded = true
             }
         onDispose { reg.remove() }
     }
@@ -325,7 +330,7 @@ fun VrcaScreen(
     // Announcement rich media: prefetch into the ann/ cache and cull anything no
     // longer referenced by an active announcement (an admin removing/swapping media
     // frees the user's storage on the next snapshot). Zero Firestore cost.
-    LaunchedEffect(announcements) {
+    LaunchedEffect(announcements, announcementsLoaded) {
         com.vrca.ui.common.AnnouncementSeenState.ensureLoaded(ctx)
         val urls = announcements.flatMap {
             com.vrca.richcontent.resolveRichDoc(it.bodyDoc, it.body)?.mediaUrls() ?: emptyList()
@@ -335,7 +340,8 @@ fun VrcaScreen(
                 ctx, it, com.vrca.richcontent.RichMediaStore.Scope.ANNOUNCEMENT
             )
         }
-        com.vrca.richcontent.RichMediaStore.gcAnnouncements(ctx, urls.toSet())
+        // Cull ONLY after the list has genuinely loaded — never on the initial empty.
+        com.vrca.richcontent.RichMediaStore.gcAnnouncements(ctx, urls.toSet(), confirmed = announcementsLoaded)
     }
 
     // --- Moderation state comes from ViewModel ---
