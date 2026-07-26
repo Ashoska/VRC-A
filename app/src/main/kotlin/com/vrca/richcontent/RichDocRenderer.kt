@@ -75,13 +75,31 @@ private val richGifLoaderLock = Any()
  *  gif / video is sized down instead of taking up the whole screen. */
 private val MAX_MEDIA_HEIGHT = 380.dp
 
-/** Coil loader with the GIF decoder registered, so uploaded .gif images animate. */
+/**
+ * Coil loader with the GIF decoder registered, so uploaded .gif images animate.
+ * Disk + memory caches are CAPPED (its own `rich_image_cache` dir so it doesn't
+ * collide with [com.vrca.admin.VrchatImageLoader]'s `image_cache`) — without a
+ * cap Coil defaults its disk cache to 2% of free space (hundreds of MB), a silent
+ * cache grower. Most rich media loads from the local [RichMediaStore] file anyway;
+ * this only bounds the network-fallback path.
+ */
 private fun richImageLoader(ctx: Context): coil.ImageLoader =
     richGifLoader ?: synchronized(richGifLoaderLock) {
         richGifLoader ?: coil.ImageLoader.Builder(ctx.applicationContext)
             .components {
                 if (android.os.Build.VERSION.SDK_INT >= 28) add(coil.decode.ImageDecoderDecoder.Factory())
                 else add(coil.decode.GifDecoder.Factory())
+            }
+            .memoryCache {
+                coil.memory.MemoryCache.Builder(ctx.applicationContext)
+                    .maxSizeBytes(12 * 1024 * 1024)
+                    .build()
+            }
+            .diskCache {
+                coil.disk.DiskCache.Builder()
+                    .directory(ctx.applicationContext.cacheDir.resolve("rich_image_cache"))
+                    .maxSizeBytes(15L * 1024 * 1024)
+                    .build()
             }
             .build()
             .also { richGifLoader = it }

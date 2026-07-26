@@ -94,6 +94,17 @@ class VrcaApplication : Application(), ViewModelStoreOwner {
         // complete, so their prefetched images survive a close/kill (resume works).
         clearStaleTutorialImages()
 
+        // Rich-content UPDATE-scope media (patch-note images/videos/gifs) is
+        // view-scoped — normally cleared when the Update / What's New dialog is
+        // dismissed. But a FORCED update dialog killed mid-show (process death, or
+        // the update reinstalling) never disposes, so its cached media (a patch-note
+        // video can be several MB) would linger in DATA forever. Wipe upd/ on every
+        // cold start; it re-downloads the moment a dialog shows. Also GC any orphaned
+        // rich media not currently referenced. (ann/ is culled live by VrcaScreen.)
+        runCatching {
+            com.vrca.richcontent.RichMediaStore.clearUpdateMedia(applicationContext)
+        }
+
         // Track app foreground state (started-activity count) so background
         // workers (e.g. the friends-profile refresh) can poll fast while the
         // user is on-screen and back off when not. Dependency-free.

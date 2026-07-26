@@ -107,6 +107,7 @@ object RichMediaStore {
                     body.byteStream().use { input -> tmp.outputStream().use { input.copyTo(it) } }
                     if (tmp.length() > 0 && tmp.renameTo(f)) {
                         Log.i(TAG, "cached ${tmp.length()}B for ${url.take(80)}")
+                        enforceTotalCap(ctx)   // backstop so the store can't balloon
                         f
                     } else {
                         tmp.delete(); null
@@ -117,6 +118,30 @@ object RichMediaStore {
                 null
             }
         }
+
+    /** Hard total-size cap across BOTH scopes (backstop). Normal active-announcement
+     *  media sits well under this; it only bites pathological accumulation (lots of
+     *  video-heavy content), evicting the OLDEST files first (they re-download on next
+     *  view). ann/ removals are still culled promptly by gcAnnouncements. */
+    private const val TOTAL_CAP_BYTES = 48L * 1024 * 1024
+
+    private fun enforceTotalCap(ctx: Context) {
+        try {
+            val files = Scope.entries
+                .flatMap { scopeDir(ctx, it).listFiles()?.toList() ?: emptyList() }
+                .filter { it.isFile }
+            var total = files.sumOf { it.length() }
+            if (total <= TOTAL_CAP_BYTES) return
+            files.sortedBy { it.lastModified() }.forEach { file ->
+                if (total <= TOTAL_CAP_BYTES) return
+                val len = file.length()
+                if (file.delete()) total -= len
+            }
+            Log.i(TAG, "enforceTotalCap evicted down to ${total / 1024}KB")
+        } catch (e: Throwable) {
+            Log.w(TAG, "enforceTotalCap failed", e)
+        }
+    }
 
     /** Fire-and-forget [ensureCached] from non-suspend contexts. */
     fun ensureCachedAsync(ctx: Context, url: String?, scope: Scope) {
