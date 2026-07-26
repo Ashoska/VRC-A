@@ -140,7 +140,8 @@ object VrchatAuthManager {
             val json = JSONObject(body)
             // userIcon is the round profile picture; profilePicOverride is the
             // wide BANNER — only fall back to it when no icon is set.
-            val pic = json.optString("userIcon", "")
+            val pic = json.optString("iconUrl", "")
+                .ifBlank { json.optString("userIcon", "") }
                 .ifBlank { json.optString("profilePicOverride", "") }
             // Store whatever we got (including blank → no VRChat+, so we don't
             // keep re-fetching a value that will never appear).
@@ -576,7 +577,8 @@ object VrchatAuthManager {
                         val displayName = json.optString("displayName")
                         // VRChat+ custom profile picture (blank without VRChat+).
                         // userIcon is the round pfp; profilePicOverride is the banner.
-                        val profilePic = json.optString("userIcon", "")
+                        val profilePic = json.optString("iconUrl", "")
+                            .ifBlank { json.optString("userIcon", "") }
                             .ifBlank { json.optString("profilePicOverride", "") }
 
                         if (authCookieValue != null && userId.isNotBlank()) {
@@ -808,24 +810,13 @@ object VrchatAuthManager {
             var avatarThumb = json.optString("currentAvatarThumbnailImageUrl", "")
             // VRChat+ images: userIcon is the round profile picture; the
             // profilePicOverride is the wide BANNER — keep them separate.
-            var profilePic = json.optString("userIcon", "")
-            var bannerPic = json.optString("profilePicOverride", "")
+            // VRChat migrated the profile icon/banner to iconUrl/bannerUrl; the legacy
+            // userIcon/profilePicOverride come back EMPTY for older items (e.g. a
+            // first-uploaded pfp/banner), which showed the name initial. Read the new
+            // fields first, fall back to the legacy ones for older clients/data.
+            var profilePic = json.optString("iconUrl", "").ifBlank { json.optString("userIcon", "") }
+            var bannerPic = json.optString("bannerUrl", "").ifBlank { json.optString("profilePicOverride", "") }
             var trustRank = extractTrustRankFromTags(json.optJSONArray("tags"))
-
-            // DEBUG: dump every image/URL-ish field so we can identify which key holds
-            // VRChat's newer "Profile Icon" (userIcon comes back empty for it).
-            runCatching {
-                val sb = StringBuilder("[/auth/user]\n")
-                val it = json.keys()
-                while (it.hasNext()) {
-                    val k = it.next()
-                    val v = json.optString(k, "")
-                    if (v.startsWith("http") || k.contains("icon", true) || k.contains("pic", true) ||
-                        k.contains("banner", true) || k.contains("image", true)
-                    ) sb.append(k).append(" = ").append(v.ifBlank { "(empty)" }.take(140)).append('\n')
-                }
-                com.vrca.vrchat.VrchatPipelineState.profileFieldsDebug = sb.toString()
-            }
 
             Log.d(TAG, "fetchPresence /auth/user: state=$state status=$status location=$location")
 
@@ -862,23 +853,11 @@ object VrchatAuthManager {
                         uj.optString("currentAvatarThumbnailImageUrl", "").let { if (it.isNotBlank()) avatarThumb = it }
                         // The /users/{id} endpoint is the authoritative source for
                         // the VRChat+ profile picture / banner fields.
-                        uj.optString("userIcon", "").let { if (it.isNotBlank()) profilePic = it }
-                        uj.optString("profilePicOverride", "").let { if (it.isNotBlank()) bannerPic = it }
+                        uj.optString("iconUrl", "").ifBlank { uj.optString("userIcon", "") }
+                            .let { if (it.isNotBlank()) profilePic = it }
+                        uj.optString("bannerUrl", "").ifBlank { uj.optString("profilePicOverride", "") }
+                            .let { if (it.isNotBlank()) bannerPic = it }
                         extractTrustRankFromTags(uj.optJSONArray("tags")).let { if (it.isNotBlank()) trustRank = it }
-                        // DEBUG: append /users/{id}'s image/URL fields too.
-                        runCatching {
-                            val sb = StringBuilder(com.vrca.vrchat.VrchatPipelineState.profileFieldsDebug)
-                            sb.append("[/users/{id}]\n")
-                            val ik = uj.keys()
-                            while (ik.hasNext()) {
-                                val k = ik.next()
-                                val v = uj.optString(k, "")
-                                if (v.startsWith("http") || k.contains("icon", true) || k.contains("pic", true) ||
-                                    k.contains("banner", true) || k.contains("image", true)
-                                ) sb.append(k).append(" = ").append(v.ifBlank { "(empty)" }.take(140)).append('\n')
-                            }
-                            com.vrca.vrchat.VrchatPipelineState.profileFieldsDebug = sb.toString()
-                        }
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "Could not fetch /users/$userId", e)
@@ -991,8 +970,8 @@ object VrchatAuthManager {
                 currentAvatarThumbnailUrl = uj.optString("currentAvatarThumbnailImageUrl", ""),
                 isOnlineInVRChat = isOnline,
                 worldImageUrl = "",
-                profilePicUrl = uj.optString("userIcon", ""),
-                bannerUrl = uj.optString("profilePicOverride", ""),
+                profilePicUrl = uj.optString("iconUrl", "").ifBlank { uj.optString("userIcon", "") },
+                bannerUrl = uj.optString("bannerUrl", "").ifBlank { uj.optString("profilePicOverride", "") },
                 trustRank = extractTrustRankFromTags(uj.optJSONArray("tags"))
             )
         } catch (e: Exception) {
