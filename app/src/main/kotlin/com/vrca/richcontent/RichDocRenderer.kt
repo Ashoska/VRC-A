@@ -43,6 +43,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -419,6 +420,26 @@ private fun RichVideo(block: RichBlock.Video, mediaScope: RichMediaStore.Scope) 
     }
     val ready = localFile != null
 
+    // When there's NO poster, extract a real frame from the downloaded clip so the
+    // idle card shows the video's first frame instead of a black box.
+    var videoFrame by remember(block.url) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    LaunchedEffect(localFile) {
+        val f = localFile
+        if (posterModel == null && f != null && videoFrame == null) {
+            videoFrame = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                val mmr = android.media.MediaMetadataRetriever()
+                try {
+                    mmr.setDataSource(f.absolutePath)
+                    mmr.getFrameAtTime(0, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                } catch (_: Throwable) {
+                    null
+                } finally {
+                    runCatching { mmr.release() }
+                }
+            }
+        }
+    }
+
     Surface(
         shape = RoundedCornerShape(12.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -480,9 +501,18 @@ private fun RichVideo(block: RichBlock.Video, mediaScope: RichMediaStore.Scope) 
                     )
                 }
             } else {
+                val frame = videoFrame
                 if (posterModel != null) {
                     coil.compose.AsyncImage(
                         model = posterModel,
+                        contentDescription = null,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxWidth().heightIn(max = MAX_MEDIA_HEIGHT)
+                    )
+                } else if (frame != null) {
+                    // No poster → show the video's own first frame instead of black.
+                    Image(
+                        bitmap = frame.asImageBitmap(),
                         contentDescription = null,
                         contentScale = ContentScale.Fit,
                         modifier = Modifier.fillMaxWidth().heightIn(max = MAX_MEDIA_HEIGHT)
