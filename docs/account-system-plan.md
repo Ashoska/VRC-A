@@ -188,3 +188,79 @@ These are additive and don't block on the account work:
    `{afk}`/`{movement}`/`{param:Name}` lines + a real "VRChat OSC live" signal.
 The log reader + roster + avatar features naturally land **with** the headset
 flavor, since that's where they run.
+
+---
+
+## 9. Log-as-event-stream → API offload map (✅ the point of the headset)
+
+The VRChat output log is an **event stream**. On the headset (same device as
+VRChat) it replaces the heaviest, most-throttled REST calls in the app entirely.
+
+| Log event line | Real-time data | API load it removes |
+|---|---|---|
+| `Joining wrld_…:<instance>~<tags>~nonce(…)` | world + instance + access type + nonce | location half of `/auth/user` + `/users/{id}` |
+| `Joining or Creating Room: <Name>` / `Entering Room:` | world **name** | `/worlds/{id}` |
+| `OnPlayerJoined <n> (usr_id)` / `OnPlayerLeft …` | count players yourself; full roster (incl. non-friends) | **`/instances/{location}` player-count polling** |
+| `Switching <n> to avatar <a>` / `Unpacking Avatar (<a> by <author>)` + `avtr_` | who's on what avatar + `avtr_` id | (no API equivalent) |
+| `Received Notification: …` | invites / friend-requests / joins **while VRChat runs** | *part* of notification backfill |
+| `[Video Playback] … URL '…'` / `[String Download]` | what's playing in-world | (no API equivalent) |
+| `OnLeftRoom` / `Successfully left room` | you left the instance | world-hop detection without polling |
+
+**Headline:** the **entire self-presence chain — location, world name, instance
+type, player count — becomes 100% log-derived on the headset, zero API calls.**
+That kills the exact calls the codebase fights hardest (`fetchPresence` 3-call
+chain + `fetchInstanceCount`, the cookie-IP-invalidation 429s, the
+`userCount`/`n_users` count-lag saga). The log count is *more* accurate than the
+API — it's the same joins/leaves the in-game panel counts.
+
+**Still NOT offloaded (kept honest):**
+- **Friend presence when they're not in your instance** — already cheap: VRC-A
+  gets it via the pipeline **WebSocket (push, not REST)**.
+- **Offline friends' bio/name/rank edits** — still the REST profile-refresh loop.
+- **Group announcements / calendar events** — app-level, not in the client log;
+  still REST.
+
+Architecture payoff: headset writes log-derived presence to the account; the
+**phone's RPC + admin read it from the account and make ZERO VRChat API calls**
+for presence.
+
+---
+
+## 10. Discord RPC — what triggers it, rate limits, and the 10s (✅ findings)
+
+Clears up "we aren't sure what triggers Discord":
+- **The trigger IS you sending an OP 3 (presence update) with a changed activity.**
+  No server-side trigger beyond that; Discord broadcasts your latest OP 3 to
+  friends. The current 10s push is a **self-imposed keepalive**, not a Discord
+  requirement.
+- **Rate limit = 5 presence updates / 20 s** per session (~1 every 4 s). Faster
+  risks throttle/disconnect. So ~4 s is the safe floor; 10 s is very conservative.
+- **The elapsed timer is client-rendered from `timestamps.start`.** Set `start`
+  once → Discord ticks it every second on its own. Frequent pushes are NOT needed
+  to keep the timer smooth (which is why 10 s never hurt the timer).
+
+**Conclusion:** the 10 s only limited *how fast a location/state change shows*.
+Fix is **event-driven pushes, not a faster poll**: push the instant the **log**
+reports a world-hop (or the WS self-location event fires), then let the ~10 s
+keepalive cover the rest → location updates land in ~1 s while staying far under
+the limit. VRC-A already does a WS-driven version (`applySelfLocationEvent` → RPC
+`collectLatest`); the **log is a more reliable trigger** (no REST 429 dependency).
+Keep the ~10 s keepalive, add on-change pushes, never go below 4 s.
+
+---
+
+## 11. Build sequence (✅ confirmed order)
+
+Everything above is wanted, but in this order:
+
+1. **Quest build first** — `headsetApp` flavor / `IS_HEADSET_BUILD`, with:
+   - **Scaled UI for the Quest 2D panel** (fixed-size floating window; density +
+     touch-target tuning for laser-pointer input; test at panel size).
+   - **Correct Quest permissions** — All-files/SAF grant on `Documents/Logs`,
+     notification listener, and the **"Allow restricted settings"** sideload
+     gateway; a Quest-specific onboarding path (its permission UI differs).
+   - The log reader + OSC-in live here.
+2. **Account system** (§2–§5) — headset-as-source, multi-device, sync/control.
+3. **Feature buffet** on top, roughly: log-derived RPC + roster (§9) → synced
+   lyrics + tokens + heart-rate (§8 / roadmap) → OSC-in avatar lines + avatar DB →
+   OSC macros → cross-wake (§6).
