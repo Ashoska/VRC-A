@@ -523,3 +523,112 @@ avatar-state lines are the highest-leverage new capability (best realised by
 running VRC-A on the Quest), and the **log-based instance roster** is the marquee
 feature to weigh against its permission friction. The user's specific
 "pause-on-in-game-typing" idea is **not buildable** — no such signal exists.
+
+---
+
+## 11. ADDENDUM — complete VRChat API client + full feature map
+
+**Correction / honesty note:** §7's first pass under-counted the JS. The native
+code (§4) was decompiled and read in full, but the initial JS scan only pulled a
+partial endpoint list, so it **missed a large part of NEXUS's feature surface** —
+group moderation, an auto-invite growth tool, user/world/avatar search, friend
+requests, notification accept/decline, invite-message slots, VRChat "prints", and
+instance-close. This addendum is the complete client, extracted from the app's
+actual method+path table and its Vue component list. NEXUS is best described not
+as a chatbox tool but as a **full VRChat companion client + group tooling**.
+
+### 11.1 Complete VRChat API client (every call the app can make)
+**Auth / self**
+- `GET /auth/user` — login / current user
+- `POST /auth/twofactorauth/{totp,otp,emailotp}/verify` — 2FA
+- `GET /auth/user/friends?offline=&n=&offset=` — friends (paginated, both passes)
+- `GET /auth/user/notifications?type=all&n=` — notifications
+- `PUT /auth/user/notifications/{id}/accept` — **accept** a notification (friend req / invite)
+- `PUT /auth/user/notifications/{id}/hide` — **decline / hide** a notification
+
+**Users / social**
+- `GET /users/{id}` — profile / presence
+- `GET /users?search=&n=` — **user search**
+- `GET /users/{id}/groups` — a user's groups
+- `GET /users/{id}/mutualFriends`, `/users/{id}/mutuals/friends` — mutual friends
+- `POST /user/{id}/friendRequest` — **send friend request**
+- `GET /message/{id}/{slot}`, `PUT /message/{id}/{slot}/…` — **invite / response message slots** (custom invite messages)
+- `GET /prints/user/{id}`, `DELETE /prints/{id}` — **VRChat "prints"** (photos): list / delete
+
+**Worlds**
+- `GET /worlds/{id}` — world info
+- `GET /worlds/favorites?n=&offset=` — favorite worlds
+- `GET /worlds?search=&sort=relevance` — **world search**
+- `GET /worlds?userId=&releaseStatus=public` — a user's public worlds
+
+**Avatars**
+- `GET /avatars/{id}` — avatar info
+- `PUT /avatars/{id}/select` — **wear / switch avatar**
+- `GET /avatars/favorites?n=&offset=` — favorite avatars
+- `GET /avatars?user=me&releaseStatus=all&sort=_created_at` — **your own uploaded avatars**
+- Avatar-DB search across `avtrdb / nsvr / paw / vrcdb / vrcwb / prismic` via a Cloudflare proxy
+
+**Instances / invites**
+- `GET /instances/{id}` — instance info
+- `DELETE /instances/{id}?hardClose=true|false` — **close / hard-close an instance**
+- `POST /invite/{userId}` — invite a user to your instance
+- `POST /invite/myself/to/{world}:{instance}` — self-invite
+
+**Groups — moderation + growth (the big miss)**
+- `GET /groups/{id}` — group info
+- `GET /groups/{id}/members?n=&offset=` — members list
+- `DELETE /groups/{id}/members/{userId}` — **kick member**
+- `GET /groups/{id}/roles` — roles
+- `GET /groups/{id}/bans?n=&offset=`, `POST /groups/{id}/bans`, `DELETE /groups/{id}/bans/{userId}` — **ban / unban**
+- `GET /groups/{id}/auditLogs?n=&offset=` — **audit logs** (moderation history)
+- `GET /groups/{id}/instances` — group instances
+- `GET /groups/{id}/posts?n=`, `POST /groups/{id}/posts` — read / **create** group posts / announcements
+- `POST /groups/{id}/invites {userId, confirmOverrideBlock}` — **invite a user to the group** (the auto-invite primitive)
+
+**Files**
+- `GET /files?tag=&n=` — list files by tag
+- `DELETE /file/{id}` — delete a file
+- `POST /file/image` (native `VrcUpload`) — upload an image
+
+### 11.2 Auto-invite to group (the feature the teardown missed)
+Instance Tools → **Scan instance** (reads the roster from VRChat's log, §4.7) →
+**Invite all to group** loops `POST /groups/{id}/invites` over everyone in the
+instance, spaced by a user-set **"Gap between invites"** to respect the rate
+limit. An **"Auto-invite new joiners"** mode keeps the log scan running and
+invites people as they enter. Pure combination of the log roster + the group
+invite endpoint — a group-growth / recruiting tool.
+
+### 11.3 Full feature / tab map (Vue components)
+Home · VRChat · **Users** (search + `UserModal`) · **Players** (instance roster
+UI over `CacheReader`) · **Alerts** (notifications + accept/decline) ·
+**Moderation** (group members/roles/bans/audit/kick/close-instance) ·
+**InviteTools** (auto-invite) · **Scripts** (OSC avatar automation, §4.4) ·
+**CacheReader** (log reader, §4.7) · **GroupCalendar** · **MutualNetwork**
+(mutual-friends graph) · **RecentWorlds** + `WorldModal` (world search/favorites) ·
+**VrcInventory** (your avatars/worlds) · **Translator** · **SymbolPicker**
+(emoji/symbols into chatbox) · **MagicChatbox** (the chatbox composer) ·
+Community · Developer · DiscordPrompt · Settings · Help. Plus ~40 language packs
+and ~10 themes (Ember/Emerald/Midnight/Rose/Slate/…).
+
+### 11.4 Gap-analysis additions (mobile + Quest compatible, VRC-A lacks)
+New candidates surfaced by the corrected pass, on top of §9:
+- ★ **Auto-invite to group** (log roster → `POST /groups/{id}/invites`, rate-gapped
+  + auto-invite-new-joiners). Standout for group owners/recruiters; headset-side
+  (needs the roster), API action works from any device. Ties directly into our
+  planned log reader.
+- **Group moderation suite** — members / roles / bans / kick / audit logs /
+  close-instance / post announcements. A mobile group-mod tool; all API, works on
+  a phone. Sizable but self-contained.
+- **User / world / avatar search + profiles** (`/users?search=`, `/worlds?search=`,
+  own avatars, favorites) — general companion browsing VRC-A doesn't do.
+- **Notification actions** — accept/decline friend requests + invites from the app
+  (`/notifications/{id}/accept|hide`). Small, high-utility.
+- **Invite tooling** — invite a user to your instance, self-invite (VRC-A has
+  self-invite on the admin side), custom invite-message slots.
+- **Mutual-friends network** graph.
+- **Prints** — view/manage VRChat photos.
+
+Priority read: **auto-invite + the group-moderation suite** are the genuinely
+differentiated adds here (nobody positions a *mobile* group-mod + recruiting tool),
+and both lean on the same log-reader/account work already planned. Search +
+notification actions are cheap quality-of-life. The rest are optional breadth.
