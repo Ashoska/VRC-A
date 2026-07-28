@@ -224,6 +224,25 @@ Architecture payoff: headset writes log-derived presence to the account; the
 **phone's RPC + admin read it from the account and make ZERO VRChat API calls**
 for presence.
 
+### 9.1 How location + count are derived (and what's still NOT from the log)
+- **Location / world / instance type / nonce** — direct from `Joining wrld_…`
+  (+ `Joining or Creating Room: <Name>` for the human name). Instant.
+- **Player count** — *tally* `OnPlayerJoined` − `OnPlayerLeft` since the last
+  `Joining wrld_…` reset. On join, VRChat logs an `OnPlayerJoined` for everyone
+  already present, so the tally is complete and matches the in-game panel exactly
+  (more accurate than the API's `userCount`).
+- **"Instant" = ~1–2 s**, not literally 0 (VRChat flush ~1 s + our tail-read /
+  `FileObserver`). Still far better than a 10 s REST poll that can 429.
+- **NOT in the log → stays on WS/API (already free or cheap):**
+  - Your VRChat **status** (join-me/ask-me/busy) + status text → WebSocket
+    `user-update` (push, free).
+  - Instance **capacity** (the "/N") → one **cached** `/worlds/{id}` per unique
+    world (cache forever), or omit the cap and show only the count.
+  - **Friend** presence (friends not in your instance) → WebSocket, free.
+- **Reader robustness:** VRChat rotates to a **new log file per launch**; the
+  reader must tail back far enough to anchor on the current `Joining wrld_…` line
+  + all joins/leaves since, or the count drifts when reading starts mid-session.
+
 ---
 
 ## 10. Discord RPC — what triggers it, rate limits, and the 10s (✅ findings)
