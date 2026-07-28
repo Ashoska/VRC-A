@@ -91,17 +91,29 @@ Having an ID ≠ being able to wear it.
   it needs a **modified client that decrypts the asset bundle** = ToS violation.
   ⛔ **We do not build ripping.** We only *identify and label* it for the user.
 
-### 4.3 Telling public / private / removed apart (❓ partial)
-One call `GET /avatars/{id}`:
-- **200** → accessible → **public/usable** (read `releaseStatus`). Show "Use / Favorite."
-- **404** → not accessible — but VRChat returns 404 for **both** "private
-  (someone else's)" **and** "deleted," so the raw API **cannot reliably split
-  private from removed**.
-- To upgrade the label we lean on an **avatar DB** (avtrdb, vrcdb, etc.) that
-  cached the avatar while it was public: "was public, now 404" → likely private;
-  DB marks known-deleted → removed.
-- **User-facing labels:** `Public — usable` vs `Not available (private or
-  removed)`, upgraded to `Removed` only when a DB confirms it.
+### 4.3 Public vs private/removed (✅ decided: all 404 → "Private")
+VRChat returns 404 for **both** "private (someone else's)" **and** "deleted," and
+the raw API can't split them. **Decision: don't try — treat every 404 as
+`Private` (a single, not-usable label).** Simpler, and the private/removed
+distinction doesn't matter to the user (both are "you can't wear this").
+
+One call `GET /avatars/{id}`, classified by status:
+- **200** → **Public / usable** (read `releaseStatus`). Show "Use / Favorite."
+- **real 404** → **Private** (not usable; hide equip).
+- **429 / 5xx / timeout / network** → **Unknown — retry later. Do NOT cache as
+  Private.** VRChat rate-limits hard (we'd hit it once per scanned ID), and a
+  throttle blip must never permanently mislabel a *public* avatar as private.
+
+Guardrails:
+- **The user's own private avatars return 200 for them** (owner has access), so
+  the "404 = Private" rule never wrongly blocks avatars they own — only avatars
+  they genuinely can't access hit the 404 path.
+- Copy note: a *deleted* avatar also reads "Private" here (slightly inaccurate but
+  harmless — both are not-usable). If we ever want it honest without a DB lookup,
+  a neutral `Private / unavailable` label covers both; plain `Private` is the
+  current pick.
+- Optional later: an **avatar DB** (avtrdb, vrcdb, …) could upgrade a 404 to a
+  precise `Removed`, but this is explicitly **not** required for v1.
 
 ---
 
