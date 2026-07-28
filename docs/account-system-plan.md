@@ -264,3 +264,69 @@ Everything above is wanted, but in this order:
 3. **Feature buffet** on top, roughly: log-derived RPC + roster (§9) → synced
    lyrics + tokens + heart-rate (§8 / roadmap) → OSC-in avatar lines + avatar DB →
    OSC macros → cross-wake (§6).
+
+---
+
+## 12. VRChat API budget & savings (modeled from code cadences)
+
+Numbers are **modeled from the actual loop intervals in the source** (not
+measured), for one logged-in user with the pipeline foreground service alive
+24/7. Representative profile: ~100 friends, ~10 groups, ~8 h/day in a world +
+~16 h/day app-alive-but-idle. All figures scale with friends / groups / in-game
+time.
+
+### Passive (continuous timer loops)
+| Loop | Cadence | Calls/fire | Calls/hr |
+|---|---|---|---|
+| **Self-presence** `fetchPresence` = `/auth/user`→`/users/{id}`→`/instances/{loc}` | 10 s | 3 in-world · 2 idle | **1,080** / **720** |
+| Friends profile refresh `fetchFriends` ×2 passes | 30 s fg / 60 s bg | ~2 (+1 per 100 friends/pass) | 120 (bg) / 240 (fg) |
+| Group poll (`groups` + posts + events per group) | 5 min | 2 + 2×groups | 264 (10 groups) |
+| Hourly instance-count | 1 h | 1 | 1 |
+| Auth revalidate | 6 h | 1 | ~0.2 |
+| *(VRChat status page — `status.vrchat.com`, NOT the API)* | 2 min | 1 | *(30, excluded)* |
+
+**Passive ≈ 1,465/hr in-world · ≈ 1,104/hr idle.**
+
+### Triggered (user/event)
+- **Backfill on every pipeline connect:** `3 + 2×groups` (~23 for 10 groups, up to
+  ~103 at the 50-group cap) — per connect.
+- World-hop instance count, `verifyStillFriend`, invites, avatar select,
+  login/2FA — rare. **Triggered ≈ 150–300/day.**
+
+### Received (VRChat → us, **0 REST cost**)
+One pipeline **WebSocket** carries everything VRChat pushes:
+`friend-online/offline/active/location`, **`friend-update` (bio/name/rank/avatar)**,
+`friend-add/delete`, `notification`, `notification-v2`, `group-*`, self
+`user-location`/`user-update`. Thousands of events/day for a social user — all
+free.
+
+### Daily total per user ≈ 29,500 calls
+| Bucket | Calls/day | Share |
+|---|---|---|
+| **Self-presence + instance count** | **~20,200** | **~68%** |
+| Group poll | ~6,300 | ~21% |
+| Friends refresh | ~2,900 | ~10% |
+| Triggered | ~150 | <1% |
+| Received (WebSocket) | thousands | **$0** |
+
+Fleet scale: 1,000 concurrent in-world users ⇒ self-presence alone ≈ **1.08M
+calls/hr ≈ 300/sec**, 24/7.
+
+### Savings
+- **Log (headset) removes the self-presence chain + instance count entirely** →
+  **~20,200/day/user, ~68% cut.** Remaining ~9,300/day (group + friends + triggered)
+  stays REST (offline friends + app-level group content the log can't see).
+- With the account model a **phone reads presence from the account (Firestore) →
+  0 VRChat presence calls**; an account with a headset drops the *whole account's*
+  presence load to ~0 VRChat calls.
+- **Available even without the headset:** the 10 s self-presence poll is largely
+  redundant with the WebSocket (which already pushes self `user-location`/
+  `user-update`, patched in `applySelfLocationEvent`). Drive location/state from
+  the WS (free) and fetch only the instance **count** sparingly (~30–60 s / on-hop)
+  → self-presence drops ~1,080/hr → ~60–120/hr, a **~90% cut of the dominant cost
+  with no headset required.** The log then makes the count free too.
+- **Stacked ceiling:** WS/log presence + slower/conditional group poll + WS-first
+  friend-edit detection ⇒ toward **~80–85% total reduction**, received pushes free
+  throughout.
+
+*(Modeled estimate — validate against real telemetry before quoting externally.)*
