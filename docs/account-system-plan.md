@@ -239,17 +239,27 @@ for presence.
   - Instance **capacity** (the "/N") → one **cached** `/worlds/{id}` per unique
     world (cache forever), or omit the cap and show only the count.
   - **Friend** presence (friends not in your instance) → WebSocket, free.
-  - **Per-player platform** (PC / Quest-Android / iOS) → **API only, 1 call per
-    player**. The log has name+id+avatar, NOT platform; it comes from
-    `GET /users/{id}` → `last_platform` (`standalonewindows`→PC, `android`→Quest,
-    `ios`→iOS) — this is exactly how NEXUS's roster does it (per-user enrichment
-    call). Two caveats: (a) it scales with roster size (40-person instance = up to
-    40 calls, rate-gap them); (b) **`android` = Quest OR Android phone** — VRChat
-    can't distinguish them, so label it "Android", not "Quest". **The aggregate
-    breakdown is free**, though: the instance object's `platforms`
-    {standalonewindows, android, ios} counts come in the single `/instances/{id}`
-    call we already make (`extractInstanceUserCount`), so "18 PC / 12 Quest / 2 iOS"
-    for the whole instance costs nothing — only the *per-person* label needs a call.
+  - **Per-player platform** (PC / Quest-Android / iOS) → **API, but a cheap
+    ONE-OFF per join** (not a poll). The log has name+id+avatar, NOT platform;
+    it comes from `GET /users/{id}` → `last_platform` (`standalonewindows`→PC,
+    `android`→Quest, `ios`→iOS), the same way NEXUS's roster does it. This is a
+    fundamentally cheaper cost class than the continuous presence poll we're
+    killing — it's **event-driven** (fires once on `OnPlayerJoined`, never again
+    for that person) and the SAME call returns the whole row (platform + trust
+    rank + bio + avatar image + friend status + age-verified), so it's "one call
+    to fully populate a roster row," clearly worth it. Make it cheaper still:
+    (a) **cache per userId** — `last_platform`/rank/bio don't change mid-session,
+    so a re-seen player costs 0; (b) the only concentrated cost is the **join
+    burst** on entering a populated instance (~40 `OnPlayerJoined` at once →
+    ~40 one-off calls) — **rate-gap/queue them** (like NEXUS's "gap between
+    invites") and/or enrich lazily (on-screen rows first); (c) **`android` = Quest
+    OR Android phone** (VRChat can't distinguish them) — label it "Android", not
+    "Quest". **The aggregate breakdown is also free**: the instance object's
+    `platforms` {standalonewindows, android, ios} counts ride the single
+    `/instances/{id}` call we already make (`extractInstanceUserCount`), so
+    "18 PC / 12 Quest / 2 iOS" for the whole instance costs nothing — only the
+    per-person label needs the one-off call. Bottom line: one-off on-join
+    enrichment is fine to keep; the reduction target was the *continuous* polling.
 - **Reader robustness:** VRChat rotates to a **new log file per launch**; the
   reader must tail back far enough to anchor on the current `Joining wrld_…` line
   + all joins/leaves since, or the count drifts when reading starts mid-session.
