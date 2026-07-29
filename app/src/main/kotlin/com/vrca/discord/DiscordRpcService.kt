@@ -627,6 +627,14 @@ class DiscordRpcService : Service() {
                 updateNotif("Discord RPC active")
                 startPresenceUpdates()
                 startSessionMonitor()
+                // Diagnostic: log the REAL gateway health ~4s after a (re)connect so
+                // logcat confirms the socket was actually captured after a recovery
+                // (vs a false CONNECTED that reports no_gateway). Read-only probe.
+                mainHandler.postDelayed({
+                    webView?.evaluateJavascript(
+                        "window.VRCA_gatewayHealth ? window.VRCA_gatewayHealth() : 'no_fn'"
+                    ) { h -> Log.i(TAG, "post-connect gateway health: ${h?.trim()?.replace("\"", "")}") }
+                }, 4000)
             } else {
                 shimRetryCount++
                 Log.w(TAG, "JS shim injection failed (attempt $shimRetryCount/$MAX_SHIM_RETRIES): $cleaned")
@@ -730,24 +738,26 @@ class DiscordRpcService : Service() {
                                     Log.w(TAG, "WebView cacheDir sweep failed", e)
                                 }
                                 mainHandler.post {
-                                    // Tear down the RPC state BEFORE reloading. The reload
-                                    // destroys the page's shim (VRCA_gatewayHealth /
-                                    // VRCA_setActivity) and the gateway — if shimReady stays
-                                    // true, the session monitor probes the reloading page,
-                                    // gets `no_probe`/`no_gateway`, and (pre-fix) treated it
-                                    // as healthy, leaving a CONNECTED-but-dead RPC only a
-                                    // toggle could clear. Reset like a planned reconnect (but
-                                    // do NOT consume a sessionRecovery attempt — this is
-                                    // maintenance, not a failure); onPageFinished re-injects
-                                    // the shim and resumes presence + the monitor.
+                                    // Tear down the RPC state, then RECREATE the WebView — do
+                                    // NOT bare-reload(). A reload()/same-route load does not
+                                    // reliably tear down + reopen Discord's gateway socket after
+                                    // a cache clear: the WS hook re-injects but the fresh gateway
+                                    // often opens before it's in place, so VRCA_setActivity stores
+                                    // the activity with no socket to send OP3 on — module-finder
+                                    // still reports "ok", we show CONNECTED, and the RPC never
+                                    // lands on Discord until a full app RESTART (the user-reported
+                                    // "cache cleaned, reconnected, but no RPC until I restart").
+                                    // loadWebView() rebuilds the WebView from scratch — the SAME
+                                    // recovery onSessionExpired / onRenderProcessGone already use:
+                                    // the session survives in app_webview cookies+localStorage so
+                                    // it re-auths silently, fresh Discord JS opens a fresh gateway,
+                                    // and the shim reliably recaptures it -> presence resumes.
+                                    // Not a sessionRecovery attempt — this is maintenance.
                                     shimReady = false
                                     stopPresenceUpdates()
                                     DiscordRpcState.status = DiscordRpcStatus.RECONNECTING
                                     DiscordRpcState.failureMessage = "Refreshing Discord connection..."
-                                    try {
-                                        webView?.reload()
-                                    } catch (_: Throwable) {
-                                    }
+                                    loadWebView()
                                 }
                             }
                         }
