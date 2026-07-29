@@ -75,22 +75,47 @@ $325/mo if using Supabase Auth). §2 removes all three.
 
 ---
 
-## 4. Recommended phased path (🟡)
+## 3b. Cloudflare — the better scale target (✅ recommended, fetched 2026-07-29)
 
-The architecture is portable, so we don't choose infra today — we choose it by cost.
+Supabase's cost/limits at scale come from **per-connection + per-message realtime
+billing** (500 conns then $10/1,000; $2.50/M messages; hard caps). Cloudflare
+**Workers + Durable Objects (WebSocket Hibernation)** bills differently and
+removes exactly that:
+- **Idle WebSockets aren't billed for duration** (hibernation) — holding lots of
+  mostly-idle presence/watch connections is cheap, not $10/1,000.
+- **No hard cap on concurrent connections** (kills the "restrictive" wall).
+- **Storage absurdly generous**: SQLite/D1 — 25 **billion** row-reads/mo + 50M
+  writes + 5 GB included; DO requests 1M/mo then $0.15/M; Workers ~$5/mo base
+  (~10M req, then ~$0.30/M — verify).
+- **Serverless** — zero server to operate (fits phone-only) and exposes no infra
+  of yours (private; it's CF's edge, not your IP).
+
+**Rough 100k math with §2 architecture:** cost driver becomes **request volume**,
+not connections → ~$5 base + **~$30–80/mo usage at 100k**, no caps, scales to
+millions with zero ops. Better ceiling than architected Supabase, and never
+restrictive.
+
+**Tradeoffs:** more bespoke code (Workers + DO classes + D1, not a Firebase-like
+SDK — but we're rebuilding anyway); lower-level DX / wrangler (works from Termux);
+some lock-in to the DO model (D1 data is portable-ish); request volume is the cost
+lever, so the presence-reduction architecture still matters.
+
+## 4. Recommended path (🟡→✅ leaning Cloudflare)
+
+The architecture (§2) is portable, so infra is a cost decision. Current lean:
 
 1. **Build the scale-ready architecture now** (§2): FCM commands, sparse
-   log-derived presence, on-demand realtime, own identity. Portable between
-   Supabase and self-host.
-2. **Start on Supabase (Free → Pro).** Launch fast, zero server ops, cheap while
-   small (first several thousand users fit $0–25). Skip Supabase Auth.
-3. **Migrate to self-hosted flat-cost** when the Supabase bill crosses the comfort
-   line (~$50–100/mo, likely 10k–50k users). Same code pattern, cheaper infra.
-4. **At 100k+ you're self-hosted, flat-cost**, architecture already scale-ready.
+   log-derived presence, on-demand realtime, own identity.
+2. **Build on Cloudflare from the start** — Workers + Durable Objects + D1 + FCM.
+   Goes 0 → millions cheaply with **no restrictive caps**, serverless (no ops,
+   private, phone-manageable), and starting there avoids BOTH the expensive
+   endpoint AND a second migration. Upfront cost is more code (on us).
 
-**Alternative (commit to self-host from day one):** cheapest long-run, but you
-operate it from the start. Viable phone-only (rent + SSH from Termux), just more
-ops earlier. Pick this only if the $25 managed step isn't worth the saved ops.
+**Alternatives:**
+- **Supabase Free → Pro** if we want fastest MVP + Firebase-like SDK, accepting a
+  later migration when the bill/limits bite (~10k–50k users). Skip Supabase Auth.
+- **Self-host Appwrite/PocketBase on a $10–20 VPS** for familiar SDK + flat cost,
+  at the price of operating a box (rent + SSH from Termux; NOT hosted on the phone).
 
 ---
 
