@@ -260,6 +260,13 @@ for presence.
     "18 PC / 12 Quest / 2 iOS" for the whole instance costs nothing — only the
     per-person label needs the one-off call. Bottom line: one-off on-join
     enrichment is fine to keep; the reduction target was the *continuous* polling.
+  - **Works for NON-FRIENDS too (the whole point).** The log supplies every
+    instance occupant's userId — friends *and* strangers — and `GET /users/{id}`
+    is a **public** endpoint, so platform + rank + bio + avatar resolve for anyone
+    in the room, not just friends. This is strictly more than the friend-presence
+    WebSocket (friends-only). Scope: limited to people currently sharing your
+    instance (that's where the IDs come from); their *location* stays privacy-gated
+    for non-friends, but platform/rank/bio/avatar are public.
 - **Reader robustness:** VRChat rotates to a **new log file per launch**; the
   reader must tail back far enough to anchor on the current `Joining wrld_…` line
   + all joins/leaves since, or the count drifts when reading starts mid-session.
