@@ -239,6 +239,17 @@ for presence.
   - Instance **capacity** (the "/N") → one **cached** `/worlds/{id}` per unique
     world (cache forever), or omit the cap and show only the count.
   - **Friend** presence (friends not in your instance) → WebSocket, free.
+  - **Per-player platform** (PC / Quest-Android / iOS) → **API only, 1 call per
+    player**. The log has name+id+avatar, NOT platform; it comes from
+    `GET /users/{id}` → `last_platform` (`standalonewindows`→PC, `android`→Quest,
+    `ios`→iOS) — this is exactly how NEXUS's roster does it (per-user enrichment
+    call). Two caveats: (a) it scales with roster size (40-person instance = up to
+    40 calls, rate-gap them); (b) **`android` = Quest OR Android phone** — VRChat
+    can't distinguish them, so label it "Android", not "Quest". **The aggregate
+    breakdown is free**, though: the instance object's `platforms`
+    {standalonewindows, android, ios} counts come in the single `/instances/{id}`
+    call we already make (`extractInstanceUserCount`), so "18 PC / 12 Quest / 2 iOS"
+    for the whole instance costs nothing — only the *per-person* label needs a call.
 - **Reader robustness:** VRChat rotates to a **new log file per launch**; the
   reader must tail back far enough to anchor on the current `Joining wrld_…` line
   + all joins/leaves since, or the count drifts when reading starts mid-session.
