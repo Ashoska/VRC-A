@@ -264,24 +264,32 @@ service cloud.firestore {
     // use it to enforce one-active-device-at-a-time: the newest claimer wins, and
     // the displaced device sees the change via its listener and stops sending.
     match /accounts/{vrchatUserId} {
-      // get: signed-in (mirrors bannedIdentifiers). A device reads its OWN account
-      // lock by exact vrchatUserId; the vrchatId can't be ownership-verified in
-      // rules (no server-side vrchatId->auth mapping). list is owner-only so the
-      // collection can't be enumerated. Writes are constrained to EXACTLY the two
-      // lock fields with a valid deviceHash string, so a write can inject no
-      // arbitrary data; worst case is kicking a device, bounded by needing the
-      // target's high-entropy usr_ id.
+      // Account centre (§5): the account doc + a per-device membership subcollection
+      // (multi-device, replaced the single-session lock). Same bounded threat model
+      // as before — a write needs the account's high-entropy usr_ id, and the keys
+      // are constrained so no arbitrary data can be injected. get: signed-in (a
+      // device reads its own account by exact vrchatUserId, unverifiable in rules).
+      // list owner-only so the collection can't be enumerated.
       allow get: if isOwner() || signedIn();
       allow list: if isOwner();
       allow create, update: if isOwner()
         || (signedIn()
-            && request.resource.data.keys().hasOnly(['activeDevice', 'activeSince'])
-            && isValidDeviceHashString(request.resource.data.activeDevice));
-      // delete releases the single-session lock — allowed for the owner (admin
-      // remote-logout) AND any signed-in client (a device freeing its own lock on
-      // sign-out). Same bounded threat as create/update: a griefer needs the target's
-      // high-entropy usr_ id, and a delete only frees the account for its real owner.
+            && request.resource.data.keys().hasOnly(['vrchatUserId', 'primaryDeviceHash', 'createdAt', 'updatedAt'])
+            && (!('primaryDeviceHash' in request.resource.data)
+                || isValidDeviceHashString(request.resource.data.primaryDeviceHash)));
       allow delete: if isOwner() || signedIn();
+
+      // Membership: each device registers its OWN record. Keys constrained; the
+      // deviceHash must be a valid hash string. Read by owner or any signed-in
+      // member (the Settings account area lists members).
+      match /devices/{deviceHash} {
+        allow get, list: if isOwner() || signedIn();
+        allow create, update: if isOwner()
+          || (signedIn()
+              && request.resource.data.keys().hasOnly(['deviceHash', 'vrchatUserId', 'role', 'appId', 'localIp', 'addedAt', 'lastSeenAt', 'versionName', 'versionCode'])
+              && isValidDeviceHashString(request.resource.data.deviceHash));
+        allow delete: if isOwner() || signedIn();
+      }
     }
 
     /* =========================

@@ -41,6 +41,7 @@ import com.vrca.ui.conversation.ConversationUiState
 import com.vrca.ui.conversation.Message
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collectLatest
@@ -196,7 +197,8 @@ class VrcaViewModel(
         private const val COL_USERS = "users"             // users/{deviceHash}
         private const val COL_USERS_BY_ID = "usersById"   // usersById/{uid}
         private const val COL_BANNED_DEVICES = "bannedDevices"
-        private const val COL_ACCOUNTS = "accounts"        // accounts/{vrchatUserId} session lock
+        private const val COL_ACCOUNTS = "accounts"        // accounts/{vrchatUserId} account doc
+        private const val COL_ACCOUNT_DEVICES = "devices"  // accounts/{vid}/devices/{deviceHash} membership
 
         @MainThread
         fun isInstanceInitialized(): Boolean = ::instance.isInitialized
@@ -991,90 +993,143 @@ class VrcaViewModel(
     }
 
     /**
-     * Single-session lock helpers (multi-device, same VRChat account).
+     * Account centre — MULTI-DEVICE MEMBERSHIP (replaces the old single-session
+     * HARD-DENY). See docs/account-system-plan.md §5.
      *
-     * Lock doc: accounts/{vrchatUserId} = { activeDevice, activeSince }. A device is
-     * "active" when the doc is absent OR names this device. The newest claimer wins
-     * (take-over); the displaced device learns instantly via [startAccountLockWatcher]
-     * and stops sending (OSC blocked at the same chokepoint as the logged-out gate).
-     * Only ever written when a second device on the same account is detected, so a
-     * single-device user never touches this collection.
+     *   accounts/{vrchatUserId}                    = { vrchatUserId, primaryDeviceHash, createdAt, updatedAt }
+     *   accounts/{vrchatUserId}/devices/{deviceHash} = { role, appId, localIp, addedAt, lastSeenAt, versionName, versionCode }
+     *
+     * On login this device JOINS the account (registers its own device record) —
+     * NO claim, NO deny. Additional same-account devices are authorized peers, not
+     * blocked. A headset always becomes primary (source of roster/location);
+     * otherwise the earliest device stays primary. Admin participates too (so the
+     * account centre is testable from the admin build). Each device writes only its
+     * OWN device record, so concurrent multi-device joins never clobber.
      */
-    private suspend fun claimAccount(vrchatUserId: String, deviceHash: String) {
-        if (vrchatUserId.isBlank() || !isValidDeviceHash(deviceHash)) return
-        runCatching {
-            db.collection(COL_ACCOUNTS).document(vrchatUserId)
-                .set(mapOf(
-                    "activeDevice" to deviceHash,
-                    "activeSince" to FieldValue.serverTimestamp()
-                ))
-                .await()
-        }.onFailure { Log.w("VrcaViewModel", "claimAccount failed: ${it.message}") }
+    private fun thisDeviceRole(): String = when {
+        BuildConfig.IS_HEADSET_BUILD -> "headset"
+        BuildConfig.IS_ADMIN_BUILD -> "admin"
+        else -> "phone"
     }
 
-    private var accountLockReg: ListenerRegistration? = null
+    /** This device's own LAN IPv4 (site-local, non-loopback) — for auto-IP slots.
+     *  Permission-free (NetworkInterface enumeration). Null when not on a LAN. */
+    fun localDeviceIp(): String? = runCatching {
+        java.net.NetworkInterface.getNetworkInterfaces().toList()
+            .asSequence()
+            .filter { runCatching { it.isUp && !it.isLoopback }.getOrDefault(false) }
+            .flatMap { it.inetAddresses.toList().asSequence() }
+            .firstOrNull { !it.isLoopbackAddress && it is java.net.Inet4Address && it.isSiteLocalAddress }
+            ?.hostAddress
+    }.getOrNull()
+
+    private suspend fun joinAccount(vid: String, deviceHash: String) {
+        if (vid.isBlank() || !isValidDeviceHash(deviceHash)) return
+        val role = thisDeviceRole()
+        val isHeadset = BuildConfig.IS_HEADSET_BUILD
+        runCatching {
+            db.runTransaction { tx ->
+                val accRef = db.collection(COL_ACCOUNTS).document(vid)
+                val devRef = accRef.collection(COL_ACCOUNT_DEVICES).document(deviceHash)
+                val accSnap = tx.get(accRef)
+                val devSnap = tx.get(devRef)
+                val devData = hashMapOf<String, Any>(
+                    "deviceHash" to deviceHash,
+                    "vrchatUserId" to vid,
+                    "role" to role,
+                    "appId" to BuildConfig.APPLICATION_ID,
+                    "versionName" to BuildConfig.VERSION_NAME,
+                    "versionCode" to BuildConfig.VERSION_CODE,
+                    "lastSeenAt" to FieldValue.serverTimestamp()
+                )
+                localDeviceIp()?.let { devData["localIp"] = it }
+                if (!devSnap.exists()) devData["addedAt"] = FieldValue.serverTimestamp()
+                tx.set(devRef, devData, SetOptions.merge())
+
+                val accData = hashMapOf<String, Any>(
+                    "vrchatUserId" to vid,
+                    "updatedAt" to FieldValue.serverTimestamp(),
+                    // Migrate off the old single-session lock schema: drop the
+                    // legacy fields so the doc holds ONLY the new membership keys
+                    // (the rules constrain the account doc to those keys). Deleting
+                    // an absent field is a harmless no-op.
+                    "activeDevice" to FieldValue.delete(),
+                    "activeSince" to FieldValue.delete()
+                )
+                if (!accSnap.exists()) accData["createdAt"] = FieldValue.serverTimestamp()
+                val curPrimary = accSnap.getString("primaryDeviceHash")
+                // Headset always wins primacy; otherwise keep the earliest device.
+                if (isHeadset || curPrimary.isNullOrBlank()) accData["primaryDeviceHash"] = deviceHash
+                tx.set(accRef, accData, SetOptions.merge())
+                null
+            }.await()
+        }.onFailure { Log.w("VrcaAccount", "joinAccount failed: ${it.message}") }
+    }
+
+    private var accountMembersReg: ListenerRegistration? = null
     @Volatile private var watchedAccountId: String = ""
 
+    /** The VRChat account id this device is currently a member of (for the UI). */
+    var accountVrchatId by mutableStateOf("")
+        private set
+
+    private val _accountMembers = MutableStateFlow<List<AccountMember>>(emptyList())
+    /** The account's member devices (headset/phone/admin), for the Settings UI. */
+    val accountMembers: kotlinx.coroutines.flow.StateFlow<List<AccountMember>> get() = _accountMembers
+
     /**
-     * Watches accounts/{vrchatUserId} for the current VRChat login (re-attaches on
-     * login / account switch / logout) and enforces the HARD-DENY single-session model:
-     * claim the lock when it's free/ours, or raise [accountDenied] (block OSC, drop
-     * Discord, show the deny screen) when another device holds it. Recovery is
-     * automatic when the lock is freed (holder signs out / admin remote-logout).
+     * Re-attaches per login / account switch / logout. Registers THIS device's
+     * membership (join) and watches the member list — no claim, no deny. The member
+     * list feeds the Settings account area + (later) the auto-IP device slots.
      */
-    private fun startAccountLockWatcher() {
-        if (BuildConfig.IS_ADMIN_BUILD) return
+    private fun startAccountMembershipWatcher() {
         viewModelScope.launch {
             VrchatPipelineState.presenceFlow.collect { presence ->
                 val vid = presence?.userId?.trim().orEmpty()
                 if (vid == watchedAccountId) return@collect
-                accountLockReg?.remove(); accountLockReg = null
+                accountMembersReg?.remove(); accountMembersReg = null
                 watchedAccountId = vid
+                accountVrchatId = vid
                 if (vid.isBlank()) {
-                    // Signed out of VRChat → no account lock applies; clear deny.
-                    if (accountDenied) { accountDenied = false; refreshOscBlockGate() }
+                    _accountMembers.value = emptyList()
                     return@collect
                 }
                 val myHash = readDeviceHashFromPrefs()
                 if (!isValidDeviceHash(myHash)) return@collect
-                // HARD-DENY model: the lock names exactly ONE device. On every lock
-                // change, claim it when it's free/ours, or DENY when another device
-                // holds it. Recovery is automatic — when the holder signs out or an
-                // admin frees the lock (deletes it), the next snapshot is absent and
-                // this device claims + un-denies itself with no reopen.
-                accountLockReg = db.collection(COL_ACCOUNTS).document(vid)
-                    .addSnapshotListener { snap, e ->
-                        if (e != null) return@addSnapshotListener
-                        val exists = snap?.exists() == true
-                        val activeDevice = snap?.getString("activeDevice")?.trim().orEmpty()
-                        val claimedByOther = exists && activeDevice.isNotBlank() && activeDevice != myHash
-                        if (claimedByOther) {
-                            if (!accountDenied) {
-                                accountDenied = true
-                                if (oscSending) stopSending()
-                                disconnectDiscordLocally()
-                                refreshOscBlockGate()
-                            }
-                        } else {
-                            // Free or ours → claim it (if not already ours) and clear deny.
-                            if (activeDevice != myHash) {
-                                viewModelScope.launch { claimAccount(vid, myHash) }
-                            }
-                            if (accountDenied) { accountDenied = false; refreshOscBlockGate() }
-                        }
+                joinAccount(vid, myHash)
+                accountMembersReg = db.collection(COL_ACCOUNTS).document(vid)
+                    .collection(COL_ACCOUNT_DEVICES)
+                    .addSnapshotListener { snaps, e ->
+                        if (e != null || snaps == null) return@addSnapshotListener
+                        _accountMembers.value = snaps.documents.map { d ->
+                            AccountMember(
+                                deviceHash = d.id,
+                                role = d.getString("role") ?: "phone",
+                                appId = d.getString("appId").orEmpty(),
+                                localIp = d.getString("localIp").orEmpty(),
+                                lastSeenMs = d.getTimestamp("lastSeenAt")?.toDate()?.time ?: 0L,
+                                addedAtMs = d.getTimestamp("addedAt")?.toDate()?.time ?: 0L,
+                                isThisDevice = d.id == myHash
+                            )
+                        }.sortedByDescending { it.lastSeenMs }
                     }
             }
         }
     }
 
-    /** Releases this account's single-session lock (deletes accounts/{vrchatUserId}) so
-     *  another device can claim it. Called on a deliberate VRChat sign-out. */
-    fun releaseAccountLock() {
-        if (BuildConfig.IS_ADMIN_BUILD) return
+    /** Leaves the account on a deliberate VRChat sign-out / admin remote-logout:
+     *  deletes this device's membership record so it drops out of the account. */
+    fun leaveAccount() {
         val vid = watchedAccountId
         if (vid.isBlank()) return
+        val deviceHash = readDeviceHashFromPrefs()
+        if (!isValidDeviceHash(deviceHash)) return
         viewModelScope.launch {
-            runCatching { db.collection(COL_ACCOUNTS).document(vid).delete().await() }
+            runCatching {
+                db.collection(COL_ACCOUNTS).document(vid)
+                    .collection(COL_ACCOUNT_DEVICES).document(deviceHash).delete().await()
+            }
+            _accountMembers.value = _accountMembers.value.filterNot { it.deviceHash == deviceHash }
         }
     }
 
@@ -1964,18 +2019,6 @@ class VrcaViewModel(
     )
         private set
 
-    /**
-     * True when this VRChat account is already claimed by a DIFFERENT device — a HARD
-     * DENY (no take-over): OSC is blocked, Discord RPC is disconnected, and the UI
-     * shows a reassuring "account already registered, contact support" screen with the
-     * support-server link. The VRChat session + the account-lock listener are KEPT
-     * attached so recovery is seamless: when the old device signs out or an admin
-     * remote-logs-it-out (freeing the lock), this device auto-recovers and claims it.
-     * Single-device users never see it (their own claim names them).
-     */
-    var accountDenied by mutableStateOf(false)
-        private set
-
     /** True when the VRChat session is CONFIRMED dead-and-unrecoverable (password
      *  change / 30-day trusted-device expiry / cleared creds), not merely a
      *  transient drop — determined by the pipeline over a 5-min window with the
@@ -1986,7 +2029,7 @@ class VrcaViewModel(
 
     /** OSC is blocked when ANY gate reason is active. */
     private fun refreshOscBlockGate() {
-        val blocked = forceUpdatePending || vrchatLoggedOut || accountDenied || vrchatAuthDead
+        val blocked = forceUpdatePending || vrchatLoggedOut || vrchatAuthDead
         remoteVrcaOsc.blocked = blocked
         localVrcaOsc.blocked = blocked
     }
@@ -2019,10 +2062,9 @@ class VrcaViewModel(
                 if (oscSending) stopSending()
                 vrchatLoggedOut = true
                 refreshOscBlockGate()
-                // A deliberate VRChat sign-out releases this account's single-session
-                // lock so another device can claim it (the "properly sign out on the
-                // old device" escape from the hard-deny).
-                releaseAccountLock()
+                // A deliberate VRChat sign-out / admin remote-logout leaves the
+                // account (drops this device's membership record).
+                leaveAccount()
             }
         }
         viewModelScope.launch {
@@ -2718,7 +2760,7 @@ class VrcaViewModel(
 
         // Single-session lock: when the same VRChat account is open on another
         // device, this one stands down (OSC blocked) until it's re-claimed.
-        startAccountLockWatcher()
+        startAccountMembershipWatcher()
 
         // Live-mode loop: idle until an admin starts watching.
         startLiveSyncWatcher()
@@ -4999,4 +5041,15 @@ data class MessengerUiState(
     val isTriggerSFX: Boolean = true,
     val isTypingIndicator: Boolean = true,
     val isSendImmediately: Boolean = true
+)
+
+/** A device that is a member of the account (account centre §5). */
+data class AccountMember(
+    val deviceHash: String,
+    val role: String,          // "headset" | "phone" | "admin"
+    val appId: String,
+    val localIp: String,       // this member's detected LAN IP (auto-IP slots), or ""
+    val lastSeenMs: Long,
+    val addedAtMs: Long,
+    val isThisDevice: Boolean
 )
