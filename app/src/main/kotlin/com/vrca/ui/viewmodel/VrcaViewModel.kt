@@ -689,6 +689,11 @@ class VrcaViewModel(
         put("cyclePreset3", cyclePresetMessages.getOrNull(2)?.trim().orEmpty())
         put("cyclePreset4", cyclePresetMessages.getOrNull(3)?.trim().orEmpty())
         put("cyclePreset5", cyclePresetMessages.getOrNull(4)?.trim().orEmpty())
+        // All the user's configured LOCAL settings (time format, invisible border,
+        // media sources, music options, manual mode, cycle shuffle, selected presets)
+        // ride ONE synced JSON field so they sync across the account's devices. Rides
+        // the write that already fires → zero extra writes; applied via applySettingsBlob.
+        put("settingsBlob", buildSettingsBlob())
         // Profile pictures are deliberately NOT synced to Firestore (cost) and
         // NOT shown in the admin panel (AdminAvatar renders name initials).
 
@@ -838,6 +843,62 @@ class VrcaViewModel(
         applyToggle("timeEnabled", timeEnabled) { updateTimeEnabled(it) }
     }
 
+    /** Serializes the user's LOCAL configured settings (VM-held, DataStore-backed)
+     *  into ONE JSON string synced as a single field. "Sync everything the user
+     *  configured" thus rides ONE delta field through the echo-suppression machinery
+     *  instead of threading ~12 fields individually. Android's org.json preserves
+     *  insertion order, so the string is stable for the baseline comparison. */
+    private fun buildSettingsBlob(): String = org.json.JSONObject().apply {
+        put("time24h", time24h)
+        put("minimalChatboxBg", minimalChatboxBg)
+        put("mediaSpotify", mediaSourceSpotify)
+        put("mediaYoutube", mediaSourceYoutube)
+        put("mediaYtMusic", mediaSourceYtMusic)
+        put("musicShowProgress", musicShowProgress)
+        put("musicCleanTitles", musicCleanTitles)
+        put("manualLiveMode", manualLiveMode)
+        put("manualScroll", manualScroll)
+        put("cycleShuffle", cycleShuffle)
+        put("selectedAfkPreset", selectedAfkPreset)
+        put("selectedCyclePreset", selectedCyclePreset)
+    }.toString()
+
+    /** Applies a synced settings blob (sibling device / admin) to local state +
+     *  DataStore. Only CHANGED values are applied, via the same setters the UI uses
+     *  (so side effects like preview rebuild / OSC minimal-bg fire). Selected presets
+     *  are set DIRECTLY (not selectX) so applying doesn't reload preset content over
+     *  freshly-synced messages. */
+    private fun applySettingsBlob(jsonStr: String) {
+        val o = runCatching { org.json.JSONObject(jsonStr) }.getOrNull() ?: return
+        fun b(k: String, cur: Boolean, set: (Boolean) -> Unit) {
+            if (o.has(k)) { val v = o.optBoolean(k, cur); if (v != cur) set(v) }
+        }
+        b("time24h", time24h) { setTime24hFlag(it) }
+        b("minimalChatboxBg", minimalChatboxBg) { setMinimalChatboxBgFlag(it) }
+        b("mediaSpotify", mediaSourceSpotify) { setMediaSourceFlag(PKG_SPOTIFY, it) }
+        b("mediaYoutube", mediaSourceYoutube) { setMediaSourceFlag(PKG_YOUTUBE, it) }
+        b("mediaYtMusic", mediaSourceYtMusic) { setMediaSourceFlag(PKG_YTMUSIC, it) }
+        b("musicShowProgress", musicShowProgress) { setMusicShowProgressFlag(it) }
+        b("musicCleanTitles", musicCleanTitles) { setMusicCleanTitlesFlag(it) }
+        b("manualLiveMode", manualLiveMode) { setManualLiveModeFlag(it) }
+        b("manualScroll", manualScroll) { setManualScrollFlag(it) }
+        b("cycleShuffle", cycleShuffle) { setCycleShuffleFlag(it) }
+        if (o.has("selectedAfkPreset")) {
+            val v = o.optInt("selectedAfkPreset", selectedAfkPreset)
+            if (v != selectedAfkPreset) {
+                selectedAfkPreset = v
+                viewModelScope.launch { userPreferencesRepository.saveSelectedAfkPreset(v) }
+            }
+        }
+        if (o.has("selectedCyclePreset")) {
+            val v = o.optInt("selectedCyclePreset", selectedCyclePreset)
+            if (v != selectedCyclePreset) {
+                selectedCyclePreset = v
+                viewModelScope.launch { userPreferencesRepository.saveSelectedCyclePreset(v) }
+            }
+        }
+    }
+
     private suspend fun applyContentFromSnapshot(
         snap: com.google.firebase.firestore.DocumentSnapshot
     ) {
@@ -920,6 +981,18 @@ class VrcaViewModel(
                 spotifyPreset = remote
                 userPreferencesRepository.saveSpotifyPreset(remote)
                 lastSyncedValues["spotifyPreset"] = remote
+            }
+        }
+        // Configured LOCAL settings (one JSON blob — see buildSettingsBlob). Apply
+        // when the sibling/admin value differs from our persisted baseline AND our
+        // current blob (so a genuine change wins, an echo is skipped). Only changed
+        // keys inside are applied. Android org.json preserves order → stable compare.
+        snap.getString("settingsBlob")?.let { remote ->
+            val local = buildSettingsBlob()
+            val baseline = (lastSyncedValues["settingsBlob"] as? String) ?: local
+            if (remote != baseline && remote != local) {
+                applySettingsBlob(remote)
+                lastSyncedValues["settingsBlob"] = remote
             }
         }
     }
@@ -2758,9 +2831,23 @@ class VrcaViewModel(
         // VRChat sign-out hard-blocks OSC until re-login (Settings Accounts).
         startVrchatAuthGateWatcher()
 
-        // Single-session lock: when the same VRChat account is open on another
-        // device, this one stands down (OSC blocked) until it's re-claimed.
+        // Account centre: register this device's membership + watch the member list.
         startAccountMembershipWatcher()
+
+        // Sync configured settings promptly: when any of the settings in the blob
+        // change, schedule ONE debounced delta write (30s) so the new settingsBlob
+        // propagates to the account's other devices without waiting for the hourly
+        // tick. snapshotFlow only emits when the blob's value actually changes; the
+        // first emission (initial load) is skipped. Admin no-ops (performSelfSync
+        // early-returns for admin), so the gate just avoids scheduling churn there.
+        if (!BuildConfig.IS_ADMIN_BUILD) {
+            viewModelScope.launch {
+                var firstBlob = true
+                androidx.compose.runtime.snapshotFlow { buildSettingsBlob() }.collect {
+                    if (firstBlob) firstBlob = false else startSelfSyncLoopIfNeeded()
+                }
+            }
+        }
 
         // Live-mode loop: idle until an admin starts watching.
         startLiveSyncWatcher()
