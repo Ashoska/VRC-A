@@ -12,6 +12,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
@@ -242,6 +243,15 @@ private object DeviceId {
         return sb.toString()
     }
 }
+
+// Monitor-shape framing breakpoints (see the Scaffold content in VrcaScreen).
+// A phone stays below the threshold (portrait ~360-420 dp), so it's never
+// centered; Meta Quest's 1024 dp landscape panel is well above it, so the app
+// reads as a centered monitor window there. MAX_CONTENT_WIDTH keeps the
+// phone-designed cards at a comfortable reading width instead of stretching
+// edge-to-edge across the wide panel.
+private val HEADSET_WIDE_THRESHOLD = 640.dp
+private val HEADSET_MAX_CONTENT_WIDTH = 720.dp
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -519,6 +529,24 @@ fun VrcaScreen(
                     .fillMaxSize()
                     .padding(padding)
             ) {
+              // Monitor-shape framing for WIDE panels — Meta Quest's 16:10
+              // 1024x640 dp default panel (also tablets/foldables). Center the
+              // page content in a comfortable max-width column so a Quest build
+              // reads as a monitor app instead of a stretched-wide phone. Keyed on
+              // the ACTUAL available width (not IS_HEADSET_BUILD), so it's a
+              // genuine responsive improvement AND never affects a normal phone
+              // (its width stays below the threshold). The top/bottom bars keep the
+              // full panel width as the window "chrome"; only the content centers.
+              BoxWithConstraints(Modifier.fillMaxSize()) {
+                val contentModifier = if (maxWidth >= HEADSET_WIDE_THRESHOLD) {
+                    Modifier
+                        .fillMaxHeight()
+                        .widthIn(max = HEADSET_MAX_CONTENT_WIDTH)
+                        .align(Alignment.TopCenter)
+                } else {
+                    Modifier.fillMaxSize()
+                }
+                Box(contentModifier) {
                 Crossfade(targetState = page, label = "page_crossfade") { p ->
                     when (p) {
                         AppPage.Home -> {
@@ -575,6 +603,8 @@ fun VrcaScreen(
                         }
                     }
                 }
+                } // Box(contentModifier)
+              } // BoxWithConstraints
 
             }
         }

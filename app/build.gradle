@@ -86,6 +86,7 @@ android {
             dimension "app"
             // Uses default applicationId com.scrapw.chatbox
             buildConfigField "boolean", "IS_ADMIN_BUILD", "false"
+            buildConfigField "boolean", "IS_HEADSET_BUILD", "false"
             buildConfigField "String", "GITHUB_PAT",   '""'
             buildConfigField "String", "GITHUB_OWNER", '""'
             buildConfigField "String", "GITHUB_REPO",  '""'
@@ -95,10 +96,30 @@ android {
             dimension "app"
             applicationId "com.scrapw.chatbox.admin"
             buildConfigField "boolean", "IS_ADMIN_BUILD", "true"
+            buildConfigField "boolean", "IS_HEADSET_BUILD", "false"
             buildConfigField "String", "GITHUB_PAT",   "\"${githubPat}\""
             buildConfigField "String", "GITHUB_OWNER", "\"${githubOwner}\""
             buildConfigField "String", "GITHUB_REPO",  "\"${githubRepo}\""
             resValue "string", "app_name", "VRC-A Admin"
+        }
+        // Meta Quest / Horizon OS headset build. Its own applicationId (distinct
+        // install + distinct device hash from the phone build, which the
+        // account/multi-device model needs) and its own Firebase app
+        // (src/headsetApp/google-services.json, package com.gremlin.inc.headset).
+        // The headset is the authoritative source for instance roster + live
+        // location in the account system (log reader lands in M2). This M1 is the
+        // flavor scaffold only: it builds, installs on a Quest, and runs the app in
+        // the 16:10 landscape "monitor" panel shape (see src/headsetApp manifest +
+        // the width-responsive framing in VrcaScreen).
+        headsetApp {
+            dimension "app"
+            applicationId "com.gremlin.inc.headset"
+            buildConfigField "boolean", "IS_ADMIN_BUILD", "false"
+            buildConfigField "boolean", "IS_HEADSET_BUILD", "true"
+            buildConfigField "String", "GITHUB_PAT",   '""'
+            buildConfigField "String", "GITHUB_OWNER", '""'
+            buildConfigField "String", "GITHUB_REPO",  '""'
+            resValue "string", "app_name", "VRC-A"
         }
     }
 

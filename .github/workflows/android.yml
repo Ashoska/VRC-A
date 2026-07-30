@@ -69,6 +69,12 @@ jobs:
       - name: Build Admin Release APK
         run: ./gradlew :app:assembleAdminAppRelease
 
+      - name: Build Headset Debug APK
+        run: ./gradlew :app:assembleHeadsetAppDebug
+
+      - name: Build Headset Release APK
+        run: ./gradlew :app:assembleHeadsetAppRelease
+
       - name: Upload Public Debug APK
         uses: actions/upload-artifact@v4
         with:
@@ -95,4 +101,18 @@ jobs:
         with:
           name: admin-release
           path: app/build/outputs/apk/adminApp/release/*.apk
+          retention-days: 3
+
+      - name: Upload Headset Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: headset-debug
+          path: app/build/outputs/apk/headsetApp/debug/*.apk
+          retention-days: 3
+
+      - name: Upload Headset Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: headset-release
+          path: app/build/outputs/apk/headsetApp/release/*.apk
           retention-days: 3
