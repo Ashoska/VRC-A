@@ -261,6 +261,62 @@ centre is not where backend cost lives (presence was, and that's already
 optimized / headed to log-derived). Build on Firestore now; the D1 mapping in
 §5.1 makes the eventual Cloudflare move an infra swap.
 
+### 5.10 Live transport — LAN/P2P for the constant data (✅ decided, builds in M2)
+
+The **durable/control plane** (membership, moderation, releases, wake) is
+server-based and rare-write (cheap). The **constant data plane** — live chatbox
+content, presence/roster porting, remote Start/Stop — must NOT be per-message
+server writes. Split it:
+
+- **Start/Stop (`oscSending`) is an EVENT, not constant** — a few writes/day.
+  Rides the existing command channel / delta write. Not a cost problem; do NOT
+  treat it as streaming.
+- **The live chatbox is DETERMINISTIC from config** — a peer with the synced
+  config **regenerates** the same chatbox locally; it needs streaming only for
+  the non-deterministic bits (now-playing on the phone, a manual send, the exact
+  cycle index). So most of the "constant" cost evaporates via regenerate-don't-
+  stream.
+- **For the genuinely-live cross-device stream** (live chatbox mirror, presence
+  porting, control-your-home-headset-from-anywhere): a **direct device-to-device
+  channel**, NOT server writes:
+  - **Same WiFi** → direct LAN socket (NSD/mDNS discovery, shared with the
+    OSCQuery work). Free.
+  - **Different networks** → **WebRTC data channel with STUN hole-punching** —
+    once established, data flows device-to-device with **zero server cost**.
+  - **Hole-punch fails (CGNAT)** → **TURN relay** (the only server-bandwidth
+    cost, and only for that minority of pairs).
+  - Server does only: tiny **signaling** (set up the link, not per-message) +
+    **FCM wake** + TURN fallback. Cheap.
+- **Honesty:** WebRTC is a real dependency + a persistent socket (battery/
+  reconnect complexity, but we've done gateway-reconnect work already); TURN
+  costs some bandwidth for un-punchable pairs.
+- **Sequencing:** v1 syncs config + Start/Stop over the server (rare, cheap,
+  must work cross-network anyway). The P2P channel lands in **M2**, alongside the
+  NSD/OSC LAN plumbing it shares.
+
+### 5.11 Auto-IP — no manual entry, synced device slots (✅ decided)
+
+Kill manual IP entry (NEXUS-style). Each device **auto-detects its own LAN IP**
+(`WifiManager` / `NetworkInterface`, IPv4, non-loopback). IP **slots become
+auto-filled per account device** instead of hand-typed Home/Hotspot/Other: the
+phone publishes its own detected IP, the headset publishes its own, each into the
+account, so any device can **switch between the account's device IPs** to pick
+its OSC target (usually the headset). Details:
+
+- Each device writes its detected IP to its **membership record** (§5.1,
+  `account_device.localIp` + `ipUpdatedAt`) → the slots are just the member list,
+  synced for free with membership.
+- Re-detect on network change (connectivity callback) and republish when it
+  changes; stale IPs age out with `lastSeenAt`.
+- **Manual override stays** as a fallback (AP isolation / weird networks), but the
+  default is auto — the user just picks which device to send to, never types an IP.
+- Ties into §5.10: the same detected IP is what the LAN socket dials.
+
+**Admin build participates in ALL of §5** (membership, the Settings account area,
+sync, auto-IP) so the account centre is testable from the admin build — it is
+**no longer excluded** from these account-centre screens/paths. (Moderation-
+specific admin behavior is unrelated and unchanged.)
+
 ---
 
 ## 6. Cross-device wake
