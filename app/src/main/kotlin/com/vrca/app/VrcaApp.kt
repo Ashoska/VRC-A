@@ -199,7 +199,11 @@ fun VrcaApp() {
 
             try {
                 val startMs = System.currentTimeMillis()
-                kotlinx.coroutines.withTimeout(20_000L) {
+                // 30s (was 20s) so the now per-attempt-bounded anon-auth retry loop
+                // has room to cycle through a couple of hung cold-start attempts and
+                // still succeed rather than being cut off. The common case (one hung
+                // attempt) recovers in ~6.5s; this only matters for repeated hangs.
+                kotlinx.coroutines.withTimeout(30_000L) {
                     bootstrapFirebaseAndCache(ctx)
                 }
                 // Warm VRChat presence DURING the Device-session stage if already
@@ -1035,6 +1039,15 @@ private const val NEW_USER_BOOT_FLOOR_MS = 3_000L
  *  missed with its own spinner. */
 private const val TUTORIAL_PREFETCH_CAP_MS = 8_000L
 
+/** Per-attempt timeout for the cold-start anonymous sign-in (and the bootstrap
+ *  Firestore writes). On a fresh first boot signInAnonymously()/the first
+ *  Firestore write often HANGS (Play Services / network / token warming) rather
+ *  than throwing; without a per-attempt bound one hung call consumed the whole
+ *  boot timeout so the retry loop never cycled — "Device session" failed and a
+ *  manual Retry (now warm) worked instantly. Bounding each attempt lets the loop
+ *  abandon a hung call and retry within the boot window, self-healing the blip. */
+private const val ANON_AUTH_ATTEMPT_MS = 6_000L
+
 /** Cap on how long "Account status" waits for the VRChat pipeline to connect
  *  (presence warm) before proceeding — a dead session / bad network must never
  *  hang boot; it just hands off and the app deals with it. */
@@ -1091,13 +1104,24 @@ private suspend fun bootstrapFirebaseAndCache(ctx: Context) {
         var attempt = 0
         while (auth.currentUser == null && attempt < 4) {
             try {
-                auth.signInAnonymously().await()
+                // Per-attempt timeout: a cold-start signInAnonymously() often HANGS
+                // (not throws). withTimeoutOrNull abandons a hung attempt (cancelling
+                // the await) so the loop cycles to the next one — which succeeds once
+                // Play Services / network is warm. Without this the first hung call
+                // ate the whole outer boot timeout and the retry never ran.
+                val ok = withTimeoutOrNull(ANON_AUTH_ATTEMPT_MS) {
+                    auth.signInAnonymously().await()
+                    true
+                }
+                if (ok != true && auth.currentUser == null) {
+                    lastErr = lastErr ?: IllegalStateException("anon auth attempt timed out")
+                }
             } catch (t: Throwable) {
                 lastErr = t
-                if (attempt < 3) {
-                    kotlinx.coroutines.delay(delayMs)
-                    delayMs = (delayMs * 2).coerceAtMost(3000L)
-                }
+            }
+            if (auth.currentUser == null && attempt < 3) {
+                kotlinx.coroutines.delay(delayMs)
+                delayMs = (delayMs * 2).coerceAtMost(3000L)
             }
             attempt++
         }
@@ -1162,18 +1186,27 @@ private suspend fun bootstrapFirebaseAndCache(ctx: Context) {
             .getLong("last_self_sync_ms", 0L)
         val recentWrite = System.currentTimeMillis() - lastSyncMs < 20L * 60L * 1000L
 
+        // Both writes are non-critical for boot (the VM cold-open write repeats
+        // them seconds later) — but an un-bounded .await() on a cold Firestore
+        // connection can HANG and eat the outer boot timeout even inside
+        // runCatching (which catches throws, not hangs). Bound each so a cold-start
+        // stall can't fail boot after auth already succeeded.
         if (!recentWrite) {
             runCatching {
-                db.collection("users").document(deviceHash)
-                    .set(safeUser, SetOptions.merge())
-                    .await()
+                withTimeoutOrNull(ANON_AUTH_ATTEMPT_MS) {
+                    db.collection("users").document(deviceHash)
+                        .set(safeUser, SetOptions.merge())
+                        .await()
+                }
             }
         }
 
         runCatching {
-            db.collection("usersById").document(uid)
-                .set(safeLink, SetOptions.merge())
-                .await()
+            withTimeoutOrNull(ANON_AUTH_ATTEMPT_MS) {
+                db.collection("usersById").document(uid)
+                    .set(safeLink, SetOptions.merge())
+                    .await()
+            }
         }
     }
 }
