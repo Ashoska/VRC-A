@@ -147,11 +147,16 @@ class DiscordRpcService : Service() {
         // gateway auth — wiping it kills the session even though the CookieManager
         // cookie survives, because Discord's JS client uses the token (not the
         // cookie) for the gateway Identify and API calls. The cap measures ONLY
-        // cacheDir/WebView; when over cap we clear the HTTP cache + best-effort
-        // delete Code Cache, then reload so Chromium re-fetches the assets it needs.
+        // cacheDir/WebView; when over cap we clear the HTTP cache IN PLACE
+        // (clearCache(true)) so the live page/gateway/RPC are untouched — no
+        // reload, no visible RPC drop. A disruptive rebuild is a last resort,
+        // fired only if in-place clearing can't hold the cap for 2 cycles.
         private const val CACHE_FIRST_CHECK_DELAY_MS = 3L * 60 * 1000   // 3 min
         private const val CACHE_CHECK_INTERVAL_MS = 30L * 60 * 1000     // 30 min
         private const val WEBVIEW_CACHE_CAP_BYTES = 64L * 1024 * 1024   // 64 MB cacheDir only
+        // Consecutive over-cap cycles (each already cleared HTTP cache in place)
+        // before paying the disruptive delete+reload to reclaim Code Cache.
+        private const val CACHE_HEAVY_CLEAR_STREAK = 2
 
         var isRunning = false
             private set
@@ -164,6 +169,9 @@ class DiscordRpcService : Service() {
     private var presenceTimerJob: Job? = null
     private var sessionMonitorJob: Job? = null
     private var cacheMaintenanceJob: Job? = null
+    // Consecutive maintenance cycles found over cap after an in-place HTTP clear.
+    // Drives the last-resort heavy rebuild (CACHE_HEAVY_CLEAR_STREAK).
+    private var cacheOverCapStreak = 0
     private var shimReady = false
     private var shimRetryCount = 0
     private var sessionRecoveryCount = 0
@@ -724,13 +732,38 @@ class DiscordRpcService : Service() {
                     val cacheWebViewDir = File(cacheDir, "WebView")
                     val size = dirSizeBytes(cacheWebViewDir)
                     if (size > WEBVIEW_CACHE_CAP_BYTES) {
-                        Log.i(TAG, "WebView cache ${size / (1024 * 1024)}MB over cap — clearing HTTP/Code cache (session preserved)")
+                        cacheOverCapStreak++
+                        // SEAMLESS PATH (the default, and in practice the only one that ever
+                        // runs): clear the disk HTTP cache IN PLACE. clearCache(true) empties
+                        // the HTTP cache buckets (Discord's assets — the dominant grower)
+                        // WITHOUT navigating, reloading, or terminating the renderer, so the
+                        // live gateway socket + injected shim + presence loop are UNTOUCHED and
+                        // the RPC never blinks off the user's Discord profile. This replaces the
+                        // old proactive stopPresenceUpdates()+loadWebView(), which fixed the cap
+                        // but visibly dropped the RPC for a few seconds on EVERY over-cap cycle
+                        // (the "it fixes itself but you can see it disappear" problem). The
+                        // session-monitor's own recovery ladder still handles any genuine gateway
+                        // hiccup — we no longer manufacture one just for disk hygiene.
+                        Log.i(TAG, "WebView cache ${size / (1024 * 1024)}MB over cap — clearing HTTP cache in place (RPC preserved, streak=$cacheOverCapStreak)")
                         mainHandler.post {
                             try {
                                 webView?.clearCache(true)
                             } catch (e: Throwable) {
                                 Log.w(TAG, "WebView cache clear failed", e)
                             }
+                        }
+
+                        // HEAVY FALLBACK (rare — basically never): only if an in-place clear on
+                        // the PREVIOUS cycle STILL left us over cap does Code Cache alone exceed
+                        // the cap (clearCache can't reclaim Code Cache; the only way is deleting
+                        // files under a live renderer, which forces a reload). Gated behind a
+                        // 2-cycle streak so a single stale over-cap reading (clearCache's disk
+                        // delete not yet settled) can never trigger a visible RPC drop. This is
+                        // the ONE path that rebuilds the WebView — the session survives in
+                        // app_webview (cookies + localStorage.token) so it re-auths silently.
+                        if (cacheOverCapStreak >= CACHE_HEAVY_CLEAR_STREAK) {
+                            cacheOverCapStreak = 0
+                            Log.w(TAG, "WebView cache still over cap after in-place clear — heavy rebuild to reclaim Code Cache")
                             scope.launch {
                                 try {
                                     cacheWebViewDir.listFiles()?.forEach { it.deleteRecursively() }
@@ -738,29 +771,24 @@ class DiscordRpcService : Service() {
                                     Log.w(TAG, "WebView cacheDir sweep failed", e)
                                 }
                                 mainHandler.post {
-                                    // Tear down the RPC state, then RECREATE the WebView — do
-                                    // NOT bare-reload(). A reload()/same-route load does not
-                                    // reliably tear down + reopen Discord's gateway socket after
-                                    // a cache clear: the WS hook re-injects but the fresh gateway
-                                    // often opens before it's in place, so VRCA_setActivity stores
-                                    // the activity with no socket to send OP3 on — module-finder
-                                    // still reports "ok", we show CONNECTED, and the RPC never
-                                    // lands on Discord until a full app RESTART (the user-reported
-                                    // "cache cleaned, reconnected, but no RPC until I restart").
-                                    // loadWebView() rebuilds the WebView from scratch — the SAME
-                                    // recovery onSessionExpired / onRenderProcessGone already use:
-                                    // the session survives in app_webview cookies+localStorage so
-                                    // it re-auths silently, fresh Discord JS opens a fresh gateway,
-                                    // and the shim reliably recaptures it -> presence resumes.
-                                    // Not a sessionRecovery attempt — this is maintenance.
+                                    // Deliberately do NOT flip status to RECONNECTING/DISCONNECTED
+                                    // here. This is a SCHEDULED maintenance rebuild — surfacing
+                                    // "reconnecting" would make users think something broke when
+                                    // it's just disk hygiene. Leave the status showing CONNECTED:
+                                    // shimReady=false makes the session monitor skip probing while
+                                    // the page rebuilds, and on the normal successful re-inject
+                                    // injectShim re-asserts CONNECTED (a no-op from CONNECTED), so
+                                    // the whole cycle is invisible. A GENUINE failure still
+                                    // surfaces — injectShim flips to RECONNECTING on its retries
+                                    // and FAILED after exhausting them — so nothing real is masked.
                                     shimReady = false
                                     stopPresenceUpdates()
-                                    DiscordRpcState.status = DiscordRpcStatus.RECONNECTING
-                                    DiscordRpcState.failureMessage = "Refreshing Discord connection..."
                                     loadWebView()
                                 }
                             }
                         }
+                    } else {
+                        cacheOverCapStreak = 0
                     }
                 } catch (e: Throwable) {
                     Log.w(TAG, "Cache maintenance check failed", e)
