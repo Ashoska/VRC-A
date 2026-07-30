@@ -1,9 +1,13 @@
 # VRC-A account system + headset-source plan (DRAFT — under discussion)
 
-Living design note for the next major evolution of VRC-A. **Not implemented
-yet** — this records decisions and constraints as we discuss them so the eventual
-build has a clear spec. Companion to `docs/vrc-nexus-teardown.md` (the technique
-source) and the sync/background sections of `CLAUDE.md`.
+Living design note for the next major evolution of VRC-A. Companion to
+`docs/vrc-nexus-teardown.md` (the technique source) and the sync/background
+sections of `CLAUDE.md`.
+
+**Progress:** §2 headset flavor **M1 scaffold is SHIPPED** (the `headsetApp`
+build variant + 16:10 landscape monitor framing — see `CLAUDE.md`). §5 account
+centre is **design-locked** (this doc) and next to build, on Firestore. The log
+reader (§9), account-centre code, and features (§8) are not implemented yet.
 
 Status legend: ✅ decided · 🟡 leaning · ❓ open · ⛔ ruled out / not possible.
 
@@ -117,17 +121,145 @@ Guardrails:
 
 ---
 
-## 5. Account / auth model
+## 5. Account centre (✅ design locked — backend-agnostic)
 
-- 🟡 Real account (auth) on top of today's Firestore + anon-device model; headset
-  is the **primary/required** device, phones/others are **added** to that account.
-- Reuse the existing **single-session lock** concept, generalized: instead of
-  hard-deny across devices, account members are *known peers* that sync + can
-  command each other (the existing oscCommand / kill / toggle channel, extended
-  peer-to-peer).
-- Content sync: today's `vrchatUserId`-keyed cross-device content pull becomes
-  account-scoped.
-- ❓ Auth provider (Firebase Auth email/OAuth? VRChat-login-derived?) — open.
+The account centre replaces the **single-session HARD-DENY** with a
+**multi-device membership** model: one account = one VRChat identity, with
+several *member devices* (a headset + phone(s)) that are all authorized, sync
+content, and can command each other. This is the direct answer to "logging in
+on the headset with my other device should be allowed, not blocked" — the
+hard-deny was built for a one-device world we're leaving.
+
+**Identity, for now:** keyed on `vrchatUserId` (the account) + the per-device
+`deviceHash` (the member), exactly the keys we already have — **no new auth
+provider is introduced in v1** (email/OAuth stays deferred, §7). The headset is
+the *primary/source* device; phones/others are *added* members.
+
+**Backend-agnostic:** the data model below maps 1:1 onto **Firestore
+collections (build on this NOW)** or **Cloudflare D1 tables (migrate later,
+free tier is fine at our scale — see `backend-migration-plan.md`)**. Every
+operation is a point read / small upsert, so the layer is a clean infra swap,
+not a redesign.
+
+### 5.1 Data model
+
+Two records. **Each device only ever writes its OWN device record** (never the
+whole account), so concurrent multi-device writes never clobber each other — a
+Firestore **subcollection** (not a map field) gives that for free and maps
+cleanly to a D1 child table.
+
+```
+account            (rarely written — created once, primary changes rarely)
+  id            = vrchatUserId ("usr_…")        // doc id / PK
+  primaryDeviceHash                              // the headset if one exists, else earliest device
+  createdAt, updatedAt
+
+account_device     (one per member device; each device writes only its own)
+  deviceHash                                     // doc id / PK
+  vrchatUserId                                   // parent / FK
+  role          = "headset" | "phone"            // from BuildConfig at join (admin never joins)
+  appId                                          // com.gremlin.inc.headset | com.scrapw.chatbox
+  addedAt, lastSeenAt                            // lastSeenAt piggybacks existing liveness → ~0 new cost
+  versionName, versionCode
+```
+
+| Concern | Firestore (now) | Cloudflare D1 (later) |
+|---|---|---|
+| account | `accounts/{vrchatUserId}` | `accounts(vrchat_user_id PK, primary_device_hash, …)` |
+| device | `accounts/{vrchatUserId}/devices/{deviceHash}` | `account_devices(device_hash PK, vrchat_user_id FK, role, …)` |
+| list members | subcollection query | `SELECT … WHERE vrchat_user_id = ?` |
+| join / heartbeat | dotted upsert of own device doc | `INSERT … ON CONFLICT UPDATE` |
+
+### 5.2 Lifecycle (no deny anywhere)
+
+1. **Join** — on VRChat login (vrchatUserId known) + valid deviceHash: upsert
+   `devices/{myHash}` (`role` from `IS_HEADSET_BUILD`, `addedAt` if new,
+   `lastSeenAt = now`); create the `accounts/{vid}` doc if absent; set
+   `primaryDeviceHash` (a **headset always wins**; otherwise keep the earliest).
+   **No claim, no deny** — additional same-account devices simply appear as
+   members. (Replaces `claimAccount`.)
+2. **Heartbeat** — `lastSeenAt` rides the **existing** liveness write (hourly,
+   or 10 s while watched), so membership freshness costs **no extra writes**.
+3. **Leave** — on a deliberate VRChat sign-out, delete `devices/{myHash}`; if it
+   was the last device, delete `accounts/{vid}`. (Replaces `releaseAccountLock`
+   / the admin remote-logout lock delete.)
+4. **Remove a device** (later increment) — a member (or admin) deletes another
+   `devices/{hash}` to kick a lost/old device off the account.
+
+### 5.3 What comes OUT (hard-deny removal)
+
+- `accountDenied` state, its OSC block, its `disconnectDiscordLocally()`, and
+  the `AccountDeniedScreen` — all removed. `refreshOscBlockGate()` drops
+  `accountDenied` from its OR (keeps `forceUpdatePending || vrchatLoggedOut ||
+  vrchatAuthDead`).
+- `startAccountLockWatcher()` becomes `startAccountMembershipWatcher()`: it
+  still re-attaches per login and still watches the account, but instead of
+  claim-or-deny it **registers/refreshes this device's membership** and exposes
+  the member list (for a future "your devices" view + peer commands). It never
+  blocks OSC or Discord.
+- `claimAccount` → `joinAccount`, `releaseAccountLock` → `leaveAccount`.
+
+### 5.4 Content sync — account-scoped
+
+Already effectively account-scoped: `applyCrossDeviceSync()` queries `users
+where vrchatUserId == mine`, picks the freshest `updatedAt`, and pulls
+presets/messages/intervals into local DataStore (read-only against siblings,
+freshest-wins). v1 **keeps this as-is** (it's the membership set by another
+name) — no migration needed. *Optional later:* promote content to a single
+`accounts/{vid}/content` doc so there's one source instead of per-device docs;
+not required and deferred.
+
+### 5.5 Peer commands (member ↔ member) — design, deferred to a follow-on
+
+Generalize today's admin→device channel (`oscCommand`/`killSignal`/
+`logoutVrchatAt`, read by each device's moderation listener) to **member →
+member**: a phone can tell the headset to Start/Stop OSC, or wake it. Transport
+is the same pattern — write a command to the **target device's** record (or
+`accounts/{vid}/commands/{deviceHash}`), delivered by the target's existing
+listener, plus **FCM** for wake (§6, with the FLAG_STOPPED caveat). v1 only
+needs membership + roles recorded; the command channel lands next.
+
+### 5.6 Migration from the existing lock docs
+
+Existing docs are `accounts/{vid} = {activeDevice, activeSince}`. The new join
+logic just writes `devices/{myHash}` + the new account fields; the vestigial
+`activeDevice` field is harmless (nothing reads it once the deny is gone) and
+can be cleaned opportunistically. **Rollout note:** an un-updated OLD client
+still runs the hard-deny and could deny a second device until it updates —
+**forced-update resolves this** (all releases are forced). New devices coexist
+immediately.
+
+### 5.7 Firestore rules (v1)
+
+Add the `devices` subcollection under the existing `accounts` rules:
+`accounts/{vid}/devices/{deviceHash}` — **create/update/delete** by `signedIn()`
+constrained to the schema keys + a valid `deviceHash` (same bounded threat as
+today's lock: it needs the high-entropy `usr_` id, which only the real owner
+has). **read** by `isOwner()` or a signed-in member of that account. The parent
+`accounts/{vid}` rules are unchanged.
+
+### 5.8 First shippable increment (v1 scope)
+
+1. Write `accounts/{vid}/devices/{myHash}` on login + upsert the account doc
+   (`joinAccount`, role from build flag, headset→primary).
+2. **Remove the hard-deny** (§5.3) so headset + phone coexist.
+3. `lastSeenAt` piggybacks the existing liveness write (no new cost).
+4. Firestore rules for the `devices` subcollection (§5.7).
+5. `leaveAccount` on sign-out (+ admin remote-logout frees membership, not a
+   lock).
+
+**Deferred:** peer commands (§5.5), account-level content doc (§5.4), a
+"your devices" management UI, and cross-wake FCM (§6). Auth provider (§7).
+
+### 5.9 Cost & portability
+
+Membership is **low-write**: one `join` per login + `lastSeenAt` folded into the
+liveness write that already fires → **~0 marginal Firestore cost**. That's why
+Firestore-now is fine and Cloudflare's **free tier** (100k Worker/DO req/day,
+100k D1 row-writes/day) comfortably covers this at our scale — the account
+centre is not where backend cost lives (presence was, and that's already
+optimized / headed to log-derived). Build on Firestore now; the D1 mapping in
+§5.1 makes the eventual Cloudflare move an infra swap.
 
 ---
 
@@ -171,12 +303,20 @@ The ack means we never falsely believe we woke a device we didn't.
 ---
 
 ## 7. Open questions
-- ❓ Auth provider + how a headset "claims" the account and invites other devices.
-- ❓ Exact account doc schema (roster/location live subdoc vs main doc; cost).
+- ❓ **Auth provider** (email/OAuth vs VRChat-login-derived) — deferred; v1 keeps
+  the `vrchatUserId` + `deviceHash` keying (§5), so nothing is blocked on it.
+  Revisit if/when we want account recovery independent of a VRChat login.
+- ❓ Device **invite/authorization UX** — v1 auto-joins any device that logs in
+  with the same VRChat account (possession of the login = authorization). A
+  stricter "approve this new device from an existing one" flow is a later option.
 - ❓ Phone→Quest OSC-in viability (OSCQuery advertise over LAN) vs headset-only.
 - ❓ Private-vs-removed labeling: which avatar DB(s), and their reliability/ToS.
 - ❓ Whether the headset build also runs Discord RPC or delegates it to the phone.
 - ❓ FCM: self-hosted send (Cloud Function) vs client-triggered; ack field shape.
+
+**Resolved this pass:** account doc schema (§5.1), headset "claim" → multi-device
+**join** with no deny (§5.2–5.3), backend = Firestore now / Cloudflare-free later
+(§5.9).
 
 ---
 
@@ -300,13 +440,16 @@ Keep the ~10 s keepalive, add on-change pushes, never go below 4 s.
 
 Everything above is wanted, but in this order:
 
-1. **Quest build first** — `headsetApp` flavor / `IS_HEADSET_BUILD`, with:
-   - **Scaled UI for the Quest 2D panel** (fixed-size floating window; density +
-     touch-target tuning for laser-pointer input; test at panel size).
-   - **Correct Quest permissions** — All-files/SAF grant on `Documents/Logs`,
-     notification listener, and the **"Allow restricted settings"** sideload
-     gateway; a Quest-specific onboarding path (its permission UI differs).
-   - The log reader + OSC-in live here.
+1. **Quest build first** — `headsetApp` flavor / `IS_HEADSET_BUILD`:
+   - ✅ **M1 SHIPPED:** the flavor (id `com.gremlin.inc.headset`), its Firebase
+     app, and **16:10 landscape "monitor" framing** (Quest's 1024×640 dp panel;
+     width-responsive so phones are untouched). Builds + installs + runs.
+   - 🟡 **M1.5 (polish):** monitor-frame the boot/onboarding screens too; tune
+     content width from real in-headset feedback.
+   - 🟡 **M2:** the **log reader** + its **Quest permissions** — All-files/SAF on
+     the VRChat log path (confirm the real Quest path first), notification
+     listener, and the **"Allow restricted settings"** sideload gateway; a
+     Quest-specific onboarding path (its permission UI differs). OSC-in lives here.
 2. **Account system** (§2–§5) — headset-as-source, multi-device, sync/control.
 3. **Feature buffet** on top, roughly: log-derived RPC + roster (§9) → synced
    lyrics + tokens + heart-rate (§8 / roadmap) → OSC-in avatar lines + avatar DB →
