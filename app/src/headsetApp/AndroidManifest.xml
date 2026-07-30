@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Headset (Meta Quest / Horizon OS) flavor manifest overlay. Merged OVER the
+  main manifest (flavor manifests win), so this only adds/overrides what the
+  Quest build needs — the phone/admin builds are untouched.
+
+  M1 (flavor scaffold): force the launcher activity into LANDSCAPE so the app
+  opens in Quest's 16:10 "monitor" panel (default 1024x640 dp) instead of a
+  tall phone shape. Content stays width-responsive (see VrcaScreen framing) so
+  a user resizing the panel toward the 384x500 dp minimum never looks broken.
+
+  Deferred to M2 (log reader): MANAGE_EXTERNAL_STORAGE / SAF for reading
+  VRChat's output logs, and any Horizon-Store submission manifest entries.
+  Not added here — unused permissions would only complicate store review.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <application>
+        <activity
+            android:name=".app.MainActivity"
+            android:screenOrientation="sensorLandscape"
+            tools:node="merge" />
+    </application>
+
+</manifest>
