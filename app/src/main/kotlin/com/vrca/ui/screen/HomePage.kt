@@ -1168,9 +1168,67 @@ private fun ConnectionCard(
             }
         }
     ) {
+        // Auto-IP: pick a target from the account's devices (their detected LAN IPs,
+        // synced via membership) instead of typing one. Manual entry stays below.
+        AccountDeviceIpPicker(vm = vm, currentIp = ipAddress)
         com.vrca.ui.conversation.IpField(
             chatboxViewModel = vm,
             modifier = Modifier.fillMaxWidth()
+        )
+    }
+}
+
+@Composable
+private fun AccountDeviceIpPicker(vm: VrcaViewModel, currentIp: String) {
+    val members by vm.accountMembers.collectAsState()
+    // Other account devices with a detected IP — you send OSC to another device
+    // (usually the headset running VRChat), not to this one.
+    val targets = members.filter { !it.isThisDevice && it.localIp.isNotBlank() }
+    if (targets.isEmpty()) return
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("Account devices", style = MaterialTheme.typography.labelLarge)
+        Text(
+            "Auto-detected IPs from your other devices. Tap one to send there.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        targets.forEach { m ->
+            val selected = currentIp == m.localIp
+            Surface(
+                onClick = { vm.ipAddressApply(m.localIp) },
+                shape = MaterialTheme.shapes.medium,
+                color = if (selected) MaterialTheme.colorScheme.primaryContainer
+                        else MaterialTheme.colorScheme.surfaceVariant,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            m.role.replaceFirstChar { it.uppercase() },
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Text(
+                            m.localIp,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(
+                        if (selected) "Sending here" else "Use",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+        }
+        Text(
+            "Or set an IP manually:",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
 }

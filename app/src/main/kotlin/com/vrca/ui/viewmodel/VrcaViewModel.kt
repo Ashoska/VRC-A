@@ -1206,6 +1206,39 @@ class VrcaViewModel(
         }
     }
 
+    /** Re-publishes THIS device's detected LAN IP onto its membership record so the
+     *  account's auto-IP slots stay current when the network changes (the header
+     *  fires this from a connectivity callback). Merge-only (localIp + lastSeenAt),
+     *  so it satisfies the constrained device-doc rule. No-op when unlinked. */
+    private var lastPublishedIp: String = ""
+    fun publishLocalIp() {
+        val vid = watchedAccountId
+        if (vid.isBlank()) return
+        val hash = readDeviceHashFromPrefs()
+        if (!isValidDeviceHash(hash)) return
+        val ip = localDeviceIp() ?: return
+        if (ip == lastPublishedIp) return
+        lastPublishedIp = ip
+        viewModelScope.launch {
+            runCatching {
+                db.collection(COL_ACCOUNTS).document(vid)
+                    .collection(COL_ACCOUNT_DEVICES).document(hash)
+                    .set(mapOf("localIp" to ip, "lastSeenAt" to FieldValue.serverTimestamp()), SetOptions.merge())
+                    .await()
+            }
+        }
+    }
+
+    private fun startLocalIpWatcher() {
+        runCatching {
+            val cm = app.getSystemService(android.net.ConnectivityManager::class.java) ?: return
+            cm.registerDefaultNetworkCallback(object : android.net.ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: android.net.Network) { publishLocalIp() }
+                override fun onLost(network: android.net.Network) { lastPublishedIp = "" }
+            })
+        }.onFailure { Log.w("VrcaAccount", "startLocalIpWatcher failed: ${it.message}") }
+    }
+
     @Suppress("UNUSED_PARAMETER")
     private suspend fun performSelfSync(coldOpen: Boolean = false) {
         if (BuildConfig.IS_ADMIN_BUILD) return
@@ -2833,6 +2866,8 @@ class VrcaViewModel(
 
         // Account centre: register this device's membership + watch the member list.
         startAccountMembershipWatcher()
+        // Keep this device's published LAN IP current for the account's auto-IP slots.
+        startLocalIpWatcher()
 
         // Sync configured settings promptly: when any of the settings in the blob
         // change, schedule ONE debounced delta write (30s) so the new settingsBlob
