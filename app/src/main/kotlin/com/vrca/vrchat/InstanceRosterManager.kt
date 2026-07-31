@@ -179,25 +179,29 @@ object InstanceRosterManager {
     )
 
     private fun findNewestLog(context: Context): LogRef? {
-        // Prefer a SAF grant if present (works where File access to Android/data
-        // is blocked); else scan the direct File dirs.
-        safFolder(context)?.let { tree -> return newestSaf(context, tree) }
-        if (!hasStoragePermission()) return null
-        var best: LogRef? = null
-        for (dir in candidateDirs()) {
-            val files = try {
-                if (!dir.isDirectory) continue
-                dir.listFiles { f -> f.isFile && looksLikeLog(f.name) } ?: continue
-            } catch (e: Exception) {
-                continue
-            }
-            for (f in files) {
-                if (best == null || f.lastModified() > best!!.lastModified) {
-                    best = LogRef(f.absolutePath, f.length(), f.lastModified(), null)
+        // Direct File read FIRST — the shared VRChat log dirs (Documents/Logs,
+        // etc.) are readable with All-files access, so this is the normal path
+        // and a stray SAF folder-pick can't shadow it. SAF is the fallback for
+        // File-API-blocked locations (Android/data on Android 11+).
+        if (hasStoragePermission()) {
+            var best: LogRef? = null
+            for (dir in candidateDirs()) {
+                val files = try {
+                    if (!dir.isDirectory) continue
+                    dir.listFiles { f -> f.isFile && looksLikeLog(f.name) } ?: continue
+                } catch (e: Exception) {
+                    continue
+                }
+                for (f in files) {
+                    if (best == null || f.lastModified() > best!!.lastModified) {
+                        best = LogRef(f.absolutePath, f.length(), f.lastModified(), null)
+                    }
                 }
             }
+            if (best != null) return best
         }
-        return best
+        safFolder(context)?.let { tree -> return newestSaf(context, tree) }
+        return null
     }
 
     /** List the granted SAF tree and return the newest log-looking file. */
