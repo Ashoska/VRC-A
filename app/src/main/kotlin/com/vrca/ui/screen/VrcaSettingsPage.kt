@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.NewReleases
 import androidx.compose.material.icons.filled.Notifications
@@ -99,6 +100,10 @@ internal fun SettingsPage(
     }
     val overlayAllowed = remember(permRefreshTick) {
         android.provider.Settings.canDrawOverlays(ctx)
+    }
+    // Headset only: All-files access lets the log reader find VRChat's output log.
+    val filesAccessGranted = remember(permRefreshTick) {
+        com.vrca.vrchat.InstanceRosterManager.hasStoragePermission()
     }
 
     // Inline VRChat re-login (Accounts → Sign in). Full-screen takeover; on
@@ -225,6 +230,26 @@ internal fun SettingsPage(
                 primary = "Open",
                 granted = overlayAllowed
             ) { ctx.startActivity(vm.overlayPermissionIntent()) }
+
+            // Headset only: read VRChat's log to build the instance roster. The
+            // rest of the roster setup (pick log folder, VRChat Logging = FULL)
+            // lives on the Home "In your instance" panel.
+            if (BuildConfig.IS_HEADSET_BUILD) {
+                SettingsRow(
+                    icon = Icons.Filled.Folder,
+                    title = "All files access",
+                    subtitle = "Lets VRC-A read VRChat's log to show who's in your instance.",
+                    primary = "Open",
+                    granted = filesAccessGranted
+                ) {
+                    runCatching {
+                        ctx.startActivity(
+                            com.vrca.vrchat.InstanceRosterManager.allFilesAccessIntent(ctx)
+                                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    }
+                }
+            }
         }
 
         // -- About --

@@ -66,6 +66,11 @@ object VrcLogParser {
     private val RE_ENTERING = Regex(
         """\[Behaviour]\s+Entering Room:\s+(.+)$"""
     )
+    // VRChat also logs the world name as "Joining or Creating Room: <name>"
+    // (distinct from the "Joining wrld_…" location line above).
+    private val RE_JOINING_ROOM = Regex(
+        """\[Behaviour]\s+Joining or Creating Room:\s+(.+)$"""
+    )
     private val RE_JOINED = Regex(
         """\[Behaviour]\s+(?:Successfully joined room|OnJoinedRoom)\b"""
     )
@@ -111,6 +116,7 @@ object VrcLogParser {
             )
         }
         RE_ENTERING.find(body)?.let { return LogEvent.EnteringRoom(it.groupValues[1].trim()) }
+        RE_JOINING_ROOM.find(body)?.let { return LogEvent.EnteringRoom(it.groupValues[1].trim()) }
         if (RE_JOINED.containsMatchIn(body)) return LogEvent.JoinedRoom
         if (RE_LEFT_ROOM.containsMatchIn(body)) return LogEvent.LeftRoom
         RE_PLAYER_JOINED.find(body)?.let { m ->

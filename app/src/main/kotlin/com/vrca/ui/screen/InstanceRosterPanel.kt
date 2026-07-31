@@ -1,9 +1,8 @@
 package com.vrca.ui.screen
 
 import android.content.Intent
-import android.net.Uri
-import android.os.Build
-import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,6 +21,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -53,6 +53,11 @@ fun InstanceRosterPanel(modifier: Modifier = Modifier) {
         if (BuildConfig.IS_HEADSET_BUILD) InstanceRosterManager.start(ctx)
     }
     val ui by InstanceRosterManager.flow.collectAsState()
+    // SAF fallback: let the user grant VRChat's log folder when direct file
+    // access to Android/data is blocked (Android 11+ / most Horizon OS).
+    val pickFolder = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri -> if (uri != null) InstanceRosterManager.setSafFolder(ctx, uri) }
 
     ElevatedCard(
         modifier = modifier.fillMaxWidth(),
@@ -90,9 +95,16 @@ fun InstanceRosterPanel(modifier: Modifier = Modifier) {
             }
 
             when (ui.status) {
-                InstanceRosterManager.Status.NEEDS_PERMISSION -> PermissionState(ctx)
-                InstanceRosterManager.Status.NO_LOG -> HintState(
-                    "Waiting for VRChat's log. Open VRChat and this fills in automatically."
+                InstanceRosterManager.Status.NEEDS_PERMISSION -> AccessState(
+                    ctx = ctx,
+                    lead = "Give VRC-A access to VRChat's log so it can show who's in your instance.",
+                    onPickFolder = { pickFolder.launch(null) }
+                )
+                InstanceRosterManager.Status.NO_LOG -> AccessState(
+                    ctx = ctx,
+                    lead = "No VRChat log yet. Two things to check:",
+                    showChecklist = true,
+                    onPickFolder = { pickFolder.launch(null) }
                 )
                 InstanceRosterManager.Status.IDLE -> HintState(
                     "Not in a world right now. Join an instance to see who's in it."
@@ -110,31 +122,47 @@ fun InstanceRosterPanel(modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun PermissionState(ctx: android.content.Context) {
+private fun AccessState(
+    ctx: android.content.Context,
+    lead: String,
+    showChecklist: Boolean = false,
+    onPickFolder: () -> Unit
+) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
-            "Give VRC-A file access so it can read VRChat's log and show who's in your instance.",
+            lead,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        Button(
-            onClick = {
-                runCatching {
-                    val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        Intent(
-                            Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                            Uri.parse("package:" + ctx.packageName)
+        if (showChecklist) {
+            Text(
+                "1. In VRChat: Settings -> Debug -> set Logging to FULL, then rejoin your world.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                "2. If it still says this, pick VRChat's log folder below.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        if (!InstanceRosterManager.hasStoragePermission()) {
+            Button(
+                onClick = {
+                    runCatching {
+                        ctx.startActivity(
+                            InstanceRosterManager.allFilesAccessIntent(ctx)
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                         )
-                    } else {
-                        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                            Uri.parse("package:" + ctx.packageName))
                     }
-                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    ctx.startActivity(intent)
-                }
-            },
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("Grant file access") }
+        }
+        OutlinedButton(
+            onClick = onPickFolder,
             modifier = Modifier.fillMaxWidth()
-        ) { Text("Grant file access") }
+        ) { Text("Choose log folder") }
     }
 }
 
