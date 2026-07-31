@@ -1134,6 +1134,55 @@ object VrchatAuthManager {
         }
     }
 
+    /**
+     * A resolved user's identity + platform, from a single `GET /users/{id}`.
+     * `platform` is the RAW VRChat value (`standalonewindows`/`android`/`ios`/`web`,
+     * or blank when the user is offline / the field is absent); use
+     * [prettyPlatform] to map it to a display label. `trustRank` is the raw
+     * highest `system_trust_*` tag (blank when unavailable).
+     *
+     * This is the per-user platform lookup the instance-roster feature (M2 log
+     * reader) uses: the log reader supplies the `usr_` ids of everyone in the
+     * instance; this call fills in each one's name + PC/Quest/iOS platform.
+     * The endpoint is PUBLIC (works for non-friends), so a roster of strangers
+     * still resolves. Best-effort: returns null on any non-200 / parse failure.
+     */
+    data class VrcUserInfo(
+        val userId: String,
+        val displayName: String,
+        val platform: String,
+        val trustRank: String,
+        val status: String,
+        val statusDescription: String,
+        val location: String
+    )
+
+    suspend fun fetchUserInfo(context: Context, userId: String): VrcUserInfo? = withContext(Dispatchers.IO) {
+        if (userId.isBlank() || !userId.startsWith("usr_")) return@withContext null
+        val cookieHeader = getCookieHeader(context) ?: return@withContext null
+        try {
+            val (code, body, rawCookies) = get("$BASE/users/$userId", null, cookieHeader)
+            if (code == 200) captureRolledCookies(context, rawCookies)
+            if (code != 200 || !body.startsWith("{")) return@withContext null
+            val j = org.json.JSONObject(body)
+            VrcUserInfo(
+                userId = userId,
+                displayName = j.optString("displayName", ""),
+                // `last_platform` is the user's most-recent client; `platform`
+                // (when present on a friend object) is the CURRENT session's.
+                // Prefer the live `platform`, fall back to `last_platform`.
+                platform = j.optString("platform", "").ifBlank { j.optString("last_platform", "") },
+                trustRank = extractTrustRankFromTags(j.optJSONArray("tags")),
+                status = j.optString("status", ""),
+                statusDescription = j.optString("statusDescription", ""),
+                location = j.optString("location", "")
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "fetchUserInfo($userId) failed", e)
+            null
+        }
+    }
+
     suspend fun fetchGroupName(context: Context, groupId: String): String? = withContext(Dispatchers.IO) {
         if (groupId.isBlank()) return@withContext null
         val cookieHeader = getCookieHeader(context) ?: return@withContext null
@@ -1360,6 +1409,20 @@ object VrchatAuthManager {
     // ------------------------------------------------------------------
     // Private helpers
     // ------------------------------------------------------------------
+
+    /**
+     * Maps VRChat's raw platform value to a short display label for the roster.
+     * `standalonewindows` = PC (Windows), `android` = Quest/Android standalone,
+     * `ios` = iOS, `web` = website. Blank/offline → "" (caller renders nothing).
+     */
+    fun prettyPlatform(raw: String): String = when (raw.lowercase()) {
+        "standalonewindows" -> "PC"
+        "android" -> "Quest"
+        "ios" -> "iOS"
+        "web" -> "Web"
+        "" , "offline" -> ""
+        else -> raw
+    }
 
     private fun extractTrustRankFromTags(tags: org.json.JSONArray?): String {
         if (tags == null) return ""
