@@ -19,7 +19,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -251,8 +253,11 @@ fun OnboardingFlow(
                     detectTapGestures(onTap = { focusManager.clearFocus() })
                 }
         ) {
-            // Step content
-            Box(Modifier.weight(1f)) {
+            // Step content — monitor-shape framing: center at a comfortable max
+            // width on a wide Quest panel (a phone stays under the cap and fills as
+            // before). The footer below keeps full panel width as the window chrome.
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+              Box(Modifier.fillMaxHeight().widthIn(max = 640.dp)) {
                 when (step) {
                     0 -> StepWelcomeTos(tosVersion, tosText, tosUrl, tosDone, onAccept = {
                         onTosAccepted(); advance()
@@ -271,6 +276,7 @@ fun OnboardingFlow(
                         onGoToIpStep = { step = 3 }
                     )
                 }
+              }
             }
 
             // Footer: step label + progress pills + nav. Hard gates hide

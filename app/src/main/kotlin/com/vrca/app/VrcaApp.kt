@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -1453,7 +1454,12 @@ private fun BootstrapScreen(
         Box(Modifier.fillMaxSize().background(gradient)) {
             Column(
                 modifier = Modifier
-                    .fillMaxSize()
+                    .fillMaxHeight()
+                    // Monitor-shape framing: center the boot content in a comfortable
+                    // column on a wide Quest panel (a phone stays under the cap, so it
+                    // fills as before). Matches the main app's centered framing.
+                    .widthIn(max = 520.dp)
+                    .align(Alignment.Center)
                     .padding(28.dp),
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally
