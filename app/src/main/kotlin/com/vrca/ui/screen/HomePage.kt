@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -84,6 +85,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.vrca.BuildConfig
 import com.vrca.ui.common.CompactSectionCard
 import com.vrca.ui.common.KitStatusChip
@@ -171,6 +173,13 @@ private fun AnnouncementCard(a: AnnouncementUi) {
         }
     }
 }
+
+// Fixed preview-bubble size (all builds): 9 chatbox lines at the compact preview
+// font (PREVIEW_LINE_SP) + padding, so the preview never grows/pushes the UI as
+// lines are added — like the in-game chatbox's fixed size.
+private val PREVIEW_LINE_SP = 14
+private val PREVIEW_FONT_SP = 11
+private val PREVIEW_BUBBLE_HEIGHT = (PREVIEW_LINE_SP * 9 + 24).dp  // 9 lines + 12dp top/bottom padding
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -624,7 +633,11 @@ private fun PreviewAndTogglesCard(
                     Modifier
                         .widthIn(max = 420.dp)
                         .fillMaxWidth(0.92f)
-                        .heightIn(min = 96.dp)
+                        // FIXED height that reserves 9 chatbox lines always — like the
+                        // in-game chatbox, the preview no longer grows as lines are
+                        // added (which pushed the rest of the UI down). Content is
+                        // centered; fewer lines just leave space. (All builds.)
+                        .height(PREVIEW_BUBBLE_HEIGHT)
                 ) {
                     if (vm.minimalChatboxBg) {
                         // Invisible Chatbox Border simulation: in-game the bubble
@@ -662,6 +675,8 @@ private fun PreviewAndTogglesCard(
                                         modifier = Modifier.fillMaxWidth(),
                                         fontFamily = FontFamily.Monospace,
                                         style = MaterialTheme.typography.bodyMedium,
+                                        fontSize = PREVIEW_FONT_SP.sp,
+                                        lineHeight = PREVIEW_LINE_SP.sp,
                                         textAlign = TextAlign.Center,
                                         softWrap = true,
                                         maxLines = 9,
@@ -672,16 +687,15 @@ private fun PreviewAndTogglesCard(
                         }
                     } else {
                         Surface(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier.fillMaxSize(),
                             tonalElevation = 3.dp,
                             shape = MaterialTheme.shapes.large,
                             color = MaterialTheme.colorScheme.surfaceVariant
                         ) {
                             Box(
                                 Modifier
-                                    .heightIn(min = 96.dp)
-                                    .padding(12.dp)
-                                    .fillMaxWidth(),
+                                    .fillMaxSize()
+                                    .padding(12.dp),
                                 contentAlignment = Alignment.Center
                             ) {
                                 SelectionContainer {
@@ -690,6 +704,8 @@ private fun PreviewAndTogglesCard(
                                         modifier = Modifier.fillMaxWidth(),
                                         fontFamily = FontFamily.Monospace,
                                         style = MaterialTheme.typography.bodyMedium,
+                                        fontSize = PREVIEW_FONT_SP.sp,
+                                        lineHeight = PREVIEW_LINE_SP.sp,
                                         // Explicit bright color: Surface(surfaceVariant)
                                         // switches LocalContentColor to the muted
                                         // onSurfaceVariant, which dimmed the preview
