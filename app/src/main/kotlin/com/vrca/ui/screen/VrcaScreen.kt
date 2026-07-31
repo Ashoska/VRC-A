@@ -358,7 +358,9 @@ private fun ConnectionButton(vm: com.vrca.ui.viewmodel.VrcaViewModel) {
 // phone-designed cards at a comfortable reading width instead of stretching
 // edge-to-edge across the wide panel.
 private val HEADSET_WIDE_THRESHOLD = 640.dp
-private val HEADSET_MAX_CONTENT_WIDTH = 720.dp
+// Wide enough to use most of the Quest 1024 dp panel (the two-column Home needs
+// the width) while keeping a small margin so content isn't edge-to-edge.
+private val HEADSET_MAX_CONTENT_WIDTH = 960.dp
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

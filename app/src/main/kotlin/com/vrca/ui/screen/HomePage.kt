@@ -10,6 +10,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -273,30 +276,58 @@ internal fun HomePage(
         )
     }
 
-    PageContainer {
+    // Setup health checklist items — computed here so BOTH the phone and headset
+    // layouts can render the shared alert block. Shows ONLY the red rows.
+    val healthItems = buildList {
+        if (!vrcLinked) add(
+            HealthItem(
+                "VRChat account not linked",
+                "OSC sending is blocked until you sign in."
+            ) { onNavigate(AppPage.VrchatStatus) }
+        )
+        if (ipOk == false) add(
+            HealthItem(
+                "Headset IP not set",
+                "Tap the connection icon (top right) to set your Quest/PC IP."
+            ) { }
+        )
+        if (!batteryOk) add(
+            HealthItem(
+                "Battery optimization is on",
+                "Android may pause VRC-A when the screen is off."
+            ) {
+                ctx.startActivity(vm.batteryOptimizationIntent())
+                batteryOk = pm.isIgnoringBatteryOptimizations(ctx.packageName)
+            }
+        )
+        if (vm.spotifyEnabled && !notifOk) add(
+            HealthItem(
+                "Notification Access missing",
+                "Now Playing is on but can't detect media without it."
+            ) { ctx.startActivity(vm.notificationAccessIntent()) }
+        )
+    }
+
+    // Alert / info cards (announcements, VRChat status, session-expired, warning,
+    // setup health). Shared block — on the headset these live in the LEFT column so
+    // they never push the two-column structure into a full-page scroll.
+    val alertCards: @Composable ColumnScope.() -> Unit = {
         if (sortedAnnouncements.isNotEmpty()) {
             SectionCard(
                 title = "Announcements",
                 subtitle = "Latest updates from the app team."
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    sortedAnnouncements.forEach { a ->
-                        key(a.id) { AnnouncementCard(a) }
-                    }
+                    sortedAnnouncements.forEach { a -> key(a.id) { AnnouncementCard(a) } }
                 }
             }
         }
-
-        // VRChat server status warning
         VrchatStatusBanner()
-
-        // Confirmed-dead VRChat session: OSC is gated, so explain why + offer sign-in.
         if (vm.vrchatAuthDead) {
             com.vrca.ui.common.VrchatSessionExpiredBanner(
                 onSignIn = { onNavigate(AppPage.VrchatStatus) }
             )
         }
-
         if (moderation.warned && !(moderation.banned || moderation.deviceBanned)) {
             SectionCard(
                 title = "Account warning",
@@ -313,88 +344,47 @@ internal fun HomePage(
                 }
             }
         }
+        if (healthItems.isNotEmpty()) SetupHealthCard(healthItems)
+    }
 
-        // Setup health checklist — Home-only replacement for the old every-tab
-        // "Setup incomplete" banner. Shows ONLY the red rows; disappears
-        // entirely when everything is green. Each row deep-links to its fix.
-        val healthItems = buildList {
-            if (!vrcLinked) add(
-                HealthItem(
-                    "VRChat account not linked",
-                    "OSC sending is blocked until you sign in."
-                ) { onNavigate(AppPage.VrchatStatus) }
-            )
-            if (ipOk == false) add(
-                HealthItem(
-                    "Headset IP not set",
-                    "Tap the connection icon (top right) to set your Quest/PC IP."
-                ) { }
-            )
-            if (!batteryOk) add(
-                HealthItem(
-                    "Battery optimization is on",
-                    "Android may pause VRC-A when the screen is off."
+    val preview: @Composable (Boolean) -> Unit = { showToggles ->
+        PreviewAndTogglesCard(
+            vm = vm,
+            isBanned = isBanned,
+            nowTickMs = nowTickMs,
+            cardReorderMode = cardReorderMode,
+            onToggleReorderMode = { cardReorderMode = it },
+            onResetOrder = { vm.resetCardOrder() },
+            onNavigate = onNavigate,
+            showToggles = showToggles
+        )
+    }
+
+    if (BuildConfig.IS_HEADSET_BUILD) {
+        // Headset: FILL the panel (bottom nav stays pinned) and never scroll the whole
+        // page. Wide → two columns (Preview + alerts LEFT, Quick Toggles + Manual Send
+        // RIGHT), each column scrolls internally so alert cards can't push the layout.
+        // Narrow/shrunk → a single scrollable column that still fills the panel.
+        BoxWithConstraints(Modifier.fillMaxSize().padding(14.dp)) {
+            if (maxWidth >= HOME_TWO_COL_THRESHOLD) {
+                Row(
+                    Modifier.fillMaxSize(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    ctx.startActivity(vm.batteryOptimizationIntent())
-                    batteryOk = pm.isIgnoringBatteryOptimizations(ctx.packageName)
-                }
-            )
-            if (vm.spotifyEnabled && !notifOk) add(
-                HealthItem(
-                    "Notification Access missing",
-                    "Now Playing is on but can't detect media without it."
-                ) { ctx.startActivity(vm.notificationAccessIntent()) }
-            )
-        }
-        if (healthItems.isNotEmpty()) {
-            SetupHealthCard(healthItems)
-        }
-
-        if (BuildConfig.IS_HEADSET_BUILD) {
-            // Headset: two columns — Preview LEFT, Quick Toggles + Manual Send RIGHT
-            // — but ONLY while the panel is wide enough. When the user SHRINKS the
-            // Quest panel to a narrow shape it falls back to the normal single
-            // column (two columns would be cramped). Width-gated via BoxWithConstraints.
-            BoxWithConstraints(Modifier.fillMaxWidth()) {
-                if (maxWidth >= HOME_TWO_COL_THRESHOLD) {
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    Column(
+                        Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Column(Modifier.weight(1f)) {
-                            PreviewAndTogglesCard(
-                                vm = vm,
-                                isBanned = isBanned,
-                                nowTickMs = nowTickMs,
-                                cardReorderMode = cardReorderMode,
-                                onToggleReorderMode = { cardReorderMode = it },
-                                onResetOrder = { vm.resetCardOrder() },
-                                onNavigate = onNavigate,
-                                showToggles = false
-                            )
-                        }
-                        Column(
-                            Modifier.weight(1f),
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            QuickTogglesSection(
-                                vm = vm,
-                                isBanned = isBanned,
-                                cardReorderMode = cardReorderMode,
-                                onToggleReorderMode = { cardReorderMode = it },
-                                onResetOrder = { vm.resetCardOrder() },
-                                onNavigate = onNavigate
-                            )
-                            ManualSendCard(vm = vm, isBanned = isBanned)
-                        }
+                        preview(false)
+                        alertCards()
                     }
-                } else {
-                    // Narrow/shrunk panel → single column (with toggles under preview).
-                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        PreviewAndTogglesCard(
+                    Column(
+                        Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        QuickTogglesSection(
                             vm = vm,
                             isBanned = isBanned,
-                            nowTickMs = nowTickMs,
                             cardReorderMode = cardReorderMode,
                             onToggleReorderMode = { cardReorderMode = it },
                             onResetOrder = { vm.resetCardOrder() },
@@ -403,17 +393,21 @@ internal fun HomePage(
                         ManualSendCard(vm = vm, isBanned = isBanned)
                     }
                 }
+            } else {
+                Column(
+                    Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    alertCards()
+                    preview(true)
+                    ManualSendCard(vm = vm, isBanned = isBanned)
+                }
             }
-        } else {
-            PreviewAndTogglesCard(
-                vm = vm,
-                isBanned = isBanned,
-                nowTickMs = nowTickMs,
-                cardReorderMode = cardReorderMode,
-                onToggleReorderMode = { cardReorderMode = it },
-                onResetOrder = { vm.resetCardOrder() },
-                onNavigate = onNavigate
-            )
+        }
+    } else {
+        PageContainer {
+            alertCards()
+            preview(true)
             ManualSendCard(vm = vm, isBanned = isBanned)
         }
     }
