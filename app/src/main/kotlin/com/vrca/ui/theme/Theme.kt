@@ -4,6 +4,9 @@ import android.app.Activity
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.ripple.LocalRippleTheme
+import androidx.compose.material.ripple.RippleAlpha
+import androidx.compose.material.ripple.RippleTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.darkColorScheme
@@ -11,7 +14,9 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
+import com.vrca.BuildConfig
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
@@ -20,6 +25,27 @@ import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 
 enum class ThemeMode { System, Light, Dark }
+
+/**
+ * Headset-only ripple theme that ZEROES the HOVER alpha. On Meta Quest the
+ * controller laser generates pointer-hover events but the hover-EXIT often isn't
+ * delivered when the laser moves off quickly, so Compose's hover highlight gets
+ * "stuck" on buttons/pills. Making the hovered ripple invisible means there is
+ * nothing to stick, while press/focus feedback is preserved. Phone/admin builds
+ * keep the normal ripple (a touchscreen has no hover state anyway).
+ */
+private object NoHoverRippleTheme : RippleTheme {
+    @Composable
+    override fun defaultColor(): Color = MaterialTheme.colorScheme.onSurface
+
+    @Composable
+    override fun rippleAlpha(): RippleAlpha = RippleAlpha(
+        draggedAlpha = 0.16f,
+        focusedAlpha = 0.12f,
+        hoveredAlpha = 0f,
+        pressedAlpha = 0.12f
+    )
+}
 
 fun ThemeMode.isDark(systemIsDark: Boolean): Boolean = when (this) {
     ThemeMode.System -> systemIsDark
@@ -119,9 +145,16 @@ fun VrcaTheme(
     MaterialTheme(
         colorScheme = colorScheme,
         typography = Typography,
-        shapes = AppShapes,
-        content = content
-    )
+        shapes = AppShapes
+    ) {
+        // Headset build: kill the stuck-hover highlight (Quest laser hover-exit is
+        // unreliable). Other builds render the content unchanged.
+        if (BuildConfig.IS_HEADSET_BUILD) {
+            CompositionLocalProvider(LocalRippleTheme provides NoHoverRippleTheme, content = content)
+        } else {
+            content()
+        }
+    }
 }
 
 @Composable
