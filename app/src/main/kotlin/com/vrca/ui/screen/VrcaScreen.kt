@@ -45,6 +45,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
@@ -52,6 +53,9 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.Divider
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -83,6 +87,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -241,6 +246,108 @@ private object DeviceId {
         val sb = StringBuilder(bytes.size * 2)
         for (b in bytes) sb.append(String.format("%02x", b))
         return sb.toString()
+    }
+}
+
+/**
+ * Top-bar connection control (next to Settings). A Wi-Fi icon TINTED by the
+ * current OSC target's reachability — green = reachable, red = no reply, neutral =
+ * checking / not set (no text, per design). Tapping opens a small dropdown of the
+ * device IPs (the manual slots for now; the account centre will add real synced
+ * device IPs) — pick one to make it the OSC target, or "Edit / add IP…" for the
+ * full field. On the headset it's automatic (localhost), so the dropdown just
+ * shows that. Replaced the Home Connection card.
+ */
+@Composable
+private fun ConnectionButton(vm: com.vrca.ui.viewmodel.VrcaViewModel) {
+    val isHeadset = BuildConfig.IS_HEADSET_BUILD
+    val repo = vm.userPreferencesRepository
+    val scope = rememberCoroutineScope()
+
+    val ip by repo.ipAddress.collectAsState(initial = "")
+    var reachable by remember(ip) { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(ip, isHeadset) {
+        if (isHeadset) { reachable = true; return@LaunchedEffect }
+        if (ip.isBlank() || ip == "127.0.0.1") { reachable = null; return@LaunchedEffect }
+        while (true) {
+            reachable = com.vrca.ui.onboarding.pingHost(ip)
+            kotlinx.coroutines.delay(20_000L)
+        }
+    }
+
+    var menuOpen by remember { mutableStateOf(false) }
+    var editOpen by remember { mutableStateOf(false) }
+    val tint = when {
+        isHeadset || reachable == true -> Color(0xFF4CAF50)
+        reachable == false -> MaterialTheme.colorScheme.error
+        else -> LocalContentColor.current
+    }
+
+    Box {
+        IconButton(onClick = { menuOpen = true }) {
+            Icon(Icons.Filled.Wifi, contentDescription = "Connection", tint = tint)
+        }
+        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+            if (isHeadset) {
+                DropdownMenuItem(
+                    text = { Text("This headset · 127.0.0.1") },
+                    onClick = { menuOpen = false },
+                    leadingIcon = { Icon(Icons.Filled.Wifi, null, tint = Color(0xFF4CAF50)) }
+                )
+            } else {
+                val activeSlot by repo.activeIpSlot.collectAsState(initial = 1)
+                val n1 by repo.ip1Name.collectAsState(initial = "Home")
+                val n2 by repo.ip2Name.collectAsState(initial = "Hotspot")
+                val n3 by repo.ip3Name.collectAsState(initial = "Other")
+                val a1 by repo.ip1Address.collectAsState(initial = "")
+                val a2 by repo.ip2Address.collectAsState(initial = "")
+                val a3 by repo.ip3Address.collectAsState(initial = "")
+                val slots = listOf(Triple(1, n1, a1), Triple(2, n2, a2), Triple(3, n3, a3))
+                var anyShown = false
+                slots.forEach { (slot, name, addr) ->
+                    if (addr.isNotBlank()) {
+                        anyShown = true
+                        DropdownMenuItem(
+                            text = { Text(if (slot == activeSlot) "$name · $addr  ✓" else "$name · $addr") },
+                            onClick = {
+                                scope.launch { repo.saveActiveIpSlot(slot) }
+                                vm.ipAddressApply(addr)
+                                menuOpen = false
+                            }
+                        )
+                    }
+                }
+                if (anyShown) Divider()
+                DropdownMenuItem(
+                    text = { Text("Edit / add IP…") },
+                    onClick = { menuOpen = false; editOpen = true }
+                )
+            }
+        }
+    }
+
+    if (editOpen && !isHeadset) {
+        com.vrca.ui.common.VrcaCardDialog(onDismiss = { editOpen = false }) {
+            Column(
+                Modifier.padding(4.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text("Connection", style = MaterialTheme.typography.titleLarge)
+                Text(
+                    "Choose or enter the IP of the headset/PC running VRChat.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                com.vrca.ui.conversation.IpField(
+                    chatboxViewModel = vm,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                TextButton(
+                    onClick = { editOpen = false },
+                    modifier = Modifier.align(Alignment.End)
+                ) { Text("Done") }
+            }
+        }
     }
 }
 
@@ -471,6 +578,7 @@ fun VrcaScreen(
                         }
                     },
                     actions = {
+                        ConnectionButton(vm = chatboxViewModel)
                         IconButton(onClick = { page = AppPage.Settings }) {
                             Icon(Icons.Filled.Settings, contentDescription = "Settings")
                         }

@@ -249,19 +249,13 @@ internal fun HomePage(
         }
     }
 
-    // Shared Edit mode: reorders the chatbox COMPONENT order (Quick Toggles)
-    // AND the page-level card order — one mode, every card participates.
+    // Edit mode now ONLY reorders the chatbox COMPONENT order (Quick Toggles).
+    // The page-level card reordering (Preview / Connection / Manual Send) was
+    // removed — the Home cards render in a fixed order.
     var cardReorderMode by remember { mutableStateOf(false) }
-    var homeOrder by remember { mutableStateOf(UiPrefs.readHomeCardOrder(ctx)) }
-    fun moveHomeCard(key: String, delta: Int) {
-        val order = homeOrder.toMutableList()
-        val idx = order.indexOf(key)
-        val to = idx + delta
-        if (idx < 0 || to < 0 || to >= order.size) return
-        order[idx] = order[to]; order[to] = key
-        homeOrder = order
-        UiPrefs.writeHomeCardOrder(ctx, order)
-    }
+    // Connection moved out of Home into the top-bar connection button (next to
+    // Settings). Home is just Preview + Manual Send now.
+    val homeOrder = listOf("Preview", "ManualSend")
 
     val sortedAnnouncements = remember(announcements) {
         announcements.sortedWith(
@@ -323,8 +317,8 @@ internal fun HomePage(
             if (ipOk == false) add(
                 HealthItem(
                     "Headset IP not set",
-                    "Set your Quest/PC IP in the Connection card."
-                ) { scope.launch { connectionBring.bringIntoView() } }
+                    "Tap the connection icon (top right) to set your Quest/PC IP."
+                ) { }
             )
             if (!batteryOk) add(
                 HealthItem(
@@ -346,32 +340,8 @@ internal fun HomePage(
             SetupHealthCard(healthItems)
         }
 
-        // Reorder mode exit — unmissable full-width button at the top of the
-        // page (the small Done in the Quick Toggles header can be off-screen
-        // while the user is moving the upper cards around).
-        if (cardReorderMode) {
-            Button(
-                onClick = { cardReorderMode = false },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Done reordering")
-            }
-        }
-
         homeOrder.forEach { cardKey ->
-            HomeCardSlot(
-                label = when (cardKey) {
-                    "Preview" -> "Preview & toggles"
-                    "Connection" -> "Connection"
-                    else -> "Manual Send"
-                },
-                reorderMode = cardReorderMode,
-                canMoveUp = homeOrder.indexOf(cardKey) > 0,
-                canMoveDown = homeOrder.indexOf(cardKey) < homeOrder.size - 1,
-                onMove = { delta -> moveHomeCard(cardKey, delta) }
-            ) {
+            run {
                 when (cardKey) {
                     "Preview" -> PreviewAndTogglesCard(
                         vm = vm,
@@ -379,17 +349,9 @@ internal fun HomePage(
                         nowTickMs = nowTickMs,
                         cardReorderMode = cardReorderMode,
                         onToggleReorderMode = { cardReorderMode = it },
-                        onResetOrder = {
-                            vm.resetCardOrder()
-                            homeOrder = UiPrefs.HOME_CARDS_DEFAULT
-                            UiPrefs.writeHomeCardOrder(ctx, UiPrefs.HOME_CARDS_DEFAULT)
-                        },
+                        onResetOrder = { vm.resetCardOrder() },
                         onNavigate = onNavigate
                     )
-
-                    "Connection" -> Column(Modifier.bringIntoViewRequester(connectionBring)) {
-                        ConnectionCard(vm = vm, ipAddress = uiState.ipAddress, ipOk = ipOk ?: true)
-                    }
 
                     "ManualSend" -> CompactSectionCard(
                         title = "Manual Send",
