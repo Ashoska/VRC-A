@@ -110,7 +110,7 @@ import java.security.MessageDigest
 
 internal enum class AppPage(val title: String) {
     Home("Home"),
-    Automations("Automations"),
+    Automations("Chatbox"),
     Music("Media"),
     VrchatStatus("VRChat"),
     Settings("Settings"),
@@ -606,7 +606,7 @@ fun VrcaScreen(
                             selected = page == AppPage.Automations,
                             onClick = { page = AppPage.Automations },
                             icon = { Icon(Icons.Filled.Sync, contentDescription = null) },
-                            label = { Text("Automations") }
+                            label = { Text("Chatbox") }
                         )
                         NavigationBarItem(
                             selected = page == AppPage.Music,

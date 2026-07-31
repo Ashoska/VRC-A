@@ -9,6 +9,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -181,6 +182,10 @@ private val PREVIEW_LINE_SP = 14
 private val PREVIEW_FONT_SP = 11
 private val PREVIEW_BUBBLE_HEIGHT = (PREVIEW_LINE_SP * 9 + 24).dp  // 9 lines + 12dp top/bottom padding
 
+// Headset Home goes two-column at/above this width; below it (a shrunk Quest
+// panel) it falls back to the single column.
+private val HOME_TWO_COL_THRESHOLD = 560.dp
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 internal fun HomePage(
@@ -196,10 +201,6 @@ internal fun HomePage(
     val scope = rememberCoroutineScope()
 
     val connectionBring = remember { BringIntoViewRequester() }
-    // Keeps the Manual Send field visible while typing — the live preview above it
-    // grows as you type and would otherwise push the input line out of view.
-    val manualBring = remember { BringIntoViewRequester() }
-    var manualFieldFocused by remember { mutableStateOf(false) }
 
     val pm = remember(ctx) { ctx.getSystemService(Context.POWER_SERVICE) as PowerManager }
     var batteryOk by remember { mutableStateOf(pm.isIgnoringBatteryOptimizations(ctx.packageName)) }
@@ -349,118 +350,174 @@ internal fun HomePage(
             SetupHealthCard(healthItems)
         }
 
-        homeOrder.forEach { cardKey ->
-            run {
-                when (cardKey) {
-                    "Preview" -> PreviewAndTogglesCard(
-                        vm = vm,
-                        isBanned = isBanned,
-                        nowTickMs = nowTickMs,
-                        cardReorderMode = cardReorderMode,
-                        onToggleReorderMode = { cardReorderMode = it },
-                        onResetOrder = { vm.resetCardOrder() },
-                        onNavigate = onNavigate
-                    )
-
-                    "ManualSend" -> CompactSectionCard(
-                        title = "Manual Send",
-                        icon = Icons.Filled.Send,
-                        summary = if (vm.manualLiveMode) "Live typing" else "Type a manual message"
+        if (BuildConfig.IS_HEADSET_BUILD) {
+            // Headset: two columns — Preview LEFT, Quick Toggles + Manual Send RIGHT
+            // — but ONLY while the panel is wide enough. When the user SHRINKS the
+            // Quest panel to a narrow shape it falls back to the normal single
+            // column (two columns would be cramped). Width-gated via BoxWithConstraints.
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                if (maxWidth >= HOME_TWO_COL_THRESHOLD) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        val budget = vm.manualCharBudget()
-                        val msgLen = vm.messageText.value.text.length
-                        val over = msgLen > budget
-
-                        // Instant / Live segmented toggle (compact, on-vibe).
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        Column(Modifier.weight(1f)) {
+                            PreviewAndTogglesCard(
+                                vm = vm,
+                                isBanned = isBanned,
+                                nowTickMs = nowTickMs,
+                                cardReorderMode = cardReorderMode,
+                                onToggleReorderMode = { cardReorderMode = it },
+                                onResetOrder = { vm.resetCardOrder() },
+                                onNavigate = onNavigate,
+                                showToggles = false
+                            )
+                        }
+                        Column(
+                            Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            listOf(false, true).forEach { live ->
-                                val selected = vm.manualLiveMode == live
-                                Surface(
-                                    shape = MaterialTheme.shapes.small,
-                                    color = if (selected) MaterialTheme.colorScheme.primary
-                                            else MaterialTheme.colorScheme.surfaceVariant,
-                                    contentColor = if (selected) MaterialTheme.colorScheme.onPrimary
-                                            else MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .clickable(enabled = !isBanned) { vm.setManualLiveModeFlag(live) }
-                                ) {
-                                    Text(
-                                        if (live) "Live" else "Instant",
-                                        textAlign = TextAlign.Center,
-                                        style = MaterialTheme.typography.labelLarge,
-                                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
-                                    )
-                                }
-                            }
+                            QuickTogglesSection(
+                                vm = vm,
+                                isBanned = isBanned,
+                                cardReorderMode = cardReorderMode,
+                                onToggleReorderMode = { cardReorderMode = it },
+                                onResetOrder = { vm.resetCardOrder() },
+                                onNavigate = onNavigate
+                            )
+                            ManualSendCard(vm = vm, isBanned = isBanned)
                         }
-
-                        // Scroll style is Live-only.
-                        if (vm.manualLiveMode) {
-                            ToggleRow(
-                                label = "Scroll",
-                                description = "Scroll to the 4 newest lines.",
-                                checked = vm.manualScroll,
-                                enabled = !isBanned
-                            ) { vm.setManualScrollFlag(it) }
-                        }
-
-                        // Bring the input back into view as the live preview above
-                        // grows/shifts while typing (a small delay lets it relayout
-                        // first, then we scroll the field into view).
-                        LaunchedEffect(vm.messageText.value.text, manualFieldFocused) {
-                            if (manualFieldFocused) {
-                                kotlinx.coroutines.delay(60)
-                                runCatching { manualBring.bringIntoView() }
-                            }
-                        }
-                        OutlinedTextField(
-                            value = vm.messageText.value,
-                            onValueChange = { v: TextFieldValue -> vm.onMessageTextChange(v) },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .bringIntoViewRequester(manualBring)
-                                .onFocusChanged { manualFieldFocused = it.isFocused },
-                            minLines = 2,
-                            label = { Text("Message") },
-                            isError = over && !vm.manualLiveMode,
-                            enabled = !isBanned,
-                            supportingText = {
-                                Text(
-                                    "$msgLen / $budget" +
-                                        if (vm.manualLiveMode) "  ·  newest lines shown live" else "",
-                                    // In Live mode going over budget is expected —
-                                    // Scroll rolls older lines off — so don't alarm.
-                                    color = if (over && !vm.manualLiveMode) MaterialTheme.colorScheme.error
-                                            else MaterialTheme.colorScheme.onSurfaceVariant,
-                                    style = MaterialTheme.typography.labelSmall
-                                )
-                            }
+                    }
+                } else {
+                    // Narrow/shrunk panel → single column (with toggles under preview).
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        PreviewAndTogglesCard(
+                            vm = vm,
+                            isBanned = isBanned,
+                            nowTickMs = nowTickMs,
+                            cardReorderMode = cardReorderMode,
+                            onToggleReorderMode = { cardReorderMode = it },
+                            onResetOrder = { vm.resetCardOrder() },
+                            onNavigate = onNavigate
                         )
-
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            if (!vm.manualLiveMode) {
-                                Button(
-                                    onClick = { vm.sendMessage() },
-                                    modifier = Modifier.weight(1f),
-                                    enabled = !isBanned && msgLen > 0 && !over
-                                ) { Text("Send") }
-                            }
-                            OutlinedButton(
-                                onClick = { vm.clearManual() },
-                                modifier = Modifier.weight(1f),
-                                enabled = !isBanned
-                            ) { Text("Clear") }
-                        }
+                        ManualSendCard(vm = vm, isBanned = isBanned)
                     }
                 }
             }
+        } else {
+            PreviewAndTogglesCard(
+                vm = vm,
+                isBanned = isBanned,
+                nowTickMs = nowTickMs,
+                cardReorderMode = cardReorderMode,
+                onToggleReorderMode = { cardReorderMode = it },
+                onResetOrder = { vm.resetCardOrder() },
+                onNavigate = onNavigate
+            )
+            ManualSendCard(vm = vm, isBanned = isBanned)
+        }
+    }
+}
+
+/** Manual Send card (extracted so the headset two-column layout can place it in
+ *  the right column under the Quick Toggles). */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ManualSendCard(vm: VrcaViewModel, isBanned: Boolean) {
+    val manualBring = remember { BringIntoViewRequester() }
+    var manualFieldFocused by remember { mutableStateOf(false) }
+    CompactSectionCard(
+        title = "Manual Send",
+        icon = Icons.Filled.Send,
+        summary = if (vm.manualLiveMode) "Live typing" else "Type a manual message"
+    ) {
+        val budget = vm.manualCharBudget()
+        val msgLen = vm.messageText.value.text.length
+        val over = msgLen > budget
+
+        // Instant / Live segmented toggle (compact, on-vibe).
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            listOf(false, true).forEach { live ->
+                val selected = vm.manualLiveMode == live
+                Surface(
+                    shape = MaterialTheme.shapes.small,
+                    color = if (selected) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.surfaceVariant,
+                    contentColor = if (selected) MaterialTheme.colorScheme.onPrimary
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable(enabled = !isBanned) { vm.setManualLiveModeFlag(live) }
+                ) {
+                    Text(
+                        if (live) "Live" else "Instant",
+                        textAlign = TextAlign.Center,
+                        style = MaterialTheme.typography.labelLarge,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+                    )
+                }
+            }
+        }
+
+        // Scroll style is Live-only.
+        if (vm.manualLiveMode) {
+            ToggleRow(
+                label = "Scroll",
+                description = "Scroll to the 4 newest lines.",
+                checked = vm.manualScroll,
+                enabled = !isBanned
+            ) { vm.setManualScrollFlag(it) }
+        }
+
+        // Bring the input back into view as the live preview above grows/shifts
+        // while typing (a small delay lets it relayout first).
+        LaunchedEffect(vm.messageText.value.text, manualFieldFocused) {
+            if (manualFieldFocused) {
+                kotlinx.coroutines.delay(60)
+                runCatching { manualBring.bringIntoView() }
+            }
+        }
+        OutlinedTextField(
+            value = vm.messageText.value,
+            onValueChange = { v: TextFieldValue -> vm.onMessageTextChange(v) },
+            modifier = Modifier
+                .fillMaxWidth()
+                .bringIntoViewRequester(manualBring)
+                .onFocusChanged { manualFieldFocused = it.isFocused },
+            minLines = 2,
+            label = { Text("Message") },
+            isError = over && !vm.manualLiveMode,
+            enabled = !isBanned,
+            supportingText = {
+                Text(
+                    "$msgLen / $budget" +
+                        if (vm.manualLiveMode) "  ·  newest lines shown live" else "",
+                    color = if (over && !vm.manualLiveMode) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
+        )
+
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            if (!vm.manualLiveMode) {
+                Button(
+                    onClick = { vm.sendMessage() },
+                    modifier = Modifier.weight(1f),
+                    enabled = !isBanned && msgLen > 0 && !over
+                ) { Text("Send") }
+            }
+            OutlinedButton(
+                onClick = { vm.clearManual() },
+                modifier = Modifier.weight(1f),
+                enabled = !isBanned
+            ) { Text("Clear") }
         }
     }
 }
@@ -580,7 +637,10 @@ private fun PreviewAndTogglesCard(
     cardReorderMode: Boolean,
     onToggleReorderMode: (Boolean) -> Unit,
     onResetOrder: () -> Unit,
-    onNavigate: (AppPage) -> Unit
+    onNavigate: (AppPage) -> Unit,
+    // When false the Quick Toggles are rendered SEPARATELY (headset two-column
+    // layout puts them in the right column); the card is then just the preview.
+    showToggles: Boolean = true
 ) {
     val ctx = LocalContext.current
     var previewExpanded by remember { mutableStateOf(UiPrefs.readPreviewExpanded(ctx)) }
@@ -928,51 +988,71 @@ private fun PreviewAndTogglesCard(
             }
         }
 
-        ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        if (showToggles) {
+            QuickTogglesSection(
+                vm = vm,
+                isBanned = isBanned,
+                cardReorderMode = cardReorderMode,
+                onToggleReorderMode = onToggleReorderMode,
+                onResetOrder = onResetOrder,
+                onNavigate = onNavigate
+            )
+        }
+    }
+}
 
-                // Quick Toggles title row with Edit/Done toggle and Reset button
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column {
-                        Text("Quick Toggles", style = MaterialTheme.typography.titleSmall)
+/** The Quick Toggles card (extracted so the headset two-column layout can render
+ *  it in the right column, separate from the preview). */
+@Composable
+private fun QuickTogglesSection(
+    vm: VrcaViewModel,
+    isBanned: Boolean,
+    cardReorderMode: Boolean,
+    onToggleReorderMode: (Boolean) -> Unit,
+    onResetOrder: () -> Unit,
+    onNavigate: (AppPage) -> Unit
+) {
+    ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+
+            // Quick Toggles title row with Edit/Done toggle and Reset button
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text("Quick Toggles", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        (if (vm.oscSending) "Edits show live" else "Press Start when ready") +
+                            " · hold a pill to edit",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (cardReorderMode) {
+                        TextButton(
+                            onClick = onResetOrder,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                        ) { Text("Reset", style = MaterialTheme.typography.labelSmall) }
+                    }
+                    TextButton(
+                        onClick = { onToggleReorderMode(!cardReorderMode) },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
                         Text(
-                            (if (vm.oscSending) "Edits show live" else "Press Start when ready") +
-                                " · hold a pill to edit",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            if (cardReorderMode) "Done" else "Edit",
+                            style = MaterialTheme.typography.labelSmall
                         )
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        if (cardReorderMode) {
-                            TextButton(
-                                onClick = onResetOrder,
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                            ) { Text("Reset", style = MaterialTheme.typography.labelSmall) }
-                        }
-                        TextButton(
-                            onClick = { onToggleReorderMode(!cardReorderMode) },
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                        ) {
-                            Text(
-                                if (cardReorderMode) "Done" else "Edit",
-                                style = MaterialTheme.typography.labelSmall
-                            )
-                        }
-                    }
                 }
+            }
 
-                if (cardReorderMode) {
-                    // Edit mode: vertical rows with up/down arrows — order =
-                    // top-to-bottom in the chatbox output.
-                    QuickTogglesReorderList(vm = vm, isBanned = isBanned)
-                } else {
-                    // Normal mode: compact 2×2 pill grid in chatbox-output order.
-                    QuickTogglesGrid(vm = vm, isBanned = isBanned, onNavigate = onNavigate)
-                }
+            if (cardReorderMode) {
+                QuickTogglesReorderList(vm = vm, isBanned = isBanned)
+            } else {
+                QuickTogglesGrid(vm = vm, isBanned = isBanned, onNavigate = onNavigate)
             }
         }
     }
