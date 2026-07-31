@@ -2,7 +2,10 @@ name: Android CI
 
 on:
   push:
-    branches: [ "main", "VRC-A-Official" ]
+    # claude/** so every commit pushed to a claude working branch builds + uploads
+    # the APK artifacts (public/admin/headset, debug+release) — testable straight
+    # from the Actions run, no PR needed.
+    branches: [ "main", "VRC-A-Official", "claude/**" ]
   pull_request:
     branches: [ "main", "VRC-A-Official" ]
   workflow_dispatch:
