@@ -550,6 +550,10 @@ fun VrcaScreen(
     // cover it. The icon buttons consume their own taps, so they still work.
     val topBarFocus = androidx.compose.ui.platform.LocalFocusManager.current
     Scaffold(
+            // Always fill the panel so the bottom nav stays pinned to the bottom.
+            // Without this the Scaffold could size to content on a resized Quest
+            // panel, floating the nav bar mid-window with empty space below it.
+            modifier = Modifier.fillMaxSize(),
             topBar = {
                 CenterAlignedTopAppBar(
                     modifier = Modifier.pointerInput(Unit) {
