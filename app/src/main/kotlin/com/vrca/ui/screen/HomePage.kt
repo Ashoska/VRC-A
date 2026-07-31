@@ -300,12 +300,8 @@ internal fun HomePage(
                 batteryOk = pm.isIgnoringBatteryOptimizations(ctx.packageName)
             }
         )
-        if (vm.spotifyEnabled && !notifOk) add(
-            HealthItem(
-                "Notification Access missing",
-                "Now Playing is on but can't detect media without it."
-            ) { ctx.startActivity(vm.notificationAccessIntent()) }
-        )
+        // (Now Playing / Notification Access nag removed — media detection is moving
+        // to Spotify auth, so we no longer require/prompt notification access.)
     }
 
     // Alert / info cards (announcements, VRChat status, session-expired, warning,

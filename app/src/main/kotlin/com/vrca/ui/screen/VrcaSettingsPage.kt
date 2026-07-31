@@ -169,28 +169,27 @@ internal fun SettingsPage(
         // -- Permissions (every permission the app uses lives here, each with
         //    its live granted status) --
         SectionCard(title = "Permissions") {
-            SettingsRow(
-                icon = Icons.Filled.Notifications,
-                title = "Notifications",
-                subtitle = "Friend activity, invites and group alerts.",
-                primary = "Open",
-                granted = notifGranted
-            ) {
-                runCatching {
-                    ctx.startActivity(
-                        android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                            .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, ctx.packageName)
-                    )
+            // POST_NOTIFICATIONS — not prompted on the headset (Quest doesn't surface
+            // the app notifications the way a phone does).
+            if (!BuildConfig.IS_HEADSET_BUILD) {
+                SettingsRow(
+                    icon = Icons.Filled.Notifications,
+                    title = "Notifications",
+                    subtitle = "Friend activity, invites and group alerts.",
+                    primary = "Open",
+                    granted = notifGranted
+                ) {
+                    runCatching {
+                        ctx.startActivity(
+                            android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, ctx.packageName)
+                        )
+                    }
                 }
             }
 
-            SettingsRow(
-                icon = Icons.Filled.MusicNote,
-                title = "Notification Access",
-                subtitle = "Required for Now Playing detection.",
-                primary = "Open",
-                granted = listenerGranted
-            ) { ctx.startActivity(vm.notificationAccessIntent()) }
+            // (Notification Access / Now Playing removed — media detection is moving
+            // to Spotify auth, so it's no longer required/prompted on any build.)
 
             SettingsRow(
                 icon = Icons.Filled.Power,
@@ -200,18 +199,22 @@ internal fun SettingsPage(
                 granted = batteryExempt
             ) { ctx.startActivity(vm.batteryOptimizationIntent()) }
 
-            SettingsRow(
-                icon = Icons.Filled.SystemUpdate,
-                title = "Install updates",
-                subtitle = "Lets VRC-A install its own update APKs when a new version is pushed.",
-                primary = "Open",
-                granted = installAllowed
-            ) {
-                runCatching {
-                    ctx.startActivity(
-                        android.content.Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
-                            .setData(android.net.Uri.parse("package:${ctx.packageName}"))
-                    )
+            // Install-updates (unknown sources) — not on the headset: it's
+            // distributed through the Meta store, so no in-app APK install.
+            if (!BuildConfig.IS_HEADSET_BUILD) {
+                SettingsRow(
+                    icon = Icons.Filled.SystemUpdate,
+                    title = "Install updates",
+                    subtitle = "Lets VRC-A install its own update APKs when a new version is pushed.",
+                    primary = "Open",
+                    granted = installAllowed
+                ) {
+                    runCatching {
+                        ctx.startActivity(
+                            android.content.Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
+                                .setData(android.net.Uri.parse("package:${ctx.packageName}"))
+                        )
+                    }
                 }
             }
 

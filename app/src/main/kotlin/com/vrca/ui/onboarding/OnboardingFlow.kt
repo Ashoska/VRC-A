@@ -560,24 +560,21 @@ private fun StepPermissions() {
                 )
             }
         }
-        PermissionRow(
-            title = "Notifications",
-            why = "So friend activity, invites and group alerts can reach you.",
-            granted = notifGranted
-        ) {
-            if (Build.VERSION.SDK_INT >= 33) {
-                permLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        // POST_NOTIFICATIONS — not prompted on the headset (Quest doesn't surface
+        // the app notifications the way a phone does).
+        if (!com.vrca.BuildConfig.IS_HEADSET_BUILD) {
+            PermissionRow(
+                title = "Notifications",
+                why = "So friend activity, invites and group alerts can reach you.",
+                granted = notifGranted
+            ) {
+                if (Build.VERSION.SDK_INT >= 33) {
+                    permLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+                }
             }
         }
-        PermissionRow(
-            title = "Notification Access",
-            why = "Reads your music player's notification to show Now Playing in the chatbox. Nothing else is read.",
-            granted = listenerEnabled
-        ) {
-            runCatching {
-                ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
-            }
-        }
+        // (Notification Access / Now Playing removed from the tutorial — media
+        // detection is moving to Spotify auth, so it's no longer required/prompted.)
         PermissionRow(
             title = "Battery optimization exemption",
             why = "Stops Android pausing VRC-A when the screen is off. Strongly recommended.",
@@ -590,16 +587,20 @@ private fun StepPermissions() {
                 )
             }
         }
-        PermissionRow(
-            title = "Install updates",
-            why = "Lets VRC-A install its own update APKs when a new version is pushed.",
-            granted = installAllowed
-        ) {
-            runCatching {
-                ctx.startActivity(
-                    Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
-                        .setData(Uri.parse("package:${ctx.packageName}"))
-                )
+        // Install-updates (unknown sources) — not on the headset: distributed via
+        // the Meta store, so no in-app APK install.
+        if (!com.vrca.BuildConfig.IS_HEADSET_BUILD) {
+            PermissionRow(
+                title = "Install updates",
+                why = "Lets VRC-A install its own update APKs when a new version is pushed.",
+                granted = installAllowed
+            ) {
+                runCatching {
+                    ctx.startActivity(
+                        Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
+                            .setData(Uri.parse("package:${ctx.packageName}"))
+                    )
+                }
             }
         }
         PermissionRow(
