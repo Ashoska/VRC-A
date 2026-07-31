@@ -42,6 +42,7 @@ import androidx.compose.material.icons.filled.Loop
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Send
@@ -370,6 +371,8 @@ internal fun HomePage(
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         preview(false)
+                        // Freed space next to the skinny preview → instance roster.
+                        InstanceRosterPanel()
                     }
                     Column(
                         Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
@@ -392,6 +395,7 @@ internal fun HomePage(
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     preview(true)
+                    InstanceRosterPanel()
                     ManualSendCard(vm = vm, isBanned = isBanned)
                 }
             }
@@ -505,6 +509,56 @@ private fun ManualSendCard(vm: VrcaViewModel, isBanned: Boolean) {
                 modifier = Modifier.weight(1f),
                 enabled = !isBanned
             ) { Text("Clear") }
+        }
+    }
+}
+
+/** Placeholder for the "who's in your instance" roster (the headline headset
+ *  feature, lands with the M2 log reader). Fills the freed space next to the
+ *  skinny preview. Shows an empty-state + skeleton rows so the future layout is
+ *  visible; no live data yet. */
+@Composable
+private fun InstanceRosterPanel(modifier: Modifier = Modifier) {
+    ElevatedCard(
+        modifier = modifier.fillMaxWidth(),
+        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(Icons.Filled.Group, contentDescription = null, modifier = Modifier.size(18.dp))
+                Text("In your instance", style = MaterialTheme.typography.titleSmall)
+            }
+            Text(
+                "Who's in your VRChat world will show here — coming with the headset log reader.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            repeat(4) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    // avatar placeholder
+                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surface, modifier = Modifier.size(30.dp)) {}
+                    // name placeholder bar
+                    Surface(
+                        shape = MaterialTheme.shapes.small,
+                        color = MaterialTheme.colorScheme.surface,
+                        modifier = Modifier.height(12.dp).fillMaxWidth(0.5f)
+                    ) {}
+                    Spacer(Modifier.weight(1f))
+                    Icon(
+                        Icons.Filled.Lock,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                        modifier = Modifier.size(14.dp)
+                    )
+                }
+            }
         }
     }
 }
@@ -684,8 +738,10 @@ private fun PreviewAndTogglesCard(
             ) {
                 Box(
                     Modifier
-                        .widthIn(max = 420.dp)
-                        .fillMaxWidth(0.92f)
+                        // Headset: skinnier bubble (matches the real chatbox shape and
+                        // frees side space for the instance roster). Mobile: as before.
+                        .widthIn(max = if (isHeadset) 300.dp else 420.dp)
+                        .fillMaxWidth(if (isHeadset) 1f else 0.92f)
                         // Headset: FIXED 9-line height (compact, so the two-column
                         // stays put). Mobile: the original growing bubble (min 96dp).
                         .then(
