@@ -53,6 +53,12 @@ class VrcaApplication : Application(), ViewModelStoreOwner {
         // Toggles decide whether to restore vs start clean.
         @Volatile
         var openedFromSwipe: Boolean = false
+
+        // True when this launch came from the BootReceiver (device turned on) — the
+        // headset opens the app on boot, and a reboot is a genuine cold start the
+        // user should see the boot screen for (same treatment as a swipe-reopen).
+        @Volatile
+        var openedFromBoot: Boolean = false
     }
 
     // Process-lifetime ViewModelStore. Cleared only by AppShutdown on swipe.

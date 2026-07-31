@@ -169,11 +169,14 @@ fun VrcaApp() {
     // sign in anonymously + cache the auth uid the ban check reads; on any prior-used
     // app the uid persists in prefs, so a swipe-less relaunch can safely skip boot.
     val openedFromSwipe = remember { VrcaApplication.openedFromSwipe }
+    val openedFromBoot = remember { VrcaApplication.openedFromBoot }
     val everBootstrapped = remember {
         ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
             .getString("auth_uid", "").orEmpty().isNotBlank()
     }
-    val warmResume = remember { !(openedFromSwipe || !everBootstrapped) }
+    // A boot-launch is a genuine cold start → show the boot screen too (not just
+    // swipe-reopen / first install).
+    val warmResume = remember { !(openedFromSwipe || openedFromBoot || !everBootstrapped) }
 
     var bootOk by remember { mutableStateOf(warmResume) }
     var bootWorking by remember { mutableStateOf(false) }

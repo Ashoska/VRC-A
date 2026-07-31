@@ -32,6 +32,9 @@ class BootReceiver : BroadcastReceiver() {
                 context.startActivity(
                     Intent(context, com.vrca.app.MainActivity::class.java)
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        // Marks this as a boot launch so the app shows its boot screen
+                        // (a reboot is a genuine cold start, not a warm resume).
+                        .putExtra("vrca_from_boot", true)
                 )
             }
         }
