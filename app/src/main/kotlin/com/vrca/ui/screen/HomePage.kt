@@ -1192,7 +1192,7 @@ private fun QuickTogglesGrid(
 
         // Placeholder pills — preview the FUTURE expanded toggle system (9 total)
         // so we can see how they fit in the column. Disabled + do nothing yet.
-        listOf("Weather", "Battery", "Uptime", "Heart rate", "Custom").forEach { label ->
+        List(5) { "Testing ${it + 1}" }.forEach { label ->
             TogglePill(
                 label = label,
                 icon = Icons.Filled.Lock,

@@ -71,7 +71,9 @@ object InstanceRosterManager {
         val userId: String?,
         /** "PC" / "Quest" / "iOS" / "" (unknown / not yet resolved). */
         val platform: String,
-        val avatarName: String?
+        val avatarName: String?,
+        /** In the user's VRChat friends list — sorted to the top, shown yellow. */
+        val isFriend: Boolean = false
     )
 
     data class RosterUi(
@@ -98,6 +100,21 @@ object InstanceRosterManager {
     private val enrichInFlight = ConcurrentHashMap.newKeySet<String>()
     private val enrichAttempts = ConcurrentHashMap<String, Int>()
     private const val MAX_ENRICH_ATTEMPTS = 6
+    // Single-flight guard so platforms resolve as ONE ordered top-to-bottom pass
+    // (not several concurrent passes that would race the rate limit).
+    private val enriching = java.util.concurrent.atomic.AtomicBoolean(false)
+    // Friend-id set (local FriendsCacheStore), refreshed with a short TTL.
+    @Volatile private var friendIdsSnapshot: Set<String> = emptySet()
+    @Volatile private var friendIdsLoadedAt: Long = 0L
+
+    private fun friendIds(context: Context): Set<String> {
+        val now = System.currentTimeMillis()
+        if (now - friendIdsLoadedAt > 15_000L) {
+            friendIdsSnapshot = try { FriendsCacheStore.load(context).keys } catch (e: Exception) { friendIdsSnapshot }
+            friendIdsLoadedAt = now
+        }
+        return friendIdsSnapshot
+    }
 
     /** Idempotent — safe to call from every Home composition. */
     fun start(context: Context) {
@@ -340,28 +357,55 @@ object InstanceRosterManager {
 
     private fun publish(context: Context, state: VrcLogParser.InstanceState, logPath: String) {
         val inWorld = state.location != null && state.roster.isNotEmpty()
-        val members = state.roster.values
-            .sortedBy { it.joinedAtMs }
-            .map { e ->
-                val plat = e.userId?.let { platformCache[it] } ?: e.platform
-                Member(
-                    displayName = e.displayName,
-                    userId = e.userId,
-                    platform = plat,
-                    avatarName = e.avatarName
-                )
-            }
+
+        // Left the instance -> drop all per-user caches so nothing accumulates
+        // in memory across a session (the reader writes NOTHING per-user to disk;
+        // this just keeps RAM bounded to the current instance).
+        if (!inWorld) {
+            platformCache.clear(); enrichAttempts.clear(); enrichInFlight.clear()
+            _flow.value = RosterUi(
+                status = Status.IDLE, worldName = state.worldName,
+                location = state.location, members = emptyList(), logPath = logPath
+            )
+            return
+        }
+
+        val friends = friendIds(context)
+        // Display order: friends first, then everyone else; each by join time
+        // (top-to-bottom). Enrichment walks this SAME order so platforms fill in
+        // top-to-bottom as you watch.
+        val ordered = state.roster.values.sortedWith(
+            compareByDescending<VrcLogParser.RosterEntry> {
+                it.userId != null && friends.contains(it.userId)
+            }.thenBy { it.joinedAtMs }
+        )
+        val members = ordered.map { e ->
+            val plat = e.userId?.let { platformCache[it] } ?: e.platform
+            Member(
+                displayName = e.displayName,
+                userId = e.userId,
+                platform = plat,
+                avatarName = e.avatarName,
+                isFriend = e.userId != null && friends.contains(e.userId)
+            )
+        }
         _flow.value = RosterUi(
-            status = if (inWorld) Status.LIVE else Status.IDLE,
+            status = Status.LIVE,
             worldName = state.worldName,
             location = state.location,
             members = members,
             logPath = logPath
         )
-        val needs = state.roster.values
-            .mapNotNull { it.userId }
+
+        // One ordered enrichment pass at a time (single-flight).
+        val needs = ordered.mapNotNull { it.userId }
             .filter { !platformCache.containsKey(it) && enrichInFlight.add(it) }
-        if (needs.isNotEmpty()) scope.launch { enrichPlatforms(context, needs) }
+        if (needs.isNotEmpty() && enriching.compareAndSet(false, true)) {
+            scope.launch { try { enrichPlatforms(context, needs) } finally { enriching.set(false) } }
+        } else if (needs.isNotEmpty()) {
+            // A pass is already running; release our claim so the next pass re-queues these.
+            needs.forEach { enrichInFlight.remove(it) }
+        }
     }
 
     private suspend fun enrichPlatforms(context: Context, userIds: List<String>) {

@@ -194,6 +194,9 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
         Text(
             m.displayName,
             style = MaterialTheme.typography.bodyMedium,
+            // Friends render yellow (VRChat's friend colour), sorted to the top.
+            color = if (m.isFriend) androidx.compose.ui.graphics.Color(0xFFFFD54F)
+                    else MaterialTheme.colorScheme.onSurface,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
