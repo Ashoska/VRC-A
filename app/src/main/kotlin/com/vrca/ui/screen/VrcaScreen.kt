@@ -435,14 +435,8 @@ fun VrcaScreen(
     // config/app.discordInvite; the top-bar button opens it. The value is passed in
     // from VrcaApp's single config/app listener (merged read + live). Blank → hidden.
 
-    // Single-session take-over: this VRChat account is currently active on another
-    // device. The displaced device stands fully down behind a "Use here" screen
-    // (OSC is already blocked at the chokepoint); tapping re-claims and the other
-    // device then stops. Public build only (admin never participates).
-    if (!BuildConfig.IS_ADMIN_BUILD && chatboxViewModel.accountDenied) {
-        AccountDeniedScreen(supportUrl = discordInvite)
-        return
-    }
+    // (Single-session HARD-DENY removed — VRC-A is multi-device; several devices on
+    // the same VRChat account are all allowed. See docs/account-system-plan.md §5.)
 
     // Tapping the top bar (e.g. the "VRC-A" title) clears any focused text field /
     // dismisses the keyboard — the page background isn't always reachable when cards
@@ -641,58 +635,6 @@ private fun GlobalStatusBanner(
 /* =========================
    Ban screen
    ========================= */
-
-@Composable
-private fun AccountDeniedScreen(supportUrl: String) {
-    val ctx = LocalContext.current
-    Surface(modifier = Modifier.fillMaxSize()) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text(
-                "Account already registered",
-                style = MaterialTheme.typography.headlineSmall,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center
-            )
-            Text(
-                "This VRChat account is already set up with VRC-A on another device. " +
-                "For your security only one device can use an account at a time, so this " +
-                "one is on hold for now.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center
-            )
-            Text(
-                "To move VRC-A to this device, sign out on your old device, or join our " +
-                "support server and we'll release your previous session. It unlocks here " +
-                "automatically once that's done, no need to reinstall.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center
-            )
-            if (supportUrl.isNotBlank()) {
-                Button(
-                    onClick = {
-                        runCatching {
-                            ctx.startActivity(
-                                Intent(Intent.ACTION_VIEW, Uri.parse(supportUrl))
-                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            )
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Join the support server")
-                }
-            }
-        }
-    }
-}
 
 @Composable
 private fun BannedScreen(

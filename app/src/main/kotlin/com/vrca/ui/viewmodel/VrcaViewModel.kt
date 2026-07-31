@@ -990,93 +990,11 @@ class VrcaViewModel(
         }
     }
 
-    /**
-     * Single-session lock helpers (multi-device, same VRChat account).
-     *
-     * Lock doc: accounts/{vrchatUserId} = { activeDevice, activeSince }. A device is
-     * "active" when the doc is absent OR names this device. The newest claimer wins
-     * (take-over); the displaced device learns instantly via [startAccountLockWatcher]
-     * and stops sending (OSC blocked at the same chokepoint as the logged-out gate).
-     * Only ever written when a second device on the same account is detected, so a
-     * single-device user never touches this collection.
-     */
-    private suspend fun claimAccount(vrchatUserId: String, deviceHash: String) {
-        if (vrchatUserId.isBlank() || !isValidDeviceHash(deviceHash)) return
-        runCatching {
-            db.collection(COL_ACCOUNTS).document(vrchatUserId)
-                .set(mapOf(
-                    "activeDevice" to deviceHash,
-                    "activeSince" to FieldValue.serverTimestamp()
-                ))
-                .await()
-        }.onFailure { Log.w("VrcaViewModel", "claimAccount failed: ${it.message}") }
-    }
-
-    private var accountLockReg: ListenerRegistration? = null
-    @Volatile private var watchedAccountId: String = ""
-
-    /**
-     * Watches accounts/{vrchatUserId} for the current VRChat login (re-attaches on
-     * login / account switch / logout) and enforces the HARD-DENY single-session model:
-     * claim the lock when it's free/ours, or raise [accountDenied] (block OSC, drop
-     * Discord, show the deny screen) when another device holds it. Recovery is
-     * automatic when the lock is freed (holder signs out / admin remote-logout).
-     */
-    private fun startAccountLockWatcher() {
-        if (BuildConfig.IS_ADMIN_BUILD) return
-        viewModelScope.launch {
-            VrchatPipelineState.presenceFlow.collect { presence ->
-                val vid = presence?.userId?.trim().orEmpty()
-                if (vid == watchedAccountId) return@collect
-                accountLockReg?.remove(); accountLockReg = null
-                watchedAccountId = vid
-                if (vid.isBlank()) {
-                    // Signed out of VRChat → no account lock applies; clear deny.
-                    if (accountDenied) { accountDenied = false; refreshOscBlockGate() }
-                    return@collect
-                }
-                val myHash = readDeviceHashFromPrefs()
-                if (!isValidDeviceHash(myHash)) return@collect
-                // HARD-DENY model: the lock names exactly ONE device. On every lock
-                // change, claim it when it's free/ours, or DENY when another device
-                // holds it. Recovery is automatic — when the holder signs out or an
-                // admin frees the lock (deletes it), the next snapshot is absent and
-                // this device claims + un-denies itself with no reopen.
-                accountLockReg = db.collection(COL_ACCOUNTS).document(vid)
-                    .addSnapshotListener { snap, e ->
-                        if (e != null) return@addSnapshotListener
-                        val exists = snap?.exists() == true
-                        val activeDevice = snap?.getString("activeDevice")?.trim().orEmpty()
-                        val claimedByOther = exists && activeDevice.isNotBlank() && activeDevice != myHash
-                        if (claimedByOther) {
-                            if (!accountDenied) {
-                                accountDenied = true
-                                if (oscSending) stopSending()
-                                disconnectDiscordLocally()
-                                refreshOscBlockGate()
-                            }
-                        } else {
-                            // Free or ours → claim it (if not already ours) and clear deny.
-                            if (activeDevice != myHash) {
-                                viewModelScope.launch { claimAccount(vid, myHash) }
-                            }
-                            if (accountDenied) { accountDenied = false; refreshOscBlockGate() }
-                        }
-                    }
-            }
-        }
-    }
-
-    /** Releases this account's single-session lock (deletes accounts/{vrchatUserId}) so
-     *  another device can claim it. Called on a deliberate VRChat sign-out. */
-    fun releaseAccountLock() {
-        if (BuildConfig.IS_ADMIN_BUILD) return
-        val vid = watchedAccountId
-        if (vid.isBlank()) return
-        viewModelScope.launch {
-            runCatching { db.collection(COL_ACCOUNTS).document(vid).delete().await() }
-        }
-    }
+    // Single-session HARD-DENY removed: VRC-A is multi-device (several devices on
+    // the same VRChat account are all allowed — no "account already registered"
+    // block). The full account-centre membership design (accounts/{vid} +
+    // devices subcollection) is deferred and preserved at git tag account-centre-v1;
+    // see docs/account-system-plan.md §5.
 
     @Suppress("UNUSED_PARAMETER")
     private suspend fun performSelfSync(coldOpen: Boolean = false) {
@@ -1964,17 +1882,6 @@ class VrcaViewModel(
     )
         private set
 
-    /**
-     * True when this VRChat account is already claimed by a DIFFERENT device — a HARD
-     * DENY (no take-over): OSC is blocked, Discord RPC is disconnected, and the UI
-     * shows a reassuring "account already registered, contact support" screen with the
-     * support-server link. The VRChat session + the account-lock listener are KEPT
-     * attached so recovery is seamless: when the old device signs out or an admin
-     * remote-logs-it-out (freeing the lock), this device auto-recovers and claims it.
-     * Single-device users never see it (their own claim names them).
-     */
-    var accountDenied by mutableStateOf(false)
-        private set
 
     /** True when the VRChat session is CONFIRMED dead-and-unrecoverable (password
      *  change / 30-day trusted-device expiry / cleared creds), not merely a
@@ -1986,7 +1893,7 @@ class VrcaViewModel(
 
     /** OSC is blocked when ANY gate reason is active. */
     private fun refreshOscBlockGate() {
-        val blocked = forceUpdatePending || vrchatLoggedOut || accountDenied || vrchatAuthDead
+        val blocked = forceUpdatePending || vrchatLoggedOut || vrchatAuthDead
         remoteVrcaOsc.blocked = blocked
         localVrcaOsc.blocked = blocked
     }
@@ -2019,10 +1926,6 @@ class VrcaViewModel(
                 if (oscSending) stopSending()
                 vrchatLoggedOut = true
                 refreshOscBlockGate()
-                // A deliberate VRChat sign-out releases this account's single-session
-                // lock so another device can claim it (the "properly sign out on the
-                // old device" escape from the hard-deny).
-                releaseAccountLock()
             }
         }
         viewModelScope.launch {
@@ -2715,10 +2618,6 @@ class VrcaViewModel(
 
         // VRChat sign-out hard-blocks OSC until re-login (Settings Accounts).
         startVrchatAuthGateWatcher()
-
-        // Single-session lock: when the same VRChat account is open on another
-        // device, this one stands down (OSC blocked) until it's re-claimed.
-        startAccountLockWatcher()
 
         // Live-mode loop: idle until an admin starts watching.
         startLiveSyncWatcher()
