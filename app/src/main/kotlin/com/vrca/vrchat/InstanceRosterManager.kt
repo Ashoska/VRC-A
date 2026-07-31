@@ -89,9 +89,15 @@ object InstanceRosterManager {
     private val started = AtomicBoolean(false)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    // userId -> pretty platform ("" once fetched-but-unknown so we don't re-hammer).
+    // userId -> pretty platform. A key is only cached on a SUCCESSFUL lookup
+    // (even if the value is "" = genuinely unknown); a FAILED lookup (429 /
+    // network) is left uncached so the 2s publish loop re-queues it — the fix
+    // for "non-friends never show a platform" (they're fetched after friends,
+    // so they're the ones that hit VRChat's rate limit on the initial burst).
     private val platformCache = ConcurrentHashMap<String, String>()
     private val enrichInFlight = ConcurrentHashMap.newKeySet<String>()
+    private val enrichAttempts = ConcurrentHashMap<String, Int>()
+    private const val MAX_ENRICH_ATTEMPTS = 6
 
     /** Idempotent — safe to call from every Home composition. */
     fun start(context: Context) {
@@ -360,24 +366,38 @@ object InstanceRosterManager {
 
     private suspend fun enrichPlatforms(context: Context, userIds: List<String>) {
         for (id in userIds) {
-            try {
-                val info = VrchatAuthManager.fetchUserInfo(context, id)
-                platformCache[id] = info?.let { VrchatAuthManager.prettyPlatform(it.platform) } ?: ""
+            val info = try {
+                VrchatAuthManager.fetchUserInfo(context, id)
             } catch (e: Exception) {
-                platformCache[id] = ""
-            } finally {
-                enrichInFlight.remove(id)
+                null
             }
-            _flow.value.let { cur ->
-                if (cur.members.any { it.userId == id }) {
-                    _flow.value = cur.copy(
-                        members = cur.members.map { m ->
-                            if (m.userId == id) m.copy(platform = platformCache[id] ?: "") else m
-                        }
-                    )
+            enrichInFlight.remove(id)
+
+            if (info != null) {
+                // Success — cache the resolved platform (may be "" if the user
+                // object genuinely has no platform) and republish that row.
+                val plat = VrchatAuthManager.prettyPlatform(info.platform)
+                platformCache[id] = plat
+                enrichAttempts.remove(id)
+                _flow.value.let { cur ->
+                    if (cur.members.any { it.userId == id }) {
+                        _flow.value = cur.copy(
+                            members = cur.members.map { m ->
+                                if (m.userId == id) m.copy(platform = plat) else m
+                            }
+                        )
+                    }
                 }
+                delay(300) // pace VRChat REST
+            } else {
+                // Failure (likely 429) — DON'T cache; the next publish re-queues
+                // it so it retries. Give up only after MAX attempts so a
+                // permanently-unresolvable id can't loop forever.
+                val n = (enrichAttempts[id] ?: 0) + 1
+                enrichAttempts[id] = n
+                if (n >= MAX_ENRICH_ATTEMPTS) { platformCache[id] = ""; enrichAttempts.remove(id) }
+                delay(800) // back off harder after a failed call
             }
-            delay(300) // pace VRChat REST
         }
     }
 }
