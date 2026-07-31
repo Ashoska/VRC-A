@@ -42,6 +42,7 @@ import androidx.compose.material.icons.filled.Loop
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Stop
@@ -1116,6 +1117,18 @@ private fun QuickTogglesGrid(
                     }
                 }
             }
+        }
+
+        // Placeholder pills — preview the FUTURE expanded toggle system (9 total)
+        // so we can see how they fit in the column. Disabled + do nothing yet.
+        listOf("Weather", "Battery", "Uptime", "Heart rate", "Custom").forEach { label ->
+            TogglePill(
+                label = label,
+                icon = Icons.Filled.Lock,
+                checked = false,
+                enabled = false,
+                modifier = Modifier.fillMaxWidth()
+            ) { }
         }
     }
 }
