@@ -278,7 +278,9 @@ fun TogglePill(
                     onClick = { onToggle(!checked) },
                     onLongClick = onLongPress
                 )
-                .padding(horizontal = 12.dp, vertical = 10.dp),
+                // Shorter pill (vertical 10 -> 6) so the toggle list is more compact
+                // and less likely to make the tab scroll.
+                .padding(horizontal = 12.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {

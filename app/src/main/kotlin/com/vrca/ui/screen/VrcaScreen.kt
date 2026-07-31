@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -43,6 +44,7 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Wifi
@@ -80,6 +82,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -351,6 +354,126 @@ private fun ConnectionButton(vm: com.vrca.ui.viewmodel.VrcaViewModel) {
     }
 }
 
+/**
+ * Top-bar notification button (between the title and the connection button). A
+ * bell with a badge count; tapping drops down a scrollable, neatly organized list
+ * of ALL the alert types — setup-health rows, session-expired, account warning,
+ * VRChat status, and announcements (each collapsible; long ones scroll INSIDE the
+ * dropdown so they never push the tabs). Replaced the Home alert cards.
+ */
+@Composable
+private fun NotificationButton(
+    vm: com.vrca.ui.viewmodel.VrcaViewModel,
+    announcements: List<AnnouncementUi>,
+    moderation: ModerationUi,
+    vrcLinked: Boolean,
+    ipSet: Boolean?,
+    onNavigate: (AppPage) -> Unit
+) {
+    val ctx = LocalContext.current
+    var open by remember { mutableStateOf(false) }
+
+    val batteryOk = remember {
+        (ctx.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager)
+            .isIgnoringBatteryOptimizations(ctx.packageName)
+    }
+    val warned = moderation.warned && !(moderation.banned || moderation.deviceBanned)
+    val authDead = vm.vrchatAuthDead
+    val alertCount = announcements.size +
+        (if (!vrcLinked) 1 else 0) +
+        (if (ipSet == false) 1 else 0) +
+        (if (!batteryOk) 1 else 0) +
+        (if (warned) 1 else 0) +
+        (if (authDead) 1 else 0)
+
+    Box {
+        IconButton(onClick = { open = true }) {
+            BadgedBox(badge = { if (alertCount > 0) Badge { Text("$alertCount") } }) {
+                Icon(Icons.Filled.Notifications, contentDescription = "Notifications")
+            }
+        }
+        DropdownMenu(
+            expanded = open,
+            onDismissRequest = { open = false },
+            modifier = Modifier.width(340.dp).heightIn(max = 520.dp)
+        ) {
+            Column(
+                Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text("Notifications", style = MaterialTheme.typography.titleSmall)
+                if (alertCount == 0) {
+                    Text(
+                        "You're all caught up.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    if (!vrcLinked) NotifHealthRow(
+                        "VRChat not linked",
+                        "OSC sending is blocked until you sign in."
+                    ) { open = false; onNavigate(AppPage.VrchatStatus) }
+                    if (ipSet == false) NotifHealthRow(
+                        "Headset IP not set",
+                        "Tap the connection icon (top right)."
+                    ) { open = false }
+                    if (!batteryOk) NotifHealthRow(
+                        "Battery optimization is on",
+                        "Android may pause VRC-A when the screen is off."
+                    ) {
+                        open = false
+                        runCatching {
+                            ctx.startActivity(
+                                Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                                    .setData(Uri.parse("package:${ctx.packageName}"))
+                            )
+                        }
+                    }
+                    if (authDead) com.vrca.ui.common.VrchatSessionExpiredBanner(
+                        onSignIn = { open = false; onNavigate(AppPage.VrchatStatus) }
+                    )
+                    if (warned) {
+                        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("You have been warned.", style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    moderation.warnReason.ifBlank { "No reason provided." },
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                        }
+                    }
+                    VrchatStatusBanner()
+                    announcements.forEach { a -> key(a.id) { AnnouncementCard(a) } }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NotifHealthRow(title: String, subtitle: String, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.tertiaryContainer,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+            Text(
+                title,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onTertiaryContainer
+            )
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.8f)
+            )
+        }
+    }
+}
+
 // Monitor-shape framing breakpoints (see the Scaffold content in VrcaScreen).
 // A phone stays below the threshold (portrait ~360-420 dp), so it's never
 // centered; Meta Quest's 1024 dp landscape panel is well above it, so the app
@@ -584,6 +707,18 @@ fun VrcaScreen(
                         }
                     },
                     actions = {
+                        // Headset ONLY: alerts live in this top-bar notification
+                        // button. Phones/admin keep the alert cards at the top of Home.
+                        if (BuildConfig.IS_HEADSET_BUILD) {
+                            NotificationButton(
+                                vm = chatboxViewModel,
+                                announcements = announcements,
+                                moderation = moderation,
+                                vrcLinked = vrcLinked,
+                                ipSet = ipSet.value,
+                                onNavigate = { page = it }
+                            )
+                        }
                         ConnectionButton(vm = chatboxViewModel)
                         IconButton(onClick = { page = AppPage.Settings }) {
                             Icon(Icons.Filled.Settings, contentDescription = "Settings")

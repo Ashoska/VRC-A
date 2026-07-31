@@ -110,7 +110,7 @@ import kotlinx.coroutines.withContext
  * expanded; priority > 0 auto-expands. Media served from the ann/ cache.
  */
 @Composable
-private fun AnnouncementCard(a: AnnouncementUi) {
+internal fun AnnouncementCard(a: AnnouncementUi) {
     val ctx = LocalContext.current
     val doc = remember(a.bodyDoc, a.body) {
         com.vrca.richcontent.resolveRichDoc(a.bodyDoc, a.body)
@@ -277,8 +277,8 @@ internal fun HomePage(
         )
     }
 
-    // Setup health checklist items — computed here so BOTH the phone and headset
-    // layouts can render the shared alert block. Shows ONLY the red rows.
+    // Setup health items — shown in the phone's Home alert block (the HEADSET moves
+    // all alerts to the top-bar notification button instead).
     val healthItems = buildList {
         if (!vrcLinked) add(
             HealthItem(
@@ -301,13 +301,10 @@ internal fun HomePage(
                 batteryOk = pm.isIgnoringBatteryOptimizations(ctx.packageName)
             }
         )
-        // (Now Playing / Notification Access nag removed — media detection is moving
-        // to Spotify auth, so we no longer require/prompt notification access.)
     }
 
-    // Alert / info cards (announcements, VRChat status, session-expired, warning,
-    // setup health). Shared block — on the headset these live in the LEFT column so
-    // they never push the two-column structure into a full-page scroll.
+    // Alert / info cards — PHONE ONLY (top of Home, as always). On the headset the
+    // top-bar NotificationButton (VrcaScreen) shows these instead.
     val alertCards: @Composable ColumnScope.() -> Unit = {
         if (sortedAnnouncements.isNotEmpty()) {
             SectionCard(
@@ -373,7 +370,6 @@ internal fun HomePage(
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         preview(false)
-                        alertCards()
                     }
                     Column(
                         Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
@@ -395,13 +391,13 @@ internal fun HomePage(
                     Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    alertCards()
                     preview(true)
                     ManualSendCard(vm = vm, isBanned = isBanned)
                 }
             }
         }
     } else {
+        // Phone/admin: alerts at the top of Home, as always.
         PageContainer {
             alertCards()
             preview(true)
@@ -1016,25 +1012,23 @@ private fun QuickTogglesSection(
     onNavigate: (AppPage) -> Unit
 ) {
     ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        // Tighter padding (8dp) + spacing so the card is shorter and scrolls less.
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
 
-            // Quick Toggles title row with Edit/Done toggle and Reset button
+            // Title row with Edit/Done toggle and Reset button (no subtitle — keeps
+            // the card compact).
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // weight(1f) so the long subtitle can't push the Reset/Done buttons
-                // off the right edge on a narrow phone (the "Done doesn't show" bug).
-                Column(Modifier.weight(1f)) {
-                    Text("Quick Toggles", style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        (if (vm.oscSending) "Edits show live" else "Press Start when ready") +
-                            " · hold a pill to edit",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+                // weight(1f) so the title can't push the Reset/Done buttons off the
+                // right edge on a narrow phone.
+                Text(
+                    "Line Toggles",
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.weight(1f)
+                )
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     if (cardReorderMode) {
                         TextButton(
@@ -1073,7 +1067,7 @@ private fun QuickTogglesGrid(
 ) {
     var timeMenuOpen by remember { mutableStateOf(false) }
 
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         vm.cardOrder.forEach { component ->
             when (component) {
                 "Pinned" -> TogglePill(
