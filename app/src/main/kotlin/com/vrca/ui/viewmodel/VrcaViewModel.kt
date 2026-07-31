@@ -1832,7 +1832,12 @@ class VrcaViewModel(
     )
 
     private val remoteVrcaOsc = VrcaOsc(
-        ipAddress = runBlocking { userPreferencesRepository.ipAddress.first() },
+        // Headset build: VRChat runs on the SAME Quest, so OSC always targets
+        // localhost — no manual IP needed. Phone build: the saved LAN IP of the
+        // headset/PC running VRChat (still entered manually until a device-link
+        // exists). See the ipAddress collector + ConnectionCard for the same gate.
+        ipAddress = if (BuildConfig.IS_HEADSET_BUILD) "127.0.0.1"
+                    else runBlocking { userPreferencesRepository.ipAddress.first() },
         port = 9000
     )
 
@@ -2606,9 +2611,13 @@ class VrcaViewModel(
         // collector makes any saved/equipped/synced IP the runtime target
         // automatically. Manual Apply also writes the same value to DataStore, so
         // this re-emits the identical value (no conflict).
-        viewModelScope.launch {
-            userPreferencesRepository.ipAddress.collect { ip ->
-                if (ip.isNotBlank()) remoteVrcaOsc.ipAddress = ip
+        // Headset build sends to localhost (VRChat is on the same Quest) and never
+        // follows the saved IP pref; only the phone build tracks the manual IP.
+        if (!BuildConfig.IS_HEADSET_BUILD) {
+            viewModelScope.launch {
+                userPreferencesRepository.ipAddress.collect { ip ->
+                    if (ip.isNotBlank()) remoteVrcaOsc.ipAddress = ip
+                }
             }
         }
 

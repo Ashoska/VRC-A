@@ -84,6 +84,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.vrca.BuildConfig
 import com.vrca.ui.common.CompactSectionCard
 import com.vrca.ui.common.KitStatusChip
 import com.vrca.ui.common.KitTone
@@ -211,6 +212,9 @@ internal fun HomePage(
     }
     var ipOk by remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(Unit) {
+        // Headset: OSC is automatic (localhost), so the connection is always "set" —
+        // never flag "IP not set" in setup health.
+        if (BuildConfig.IS_HEADSET_BUILD) { ipOk = true; return@LaunchedEffect }
         vm.userPreferencesRepository.ipAddress.collect { ip ->
             ipOk = ip.isNotBlank() && ip != "127.0.0.1"
         }
@@ -1129,6 +1133,11 @@ private fun ConnectionCard(
     ipAddress: String,
     ipOk: Boolean
 ) {
+    // Headset build: VRChat runs on THIS Quest, so OSC targets localhost
+    // automatically — no IP to enter. The phone build keeps the manual IP field
+    // (it must point at the headset/PC over the LAN until a device-link exists).
+    val isHeadset = BuildConfig.IS_HEADSET_BUILD
+
     val repo = vm.userPreferencesRepository
     val activeSlot by repo.activeIpSlot.collectAsState(initial = 1)
     val n1 by repo.ip1Name.collectAsState(initial = "Home")
@@ -1140,10 +1149,10 @@ private fun ConnectionCard(
     // UDP fire-and-forget, so "no reply" is a WARNING (many devices simply
     // don't answer pings), not proof the target is dead — but a green check
     // catches "started sending into a dead IP" before the user wonders why
-    // nothing shows in VRChat.
+    // nothing shows in VRChat. Skipped on the headset (localhost is always up).
     var reachable by remember(ipAddress) { mutableStateOf<Boolean?>(null) }
-    LaunchedEffect(ipAddress) {
-        if (!ipOk) return@LaunchedEffect
+    LaunchedEffect(ipAddress, isHeadset) {
+        if (isHeadset || !ipOk) return@LaunchedEffect
         while (true) {
             // Robust ping (isReachable + system ping fallback) — the bare
             // InetAddress.isReachable misses devices that ICMP-reply fine
@@ -1158,9 +1167,14 @@ private fun ConnectionCard(
         icon = Icons.Filled.Wifi,
         // Two lines while collapsed: the IP with the slot's device name under
         // it (the summary Text allows 2 lines).
-        summary = if (ipOk) "$ipAddress\n$slotName" else "No headset IP set",
+        summary = when {
+            isHeadset -> "This headset · 127.0.0.1"
+            ipOk -> "$ipAddress\n$slotName"
+            else -> "No headset IP set"
+        },
         trailing = {
             when {
+                isHeadset -> KitStatusChip("Automatic", KitTone.Success)
                 !ipOk -> KitStatusChip("Not set", KitTone.Error)
                 reachable == null -> KitStatusChip("Checking", KitTone.Neutral)
                 reachable == true -> KitStatusChip("Reachable", KitTone.Success)
@@ -1168,10 +1182,18 @@ private fun ConnectionCard(
             }
         }
     ) {
-        com.vrca.ui.conversation.IpField(
-            chatboxViewModel = vm,
-            modifier = Modifier.fillMaxWidth()
-        )
+        if (isHeadset) {
+            Text(
+                "VRChat runs on this headset, so VRC-A sends to it automatically at 127.0.0.1 — no IP to set. Just make sure OSC is enabled in VRChat.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        } else {
+            com.vrca.ui.conversation.IpField(
+                chatboxViewModel = vm,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
     }
 }
 
