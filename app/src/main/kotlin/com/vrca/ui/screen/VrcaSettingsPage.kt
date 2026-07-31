@@ -21,10 +21,6 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.Devices
-import androidx.compose.material.icons.filled.Gavel
-import androidx.compose.material.icons.filled.Headset
-import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.MusicNote
@@ -525,17 +521,6 @@ private fun SettingsRow(
    VrcaViewModel auth gate) until a VRChat account is signed in again.
    ========================================================================= */
 
-private fun accountRelTime(ms: Long): String {
-    if (ms <= 0) return ""
-    val d = System.currentTimeMillis() - ms
-    return when {
-        d < 60_000 -> "just now"
-        d < 3_600_000 -> "${d / 60_000}m ago"
-        d < 86_400_000 -> "${d / 3_600_000}h ago"
-        else -> "${d / 86_400_000}d ago"
-    }
-}
-
 @Composable
 private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
     val ctx = LocalContext.current
@@ -573,65 +558,6 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
     }
 
     SectionCard(title = "Accounts") {
-        // Account centre (§5): this VRChat account + the member devices synced to
-        // it (headset / phone / admin). Multi-device — additional same-account
-        // devices are authorized members, no longer blocked.
-        val members by vm.accountMembers.collectAsState()
-        val accountId = vm.accountVrchatId
-        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("Account", style = MaterialTheme.typography.titleSmall)
-            if (accountId.isBlank()) {
-                Text(
-                    "Sign in to VRChat to link this device to your account and sync your setup across devices.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            } else {
-                Text(
-                    "${members.size} device${if (members.size == 1) "" else "s"} on this account",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                members.forEach { m ->
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        Icon(
-                            imageVector = when (m.role) {
-                                "headset" -> Icons.Filled.Headset
-                                "admin" -> Icons.Filled.Gavel
-                                "phone" -> Icons.Filled.Smartphone
-                                else -> Icons.Filled.Devices
-                            },
-                            contentDescription = null,
-                            tint = if (m.isThisDevice) MaterialTheme.colorScheme.primary
-                                   else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                m.role.replaceFirstChar { it.uppercase() } +
-                                    if (m.isThisDevice) " · This device" else "",
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                            val sub = listOfNotNull(
-                                m.localIp.ifBlank { null },
-                                accountRelTime(m.lastSeenMs).ifBlank { null }
-                            ).joinToString(" · ")
-                            if (sub.isNotBlank()) {
-                                Text(
-                                    sub,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         // VRChat row — status line mirrors the Discord row's format so the
         // two accounts read consistently ("Connected — Presence on/off").
         val pipelineConnected by com.vrca.vrchat.VrchatPipelineState.isConnectedFlow.collectAsState()
