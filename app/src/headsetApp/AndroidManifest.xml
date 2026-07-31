@@ -11,25 +11,32 @@
 
   Lock the panel to a FIXED size so the user cannot resize/reshape it (which
   was reshuffling the layout): android:resizeableActivity="false" tells
-  Horizon OS to open the app in a single fixed panel with no resize grip.
-  Belt-and-braces: the same flag on <application>, plus the Meta-specific
-  <meta-data com.oculus.vr.focusaware /> so the fixed panel keeps input focus.
-  (Honest caveat: Horizon OS ultimately owns window management; if a future
-  Horizon build ignores resizeableActivity for 2D panels, the width-responsive
-  framing in VrcaScreen is still the fallback so nothing looks broken.)
+  Horizon OS to open the app in a single fixed panel, and min/maxAspectRatio
+  pin the 16:10 shape so even if Horizon lets the user tug the panel, the
+  aspect can't change and the layout can't reshuffle.
+  (Honest caveat: Horizon OS ultimately owns 2D-panel window management and may
+  still allow resizing regardless of these flags — Android has no hard "no
+  resize" for VR panels. The real safeguard is the width-responsive framing in
+  VrcaScreen + the Home 3/2/1-column thresholds, which degrade gracefully at
+  any size, so resizing is harmless even when it can't be prevented.)
 
-  Deferred to M2 (log reader): MANAGE_EXTERNAL_STORAGE / SAF for reading
-  VRChat's output logs, and any Horizon-Store submission manifest entries.
-  Not added here — unused permissions would only complicate store review.
+  MANAGE_EXTERNAL_STORAGE: the headset build reads VRChat's output log to build
+  the instance roster (InstanceRosterManager). Only the headset flavor requests
+  it — the public/admin builds never touch the log reader.
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- All-files access, headset-only: read VRChat's output log for the roster. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
     <application android:resizeableActivity="false" tools:node="merge">
         <activity
             android:name=".app.MainActivity"
             android:screenOrientation="sensorLandscape"
             android:resizeableActivity="false"
+            android:minAspectRatio="1.6"
+            android:maxAspectRatio="1.6"
             tools:node="merge" />
     </application>
 

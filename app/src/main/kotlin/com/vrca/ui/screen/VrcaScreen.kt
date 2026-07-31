@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.heightIn
@@ -388,7 +389,11 @@ private fun NotificationButton(
 
     Box {
         IconButton(onClick = { open = true }) {
-            BadgedBox(badge = { if (alertCount > 0) Badge { Text("$alertCount") } }) {
+            // Pull the badge down-inward so it sits ON the bell instead of poking
+            // past the top-bar edge (it was clipping at the top on the headset).
+            BadgedBox(badge = {
+                if (alertCount > 0) Badge(modifier = Modifier.offset(x = (-2).dp, y = 4.dp)) { Text("$alertCount") }
+            }) {
                 Icon(Icons.Filled.Notifications, contentDescription = "Notifications")
             }
         }
@@ -737,7 +742,12 @@ fun VrcaScreen(
                                 // Red dot = the Home setup-health checklist has
                                 // unresolved items (the only cross-tab signal;
                                 // the checklist itself lives on Home only).
-                                BadgedBox(badge = { if (setupNeedsAttention) Badge() }) {
+                                // Headset surfaces setup items in the top-bar
+                                // notification button, so the nav dot is redundant
+                                // there — suppress it.
+                                BadgedBox(badge = {
+                                    if (setupNeedsAttention && !BuildConfig.IS_HEADSET_BUILD) Badge()
+                                }) {
                                     Icon(Icons.Filled.Home, contentDescription = null)
                                 }
                             },

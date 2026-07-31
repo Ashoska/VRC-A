@@ -190,6 +190,9 @@ private val PREVIEW_BUBBLE_HEIGHT = (PREVIEW_LINE_SP * 9 + 24).dp  // 9 lines + 
 // Headset Home goes two-column at/above this width; below it (a shrunk Quest
 // panel) it falls back to the single column.
 private val HOME_TWO_COL_THRESHOLD = 560.dp
+// Full Quest panel (1024dp) clears this → three columns; a resized-narrower
+// panel drops to two, then one.
+private val HOME_THREE_COL_THRESHOLD = 820.dp
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -361,42 +364,84 @@ internal fun HomePage(
         // RIGHT), each column scrolls internally so alert cards can't push the layout.
         // Narrow/shrunk → a single scrollable column that still fills the panel.
         BoxWithConstraints(Modifier.fillMaxSize().padding(14.dp)) {
-            if (maxWidth >= HOME_TWO_COL_THRESHOLD) {
-                Row(
-                    Modifier.fillMaxSize(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Column(
-                        Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
+            when {
+                // Full Quest panel (1024dp): THREE columns.
+                //   left  = skinny preview
+                //   middle = Line Toggles + Manual Send (they fit perfectly together)
+                //   right = instance roster, pinned far right
+                maxWidth >= HOME_THREE_COL_THRESHOLD -> {
+                    Row(
+                        Modifier.fillMaxSize(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        preview(false)
-                        // Freed space next to the skinny preview → instance roster.
-                        InstanceRosterPanel()
-                    }
-                    Column(
-                        Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        QuickTogglesSection(
-                            vm = vm,
-                            isBanned = isBanned,
-                            cardReorderMode = cardReorderMode,
-                            onToggleReorderMode = { cardReorderMode = it },
-                            onResetOrder = { vm.resetCardOrder() },
-                            onNavigate = onNavigate
-                        )
-                        ManualSendCard(vm = vm, isBanned = isBanned)
+                        Column(
+                            Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            preview(false)
+                        }
+                        Column(
+                            Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            QuickTogglesSection(
+                                vm = vm,
+                                isBanned = isBanned,
+                                cardReorderMode = cardReorderMode,
+                                onToggleReorderMode = { cardReorderMode = it },
+                                onResetOrder = { vm.resetCardOrder() },
+                                onNavigate = onNavigate
+                            )
+                            ManualSendCard(vm = vm, isBanned = isBanned)
+                        }
+                        Column(
+                            Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            InstanceRosterPanel()
+                        }
                     }
                 }
-            } else {
-                Column(
-                    Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    preview(true)
-                    InstanceRosterPanel()
-                    ManualSendCard(vm = vm, isBanned = isBanned)
+                // Resized-narrower panel: two columns (preview + roster left,
+                // toggles + manual right).
+                maxWidth >= HOME_TWO_COL_THRESHOLD -> {
+                    Row(
+                        Modifier.fillMaxSize(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Column(
+                            Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            preview(false)
+                            InstanceRosterPanel()
+                        }
+                        Column(
+                            Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            QuickTogglesSection(
+                                vm = vm,
+                                isBanned = isBanned,
+                                cardReorderMode = cardReorderMode,
+                                onToggleReorderMode = { cardReorderMode = it },
+                                onResetOrder = { vm.resetCardOrder() },
+                                onNavigate = onNavigate
+                            )
+                            ManualSendCard(vm = vm, isBanned = isBanned)
+                        }
+                    }
+                }
+                // Small/shrunk panel: single scrolling column.
+                else -> {
+                    Column(
+                        Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        preview(true)
+                        InstanceRosterPanel()
+                        ManualSendCard(vm = vm, isBanned = isBanned)
+                    }
                 }
             }
         }
@@ -417,10 +462,21 @@ internal fun HomePage(
 private fun ManualSendCard(vm: VrcaViewModel, isBanned: Boolean) {
     val manualBring = remember { BringIntoViewRequester() }
     var manualFieldFocused by remember { mutableStateOf(false) }
+    // Expanding the card should scroll the column down so the whole editor shows.
+    val cardBring = remember { BringIntoViewRequester() }
+    val manualExpanded = remember { mutableStateOf(false) }
+    LaunchedEffect(manualExpanded.value) {
+        if (manualExpanded.value) {
+            kotlinx.coroutines.delay(120) // let the expand animation lay out first
+            runCatching { cardBring.bringIntoView() }
+        }
+    }
     CompactSectionCard(
         title = "Manual Send",
         icon = Icons.Filled.Send,
-        summary = if (vm.manualLiveMode) "Live typing" else "Type a manual message"
+        summary = if (vm.manualLiveMode) "Live typing" else "Type a manual message",
+        expandedState = manualExpanded,
+        modifier = Modifier.bringIntoViewRequester(cardBring)
     ) {
         val budget = vm.manualCharBudget()
         val msgLen = vm.messageText.value.text.length
@@ -513,55 +569,6 @@ private fun ManualSendCard(vm: VrcaViewModel, isBanned: Boolean) {
     }
 }
 
-/** Placeholder for the "who's in your instance" roster (the headline headset
- *  feature, lands with the M2 log reader). Fills the freed space next to the
- *  skinny preview. Shows an empty-state + skeleton rows so the future layout is
- *  visible; no live data yet. */
-@Composable
-private fun InstanceRosterPanel(modifier: Modifier = Modifier) {
-    ElevatedCard(
-        modifier = modifier.fillMaxWidth(),
-        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-    ) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Icon(Icons.Filled.Group, contentDescription = null, modifier = Modifier.size(18.dp))
-                Text("In your instance", style = MaterialTheme.typography.titleSmall)
-            }
-            Text(
-                "Who's in your VRChat world will show here — coming with the headset log reader.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            repeat(4) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    // avatar placeholder
-                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surface, modifier = Modifier.size(30.dp)) {}
-                    // name placeholder bar
-                    Surface(
-                        shape = MaterialTheme.shapes.small,
-                        color = MaterialTheme.colorScheme.surface,
-                        modifier = Modifier.height(12.dp).fillMaxWidth(0.5f)
-                    ) {}
-                    Spacer(Modifier.weight(1f))
-                    Icon(
-                        Icons.Filled.Lock,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                        modifier = Modifier.size(14.dp)
-                    )
-                }
-            }
-        }
-    }
-}
 
 /* =========================
    Setup health checklist
