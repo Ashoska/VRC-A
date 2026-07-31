@@ -636,6 +636,12 @@ private fun PreviewAndTogglesCard(
     val ctx = LocalContext.current
     var previewExpanded by remember { mutableStateOf(UiPrefs.readPreviewExpanded(ctx)) }
 
+    // Fixed compact preview ONLY on the headset (the two-column space is tight).
+    // Mobile/admin keep the original growing, full-size preview.
+    val isHeadset = BuildConfig.IS_HEADSET_BUILD
+    val previewFontSize = if (isHeadset) PREVIEW_FONT_SP.sp else androidx.compose.ui.unit.TextUnit.Unspecified
+    val previewLineHeight = if (isHeadset) PREVIEW_LINE_SP.sp else androidx.compose.ui.unit.TextUnit.Unspecified
+
     SectionCard(
         title = "VRChat Preview",
         titleStyle = MaterialTheme.typography.headlineSmall,
@@ -684,11 +690,12 @@ private fun PreviewAndTogglesCard(
                     Modifier
                         .widthIn(max = 420.dp)
                         .fillMaxWidth(0.92f)
-                        // FIXED height that reserves 9 chatbox lines always — like the
-                        // in-game chatbox, the preview no longer grows as lines are
-                        // added (which pushed the rest of the UI down). Content is
-                        // centered; fewer lines just leave space. (All builds.)
-                        .height(PREVIEW_BUBBLE_HEIGHT)
+                        // Headset: FIXED 9-line height (compact, so the two-column
+                        // stays put). Mobile: the original growing bubble (min 96dp).
+                        .then(
+                            if (isHeadset) Modifier.height(PREVIEW_BUBBLE_HEIGHT)
+                            else Modifier.heightIn(min = 96.dp)
+                        )
                 ) {
                     if (vm.minimalChatboxBg) {
                         // Invisible Chatbox Border simulation: in-game the bubble
@@ -726,8 +733,8 @@ private fun PreviewAndTogglesCard(
                                         modifier = Modifier.fillMaxWidth(),
                                         fontFamily = FontFamily.Monospace,
                                         style = MaterialTheme.typography.bodyMedium,
-                                        fontSize = PREVIEW_FONT_SP.sp,
-                                        lineHeight = PREVIEW_LINE_SP.sp,
+                                        fontSize = previewFontSize,
+                                        lineHeight = previewLineHeight,
                                         textAlign = TextAlign.Center,
                                         softWrap = true,
                                         maxLines = 9,
@@ -738,14 +745,19 @@ private fun PreviewAndTogglesCard(
                         }
                     } else {
                         Surface(
-                            modifier = Modifier.fillMaxSize(),
+                            // Headset: fill the fixed box. Mobile: wrap content width
+                            // (the outer box grows with content as before).
+                            modifier = if (isHeadset) Modifier.fillMaxSize() else Modifier.fillMaxWidth(),
                             tonalElevation = 3.dp,
                             shape = MaterialTheme.shapes.large,
                             color = MaterialTheme.colorScheme.surfaceVariant
                         ) {
                             Box(
                                 Modifier
-                                    .fillMaxSize()
+                                    .then(
+                                        if (isHeadset) Modifier.fillMaxSize()
+                                        else Modifier.heightIn(min = 96.dp).fillMaxWidth()
+                                    )
                                     .padding(12.dp),
                                 contentAlignment = Alignment.Center
                             ) {
@@ -755,8 +767,8 @@ private fun PreviewAndTogglesCard(
                                         modifier = Modifier.fillMaxWidth(),
                                         fontFamily = FontFamily.Monospace,
                                         style = MaterialTheme.typography.bodyMedium,
-                                        fontSize = PREVIEW_FONT_SP.sp,
-                                        lineHeight = PREVIEW_LINE_SP.sp,
+                                        fontSize = previewFontSize,
+                                        lineHeight = previewLineHeight,
                                         // Explicit bright color: Surface(surfaceVariant)
                                         // switches LocalContentColor to the muted
                                         // onSurfaceVariant, which dimmed the preview
@@ -1009,10 +1021,12 @@ private fun QuickTogglesSection(
             // Quick Toggles title row with Edit/Done toggle and Reset button
             Row(
                 Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
+                // weight(1f) so the long subtitle can't push the Reset/Done buttons
+                // off the right edge on a narrow phone (the "Done doesn't show" bug).
+                Column(Modifier.weight(1f)) {
                     Text("Quick Toggles", style = MaterialTheme.typography.titleSmall)
                     Text(
                         (if (vm.oscSending) "Edits show live" else "Press Start when ready") +
