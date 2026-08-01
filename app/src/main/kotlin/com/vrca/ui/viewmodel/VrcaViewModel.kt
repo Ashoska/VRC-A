@@ -3893,8 +3893,37 @@ class VrcaViewModel(
             out = Regex("\\{param:([^}]+)\\}", RegexOption.IGNORE_CASE).replace(out) { m ->
                 com.vrca.osc.VrcaOscState.rawString(m.groupValues[1].trim())
             }
+        // Device / info tokens.
+        if (out.contains("{date}", ignoreCase = true))
+            out = out.replace(Regex("\\{date\\}", RegexOption.IGNORE_CASE), currentDateString())
+        if (out.contains("{uptime}", ignoreCase = true)) {
+            val up = if (sendingSinceMs > 0L) formatUptimeToken(System.currentTimeMillis() - sendingSinceMs) else ""
+            out = out.replace(Regex("\\{uptime\\}", RegexOption.IGNORE_CASE), up)
+        }
+        if (out.contains("{battery}", ignoreCase = true)) {
+            val b = batteryPercentToken()
+            out = out.replace(Regex("\\{battery\\}", RegexOption.IGNORE_CASE), if (b in 0..100) "$b%" else "")
+        }
+        if (out.contains("{weather}", ignoreCase = true))
+            out = out.replace(Regex("\\{weather\\}", RegexOption.IGNORE_CASE), com.vrca.app.WeatherProvider.current)
         return out
     }
+
+    private fun currentDateString(): String =
+        java.time.LocalDate.now().format(
+            java.time.format.DateTimeFormatter.ofPattern("MMM d", java.util.Locale.US)
+        )
+
+    private fun formatUptimeToken(ms: Long): String {
+        val totalMin = (ms / 60000L).coerceAtLeast(0)
+        val h = totalMin / 60; val m = totalMin % 60
+        return if (h > 0) "${h}h ${m}m" else "${m}m"
+    }
+
+    private fun batteryPercentToken(): Int = try {
+        val bm = app.getSystemService(android.content.Context.BATTERY_SERVICE) as? android.os.BatteryManager
+        bm?.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
+    } catch (e: Exception) { -1 }
 
     /** Set the avatar's size (eye height in meters, VRChat clamps 0.2–5.0) by
      *  sending `/avatar/eyeheight` OSC to VRChat (the configured target — loopback

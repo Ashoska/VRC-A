@@ -1406,7 +1406,8 @@ private fun TokensHint() {
         "  {mute}  {afk}  {movement}  {scale}  {param:Name}" else ""
     Text(
         "Currently experimenting, feel free to try by putting these tags into your " +
-            "pinned and cycle message:  {time}  {song}  {world}  {players}$osc",
+            "pinned and cycle message:  {time}  {song}  {world}  {players}  {date}  " +
+            "{uptime}  {battery}  {weather}$osc",
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant
     )

@@ -86,6 +86,9 @@ class VrcaApplication : Application(), ViewModelStoreOwner {
         // Lifetime chatbox-send counter (boot screen stat).
         ChatboxStats.attach(applicationContext)
 
+        // Best-effort weather for the {weather} chatbox token (IP-geo + open-meteo).
+        WeatherProvider.start()
+
         // Headset: listen for VRChat's OSC output (avatar params) so the chatbox
         // can use {mute}/{afk}/{movement}/{scale}/{param:Name}. OSC-out is loopback,
         // so this only receives on the same device as VRChat (the Quest).
