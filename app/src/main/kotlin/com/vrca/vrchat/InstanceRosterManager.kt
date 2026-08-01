@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.util.Log
+import com.vrca.BuildConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -284,12 +285,15 @@ object InstanceRosterManager {
 
         while (scope.isActive) {
             if (!hasAnyAccess(context)) {
+                // No log access -> let REST drive presence on the headset.
+                VrchatPipelineState.headsetLogActive = false
                 _flow.value = _flow.value.copy(status = Status.NEEDS_PERMISSION)
                 delay(POLL_MS); continue
             }
 
             val newest = findNewestLog(context)
             if (newest == null) {
+                VrchatPipelineState.headsetLogActive = false
                 _flow.value = RosterUi(status = Status.NO_LOG)
                 currentId = null; offset = 0L; state = VrcLogParser.InstanceState()
                 delay(POLL_MS); continue
@@ -309,6 +313,7 @@ object InstanceRosterManager {
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "read failed for ${newest.id}", e)
+                VrchatPipelineState.headsetLogActive = false
                 _flow.value = RosterUi(status = Status.NO_LOG, logPath = newest.id)
                 currentId = null; offset = 0L; state = VrcLogParser.InstanceState()
                 delay(POLL_MS); continue
@@ -369,6 +374,23 @@ object InstanceRosterManager {
 
     private fun publish(context: Context, state: VrcLogParser.InstanceState, logPath: String) {
         val inWorld = state.location != null && state.roster.isNotEmpty()
+        val self = VrchatAuthManager.getStoredUserId(context)
+
+        // HEADSET (plan §9): feed the log-derived location / world / instance /
+        // player count into the shared presence, so the Discord RPC + UI read it —
+        // instant, log-accurate, and instance HOPS are picked up the moment the log
+        // writes them (no REST poll for these fields). Mobile is unaffected.
+        if (BuildConfig.IS_HEADSET_BUILD) {
+            val selfName = (self?.let { state.roster[it]?.displayName })
+                ?: VrchatAuthManager.getStoredDisplayName(context) ?: ""
+            VrchatPipelineState.applyLogPresence(
+                active = true, inWorld = inWorld,
+                location = if (inWorld) state.location else null,
+                worldName = if (inWorld) state.worldName else null,
+                playerCount = if (inWorld) state.roster.size else 0,
+                seedUserId = self ?: "", seedDisplayName = selfName
+            )
+        }
 
         // Left the instance -> drop all per-user caches so nothing accumulates
         // in memory across a session (the reader writes NOTHING per-user to disk;
@@ -382,7 +404,6 @@ object InstanceRosterManager {
             return
         }
 
-        val self = VrchatAuthManager.getStoredUserId(context)
         val friends = friendIds(context)
         // Display order: YOU first, then friends, then everyone else; each by
         // join time (top-to-bottom). Enrichment walks this SAME order so

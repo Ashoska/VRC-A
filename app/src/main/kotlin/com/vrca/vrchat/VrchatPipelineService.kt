@@ -4523,7 +4523,76 @@ object VrchatPipelineState {
     val presenceFlow: StateFlow<VrchatAuthManager.VrcUserPresence?> = _presence.asStateFlow()
     var presence: VrchatAuthManager.VrcUserPresence?
         get() = _presence.value
-        set(value) { _presence.value = value }
+        // HEADSET (plan §9): the local user's location / world / instance / player
+        // count come from VRChat's LOG (InstanceRosterManager), not the REST API —
+        // the headset runs on the same device as VRChat, so the log is instant and
+        // more accurate (its count matches the in-game panel; instance HOPS are seen
+        // the moment the log writes `Joining wrld_…`). So on the headset every
+        // presence write (REST poll, WS event, seed) is patched here: the log values
+        // WIN for those four fields while profile fields (status/rank/pic) pass
+        // through untouched. Mobile (public/admin) is unchanged — no log there, REST
+        // drives presence as always. Passthrough when the log isn't active yet (no
+        // file access), so REST still works on the headset until the log takes over.
+        set(value) {
+            _presence.value = if (value != null && BuildConfig.IS_HEADSET_BUILD && headsetLogActive)
+                applyHeadsetLogOverride(value) else value
+        }
+
+    // --- headset log-derived self-presence (plan §9) ---
+    /** The headset has a working VRChat log driving self-presence. */
+    @Volatile var headsetLogActive = false
+    @Volatile var headsetLogInWorld = false
+    @Volatile var headsetLogLocation: String? = null
+    @Volatile var headsetLogWorldName: String? = null
+    @Volatile var headsetLogPlayerCount = 0
+
+    private fun applyHeadsetLogOverride(
+        p: VrchatAuthManager.VrcUserPresence
+    ): VrchatAuthManager.VrcUserPresence =
+        if (headsetLogInWorld)
+            p.copy(
+                location = headsetLogLocation ?: p.location,
+                worldName = headsetLogWorldName ?: p.worldName,
+                instancePlayerCount = headsetLogPlayerCount,
+                isOnlineInVRChat = true,
+                state = "online"
+            )
+        else
+            // Log works but we're between instances -> online, no instance.
+            p.copy(location = "offline", worldName = "", instancePlayerCount = 0)
+
+    /** Called by InstanceRosterManager on every log fold (headset only): updates
+     *  the log override fields and re-applies them to the current presence, seeding
+     *  a minimal presence from the log if REST hasn't produced one yet so the RPC
+     *  works from the log alone. `active=false` (no log access) makes presence a
+     *  passthrough so REST drives it. */
+    fun applyLogPresence(
+        active: Boolean, inWorld: Boolean,
+        location: String?, worldName: String?, playerCount: Int,
+        seedUserId: String, seedDisplayName: String
+    ) {
+        headsetLogActive = active
+        headsetLogInWorld = inWorld
+        headsetLogLocation = location
+        headsetLogWorldName = worldName
+        headsetLogPlayerCount = playerCount
+        val cur = _presence.value
+        if (cur == null) {
+            if (active && inWorld && seedUserId.isNotBlank()) {
+                _presence.value = applyHeadsetLogOverride(
+                    VrchatAuthManager.VrcUserPresence(
+                        userId = seedUserId, displayName = seedDisplayName,
+                        state = "online", status = "", statusDescription = "",
+                        location = location ?: "", platform = "", worldName = worldName ?: "",
+                        instancePlayerCount = playerCount, instanceCapacity = 0,
+                        currentAvatarThumbnailUrl = "", isOnlineInVRChat = true
+                    )
+                )
+            }
+        } else {
+            presence = cur // re-run the setter so the updated override is applied
+        }
+    }
 
     private val _statusPageState = MutableStateFlow<VrchatStatusPageData?>(null)
     val statusPageFlow: StateFlow<VrchatStatusPageData?> = _statusPageState.asStateFlow()
