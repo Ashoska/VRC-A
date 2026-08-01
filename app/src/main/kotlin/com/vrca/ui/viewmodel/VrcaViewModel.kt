@@ -3896,6 +3896,11 @@ class VrcaViewModel(
         return out
     }
 
+    /** Set the avatar's size (eye height in meters, VRChat clamps 0.2–5.0) by
+     *  sending `/avatar/eyeheight` OSC to VRChat (the configured target — loopback
+     *  on the headset). "Changing avi size" from the app. */
+    fun setAvatarEyeHeight(meters: Float) = remoteVrcaOsc.sendEyeHeight(meters)
+
     /**
      * No-repeat window for shuffle: how many recently-played positions to avoid,
      * scaled by the number of active lines. Small counts stay at 1 (just no

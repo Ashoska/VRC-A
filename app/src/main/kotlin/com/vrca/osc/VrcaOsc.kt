@@ -118,6 +118,23 @@ class VrcaOsc(
         }
     }
 
+    /** Set the local player's avatar size via VRChat's `/avatar/eyeheight` OSC
+     *  input (meters; VRChat clamps 0.2–5.0). A deliberate one-shot control, so it
+     *  bypasses the chatbox `blocked` gate. */
+    fun sendEyeHeight(meters: Float) {
+        val clamped = meters.coerceIn(0.2f, 5.0f)
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val sender = OSCPortOut(inetAddress, port)
+                sender.send(OSCMessage("/avatar/eyeheight", listOf(clamped)))
+                sender.close()
+                Log.d(TAG, "eyeheight -> $clamped")
+            } catch (e: Exception) {
+                Log.e(TAG, "eyeheight send failed", e)
+            }
+        }
+    }
+
     fun sendMessage(text: String, sendImmediately: Boolean, triggerSFX: Boolean) {
         sendOscMessage("/chatbox/input", listOf(withMinimalBackground(text), sendImmediately, triggerSFX))
         latestMsgTimestamp = System.currentTimeMillis()
