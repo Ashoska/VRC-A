@@ -153,6 +153,9 @@ class UserPreferencesRepository(private val context: Context) {
         val POSTS_EVENTS_BASELINE_V2     = booleanPreferencesKey("posts_events_baseline_v2")
         val CALENDAR_BASELINE_V3         = booleanPreferencesKey("calendar_baseline_v3")
         val POSTS_EVENTS_BASELINE_V4     = booleanPreferencesKey("posts_events_baseline_v4")
+        // The app versionCode we last silently baselined group posts/events at.
+        // Any update -> reseed once so a changed fetch window can't flood.
+        val NOTIF_BACKFILL_VERSION_CODE  = intPreferencesKey("notif_backfill_version_code")
 
         val TOS_ACCEPTED_VERSION  = intPreferencesKey("tos_accepted_version")
         val TOS_ACCEPTED_AT_EPOCH = longPreferencesKey("tos_accepted_at_epoch")
@@ -432,6 +435,7 @@ class UserPreferencesRepository(private val context: Context) {
     suspend fun savePostsEventsBaselineV2(v: Boolean)    = context.dataStore.edit { it[Keys.POSTS_EVENTS_BASELINE_V2]  = v }
     suspend fun saveCalendarBaselineV3(v: Boolean)       = context.dataStore.edit { it[Keys.CALENDAR_BASELINE_V3]      = v }
     suspend fun savePostsEventsBaselineV4(v: Boolean)    = context.dataStore.edit { it[Keys.POSTS_EVENTS_BASELINE_V4]  = v }
+    suspend fun saveNotifBackfillVersionCode(v: Int)     = context.dataStore.edit { it[Keys.NOTIF_BACKFILL_VERSION_CODE] = v }
 
     suspend fun saveSetupVrchatDone(v: Boolean) = context.dataStore.edit { it[Keys.SETUP_VRCHAT_DONE] = v }
     suspend fun saveSetupIpDone(v: Boolean)     = context.dataStore.edit { it[Keys.SETUP_IP_DONE]     = v }

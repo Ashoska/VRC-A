@@ -2526,6 +2526,9 @@ class VrchatPipelineService : Service() {
                 val repo = com.vrca.data.UserPreferencesRepository(this@VrchatPipelineService)
                 repo.saveNotifBackfillInitialized(true)
                 repo.savePostsEventsBaselineV2(true)
+                // Record the version we baselined at so the per-version reseed
+                // (below) fires only on a genuine later UPDATE, not this install.
+                repo.saveNotifBackfillVersionCode(BuildConfig.VERSION_CODE)
                 // Pre-seed V1/V2 notification IDs so they don't fire on first backfill
                 try {
                     val v1 = VrchatAuthManager.fetchPendingNotifications(this@VrchatPipelineService)
@@ -2591,6 +2594,25 @@ class VrchatPipelineService : Service() {
                 seedPostsAndEventsIntoExistingMap()
                 val v4Repo = com.vrca.data.UserPreferencesRepository(this@VrchatPipelineService)
                 v4Repo.savePostsEventsBaselineV4(true)
+            }
+
+            // Per-version reseed (generalises v2/v3/v4): ANY app update can change
+            // the fetch window / parsing and expose group posts+events that were
+            // never in the seen baseline, so the catch-up sweep fires them as "new"
+            // on the first post-update login — the tester-reported "announcement
+            // from <group> spam on login, on all branches". So whenever the app
+            // versionCode changes, silently re-baseline the CURRENT posts + past
+            // events window ONCE (merge, never overwrite) — only content created
+            // after the update then surfaces. This means we never have to hand-add
+            // another one-off baseline migration for a future window change.
+            val lastBackfillVersion = dataStore.data.first()[
+                androidx.datastore.preferences.core.intPreferencesKey("notif_backfill_version_code")
+            ] ?: 0
+            if (lastBackfillVersion != BuildConfig.VERSION_CODE) {
+                Log.i(TAG, "Per-version reseed: version $lastBackfillVersion -> ${BuildConfig.VERSION_CODE}, baselining posts+events silently")
+                seedPostsAndEventsIntoExistingMap()
+                val verRepo = com.vrca.data.UserPreferencesRepository(this@VrchatPipelineService)
+                verRepo.saveNotifBackfillVersionCode(BuildConfig.VERSION_CODE)
             }
 
             // V1 notifications: friend requests, invites, votetokick, messages
