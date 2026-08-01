@@ -51,7 +51,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 object InstanceRosterManager {
 
     private const val TAG = "InstanceRoster"
-    private const val POLL_MS = 2_000L
+    // Log tail cadence. This is LOCAL file I/O (no rate limit), so it's cheap to
+    // poll fast — 1s means a world hop shows in presence within ~1s of VRChat
+    // flushing the log line (vs the old 10s REST poll). The only downstream pace
+    // limit is the Discord RPC's own ~1.5s debounce (Discord rate-limits OP 3).
+    private const val POLL_MS = 1_000L
     private const val PREFS = "vrca_roster"
     private const val KEY_TREE_URI = "saf_tree_uri"
 
