@@ -3,8 +3,9 @@ name: Android CI
 on:
   push:
     # claude/** so every commit pushed to a claude working branch builds + uploads
-    # the APK artifacts (public/admin/headset, debug+release) — testable straight
-    # from the Actions run, no PR needed.
+    # the release APK artifacts (public/admin/headset) — testable straight from the
+    # Actions run, no PR needed. Debug APKs are intentionally NOT built (they only
+    # doubled build time; we install the signed release APKs).
     branches: [ "main", "VRC-A-Official", "claude/**" ]
   pull_request:
     branches: [ "main", "VRC-A-Official" ]
@@ -60,30 +61,14 @@ jobs:
 
           echo "Signing files created."
 
-      - name: Build Public Debug APK
-        run: ./gradlew :app:assemblePublicAppDebug
-
       - name: Build Public Release APK
         run: ./gradlew :app:assemblePublicAppRelease
-
-      - name: Build Admin Debug APK
-        run: ./gradlew :app:assembleAdminAppDebug
 
       - name: Build Admin Release APK
         run: ./gradlew :app:assembleAdminAppRelease
 
-      - name: Build Headset Debug APK
-        run: ./gradlew :app:assembleHeadsetAppDebug
-
       - name: Build Headset Release APK
         run: ./gradlew :app:assembleHeadsetAppRelease
-
-      - name: Upload Public Debug APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: public-debug
-          path: app/build/outputs/apk/publicApp/debug/*.apk
-          retention-days: 3
 
       - name: Upload Public Release APK
         uses: actions/upload-artifact@v4
@@ -92,25 +77,11 @@ jobs:
           path: app/build/outputs/apk/publicApp/release/*.apk
           retention-days: 3
 
-      - name: Upload Admin Debug APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: admin-debug
-          path: app/build/outputs/apk/adminApp/debug/*.apk
-          retention-days: 3
-
       - name: Upload Admin Release APK
         uses: actions/upload-artifact@v4
         with:
           name: admin-release
           path: app/build/outputs/apk/adminApp/release/*.apk
-          retention-days: 3
-
-      - name: Upload Headset Debug APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: headset-debug
-          path: app/build/outputs/apk/headsetApp/debug/*.apk
           retention-days: 3
 
       - name: Upload Headset Release APK
