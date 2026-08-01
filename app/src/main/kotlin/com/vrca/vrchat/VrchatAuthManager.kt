@@ -1154,7 +1154,10 @@ object VrchatAuthManager {
         val trustRank: String,
         val status: String,
         val statusDescription: String,
-        val location: String
+        val location: String,
+        /** VRChat+ profile icon, else the worn avatar's thumbnail. For the roster
+         *  row avatar (rides the SAME /users/{id} call — no extra request). */
+        val profilePicUrl: String = ""
     )
 
     suspend fun fetchUserInfo(context: Context, userId: String): VrcUserInfo? = withContext(Dispatchers.IO) {
@@ -1178,7 +1181,12 @@ object VrchatAuthManager {
                 trustRank = extractTrustRankFromTags(j.optJSONArray("tags")),
                 status = j.optString("status", ""),
                 statusDescription = j.optString("statusDescription", ""),
-                location = j.optString("location", "")
+                location = j.optString("location", ""),
+                // VRChat+ icon (iconUrl/userIcon) first; fall back to the worn
+                // avatar's thumbnail so everyone has SOMETHING to show.
+                profilePicUrl = j.optString("iconUrl", "")
+                    .ifBlank { j.optString("userIcon", "") }
+                    .ifBlank { j.optString("currentAvatarThumbnailImageUrl", "") }
             )
         } catch (e: Exception) {
             Log.w(TAG, "fetchUserInfo($userId) failed", e)

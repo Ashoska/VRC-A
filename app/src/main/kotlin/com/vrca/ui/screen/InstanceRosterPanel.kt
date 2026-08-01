@@ -30,6 +30,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
@@ -177,18 +179,36 @@ private fun HintState(text: String) {
 
 @Composable
 private fun MemberRow(m: InstanceRosterManager.Member) {
+    val ctx = LocalContext.current
     Row(
         Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // Initial-circle avatar (no pfp fetch — same choice as the admin UI).
-        Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surface, modifier = Modifier.size(30.dp)) {
-            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                Text(
-                    m.displayName.firstOrNull()?.uppercase() ?: "?",
-                    style = MaterialTheme.typography.labelMedium
-                )
+        // Avatar: the VRChat pic when we have one, loaded through the session-authed
+        // loader with DISK cache DISABLED — it lives only in Coil's bounded memory
+        // cache (temporary, evicts when the user leaves / on memory pressure), so
+        // nothing builds up on disk. Initial-circle fallback while blank/loading.
+        if (m.profilePicUrl.isNotBlank()) {
+            coil.compose.AsyncImage(
+                model = coil.request.ImageRequest.Builder(ctx)
+                    .data(m.profilePicUrl)
+                    .diskCachePolicy(coil.request.CachePolicy.DISABLED)
+                    .crossfade(true)
+                    .build(),
+                imageLoader = com.vrca.admin.VrchatImageLoader.get(ctx),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.size(30.dp).clip(CircleShape)
+            )
+        } else {
+            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surface, modifier = Modifier.size(30.dp)) {
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    Text(
+                        m.displayName.firstOrNull()?.uppercase() ?: "?",
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
             }
         }
         Text(

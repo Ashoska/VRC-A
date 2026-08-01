@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.os.FileObserver
 import android.provider.DocumentsContract
 import android.util.Log
 import com.vrca.BuildConfig
@@ -80,7 +81,10 @@ object InstanceRosterManager {
         /** In the user's VRChat friends list — sorted near the top, shown yellow. */
         val isFriend: Boolean = false,
         /** The local user themselves — pinned to the very top, shown purple. */
-        val isSelf: Boolean = false
+        val isSelf: Boolean = false,
+        /** VRChat+ icon / worn-avatar thumbnail for the row (temporary, evicts on
+         *  leave). Self reuses the VRChat tab's pic; others come from the API. */
+        val profilePicUrl: String = ""
     )
 
     data class RosterUi(
@@ -98,12 +102,47 @@ object InstanceRosterManager {
     private val started = AtomicBoolean(false)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    // Near-instant hop detection: a FileObserver on the direct-file log path wakes
+    // the loop the moment VRChat writes a line (no extra permission — it rides the
+    // All-files access we already have; uses LESS cpu than polling since it sleeps
+    // until a write). The 1s poll stays as the fallback and is the ONLY path for
+    // SAF content URIs, which can't be watched.
+    private val changeSignal =
+        kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.CONFLATED)
+    @Volatile private var observer: FileObserver? = null
+    @Volatile private var observedPath: String? = null
+
+    @Suppress("DEPRECATION") // String-path ctor for minSdk 26 (File ctor is API 29+)
+    private fun ensureObserver(ref: LogRef) {
+        if (ref.uri != null) { stopObserver(); return } // SAF -> poll only
+        if (observedPath == ref.id && observer != null) return
+        stopObserver()
+        observer = object : FileObserver(ref.id, FileObserver.MODIFY or FileObserver.CLOSE_WRITE) {
+            override fun onEvent(event: Int, path: String?) { changeSignal.trySend(Unit) }
+        }.also { runCatching { it.startWatching() } }
+        observedPath = ref.id
+    }
+
+    private fun stopObserver() {
+        observer?.let { runCatching { it.stopWatching() } }
+        observer = null; observedPath = null
+    }
+
+    /** Wake on a log write (FileObserver) OR after POLL_MS (fallback / SAF). */
+    private suspend fun waitForChange() {
+        kotlinx.coroutines.withTimeoutOrNull(POLL_MS) { changeSignal.receive() }
+    }
+
     // userId -> pretty platform. A key is only cached on a SUCCESSFUL lookup
     // (even if the value is "" = genuinely unknown); a FAILED lookup (429 /
     // network) is left uncached so the 2s publish loop re-queues it — the fix
     // for "non-friends never show a platform" (they're fetched after friends,
     // so they're the ones that hit VRChat's rate limit on the initial burst).
     private val platformCache = ConcurrentHashMap<String, String>()
+    // Per-user profile-pic URL (from the SAME /users/{id} call as platform).
+    // Cleared on leaving an instance so nothing lingers; the images themselves
+    // load memory-only (no disk) so they're truly temporary — see the panel.
+    private val pfpCache = ConcurrentHashMap<String, String>()
     private val enrichInFlight = ConcurrentHashMap.newKeySet<String>()
     private val enrichAttempts = ConcurrentHashMap<String, Int>()
     // Per-user platform (/users/{id} -> last_platform) is the ONLY source for a
@@ -291,6 +330,7 @@ object InstanceRosterManager {
             if (!hasAnyAccess(context)) {
                 // No log access -> let REST drive presence on the headset.
                 VrchatPipelineState.headsetLogActive = false
+                stopObserver()
                 _flow.value = _flow.value.copy(status = Status.NEEDS_PERMISSION)
                 delay(POLL_MS); continue
             }
@@ -298,6 +338,7 @@ object InstanceRosterManager {
             val newest = findNewestLog(context)
             if (newest == null) {
                 VrchatPipelineState.headsetLogActive = false
+                stopObserver()
                 _flow.value = RosterUi(status = Status.NO_LOG)
                 currentId = null; offset = 0L; state = VrcLogParser.InstanceState()
                 delay(POLL_MS); continue
@@ -307,6 +348,8 @@ object InstanceRosterManager {
             if (currentId != newest.id) {
                 currentId = newest.id; offset = 0L; state = VrcLogParser.InstanceState()
             }
+            // Watch the current log for instant wakeups (direct-file only).
+            ensureObserver(newest)
 
             try {
                 val len = newest.size
@@ -318,13 +361,14 @@ object InstanceRosterManager {
             } catch (e: Exception) {
                 Log.w(TAG, "read failed for ${newest.id}", e)
                 VrchatPipelineState.headsetLogActive = false
+                stopObserver()
                 _flow.value = RosterUi(status = Status.NO_LOG, logPath = newest.id)
                 currentId = null; offset = 0L; state = VrcLogParser.InstanceState()
                 delay(POLL_MS); continue
             }
 
             publish(context, state, newest.id)
-            delay(POLL_MS)
+            waitForChange()
         }
     }
 
@@ -400,7 +444,7 @@ object InstanceRosterManager {
         // in memory across a session (the reader writes NOTHING per-user to disk;
         // this just keeps RAM bounded to the current instance).
         if (!inWorld) {
-            platformCache.clear(); enrichAttempts.clear(); enrichInFlight.clear()
+            platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear()
             _flow.value = RosterUi(
                 status = Status.IDLE, worldName = state.worldName,
                 location = state.location, members = emptyList(), logPath = logPath
@@ -419,15 +463,25 @@ object InstanceRosterManager {
             else -> 2
         }
         val ordered = state.roster.values.sortedWith(compareBy({ rank(it) }, { it.joinedAtMs }))
+        // Self reuses the VRChat tab's already-loaded pic/platform (no fetch).
+        val selfPresence = VrchatPipelineState.presence
         val members = ordered.map { e ->
-            val plat = e.userId?.let { platformCache[it] } ?: e.platform
+            val isSelfMember = e.userId != null && e.userId == self
+            val plat = when {
+                isSelfMember -> VrchatAuthManager.prettyPlatform(selfPresence?.platform ?: "")
+                    .ifBlank { e.userId?.let { platformCache[it] } ?: "" }
+                else -> e.userId?.let { platformCache[it] } ?: e.platform
+            }
+            val pfp = if (isSelfMember) (selfPresence?.profilePicUrl ?: "")
+                      else e.userId?.let { pfpCache[it] } ?: ""
             Member(
                 displayName = e.displayName,
                 userId = e.userId,
                 platform = plat,
                 avatarName = e.avatarName,
                 isFriend = e.userId != null && friends.contains(e.userId),
-                isSelf = e.userId != null && e.userId == self
+                isSelf = isSelfMember,
+                profilePicUrl = pfp
             )
         }
         _flow.value = RosterUi(
@@ -438,9 +492,10 @@ object InstanceRosterManager {
             logPath = logPath
         )
 
-        // One ordered enrichment pass at a time (single-flight).
+        // One ordered enrichment pass at a time (single-flight). Skip self — its
+        // platform + pic come from the VRChat tab's presence, no fetch needed.
         val needs = ordered.mapNotNull { it.userId }
-            .filter { !platformCache.containsKey(it) && enrichInFlight.add(it) }
+            .filter { it != self && !platformCache.containsKey(it) && enrichInFlight.add(it) }
         if (needs.isNotEmpty() && enriching.compareAndSet(false, true)) {
             scope.launch { try { enrichPlatforms(context, needs) } finally { enriching.set(false) } }
         } else if (needs.isNotEmpty()) {
@@ -460,15 +515,16 @@ object InstanceRosterManager {
 
             if (info != null) {
                 // Success — cache the resolved platform (may be "" if the user
-                // object genuinely has no platform) and republish that row.
+                // object genuinely has no platform) + profile pic, republish row.
                 val plat = VrchatAuthManager.prettyPlatform(info.platform)
                 platformCache[id] = plat
+                pfpCache[id] = info.profilePicUrl
                 enrichAttempts.remove(id)
                 _flow.value.let { cur ->
                     if (cur.members.any { it.userId == id }) {
                         _flow.value = cur.copy(
                             members = cur.members.map { m ->
-                                if (m.userId == id) m.copy(platform = plat) else m
+                                if (m.userId == id) m.copy(platform = plat, profilePicUrl = info.profilePicUrl) else m
                             }
                         )
                     }
