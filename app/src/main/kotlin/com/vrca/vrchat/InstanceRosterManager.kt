@@ -84,9 +84,7 @@ object InstanceRosterManager {
         val location: String? = null,
         val members: List<Member> = emptyList(),
         /** The log file we're tailing (diagnostics / device confirmation). */
-        val logPath: String? = null,
-        /** TEMP: raw platform-fetch result for an unresolved non-friend. */
-        val diag: String = ""
+        val logPath: String? = null
     )
 
     private val _flow = MutableStateFlow(RosterUi())
@@ -112,8 +110,8 @@ object InstanceRosterManager {
     // MANY attempts — a genuinely-dead id caps out instead of looping forever;
     // caches clear on leaving the instance regardless).
     private const val MAX_ENRICH_ATTEMPTS = 40
-    private const val ENRICH_PACE_MS = 1200L        // matches NEXUS's proven ~1.3s gap
-    private const val ENRICH_FAIL_BACKOFF_MS = 5000L // back off hard on a 429
+    private const val ENRICH_PACE_MS = 500L          // gentle gradual fill (top-to-bottom)
+    private const val ENRICH_FAIL_BACKOFF_MS = 5000L // back off hard on a 429 (insurance)
     // Single-flight guard so platforms resolve as ONE ordered top-to-bottom pass
     // (not several concurrent passes that would race the rate limit).
     private val enriching = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -412,8 +410,7 @@ object InstanceRosterManager {
             worldName = state.worldName,
             location = state.location,
             members = members,
-            logPath = logPath,
-            diag = _flow.value.diag // TEMP: preserve the platform-fetch diagnostic
+            logPath = logPath
         )
 
         // One ordered enrichment pass at a time (single-flight).
@@ -435,16 +432,6 @@ object InstanceRosterManager {
                 null
             }
             enrichInFlight.remove(id)
-
-            // TEMP diagnostic: surface the raw fetch result for a NON-friend that
-            // didn't resolve a platform, so one screenshot tells us the real cause.
-            val isFriendId = friendIdsSnapshot.contains(id)
-            val resolvedBlank = info == null || VrchatAuthManager.prettyPlatform(info.platform).isBlank()
-            if (!isFriendId && resolvedBlank) {
-                _flow.value = _flow.value.copy(
-                    diag = "…${id.takeLast(6)} ${VrchatAuthManager.lastUserFetchDiag}"
-                )
-            }
 
             if (info != null) {
                 // Success — cache the resolved platform (may be "" if the user
