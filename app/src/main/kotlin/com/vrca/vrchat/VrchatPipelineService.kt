@@ -210,6 +210,11 @@ class VrchatPipelineService : Service() {
     private var announcementsListener: ListenerRegistration? = null
     private var seenAnnouncementIds = mutableSetOf<String>()
     private var announcementsInitialSnapshotDone = false
+    // Wall-clock ms of app install / first connect. Group announcements created
+    // BEFORE this are ignored forever (so a later fetch-window growth can't flood
+    // old ones), while post-install ones still fire even if missed. 0 = not loaded
+    // yet -> no filtering. Loaded via ensureInstallTime().
+    @Volatile private var installTimeMs: Long = 0L
 
     // VRChat status page polling
     private var statusPageJob: Job? = null
@@ -2346,6 +2351,8 @@ class VrchatPipelineService : Service() {
             else "https://vrchat.com/home/notifications"
         when {
             v2Type.contains("announcement", true) || v2Type.contains("post", true) -> {
+                // Ignore announcements made before install (pre-install ones never fire).
+                if (isPreInstallAnnouncement(v2CreatedMs)) return
                 if (groupId.isNotBlank() && isContentFingerprintSeen(groupId, v2Title, message)) {
                     Log.d(TAG, "V2 announcement skipped (REST already fired): group=$groupId title=$v2Title")
                     return
@@ -2514,6 +2521,7 @@ class VrchatPipelineService : Service() {
 
     private suspend fun backfillOfflineNotifications() {
         try {
+            ensureInstallTime()
             // First-run guard: if this is the very first pipeline connect ever
             // (no prior backfill has run), seed the per-group announcement
             // timestamps silently and skip firing any V1/V2 notifications.
@@ -2526,9 +2534,10 @@ class VrchatPipelineService : Service() {
                 val repo = com.vrca.data.UserPreferencesRepository(this@VrchatPipelineService)
                 repo.saveNotifBackfillInitialized(true)
                 repo.savePostsEventsBaselineV2(true)
-                // Record the version we baselined at so the per-version reseed
-                // (below) fires only on a genuine later UPDATE, not this install.
-                repo.saveNotifBackfillVersionCode(BuildConfig.VERSION_CODE)
+                // Anchor the install-time cutoff (fresh install) so only group
+                // announcements created AFTER now ever fire — pre-install ones
+                // are ignored forever, no matter how the fetch window later grows.
+                repo.saveNotifInstallTimeMs(System.currentTimeMillis())
                 // Pre-seed V1/V2 notification IDs so they don't fire on first backfill
                 try {
                     val v1 = VrchatAuthManager.fetchPendingNotifications(this@VrchatPipelineService)
@@ -2594,25 +2603,6 @@ class VrchatPipelineService : Service() {
                 seedPostsAndEventsIntoExistingMap()
                 val v4Repo = com.vrca.data.UserPreferencesRepository(this@VrchatPipelineService)
                 v4Repo.savePostsEventsBaselineV4(true)
-            }
-
-            // Per-version reseed (generalises v2/v3/v4): ANY app update can change
-            // the fetch window / parsing and expose group posts+events that were
-            // never in the seen baseline, so the catch-up sweep fires them as "new"
-            // on the first post-update login — the tester-reported "announcement
-            // from <group> spam on login, on all branches". So whenever the app
-            // versionCode changes, silently re-baseline the CURRENT posts + past
-            // events window ONCE (merge, never overwrite) — only content created
-            // after the update then surfaces. This means we never have to hand-add
-            // another one-off baseline migration for a future window change.
-            val lastBackfillVersion = dataStore.data.first()[
-                androidx.datastore.preferences.core.intPreferencesKey("notif_backfill_version_code")
-            ] ?: 0
-            if (lastBackfillVersion != BuildConfig.VERSION_CODE) {
-                Log.i(TAG, "Per-version reseed: version $lastBackfillVersion -> ${BuildConfig.VERSION_CODE}, baselining posts+events silently")
-                seedPostsAndEventsIntoExistingMap()
-                val verRepo = com.vrca.data.UserPreferencesRepository(this@VrchatPipelineService)
-                verRepo.saveNotifBackfillVersionCode(BuildConfig.VERSION_CODE)
             }
 
             // V1 notifications: friend requests, invites, votetokick, messages
@@ -2786,6 +2776,13 @@ class VrchatPipelineService : Service() {
                                 val postCreatedMs = parseVrcTimestampMs(postCreatedAt)
                                 val postSeenKey = "${groupId}_post_$postId"
                                 val postLastSeen = seenMap.optString(postSeenKey, "")
+                                // Ignore announcements made BEFORE install (record
+                                // as seen, never fire) — a later fetch-window growth
+                                // can't flood old posts; post-install ones still fire.
+                                if (isPreInstallAnnouncement(postCreatedMs)) {
+                                    updatedMap.put(postSeenKey, postCreatedAt)
+                                    continue
+                                }
                                 // Fire when there's ANY content (text or title) — a
                                 // title-only announcement was previously skipped.
                                 if (postCreatedAt.isNotBlank() && postCreatedAt != postLastSeen &&
@@ -2920,6 +2917,26 @@ class VrchatPipelineService : Service() {
             Log.w(TAG, "seedGroupBaselineSilently: group $groupId failed", e)
         }
     }
+
+    /** Load the install-time cutoff once. For an existing user with none recorded
+     *  (pre-fix), anchor NOW so their current backlog is ignored once and only new
+     *  announcements fire thereafter. */
+    private suspend fun ensureInstallTime() {
+        if (installTimeMs > 0L) return
+        val stored = dataStore.data.first()[
+            androidx.datastore.preferences.core.longPreferencesKey("notif_install_time_ms")
+        ] ?: 0L
+        installTimeMs = if (stored > 0L) stored else {
+            val now = System.currentTimeMillis()
+            com.vrca.data.UserPreferencesRepository(this@VrchatPipelineService).saveNotifInstallTimeMs(now)
+            now
+        }
+    }
+
+    /** Group announcement created before install -> ignore forever. A 0/unknown
+     *  timestamp (or unloaded cutoff) fires as before. */
+    private fun isPreInstallAnnouncement(createdMs: Long): Boolean =
+        createdMs in 1 until installTimeMs
 
     private suspend fun seedBackfillBaseline() {
         try {
@@ -3522,6 +3539,7 @@ class VrchatPipelineService : Service() {
 
     private suspend fun pollGroupAnnouncements() {
         if (!VrchatAuthManager.isLoggedIn(this)) return
+        ensureInstallTime()
 
         // Retry sweep of pending notification-v2 (events, announcements, role
         // changes). The one-shot connect backfill can miss these on a transient
@@ -3590,6 +3608,12 @@ class VrchatPipelineService : Service() {
                         val postCreatedMs = parseVrcTimestampMs(postCreatedAt)
                         val postSeenKey = "${groupId}_post_$postId"
                         val postLastSeen = seenMap.optString(postSeenKey, "")
+                        // Ignore pre-install announcements (record seen, never fire).
+                        if (isPreInstallAnnouncement(postCreatedMs)) {
+                            updatedMap.put(postSeenKey, postCreatedAt)
+                            changed = true
+                            continue
+                        }
                         if (postCreatedAt.isNotBlank() && postCreatedAt != postLastSeen &&
                             (postText.isNotBlank() || rawPostTitle.isNotBlank())) {
                             // Cross-path dedup (same as the backfill site): if the live
