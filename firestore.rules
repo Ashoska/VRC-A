@@ -74,6 +74,8 @@ service cloud.firestore {
         // Master OSC Start/Stop gate (whether the chatbox is actually transmitting) —
         // display-only for the admin detail view; self-written, admin never sets it.
         "oscSending",
+        // Headset log-derived instance roster (JSON) — self-written, admin reads only.
+        "instanceRoster",
 
         // Time
         "timeEnabled", "timeMode",

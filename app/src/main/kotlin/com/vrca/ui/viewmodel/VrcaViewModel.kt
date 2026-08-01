@@ -545,10 +545,32 @@ class VrcaViewModel(
         "versionName" to BuildConfig.VERSION_NAME,
         "versionCode" to BuildConfig.VERSION_CODE,
         "lastReportedTime" to if (timeEnabled) currentTimeString() else "",
+        // Headset log-derived instance roster (who's in the user's world), so the
+        // admin can see it remotely. JSON string; empty off the headset / not in a
+        // world. Rides this existing watched write — zero extra Firestore cost.
+        "instanceRoster" to buildInstanceRosterJson(),
         "lastTimeUpdateAt" to FieldValue.serverTimestamp(),
         "lastActiveAt" to FieldValue.serverTimestamp(),
         "lastSeenAt" to FieldValue.serverTimestamp()
     )
+
+    /** Compact JSON of the current instance roster (headset only, when in a world).
+     *  Read by the admin detail view. Capped so a huge instance can't bloat the doc. */
+    private fun buildInstanceRosterJson(): String {
+        if (!BuildConfig.IS_HEADSET_BUILD) return ""
+        val ui = com.vrca.vrchat.InstanceRosterManager.flow.value
+        if (ui.status != com.vrca.vrchat.InstanceRosterManager.Status.LIVE || ui.members.isEmpty()) return ""
+        val arr = org.json.JSONArray()
+        ui.members.take(80).forEach { m ->
+            arr.put(org.json.JSONObject().apply {
+                put("name", m.displayName)
+                if (m.platform.isNotBlank()) put("platform", m.platform)
+                if (m.isFriend) put("friend", true)
+                if (m.isSelf) put("self", true)
+            })
+        }
+        return arr.toString()
+    }
 
     /**
      * \u2705 UID mapping per YOUR RULES:

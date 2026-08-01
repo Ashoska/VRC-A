@@ -75,6 +75,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.material.icons.filled.Group
 import androidx.compose.ui.unit.dp
 import com.google.firebase.Timestamp
 import com.google.firebase.firestore.FieldValue
@@ -187,7 +188,9 @@ internal data class UserDetail(
     val killSignal: Timestamp? = null,
     // Master OSC Start/Stop gate — whether the chatbox is ACTUALLY transmitting to
     // VRChat right now (rides the watched 10s loop / hourly delta; no bonus read).
-    val oscSending: Boolean = false
+    val oscSending: Boolean = false,
+    // Headset log-derived instance roster (JSON array of {name,platform,friend,self}).
+    val instanceRoster: String = ""
 )
 
 internal data class ModerationTarget(
@@ -473,7 +476,8 @@ internal fun UsersTab(
             isOnlineInApp = snap.getBoolean("isOnlineInApp") ?: false,
             offlineAt = snap.getTimestamp("offlineAt"),
             killSignal = snap.getTimestamp("killSignal"),
-            oscSending = snap.getBoolean("oscSending") ?: false
+            oscSending = snap.getBoolean("oscSending") ?: false,
+            instanceRoster = s("instanceRoster")
         )
     }
     // Selected user detail: Phase 3 read model — the ONLY live read in the admin
@@ -1170,6 +1174,48 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                     })
                 // (No separate "Synced" line — liveness is the single "last seen"
                 // field in the identity header.)
+            }
+        }
+    }
+
+    // ── Instance roster (headset log-derived) ───────────────────────
+    if (d.instanceRoster.isNotBlank()) {
+        val members = remember(d.instanceRoster) {
+            runCatching {
+                val arr = org.json.JSONArray(d.instanceRoster)
+                (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
+            }.getOrElse { emptyList() }
+        }
+        if (members.isNotEmpty()) {
+            ElevatedCard {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    AdminCardHeader("Instance roster (${members.size})", Icons.Filled.Group, AdminTone.Info)
+                    members.take(60).forEach { m ->
+                        val name = m.optString("name", "")
+                        val platform = m.optString("platform", "")
+                        val self = m.optBoolean("self", false)
+                        val friend = m.optBoolean("friend", false)
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                name,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = when {
+                                    self -> androidx.compose.ui.graphics.Color(0xFFB388FF)
+                                    friend -> androidx.compose.ui.graphics.Color(0xFFFFD54F)
+                                    else -> MaterialTheme.colorScheme.onSurface
+                                },
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (platform.isNotBlank()) StatusPill(platform, AdminTone.Neutral)
+                        }
+                    }
+                }
             }
         }
     }
