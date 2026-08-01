@@ -3066,21 +3066,19 @@ class VrcaViewModel(
     // System intents
     // =========================
     fun notificationAccessIntent(): Intent {
-        // API 30+ (Quest is API 32+): open THIS app's own notification-listener
-        // detail screen directly (the "Device & app notifications" page with the
-        // Allow toggle) instead of the app LIST — the list intent doesn't land
-        // right on Quest, which is why now-playing looked broken there. Falls back
-        // to the list intent if the detail screen isn't resolvable.
-        if (android.os.Build.VERSION.SDK_INT >= 30) {
-            val component = android.content.ComponentName(
-                app, com.vrca.nowplaying.NowPlayingListenerService::class.java
-            ).flattenToString()
-            val detail = Intent(Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS)
-                .putExtra(Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME, component)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            if (detail.resolveActivity(app.packageManager) != null) return detail
-        }
+        // Open the notification-listener settings LIST but DEEP-LINK to VRC-A's own
+        // entry via the Android Settings fragment-args extras — this is exactly
+        // what VRC-NEXUS does, and on Quest it lands on VRC-A's per-app "Device &
+        // app notifications" page with the Allow toggle (the plain list / the
+        // detail intent don't land right on Horizon OS). Harmless on phones (they
+        // just highlight the row).
+        val component = android.content.ComponentName(
+            app, com.vrca.nowplaying.NowPlayingListenerService::class.java
+        ).flattenToString()
+        val args = android.os.Bundle().apply { putString(":settings:fragment_args_key", component) }
         return Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+            .putExtra(":settings:fragment_args_key", component)
+            .putExtra(":settings:show_fragment_args", args)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
 
