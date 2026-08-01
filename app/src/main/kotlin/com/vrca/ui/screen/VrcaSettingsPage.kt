@@ -204,6 +204,16 @@ internal fun SettingsPage(
                 granted = batteryExempt
             ) { ctx.startActivity(vm.batteryOptimizationIntent()) }
 
+            // Notification access — required for Now Playing (Spotify/YouTube/YT Music)
+            // on EVERY build. On Quest this opens the app's own notification page.
+            SettingsRow(
+                icon = Icons.Filled.MusicNote,
+                title = "Notification access",
+                subtitle = "Lets VRC-A read Now Playing. On Quest this opens VRC-A's notification page — turn it on there.",
+                primary = "Open",
+                granted = listenerGranted
+            ) { runCatching { ctx.startActivity(vm.notificationAccessIntent()) } }
+
             // Install-updates (unknown sources) — not on the headset: it's
             // distributed through the Meta store, so no in-app APK install.
             if (!BuildConfig.IS_HEADSET_BUILD) {

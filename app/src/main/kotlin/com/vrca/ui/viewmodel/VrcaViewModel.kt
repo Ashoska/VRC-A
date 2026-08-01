@@ -3065,9 +3065,24 @@ class VrcaViewModel(
     // =========================
     // System intents
     // =========================
-    fun notificationAccessIntent(): Intent =
-        Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+    fun notificationAccessIntent(): Intent {
+        // API 30+ (Quest is API 32+): open THIS app's own notification-listener
+        // detail screen directly (the "Device & app notifications" page with the
+        // Allow toggle) instead of the app LIST — the list intent doesn't land
+        // right on Quest, which is why now-playing looked broken there. Falls back
+        // to the list intent if the detail screen isn't resolvable.
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            val component = android.content.ComponentName(
+                app, com.vrca.nowplaying.NowPlayingListenerService::class.java
+            ).flattenToString()
+            val detail = Intent(Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS)
+                .putExtra(Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME, component)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (detail.resolveActivity(app.packageManager) != null) return detail
+        }
+        return Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
 
     fun overlayPermissionIntent(): Intent =
         Intent(
