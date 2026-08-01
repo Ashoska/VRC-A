@@ -660,6 +660,40 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
                 TextButton(onClick = { showDiscordLogin = true }) { Text("Sign in to Discord again") }
             }
         }
+
+        // Spotify row — official-API media detection (replaces the notification
+        // listener). Connect once via OAuth; we then poll currently-playing.
+        val spotifyConnected by com.vrca.spotify.SpotifyAuthManager.connectedFlow.collectAsState()
+        androidx.compose.runtime.LaunchedEffect(Unit) {
+            com.vrca.spotify.SpotifyAuthManager.refreshConnectedState(ctx)
+        }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Spotify", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    when {
+                        !com.vrca.spotify.SpotifyAuthManager.isConfigured() -> "Not set up yet"
+                        spotifyConnected -> "Connected — Now Playing from Spotify"
+                        else -> "Not connected"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (spotifyConnected) {
+                TextButton(onClick = { com.vrca.spotify.SpotifyAuthManager.logout(ctx) }) { Text("Disconnect") }
+            } else if (com.vrca.spotify.SpotifyAuthManager.isConfigured()) {
+                TextButton(onClick = {
+                    runCatching {
+                        val url = com.vrca.spotify.SpotifyAuthManager.buildAuthUrl(ctx)
+                        ctx.startActivity(
+                            android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
+                                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    }
+                }) { Text("Connect") }
+            }
+        }
     }
 
     // Discord risk consent (moved with the card; consent persists once).

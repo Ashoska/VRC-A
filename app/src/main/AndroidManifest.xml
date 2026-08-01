@@ -108,6 +108,21 @@
             </intent-filter>
         </activity>
 
+        <!-- Spotify OAuth redirect catcher (vrca://spotify-callback). -->
+        <activity
+            android:name="com.vrca.spotify.SpotifyRedirectActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="vrca" android:host="spotify-callback" />
+            </intent-filter>
+        </activity>
+
         <!-- FileProvider for APK installs -->
         <provider
             android:name="androidx.core.content.FileProvider"
