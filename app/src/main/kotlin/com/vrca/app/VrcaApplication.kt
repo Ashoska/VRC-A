@@ -86,6 +86,13 @@ class VrcaApplication : Application(), ViewModelStoreOwner {
         // Lifetime chatbox-send counter (boot screen stat).
         ChatboxStats.attach(applicationContext)
 
+        // Headset: listen for VRChat's OSC output (avatar params) so the chatbox
+        // can use {mute}/{afk}/{movement}/{scale}/{param:Name}. OSC-out is loopback,
+        // so this only receives on the same device as VRChat (the Quest).
+        if (com.vrca.BuildConfig.IS_HEADSET_BUILD) {
+            com.vrca.osc.VrcaOscReceiver.start()
+        }
+
         // Cap Firestore offline cache (default is 100 MB — far more than needed).
         FirebaseFirestore.getInstance().firestoreSettings =
             FirebaseFirestoreSettings.Builder()

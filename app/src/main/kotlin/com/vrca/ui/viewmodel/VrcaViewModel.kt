@@ -3875,6 +3875,24 @@ class VrcaViewModel(
             } else ""
             out = out.replace(Regex("\\{players\\}", RegexOption.IGNORE_CASE), players)
         }
+        // OSC-in tokens (headset — VrcaOscState is fed by VrcaOscReceiver). Empty
+        // when we haven't received that param (mobile / OSC off).
+        if (out.contains("{mute}", ignoreCase = true))
+            out = out.replace(Regex("\\{mute\\}", RegexOption.IGNORE_CASE),
+                if (com.vrca.osc.VrcaOscState.muteSelf) "Muted" else "")
+        if (out.contains("{afk}", ignoreCase = true))
+            out = out.replace(Regex("\\{afk\\}", RegexOption.IGNORE_CASE),
+                if (com.vrca.osc.VrcaOscState.afk) "AFK" else "")
+        if (out.contains("{movement}", ignoreCase = true))
+            out = out.replace(Regex("\\{movement\\}", RegexOption.IGNORE_CASE),
+                if (com.vrca.osc.VrcaOscState.moving) "Moving" else "Still")
+        if (out.contains("{scale}", ignoreCase = true))
+            out = out.replace(Regex("\\{scale\\}", RegexOption.IGNORE_CASE),
+                com.vrca.osc.VrcaOscState.scaleLabel)
+        if (out.contains("{param:", ignoreCase = true))
+            out = Regex("\\{param:([^}]+)\\}", RegexOption.IGNORE_CASE).replace(out) { m ->
+                com.vrca.osc.VrcaOscState.rawString(m.groupValues[1].trim())
+            }
         return out
     }
 
