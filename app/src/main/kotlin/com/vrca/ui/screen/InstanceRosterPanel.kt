@@ -94,6 +94,17 @@ fun InstanceRosterPanel(modifier: Modifier = Modifier) {
                 )
             }
 
+            // TEMP diagnostic: shows the raw /users/{id} result for an unresolved
+            // non-friend so we can see why platform stays blank. Remove later.
+            if (ui.diag.isNotBlank()) {
+                Text(
+                    ui.diag,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+
             when (ui.status) {
                 InstanceRosterManager.Status.NEEDS_PERMISSION -> AccessState(
                     ctx = ctx,

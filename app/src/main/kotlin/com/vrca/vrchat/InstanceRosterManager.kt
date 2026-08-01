@@ -84,7 +84,9 @@ object InstanceRosterManager {
         val location: String? = null,
         val members: List<Member> = emptyList(),
         /** The log file we're tailing (diagnostics / device confirmation). */
-        val logPath: String? = null
+        val logPath: String? = null,
+        /** TEMP: raw platform-fetch result for an unresolved non-friend. */
+        val diag: String = ""
     )
 
     private val _flow = MutableStateFlow(RosterUi())
@@ -410,7 +412,8 @@ object InstanceRosterManager {
             worldName = state.worldName,
             location = state.location,
             members = members,
-            logPath = logPath
+            logPath = logPath,
+            diag = _flow.value.diag // TEMP: preserve the platform-fetch diagnostic
         )
 
         // One ordered enrichment pass at a time (single-flight).
@@ -432,6 +435,16 @@ object InstanceRosterManager {
                 null
             }
             enrichInFlight.remove(id)
+
+            // TEMP diagnostic: surface the raw fetch result for a NON-friend that
+            // didn't resolve a platform, so one screenshot tells us the real cause.
+            val isFriendId = friendIdsSnapshot.contains(id)
+            val resolvedBlank = info == null || VrchatAuthManager.prettyPlatform(info.platform).isBlank()
+            if (!isFriendId && resolvedBlank) {
+                _flow.value = _flow.value.copy(
+                    diag = "…${id.takeLast(6)} ${VrchatAuthManager.lastUserFetchDiag}"
+                )
+            }
 
             if (info != null) {
                 // Success — cache the resolved platform (may be "" if the user

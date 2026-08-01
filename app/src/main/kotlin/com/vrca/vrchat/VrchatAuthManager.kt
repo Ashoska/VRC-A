@@ -1157,14 +1157,25 @@ object VrchatAuthManager {
         val location: String
     )
 
+    // TEMP diagnostic: the raw result of the last fetchUserInfo call, so the
+    // roster panel can surface WHY a non-friend platform stays blank (200 with
+    // no last_platform vs a non-200). Remove once the platform issue is settled.
+    @Volatile var lastUserFetchDiag: String = ""
+
     suspend fun fetchUserInfo(context: Context, userId: String): VrcUserInfo? = withContext(Dispatchers.IO) {
         if (userId.isBlank() || !userId.startsWith("usr_")) return@withContext null
-        val cookieHeader = getCookieHeader(context) ?: return@withContext null
+        val cookieHeader = getCookieHeader(context) ?: run {
+            lastUserFetchDiag = "no-cookie"; return@withContext null
+        }
         try {
             val (code, body, rawCookies) = get("$BASE/users/$userId", null, cookieHeader)
             if (code == 200) captureRolledCookies(context, rawCookies)
-            if (code != 200 || !body.startsWith("{")) return@withContext null
+            if (code != 200 || !body.startsWith("{")) {
+                lastUserFetchDiag = "code=$code body=${body.take(50)}"
+                return@withContext null
+            }
             val j = org.json.JSONObject(body)
+            lastUserFetchDiag = "code=200 hasLP=${j.has("last_platform")} lp='${j.optString("last_platform","")}' p='${j.optString("platform","")}' fr=${j.optBoolean("isFriend",false)}"
             VrcUserInfo(
                 userId = userId,
                 displayName = j.optString("displayName", ""),
@@ -1179,6 +1190,7 @@ object VrchatAuthManager {
             )
         } catch (e: Exception) {
             Log.w(TAG, "fetchUserInfo($userId) failed", e)
+            lastUserFetchDiag = "exc=${e.javaClass.simpleName}"
             null
         }
     }
