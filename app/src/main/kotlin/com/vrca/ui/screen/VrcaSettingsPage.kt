@@ -947,7 +947,55 @@ private fun ChatboxWidthCalibrationTool(vm: VrcaViewModel) {
             }
         }
 
-        Text("Measured max count per char:", style = MaterialTheme.typography.bodySmall)
+        // --- AUTO sequence: fire each reference char (over-long so it wraps) one
+        // at a time; screenshot each in VRChat and send the shots to the dev, who
+        // reads the wrap points and fills the exact table. ---
+        var seqIndex by remember { mutableStateOf(-1) }
+        fun roughUnits(c: Char): Float = when {
+            c == 'm' || c == 'w' || c == 'M' || c == 'W' -> 1.4f
+            c.isUpperCase() || c.isDigit() -> 1.2f
+            c in " ijltfr.,':;!|()[]-" -> 0.6f
+            c.code in 0xFF00..0xFF60 || c.code in 0x2E80..0x9FFF ||
+                c.code in 0xAC00..0xD7AF || c.code in 0x3000..0x303F -> 2.0f
+            else -> 1.0f
+        }
+        fun seqSend(i: Int) {
+            val c = com.vrca.nowplaying.ChatboxCalibration.REFERENCE_CHARS[i]
+            val n = (40f / roughUnits(c)).toInt().coerceIn(8, 140)
+            vm.sendCalibrationLine(c.toString().repeat(n))
+        }
+        androidx.compose.material3.Divider(Modifier.padding(vertical = 2.dp))
+        Text("Auto sequence — screenshot each line in VRChat and send the shots to the dev:",
+            style = MaterialTheme.typography.bodySmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            androidx.compose.material3.Button(onClick = { seqIndex = 0; seqSend(0) }) {
+                Text(if (seqIndex < 0) "Start sequence" else "Restart")
+            }
+            if (seqIndex >= 0) {
+                androidx.compose.material3.OutlinedButton(
+                    onClick = { if (seqIndex > 0) { seqIndex--; seqSend(seqIndex) } },
+                    enabled = seqIndex > 0
+                ) { Text("Prev") }
+                androidx.compose.material3.Button(onClick = {
+                    if (seqIndex < com.vrca.nowplaying.ChatboxCalibration.REFERENCE_CHARS.size - 1) {
+                        seqIndex++; seqSend(seqIndex)
+                    }
+                }) { Text("Next") }
+            }
+        }
+        if (seqIndex >= 0) {
+            val c = com.vrca.nowplaying.ChatboxCalibration.REFERENCE_CHARS[seqIndex]
+            Text(
+                "Showing ${seqIndex + 1}/${com.vrca.nowplaying.ChatboxCalibration.REFERENCE_CHARS.size}: " +
+                    "'${if (c == ' ') "␣ (space)" else c.toString()}' — screenshot the chatbox, then Next.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+        androidx.compose.material3.Divider(Modifier.padding(vertical = 2.dp))
+
+        Text("Measured max count per char (auto-filled from your screenshots, or type them):",
+            style = MaterialTheme.typography.bodySmall)
         androidx.compose.foundation.layout.FlowRow(
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)
