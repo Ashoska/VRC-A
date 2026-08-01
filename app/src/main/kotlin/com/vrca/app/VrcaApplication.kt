@@ -89,6 +89,10 @@ class VrcaApplication : Application(), ViewModelStoreOwner {
         // Best-effort weather for the {weather} chatbox token (IP-geo + open-meteo).
         WeatherProvider.start()
 
+        // Load the exact chatbox line-width calibration (if measured), so
+        // TitleCleaner wraps by real per-glyph widths instead of estimates.
+        com.vrca.nowplaying.ChatboxCalibration.attach(applicationContext)
+
         // Headset: listen for VRChat's OSC output (avatar params) so the chatbox
         // can use {mute}/{afk}/{movement}/{scale}/{param:Name}. OSC-out is loopback,
         // so this only receives on the same device as VRChat (the Quest).

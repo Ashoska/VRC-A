@@ -353,6 +353,9 @@ internal fun SettingsPage(
 
                         Text("Last sent to VRChat (ms): ${vm.lastSentToVrchatAtMs}",
                             style = MaterialTheme.typography.bodySmall)
+
+                        androidx.compose.material3.Divider(Modifier.padding(vertical = 4.dp))
+                        ChatboxWidthCalibrationTool(vm)
                     }
                 }
             }
@@ -890,6 +893,91 @@ private fun StorageRow() {
                 android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
                     .setData(android.net.Uri.parse("package:${ctx.packageName}"))
             )
+        }
+    }
+}
+
+/** Dev-only EXACT chatbox line-width calibration harness (plan §8.4). Send a line
+ *  of one repeated char, read the wrap point in-headset, record the max count per
+ *  char, Save → TitleCleaner wraps by measured widths instead of estimates. */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun ChatboxWidthCalibrationTool(vm: VrcaViewModel) {
+    val ctx = LocalContext.current
+    val measured = remember {
+        androidx.compose.runtime.mutableStateMapOf<Char, String>().apply {
+            com.vrca.nowplaying.ChatboxCalibration.measuredChars().forEach { (c, n) -> put(c, n.toString()) }
+        }
+    }
+    var calibrated by remember { mutableStateOf(com.vrca.nowplaying.ChatboxCalibration.calibrated) }
+    var testChar by remember { mutableStateOf('M') }
+    var count by remember { mutableStateOf(20) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Chatbox width calibration", style = MaterialTheme.typography.labelMedium)
+        Text(
+            "Send a line of one repeated character, watch where it wraps in VRChat, and enter " +
+                "the highest count that stays on ONE line. Repeat per char, then Save.  " +
+                if (calibrated) "Status: CALIBRATED." else "Status: using estimates.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        Text("Test: '$testChar' × $count", style = MaterialTheme.typography.bodySmall)
+        androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            com.vrca.nowplaying.ChatboxCalibration.REFERENCE_CHARS.forEach { c ->
+                androidx.compose.material3.FilterChip(
+                    selected = testChar == c,
+                    onClick = { testChar = c },
+                    label = { Text(if (c == ' ') "␣" else c.toString()) }
+                )
+            }
+        }
+        androidx.compose.material3.Slider(
+            value = count.toFloat(),
+            onValueChange = { count = it.toInt().coerceIn(1, 80) },
+            valueRange = 1f..80f
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            androidx.compose.material3.Button(onClick = {
+                vm.sendCalibrationLine(testChar.toString().repeat(count))
+            }) { Text("Send × $count") }
+            androidx.compose.material3.OutlinedButton(onClick = { vm.sendCalibrationLine("") }) {
+                Text("Clear chatbox")
+            }
+        }
+
+        Text("Measured max count per char:", style = MaterialTheme.typography.bodySmall)
+        androidx.compose.foundation.layout.FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            com.vrca.nowplaying.ChatboxCalibration.REFERENCE_CHARS.forEach { c ->
+                androidx.compose.material3.OutlinedTextField(
+                    value = measured[c] ?: "",
+                    onValueChange = { measured[c] = it.filter { ch -> ch.isDigit() }.take(3) },
+                    modifier = Modifier.width(78.dp),
+                    label = { Text(if (c == ' ') "␣" else c.toString()) },
+                    singleLine = true,
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                    )
+                )
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            androidx.compose.material3.Button(onClick = {
+                val counts = measured.mapNotNull { (c, s) ->
+                    s.toIntOrNull()?.takeIf { it > 0 }?.let { c to it }
+                }.toMap()
+                com.vrca.nowplaying.ChatboxCalibration.save(ctx, counts)
+                calibrated = com.vrca.nowplaying.ChatboxCalibration.calibrated
+            }) { Text("Save calibration") }
+            androidx.compose.material3.OutlinedButton(onClick = {
+                com.vrca.nowplaying.ChatboxCalibration.clear(ctx)
+                measured.clear()
+                calibrated = false
+            }) { Text("Clear") }
         }
     }
 }

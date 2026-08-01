@@ -135,6 +135,12 @@ class VrcaOsc(
         }
     }
 
+    /** Send text to the chatbox VERBATIM (no minimal-background suffix, no manual
+     *  hold) — for the width-calibration harness, where the exact glyph run matters. */
+    fun sendRaw(text: String) {
+        sendOscMessage("/chatbox/input", listOf(text, true, false))
+    }
+
     fun sendMessage(text: String, sendImmediately: Boolean, triggerSFX: Boolean) {
         sendOscMessage("/chatbox/input", listOf(withMinimalBackground(text), sendImmediately, triggerSFX))
         latestMsgTimestamp = System.currentTimeMillis()

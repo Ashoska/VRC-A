@@ -3952,6 +3952,9 @@ class VrcaViewModel(
      *  on the headset). "Changing avi size" from the app. */
     fun setAvatarEyeHeight(meters: Float) = remoteVrcaOsc.sendEyeHeight(meters)
 
+    /** Send a raw line to the chatbox for the width-calibration harness. */
+    fun sendCalibrationLine(text: String) = remoteVrcaOsc.sendRaw(text)
+
     /**
      * No-repeat window for shuffle: how many recently-played positions to avoid,
      * scaled by the number of active lines. Small counts stay at 1 (just no
