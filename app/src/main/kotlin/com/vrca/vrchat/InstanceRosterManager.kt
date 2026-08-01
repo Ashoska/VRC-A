@@ -72,8 +72,10 @@ object InstanceRosterManager {
         /** "PC" / "Quest" / "iOS" / "" (unknown / not yet resolved). */
         val platform: String,
         val avatarName: String?,
-        /** In the user's VRChat friends list — sorted to the top, shown yellow. */
-        val isFriend: Boolean = false
+        /** In the user's VRChat friends list — sorted near the top, shown yellow. */
+        val isFriend: Boolean = false,
+        /** The local user themselves — pinned to the very top, shown purple. */
+        val isSelf: Boolean = false
     )
 
     data class RosterUi(
@@ -99,7 +101,17 @@ object InstanceRosterManager {
     private val platformCache = ConcurrentHashMap<String, String>()
     private val enrichInFlight = ConcurrentHashMap.newKeySet<String>()
     private val enrichAttempts = ConcurrentHashMap<String, Int>()
-    private const val MAX_ENRICH_ATTEMPTS = 6
+    // Per-user platform (/users/{id} -> last_platform) is the ONLY source for a
+    // NON-friend (friends come free in the bulk friends list). VRChat hard
+    // rate-limits per-user calls, so the reference companion (VRC-NEXUS) paces
+    // its per-user loops at ~1.3s (its invite gap = W(1300)) and detects 429.
+    // Firing the whole roster in a burst = everything after the first couple
+    // 429s. So pace ~1.2s and KEEP retrying through 429s (give up only after
+    // MANY attempts — a genuinely-dead id caps out instead of looping forever;
+    // caches clear on leaving the instance regardless).
+    private const val MAX_ENRICH_ATTEMPTS = 40
+    private const val ENRICH_PACE_MS = 1200L        // matches NEXUS's proven ~1.3s gap
+    private const val ENRICH_FAIL_BACKOFF_MS = 5000L // back off hard on a 429
     // Single-flight guard so platforms resolve as ONE ordered top-to-bottom pass
     // (not several concurrent passes that would race the rate limit).
     private val enriching = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -370,15 +382,18 @@ object InstanceRosterManager {
             return
         }
 
+        val self = VrchatAuthManager.getStoredUserId(context)
         val friends = friendIds(context)
-        // Display order: friends first, then everyone else; each by join time
-        // (top-to-bottom). Enrichment walks this SAME order so platforms fill in
-        // top-to-bottom as you watch.
-        val ordered = state.roster.values.sortedWith(
-            compareByDescending<VrcLogParser.RosterEntry> {
-                it.userId != null && friends.contains(it.userId)
-            }.thenBy { it.joinedAtMs }
-        )
+        // Display order: YOU first, then friends, then everyone else; each by
+        // join time (top-to-bottom). Enrichment walks this SAME order so
+        // platforms fill in top-to-bottom (and friends before non-friends, which
+        // is why friends resolve before VRChat's per-user rate limit trips).
+        fun rank(e: VrcLogParser.RosterEntry): Int = when {
+            e.userId != null && e.userId == self -> 0
+            e.userId != null && friends.contains(e.userId) -> 1
+            else -> 2
+        }
+        val ordered = state.roster.values.sortedWith(compareBy({ rank(it) }, { it.joinedAtMs }))
         val members = ordered.map { e ->
             val plat = e.userId?.let { platformCache[it] } ?: e.platform
             Member(
@@ -386,7 +401,8 @@ object InstanceRosterManager {
                 userId = e.userId,
                 platform = plat,
                 avatarName = e.avatarName,
-                isFriend = e.userId != null && friends.contains(e.userId)
+                isFriend = e.userId != null && friends.contains(e.userId),
+                isSelf = e.userId != null && e.userId == self
             )
         }
         _flow.value = RosterUi(
@@ -432,7 +448,7 @@ object InstanceRosterManager {
                         )
                     }
                 }
-                delay(300) // pace VRChat REST
+                delay(ENRICH_PACE_MS) // pace VRChat REST
             } else {
                 // Failure (likely 429) — DON'T cache; the next publish re-queues
                 // it so it retries. Give up only after MAX attempts so a
@@ -440,7 +456,7 @@ object InstanceRosterManager {
                 val n = (enrichAttempts[id] ?: 0) + 1
                 enrichAttempts[id] = n
                 if (n >= MAX_ENRICH_ATTEMPTS) { platformCache[id] = ""; enrichAttempts.remove(id) }
-                delay(800) // back off harder after a failed call
+                delay(ENRICH_FAIL_BACKOFF_MS) // back off harder after a failed call
             }
         }
     }
