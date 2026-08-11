@@ -54,9 +54,19 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
-        <!-- Now Playing listener -->
+        <!-- Now Playing listener.
+             android:label is REQUIRED for the Settings deep-link to work on
+             Horizon OS (Quest): the notification-access settings screen builds
+             its list of listener entries keyed by the flattened component, and
+             an UNLABELED listener is not rendered as a targetable preference —
+             so the :settings:fragment_args_key deep-link (notificationAccessIntent)
+             can't scroll to our entry and Horizon falls back to the top-level
+             settings. VRC-NEXUS labels its listener with @string/app_name for
+             exactly this reason (verified by decompiling their APK); matching it
+             makes our "Notification access" button land on VRC-A's own page. -->
         <service
             android:name=".nowplaying.NowPlayingListenerService"
+            android:label="@string/app_name"
             android:exported="false"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
             <intent-filter>
