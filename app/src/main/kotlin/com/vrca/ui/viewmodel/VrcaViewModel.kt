@@ -3107,19 +3107,19 @@ class VrcaViewModel(
      * the Allow toggle (the plain list intent drops the user at top-level settings).
      *
      * The launch MUST happen via startActivity in a try/catch — NOT gated on
-     * Intent.resolveActivity(). On API 30+ package visibility makes resolveActivity
-     * return null for Settings targets even when startActivity succeeds, so the old
-     * resolveActivity guard silently fell through to the bare list intent and the
-     * direct per-listener page was never actually launched on Quest (the reported
-     * "detail intent didn't work" — it never ran). Each mechanism is attempted in
-     * order; if startActivity throws (ActivityNotFoundException / SecurityException)
-     * we fall through to the next.
+     * Intent.resolveActivity() (on API 30+ package visibility makes resolveActivity
+     * return null for Settings targets even when startActivity succeeds).
      *
-     *  1. ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS + the component extra
-     *     (API 30+, the purpose-built API) — opens OUR listener's page directly.
-     *  2. ACTION_NOTIFICATION_LISTENER_SETTINGS + :settings:fragment_args_key
-     *     (what VRC-NEXUS does) — the list scrolled/highlighted to our entry.
-     *  3. The bare list — last resort so the button always does *something*.
+     *  1. ACTION_NOTIFICATION_LISTENER_SETTINGS + :settings:fragment_args_key
+     *     (VRC-NEXUS's EXACT approach) — the notification-access list deep-linked
+     *     to OUR entry. CONFIRMED on-device to be the mechanism Horizon OS honors.
+     *  2. The bare list — last resort so the button always does *something*.
+     *
+     * NOTE: ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS (the "purpose-built" API)
+     * is deliberately NOT used: on Quest it does not throw but lands on Horizon's
+     * generic "General" settings page (verified via the on-device diag), so it must
+     * never be attempted before the fragment-args intent or it short-circuits the
+     * chain onto the wrong screen.
      */
     fun launchNotificationAccess(ctx: android.content.Context) {
         val component = android.content.ComponentName(
@@ -3155,20 +3155,12 @@ class VrcaViewModel(
             }
         }
 
-        // 1. Direct per-listener detail page (API 30+; Quest is API 32+).
-        if (android.os.Build.VERSION.SDK_INT >= 30) {
-            if (attempt(
-                    "DETAIL",
-                    Intent(Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS)
-                        .putExtra(Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME, component)
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                )
-            ) return
-        } else {
-            log.append("(DETAIL skipped: SDK < 30)\n")
-        }
-
-        // 2. Fragment-args deep-link into the list (VRC-NEXUS's approach).
+        // 1. Fragment-args deep-link into the list (VRC-NEXUS's EXACT approach —
+        //    the one confirmed to land on VRC-A's per-listener page on Horizon OS).
+        //    This is FIRST because the DETAIL action below lands on the WRONG page
+        //    on Quest (on-device diag showed DETAIL opened Horizon's generic
+        //    "General" settings, not the notification-access page — it doesn't
+        //    throw, so it must NOT run before this or it short-circuits the chain).
         if (attempt(
                 "FRAGMENT_ARGS",
                 Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
@@ -3183,7 +3175,7 @@ class VrcaViewModel(
             )
         ) return
 
-        // 3. Bare list — last resort.
+        // 2. Bare list — last resort.
         if (attempt(
                 "PLAIN_LIST",
                 Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
