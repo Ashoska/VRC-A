@@ -3065,6 +3065,25 @@ class VrcaViewModel(
     // =========================
     // System intents
     // =========================
+
+    /** Diagnostic for the notification-access launcher: records which mechanism
+     *  ran and what threw, so we can see on-device (Settings -> Debug) exactly
+     *  which intent the system accepted and whether it landed on the right page.
+     *  Persisted so it survives leaving for the Settings app. */
+    private val _notifAccessDiag = kotlinx.coroutines.flow.MutableStateFlow(
+        app.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
+            .getString("notif_access_diag", "") ?: ""
+    )
+    val notifAccessDiag: StateFlow<String> = _notifAccessDiag
+
+    private fun setNotifAccessDiag(s: String) {
+        _notifAccessDiag.value = s
+        runCatching {
+            app.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
+                .edit().putString("notif_access_diag", s).apply()
+        }
+    }
+
     fun notificationAccessIntent(): Intent {
         // Open the notification-listener settings LIST but DEEP-LINK to VRC-A's own
         // entry via the Android Settings fragment-args extras — this is exactly
@@ -3080,6 +3099,101 @@ class VrcaViewModel(
             .putExtra(":settings:fragment_args_key", component)
             .putExtra(":settings:show_fragment_args", args)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+
+    /**
+     * Open VRC-A's own notification-listener page, trying every mechanism in turn
+     * so at least one lands on the per-app "Device & app notifications" screen with
+     * the Allow toggle (the plain list intent drops the user at top-level settings).
+     *
+     * The launch MUST happen via startActivity in a try/catch — NOT gated on
+     * Intent.resolveActivity(). On API 30+ package visibility makes resolveActivity
+     * return null for Settings targets even when startActivity succeeds, so the old
+     * resolveActivity guard silently fell through to the bare list intent and the
+     * direct per-listener page was never actually launched on Quest (the reported
+     * "detail intent didn't work" — it never ran). Each mechanism is attempted in
+     * order; if startActivity throws (ActivityNotFoundException / SecurityException)
+     * we fall through to the next.
+     *
+     *  1. ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS + the component extra
+     *     (API 30+, the purpose-built API) — opens OUR listener's page directly.
+     *  2. ACTION_NOTIFICATION_LISTENER_SETTINGS + :settings:fragment_args_key
+     *     (what VRC-NEXUS does) — the list scrolled/highlighted to our entry.
+     *  3. The bare list — last resort so the button always does *something*.
+     */
+    fun launchNotificationAccess(ctx: android.content.Context) {
+        val component = android.content.ComponentName(
+            app, com.vrca.nowplaying.NowPlayingListenerService::class.java
+        ).flattenToString()
+
+        val log = StringBuilder()
+        log.append("SDK=").append(android.os.Build.VERSION.SDK_INT).append('\n')
+        log.append("component=").append(component).append('\n')
+
+        fun toast(msg: String) = runCatching {
+            android.widget.Toast.makeText(ctx, msg, android.widget.Toast.LENGTH_LONG).show()
+        }
+
+        // Try one mechanism. Returns true if startActivity did NOT throw (the
+        // system accepted the intent — note it may still land on the wrong page,
+        // which the diag distinguishes: "opened via X" tells us X is the one that
+        // ran, so if it's wrong we know to drop X and force the next mechanism).
+        fun attempt(label: String, intent: Intent): Boolean {
+            return try {
+                log.append("-> ").append(label).append(": launching\n")
+                setNotifAccessDiag(log.toString())   // persist BEFORE we leave the app
+                ctx.startActivity(intent)
+                log.append("OK ").append(label).append(": startActivity returned (did it land right?)\n")
+                setNotifAccessDiag(log.toString())
+                toast("Notif access: opened via $label")
+                true
+            } catch (e: Throwable) {
+                log.append("FAIL ").append(label).append(": ")
+                    .append(e.javaClass.simpleName).append(": ").append(e.message).append('\n')
+                setNotifAccessDiag(log.toString())
+                false
+            }
+        }
+
+        // 1. Direct per-listener detail page (API 30+; Quest is API 32+).
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            if (attempt(
+                    "DETAIL",
+                    Intent(Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS)
+                        .putExtra(Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME, component)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+            ) return
+        } else {
+            log.append("(DETAIL skipped: SDK < 30)\n")
+        }
+
+        // 2. Fragment-args deep-link into the list (VRC-NEXUS's approach).
+        if (attempt(
+                "FRAGMENT_ARGS",
+                Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                    .putExtra(":settings:fragment_args_key", component)
+                    .putExtra(
+                        ":settings:show_fragment_args",
+                        android.os.Bundle().apply {
+                            putString(":settings:fragment_args_key", component)
+                        }
+                    )
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        ) return
+
+        // 3. Bare list — last resort.
+        if (attempt(
+                "PLAIN_LIST",
+                Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        ) return
+
+        log.append("ALL FAILED\n")
+        setNotifAccessDiag(log.toString())
+        toast("Notif access: ALL intents failed")
     }
 
     fun overlayPermissionIntent(): Intent =

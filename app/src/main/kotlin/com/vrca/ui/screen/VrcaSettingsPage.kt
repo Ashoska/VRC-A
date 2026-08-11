@@ -212,7 +212,7 @@ internal fun SettingsPage(
                 subtitle = "Lets VRC-A read Now Playing. On Quest this opens VRC-A's notification page — turn it on there.",
                 primary = "Open",
                 granted = listenerGranted
-            ) { runCatching { ctx.startActivity(vm.notificationAccessIntent()) } }
+            ) { vm.launchNotificationAccess(ctx) }
 
             // Install-updates (unknown sources) — not on the headset: it's
             // distributed through the Meta store, so no in-app APK install.
@@ -350,6 +350,19 @@ internal fun SettingsPage(
                         Text("Playing: ${vm.nowPlayingIsPlaying}", style = MaterialTheme.typography.bodySmall)
                         Text("Title: ${vm.lastNowPlayingTitle}", style = MaterialTheme.typography.bodySmall)
                         Text("Artist: ${vm.lastNowPlayingArtist}", style = MaterialTheme.typography.bodySmall)
+
+                        Text("Notification access (last attempt)", style = MaterialTheme.typography.labelMedium)
+                        val notifDiag by vm.notifAccessDiag.collectAsState()
+                        SelectionContainer {
+                            Text(
+                                text = notifDiag.ifBlank { "(not tried yet — tap 'Open notification access' below)" },
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                        TextButton(onClick = { vm.launchNotificationAccess(ctx) }) {
+                            Text("Open notification access")
+                        }
 
                         Text("OSC Output Preview", style = MaterialTheme.typography.labelMedium)
                         SelectionContainer {

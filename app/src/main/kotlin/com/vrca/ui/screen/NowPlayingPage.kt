@@ -105,7 +105,7 @@ internal fun NowPlayingPage(
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .clickable { ctx.startActivity(vm.notificationAccessIntent()) }
+                        .clickable { vm.launchNotificationAccess(ctx) }
                         .padding(12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
