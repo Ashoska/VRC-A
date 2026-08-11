@@ -3110,16 +3110,20 @@ class VrcaViewModel(
      * Intent.resolveActivity() (on API 30+ package visibility makes resolveActivity
      * return null for Settings targets even when startActivity succeeds).
      *
-     *  1. ACTION_NOTIFICATION_LISTENER_SETTINGS + :settings:fragment_args_key
-     *     (VRC-NEXUS's EXACT approach) — the notification-access list deep-linked
-     *     to OUR entry. CONFIRMED on-device to be the mechanism Horizon OS honors.
-     *  2. The bare list — last resort so the button always does *something*.
+     * ORDER (each attempt logged to the diag so we can see which one lands):
+     *  1. The REAL AOSP Settings app (com.android.settings), targeted by explicit
+     *     activity alias then by package. On Quest, Horizon's skinned settings
+     *     (com.oculus.vrshell) intercepts the action and dumps us on "General",
+     *     but the underlying AOSP notification-access screen still exists and lists
+     *     VRC-A — reaching it directly grants access with NO ADB (this is how QGO
+     *     opens Android's real hidden settings on Quest).
+     *  2. ACTION_NOTIFICATION_LISTENER_SETTINGS + fragment-args, no package (correct
+     *     on phones/tablets; lands on "General" on Quest).
+     *  3. The bare list — last resort so the button always does *something*.
      *
      * NOTE: ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS (the "purpose-built" API)
      * is deliberately NOT used: on Quest it does not throw but lands on Horizon's
-     * generic "General" settings page (verified via the on-device diag), so it must
-     * never be attempted before the fragment-args intent or it short-circuits the
-     * chain onto the wrong screen.
+     * generic "General" page (verified via the on-device diag).
      */
     fun launchNotificationAccess(ctx: android.content.Context) {
         val component = android.content.ComponentName(
@@ -3155,27 +3159,60 @@ class VrcaViewModel(
             }
         }
 
-        // 1. Fragment-args deep-link into the list (VRC-NEXUS's EXACT approach —
-        //    the one confirmed to land on VRC-A's per-listener page on Horizon OS).
-        //    This is FIRST because the DETAIL action below lands on the WRONG page
-        //    on Quest (on-device diag showed DETAIL opened Horizon's generic
-        //    "General" settings, not the notification-access page — it doesn't
-        //    throw, so it must NOT run before this or it short-circuits the chain).
+        // Fragment-args extras — deep-link the list to OUR entry (harmless if the
+        // target ignores them). Reused across every attempt below.
+        fun Intent.withFragmentArgs(): Intent = this
+            .putExtra(":settings:fragment_args_key", component)
+            .putExtra(
+                ":settings:show_fragment_args",
+                android.os.Bundle().apply { putString(":settings:fragment_args_key", component) }
+            )
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+        // 1. THE REAL AOSP SETTINGS APP, targeted explicitly. Horizon's skinned
+        //    settings (com.oculus.vrshell) intercepts ACTION_NOTIFICATION_LISTENER_SETTINGS
+        //    and dumps us on "General" — but the underlying AOSP Settings app
+        //    (com.android.settings) still has the genuine notification-access screen
+        //    where VRC-A appears and can be toggled ON with NO ADB. This is what
+        //    QGO does to reach Android's real hidden settings on Quest. We try the
+        //    explicit activity aliases first, then just force the action onto the
+        //    com.android.settings package. Names differ across AOSP versions, so we
+        //    try each; the diag shows which one lands.
+        val aosp = "com.android.settings"
+        val aospActivities = listOf(
+            "com.android.settings.Settings\$NotificationAccessSettingsActivity",
+            "com.android.settings.Settings\$ManageNotificationAccessSettingsActivity",
+            "com.android.settings.notification.NotificationAccessSettings"
+        )
+        for (act in aospActivities) {
+            if (attempt(
+                    "AOSP:${act.substringAfterLast('.').substringAfterLast('$')}",
+                    Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                        .setClassName(aosp, act)
+                        .withFragmentArgs()
+                )
+            ) return
+        }
+
+        // 2. Force the ACTION onto the real Settings package (lets its manifest
+        //    pick the right activity even if our hard-coded names are wrong).
         if (attempt(
-                "FRAGMENT_ARGS",
+                "AOSP_PACKAGE",
                 Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
-                    .putExtra(":settings:fragment_args_key", component)
-                    .putExtra(
-                        ":settings:show_fragment_args",
-                        android.os.Bundle().apply {
-                            putString(":settings:fragment_args_key", component)
-                        }
-                    )
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    .setPackage(aosp)
+                    .withFragmentArgs()
             )
         ) return
 
-        // 2. Bare list — last resort.
+        // 3. Fragment-args deep-link, no package (lets Horizon handle it — lands on
+        //    "General" on Quest, but correct on phones/tablets).
+        if (attempt(
+                "FRAGMENT_ARGS",
+                Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).withFragmentArgs()
+            )
+        ) return
+
+        // 4. Bare list — last resort.
         if (attempt(
                 "PLAIN_LIST",
                 Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
