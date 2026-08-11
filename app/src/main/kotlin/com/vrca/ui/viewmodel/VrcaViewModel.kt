@@ -3188,6 +3188,27 @@ class VrcaViewModel(
         toast("Notif access: ALL intents failed")
     }
 
+    /** The flattened notification-listener component for THIS build/flavor, e.g.
+     *  `com.gremlin.inc.headset/com.vrca.nowplaying.NowPlayingListenerService`. */
+    fun notificationListenerComponent(): String =
+        android.content.ComponentName(
+            app, com.vrca.nowplaying.NowPlayingListenerService::class.java
+        ).flattenToString()
+
+    /**
+     * The RELIABLE way to grant notification-listener access on Meta Quest /
+     * Horizon OS: run this over ADB. Horizon does NOT expose a working in-VR
+     * toggle to ENABLE a sideloaded app's listener (the in-app Settings deep-link
+     * only lands on the app's page once the listener is ALREADY enabled — before
+     * that Horizon drops you at "General"). This is the same command VRC-NEXUS
+     * surfaces via its `adbGrantCommand` (verified by decompiling their APK):
+     *   adb shell cmd notification allow_listener <package>/<class>
+     * Additive — it does not disable any other listener. Requires Developer Mode
+     * + USB (or wireless) debugging enabled on the headset.
+     */
+    fun notificationAccessAdbCommand(): String =
+        "adb shell cmd notification allow_listener " + notificationListenerComponent()
+
     fun overlayPermissionIntent(): Intent =
         Intent(
             Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
