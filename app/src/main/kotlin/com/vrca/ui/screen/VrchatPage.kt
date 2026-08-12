@@ -805,21 +805,67 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
 
             androidx.compose.material3.Divider()
 
-            // --- avatar size (OSC /avatar/eyeheight) ---
+            // --- avatar size (OSC /avatar/eyeheight, live read via OSCQuery) ---
             Text("Avatar size (eye height)", style = MaterialTheme.typography.titleSmall)
-            var height by remember { mutableStateOf(1.6f) }
-            androidx.compose.material3.Slider(
-                value = height,
-                onValueChange = { height = it },
-                valueRange = 0.2f..5.0f,
-                onValueChangeFinished = { vm.setAvatarEyeHeight(height) }
+
+            // Live IN-GAME height from VRChat (OSCQuery pull); the slider mirrors it.
+            val liveHeight by com.vrca.osc.VrcaOscState.eyeHeightFlow.collectAsState()
+            val defaultHeight = com.vrca.osc.VrcaOscState.defaultEyeHeightMeters
+
+            var sliderVal by remember { mutableStateOf(liveHeight ?: 1.6f) }
+            var dragging by remember { mutableStateOf(false) }
+            // Sync the slider to the in-game height whenever we're not dragging it.
+            androidx.compose.runtime.LaunchedEffect(liveHeight) {
+                if (!dragging) liveHeight?.let { sliderVal = it.coerceIn(0.1f, 10f) }
+            }
+
+            Text(
+                "In-game: " + (liveHeight?.let { "%.2f m".format(it) } ?: "—"),
+                style = MaterialTheme.typography.bodyMedium
             )
+
+            androidx.compose.material3.Slider(
+                value = sliderVal.coerceIn(0.1f, 10f),
+                onValueChange = { dragging = true; sliderVal = it },
+                valueRange = 0.1f..10f,
+                onValueChangeFinished = { dragging = false; vm.setAvatarEyeHeight(sliderVal) }
+            )
+
+            // Type ANY value (no app-imposed min/max — VRChat clamps to its own range).
+            var heightText by remember { mutableStateOf("") }
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("%.2f m".format(height), style = MaterialTheme.typography.bodyMedium)
+                androidx.compose.material3.OutlinedTextField(
+                    value = heightText,
+                    onValueChange = { heightText = it },
+                    modifier = Modifier.weight(1f),
+                    label = { Text("Height (m)") },
+                    singleLine = true,
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Decimal
+                    )
+                )
+                Spacer(Modifier.width(8.dp))
+                androidx.compose.material3.Button(
+                    onClick = {
+                        heightText.trim().toFloatOrNull()?.let {
+                            vm.setAvatarEyeHeight(it); sliderVal = it.coerceIn(0.1f, 10f)
+                        }
+                    },
+                    enabled = heightText.trim().toFloatOrNull() != null
+                ) { Text("Set") }
+            }
+
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Default: " + (defaultHeight?.let { "%.2f m".format(it) } ?: "—"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 Spacer(Modifier.weight(1f))
-                androidx.compose.material3.TextButton(onClick = { height = 1.6f; vm.setAvatarEyeHeight(1.6f) }) {
-                    Text("Reset")
-                }
+                androidx.compose.material3.TextButton(
+                    onClick = { vm.resetAvatarHeightToDefault()?.let { sliderVal = it.coerceIn(0.1f, 10f) } },
+                    enabled = defaultHeight != null
+                ) { Text("Reset to default") }
             }
         }
     }

@@ -124,6 +124,16 @@ object VrcaOscQuery {
                 VrcaOscState.onParam(name, value)
                 count++
             }
+            // Also read the canonical /avatar/eyeheight node (a top-level address,
+            // not under /avatar/parameters) so the eye-height read works even if the
+            // EyeHeightAsMeters PARAM isn't present. Fed as EyeHeightAsMeters so
+            // {scale} + the size control's live read both pick it up.
+            httpGetBody("http://$h:$p/avatar/eyeheight")?.let { ehBody ->
+                runCatching {
+                    val v = JSONObject(ehBody).optJSONArray("VALUE")?.takeIf { it.length() > 0 }?.get(0)
+                    (v as? Number)?.toFloat()?.let { VrcaOscState.onParam("EyeHeightAsMeters", it) }
+                }
+            }
             updateDiag("polling $serviceName @ $h:$p — $count params")
             true
         } catch (e: Exception) {

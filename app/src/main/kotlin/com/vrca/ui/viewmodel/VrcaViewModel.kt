@@ -4038,6 +4038,16 @@ class VrcaViewModel(
      *  on the headset). "Changing avi size" from the app. */
     fun setAvatarEyeHeight(meters: Float) = remoteVrcaOsc.sendEyeHeight(meters)
 
+    /** Reset avatar size to the AVATAR'S default (creator) eye height — derived from
+     *  VRChat's live params (current / ScaleFactor), NOT whatever we last set. No-op
+     *  if the default isn't known yet (ScaleFactor not published). Returns the height
+     *  sent, or null. */
+    fun resetAvatarHeightToDefault(): Float? {
+        val def = com.vrca.osc.VrcaOscState.defaultEyeHeightMeters ?: return null
+        remoteVrcaOsc.sendEyeHeight(def)
+        return def
+    }
+
     /** Send a raw line to the chatbox for the width-calibration harness. */
     fun sendCalibrationLine(text: String) = remoteVrcaOsc.sendRaw(text)
 

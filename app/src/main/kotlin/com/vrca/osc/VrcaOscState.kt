@@ -54,10 +54,31 @@ object VrcaOscState {
         }
     }
 
+    // Live avatar eye height (meters) from EyeHeightAsMeters, exposed reactively so
+    // the VRChat-tab size control can mirror the IN-GAME height.
+    private val _eyeHeight = MutableStateFlow<Float?>(null)
+    val eyeHeightFlow: StateFlow<Float?> = _eyeHeight.asStateFlow()
+    val eyeHeightMeters: Float? get() = _eyeHeight.value
+
+    /**
+     * The avatar's DEFAULT (creator) eye height in meters = current / ScaleFactor.
+     * VRChat's ScaleFactor is 1.0 at the avatar's native height and scales linearly,
+     * so current/ScaleFactor is invariant as you resize — it's the TRUE default, not
+     * whatever our app last set. Null when ScaleFactor isn't published (no scaling).
+     */
+    val defaultEyeHeightMeters: Float? get() {
+        val eh = _eyeHeight.value ?: return null
+        val sf = float("ScaleFactor")
+        return if (sf != null && sf > 0.01f) eh / sf else null
+    }
+
     fun onParam(name: String, value: Any?) {
         if (value != null) params[name] = value
         lastRxMs = System.currentTimeMillis()
         if (!_live.value) _live.value = true
+        if (name == "EyeHeightAsMeters") {
+            (value as? Number)?.toFloat()?.let { _eyeHeight.value = it }
+        }
     }
 
     /** Called periodically so `isLive` can flip false when OSC stops. */
