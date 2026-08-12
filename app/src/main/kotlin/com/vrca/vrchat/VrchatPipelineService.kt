@@ -4617,26 +4617,39 @@ object VrchatPipelineState {
         location: String?, worldName: String?, playerCount: Int,
         seedUserId: String, seedDisplayName: String
     ) {
+        val wasActive = headsetLogActive
         headsetLogActive = active
         headsetLogInWorld = inWorld
         headsetLogLocation = location
         headsetLogWorldName = worldName
         headsetLogPlayerCount = playerCount
         val cur = _presence.value
-        if (cur == null) {
-            if (active && inWorld && seedUserId.isNotBlank()) {
-                _presence.value = applyHeadsetLogOverride(
-                    VrchatAuthManager.VrcUserPresence(
-                        userId = seedUserId, displayName = seedDisplayName,
-                        state = "online", status = "", statusDescription = "",
-                        location = location ?: "", platform = "", worldName = worldName ?: "",
-                        instancePlayerCount = playerCount, instanceCapacity = 0,
-                        currentAvatarThumbnailUrl = "", isOnlineInVRChat = true
+        when {
+            cur == null -> {
+                if (active && inWorld && seedUserId.isNotBlank()) {
+                    _presence.value = applyHeadsetLogOverride(
+                        VrchatAuthManager.VrcUserPresence(
+                            userId = seedUserId, displayName = seedDisplayName,
+                            state = "online", status = "", statusDescription = "",
+                            location = location ?: "", platform = "", worldName = worldName ?: "",
+                            instancePlayerCount = playerCount, instanceCapacity = 0,
+                            currentAvatarThumbnailUrl = "", isOnlineInVRChat = true
+                        )
                     )
+                }
+            }
+            // Log just went STALE (VRChat closed / headset shutting down). The log
+            // was driving presence and there's no "left" event, so force offline NOW
+            // instead of showing the last instance (and running the uptime/RPC timer)
+            // forever. REST confirms on its next poll; if VRChat reopens the log goes
+            // active again and re-seeds. Only fire on the active->inactive edge.
+            !active && wasActive -> {
+                _presence.value = cur.copy(
+                    location = "offline", worldName = "", instancePlayerCount = 0,
+                    isOnlineInVRChat = false, state = "offline"
                 )
             }
-        } else {
-            presence = cur // re-run the setter so the updated override is applied
+            else -> presence = cur // re-run the setter so the updated override is applied
         }
     }
 

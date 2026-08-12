@@ -57,6 +57,12 @@ object InstanceRosterManager {
     // flushing the log line (vs the old 10s REST poll). The only downstream pace
     // limit is the Discord RPC's own ~1.5s debounce (Discord rate-limits OP 3).
     private const val POLL_MS = 1_000L
+    // If the log file hasn't been written to in this long, VRChat isn't running
+    // (closed / headset shut down) — with Logging=FULL VRChat writes constantly, so
+    // a frozen mtime reliably means "not running". We then hand presence back to
+    // REST (which shows offline) instead of showing the last instance / running the
+    // uptime+RPC timer forever. Survives a reboot too (the file's mtime persists).
+    private const val LOG_STALE_MS = 120_000L
     private const val PREFS = "vrca_roster"
     private const val KEY_TREE_URI = "saf_tree_uri"
 
@@ -367,7 +373,8 @@ object InstanceRosterManager {
                 delay(POLL_MS); continue
             }
 
-            publish(context, state, newest.id)
+            val alive = System.currentTimeMillis() - newest.lastModified < LOG_STALE_MS
+            publish(context, state, newest.id, alive)
             waitForChange()
         }
     }
@@ -420,7 +427,24 @@ object InstanceRosterManager {
 
     // ---- publish + platform enrichment --------------------------------------
 
-    private fun publish(context: Context, state: VrcLogParser.InstanceState, logPath: String) {
+    private fun publish(context: Context, state: VrcLogParser.InstanceState, logPath: String, alive: Boolean = true) {
+        // VRChat stopped writing the log (closed / headset shut down). There's no
+        // "left" line in that case, so the last state would otherwise show us in an
+        // instance forever. Hand presence back to REST (active=false → the log
+        // override becomes a passthrough, and the active->inactive edge forces the
+        // presence offline in applyLogPresence), and show the roster as not-in-world.
+        if (!alive) {
+            if (BuildConfig.IS_HEADSET_BUILD) {
+                VrchatPipelineState.applyLogPresence(
+                    active = false, inWorld = false,
+                    location = null, worldName = null, playerCount = 0,
+                    seedUserId = "", seedDisplayName = ""
+                )
+            }
+            platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear()
+            _flow.value = RosterUi(status = Status.IDLE, worldName = null, location = null, members = emptyList(), logPath = logPath)
+            return
+        }
         val inWorld = state.location != null && state.roster.isNotEmpty()
         val self = VrchatAuthManager.getStoredUserId(context)
 
