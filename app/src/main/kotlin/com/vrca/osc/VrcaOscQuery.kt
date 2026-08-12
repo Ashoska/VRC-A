@@ -161,16 +161,24 @@ object VrcaOscQuery {
         }
     }
 
-    private fun httpGetBody(url: String): String? = try {
-        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 2500; readTimeout = 2500; requestMethod = "GET"
+    private fun httpGetBody(url: String): String? {
+        // ALWAYS disconnect in finally. This runs 4x/second (250ms poll) on the
+        // headset ONLY — an exception between openConnection and disconnect would
+        // leak a connection/socket every failed poll, and at that rate the process
+        // fd limit is reached fast (the phone never runs this, which is why the
+        // "chatbox randomly stops" was headset-only).
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 2500; readTimeout = 2500; requestMethod = "GET"
+            }
+            val code = conn.responseCode
+            if (code in 200..299) conn.inputStream.bufferedReader().use { it.readText() } else null
+        } catch (e: Exception) {
+            null
+        } finally {
+            runCatching { conn?.disconnect() }
         }
-        val code = conn.responseCode
-        val body = if (code in 200..299) conn.inputStream.bufferedReader().readText() else null
-        conn.disconnect()
-        body
-    } catch (e: Exception) {
-        null
     }
 
     private fun updateDiag(s: String) {

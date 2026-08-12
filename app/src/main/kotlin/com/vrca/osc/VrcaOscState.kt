@@ -38,7 +38,15 @@ object VrcaOscState {
     @Volatile var diagRxPackets = 0L
     @Volatile var diagLastAddress = ""
 
+    /** Open file-descriptor count for THIS process. Climbing toward ~1024 over a
+     *  session = a socket/connection leak (the suspected "chatbox randomly stops"
+     *  cause — sends fail once the fd limit is hit, until an app/headset restart). */
+    fun openFdCount(): Int = runCatching {
+        java.io.File("/proc/self/fd").list()?.size ?: -1
+    }.getOrDefault(-1)
+
     fun diagString(): String = buildString {
+        append("fds=").append(openFdCount()).append('\n')
         append("bound=").append(diagBound)
         if (diagBindError.isNotBlank()) append("  bindErr=").append(diagBindError)
         append("  rxPackets=").append(diagRxPackets)
