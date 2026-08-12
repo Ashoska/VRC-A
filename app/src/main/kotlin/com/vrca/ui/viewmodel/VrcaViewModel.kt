@@ -1975,6 +1975,47 @@ class VrcaViewModel(
                 refreshOscBlockGate()
             }
         }
+        // Headset self-heal (the "chatbox won't send on open / randomly stops,
+        // only a reopen fixes it" fix — headset-only in practice).
+        //
+        // The app-scoped VM is RE-CONSTRUCTED on every headless revival
+        // (KeepAliveService -> ensureRuntimeViewModel after an OS/OEM kill, which
+        // is routine on Quest), and each construction seeds `vrchatLoggedOut`
+        // from VrchatAuthManager.isLoggedIn(), which reads EncryptedSharedPrefs.
+        // On Quest that can read FALSE TRANSIENTLY at cold boot / revival (the
+        // Keystore/MasterKey isn't ready yet) even though the VRChat session is
+        // perfectly valid -> the OSC gate seeds BLOCKED and never clears, because
+        // nothing re-logs-in (so no loggedInSignal ever fires). The sender loop
+        // runs (restoreFeatureSession set oscSending=true) but every send is
+        // dropped at the chokepoint, so the chatbox is silently dead until the
+        // user reopens (a fresh VM whose Keystore is now ready seeds it false).
+        //
+        // A CONNECTED pipeline is definitive proof the session is valid, so clear
+        // the gate the moment it connects. This can NEVER unblock a genuine
+        // sign-out: logout() wipes the saved credentials, so the pipeline can't
+        // reconnect; and we double-confirm isLoggedIn() now reads true.
+        viewModelScope.launch {
+            com.vrca.vrchat.VrchatPipelineState.isConnectedFlow.collect { connected ->
+                if (!connected) return@collect
+                if (!com.vrca.vrchat.VrchatAuthManager.isLoggedIn(app.applicationContext)) return@collect
+                val wasGated = vrchatLoggedOut || vrchatAuthDead
+                if (wasGated) {
+                    vrchatLoggedOut = false
+                    vrchatAuthDead = false
+                    com.vrca.vrchat.VrchatPipelineState.authDead = false
+                    refreshOscBlockGate()
+                    // If a transient block had already torn down sending (a spurious
+                    // authDead calls stopSending), resume now that the session is
+                    // proven alive AND the user had sending armed. Safe: a real
+                    // sign-out disarms restore and won't reconnect, so this only
+                    // fires for a genuine transient. pendingRestore is a pure read.
+                    if (!oscSending && !isBanned) {
+                        val pending = com.vrca.app.FeatureSessionStore.pendingRestore(app.applicationContext)
+                        if (pending?.sending == true && pending.anyEnabled) startSending()
+                    }
+                }
+            }
+        }
     }
 
     /**
