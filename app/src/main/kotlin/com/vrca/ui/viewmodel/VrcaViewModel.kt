@@ -3066,101 +3066,29 @@ class VrcaViewModel(
     // System intents
     // =========================
 
-    /** Diagnostic for the notification-access launcher: records which mechanism
-     *  ran and what threw, so we can see on-device (Settings -> Debug) exactly
-     *  which intent the system accepted and whether it landed on the right page.
-     *  Persisted so it survives leaving for the Settings app. */
-    private val _notifAccessDiag = kotlinx.coroutines.flow.MutableStateFlow(
-        app.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
-            .getString("notif_access_diag", "") ?: ""
-    )
-    val notifAccessDiag: StateFlow<String> = _notifAccessDiag
-
-    private fun setNotifAccessDiag(s: String) {
-        _notifAccessDiag.value = s
-        runCatching {
-            app.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
-                .edit().putString("notif_access_diag", s).apply()
-        }
-    }
-
-    fun notificationAccessIntent(): Intent {
-        // Open the notification-listener settings LIST but DEEP-LINK to VRC-A's own
-        // entry via the Android Settings fragment-args extras — this is exactly
-        // what VRC-NEXUS does, and on Quest it lands on VRC-A's per-app "Device &
-        // app notifications" page with the Allow toggle (the plain list / the
-        // detail intent don't land right on Horizon OS). Harmless on phones (they
-        // just highlight the row).
-        val component = android.content.ComponentName(
-            app, com.vrca.nowplaying.NowPlayingListenerService::class.java
-        ).flattenToString()
-        val args = android.os.Bundle().apply { putString(":settings:fragment_args_key", component) }
-        return Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
-            .putExtra(":settings:fragment_args_key", component)
-            .putExtra(":settings:show_fragment_args", args)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    }
-
     /**
-     * Open VRC-A's own notification-listener page, trying every mechanism in turn
-     * so at least one lands on the per-app "Device & app notifications" screen with
-     * the Allow toggle (the plain list intent drops the user at top-level settings).
+     * Open VRC-A's notification-listener settings, trying each mechanism in turn
+     * (startActivity in a try/catch — NOT gated on resolveActivity(), which returns
+     * null for Settings targets under API 30+ package visibility even when the
+     * launch would succeed).
      *
-     * The launch MUST happen via startActivity in a try/catch — NOT gated on
-     * Intent.resolveActivity() (on API 30+ package visibility makes resolveActivity
-     * return null for Settings targets even when startActivity succeeds).
-     *
-     * ORDER (each attempt logged to the diag so we can see which one lands):
-     *  1. The REAL AOSP Settings app (com.android.settings), targeted by explicit
-     *     activity alias then by package. On Quest, Horizon's skinned settings
-     *     (com.oculus.vrshell) intercepts the action and dumps us on "General",
-     *     but the underlying AOSP notification-access screen still exists and lists
-     *     VRC-A — reaching it directly grants access with NO ADB (this is how QGO
-     *     opens Android's real hidden settings on Quest).
-     *  2. ACTION_NOTIFICATION_LISTENER_SETTINGS + fragment-args, no package (correct
-     *     on phones/tablets; lands on "General" on Quest).
-     *  3. The bare list — last resort so the button always does *something*.
-     *
-     * NOTE: ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS (the "purpose-built" API)
-     * is deliberately NOT used: on Quest it does not throw but lands on Horizon's
-     * generic "General" page (verified via the on-device diag).
+     * On Quest, Horizon's skinned settings (com.oculus.vrshell) intercept
+     * ACTION_NOTIFICATION_LISTENER_SETTINGS and dump the user on "General". The
+     * underlying AOSP Settings app (com.android.settings) still has the genuine
+     * "Device & app notifications" screen that lists VRC-A and lets the user turn
+     * on notification access with NO ADB — so we target it directly first (this is
+     * how QGO reaches Android's real hidden settings on Quest), then fall back to
+     * the plain action for phones/tablets. (The per-listener DETAIL action also
+     * lands on Horizon's "General" page, so it is deliberately not used.)
      */
     fun launchNotificationAccess(ctx: android.content.Context) {
-        val component = android.content.ComponentName(
-            app, com.vrca.nowplaying.NowPlayingListenerService::class.java
-        ).flattenToString()
+        val component = notificationListenerComponent()
 
-        val log = StringBuilder()
-        log.append("SDK=").append(android.os.Build.VERSION.SDK_INT).append('\n')
-        log.append("component=").append(component).append('\n')
+        fun attempt(intent: Intent): Boolean = try {
+            ctx.startActivity(intent); true
+        } catch (_: Throwable) { false }
 
-        fun toast(msg: String) = runCatching {
-            android.widget.Toast.makeText(ctx, msg, android.widget.Toast.LENGTH_LONG).show()
-        }
-
-        // Try one mechanism. Returns true if startActivity did NOT throw (the
-        // system accepted the intent — note it may still land on the wrong page,
-        // which the diag distinguishes: "opened via X" tells us X is the one that
-        // ran, so if it's wrong we know to drop X and force the next mechanism).
-        fun attempt(label: String, intent: Intent): Boolean {
-            return try {
-                log.append("-> ").append(label).append(": launching\n")
-                setNotifAccessDiag(log.toString())   // persist BEFORE we leave the app
-                ctx.startActivity(intent)
-                log.append("OK ").append(label).append(": startActivity returned (did it land right?)\n")
-                setNotifAccessDiag(log.toString())
-                toast("Notif access: opened via $label")
-                true
-            } catch (e: Throwable) {
-                log.append("FAIL ").append(label).append(": ")
-                    .append(e.javaClass.simpleName).append(": ").append(e.message).append('\n')
-                setNotifAccessDiag(log.toString())
-                false
-            }
-        }
-
-        // Fragment-args extras — deep-link the list to OUR entry (harmless if the
-        // target ignores them). Reused across every attempt below.
+        // Deep-link the list to OUR entry (harmless if the target ignores it).
         fun Intent.withFragmentArgs(): Intent = this
             .putExtra(":settings:fragment_args_key", component)
             .putExtra(
@@ -3169,15 +3097,8 @@ class VrcaViewModel(
             )
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
-        // 1. THE REAL AOSP SETTINGS APP, targeted explicitly. Horizon's skinned
-        //    settings (com.oculus.vrshell) intercepts ACTION_NOTIFICATION_LISTENER_SETTINGS
-        //    and dumps us on "General" — but the underlying AOSP Settings app
-        //    (com.android.settings) still has the genuine notification-access screen
-        //    where VRC-A appears and can be toggled ON with NO ADB. This is what
-        //    QGO does to reach Android's real hidden settings on Quest. We try the
-        //    explicit activity aliases first, then just force the action onto the
-        //    com.android.settings package. Names differ across AOSP versions, so we
-        //    try each; the diag shows which one lands.
+        // 1. The REAL AOSP Settings app, by explicit activity alias then by package.
+        //    Activity names differ across AOSP versions, so try each.
         val aosp = "com.android.settings"
         val aospActivities = listOf(
             "com.android.settings.Settings\$NotificationAccessSettingsActivity",
@@ -3186,43 +3107,23 @@ class VrcaViewModel(
         )
         for (act in aospActivities) {
             if (attempt(
-                    "AOSP:${act.substringAfterLast('.').substringAfterLast('$')}",
                     Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
-                        .setClassName(aosp, act)
-                        .withFragmentArgs()
+                        .setClassName(aosp, act).withFragmentArgs()
                 )
             ) return
         }
-
-        // 2. Force the ACTION onto the real Settings package (lets its manifest
-        //    pick the right activity even if our hard-coded names are wrong).
         if (attempt(
-                "AOSP_PACKAGE",
                 Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
-                    .setPackage(aosp)
-                    .withFragmentArgs()
+                    .setPackage(aosp).withFragmentArgs()
             )
         ) return
 
-        // 3. Fragment-args deep-link, no package (lets Horizon handle it — lands on
-        //    "General" on Quest, but correct on phones/tablets).
-        if (attempt(
-                "FRAGMENT_ARGS",
-                Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).withFragmentArgs()
-            )
-        ) return
-
-        // 4. Bare list — last resort.
-        if (attempt(
-                "PLAIN_LIST",
-                Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            )
-        ) return
-
-        log.append("ALL FAILED\n")
-        setNotifAccessDiag(log.toString())
-        toast("Notif access: ALL intents failed")
+        // 2. Plain action (correct on phones/tablets; Horizon "General" on Quest).
+        if (attempt(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).withFragmentArgs())) return
+        attempt(
+            Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
     }
 
     /** The flattened notification-listener component for THIS build/flavor, e.g.
@@ -3233,18 +3134,26 @@ class VrcaViewModel(
         ).flattenToString()
 
     /**
-     * The RELIABLE way to grant notification-listener access on Meta Quest /
-     * Horizon OS: run this over ADB. Horizon does NOT expose a working in-VR
-     * toggle to ENABLE a sideloaded app's listener (the in-app Settings deep-link
-     * only lands on the app's page once the listener is ALREADY enabled — before
-     * that Horizon drops you at "General"). This is the same command VRC-NEXUS
-     * surfaces via its `adbGrantCommand` (verified by decompiling their APK):
-     *   adb shell cmd notification allow_listener <package>/<class>
-     * Additive — it does not disable any other listener. Requires Developer Mode
-     * + USB (or wireless) debugging enabled on the headset.
+     * Open VRC-A's App Info page, targeting the REAL AOSP Settings app on Quest.
+     * Needed for the "Allow restricted settings" step: Android 13+ GREYS OUT the
+     * notification-access toggle for SIDELOADED apps until the user opens App Info
+     * -> 3-dot menu -> "Allow restricted settings". Horizon's skinned App Info
+     * doesn't expose that overflow, so target com.android.settings directly and
+     * fall back to the normal action.
      */
-    fun notificationAccessAdbCommand(): String =
-        "adb shell cmd notification allow_listener " + notificationListenerComponent()
+    fun launchAppInfo(ctx: android.content.Context) {
+        val uri = Uri.parse("package:${app.packageName}")
+        fun attempt(intent: Intent): Boolean = try {
+            ctx.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); true
+        } catch (_: Throwable) { false }
+
+        if (attempt(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, uri)
+                    .setPackage("com.android.settings")
+            )
+        ) return
+        attempt(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, uri))
+    }
 
     fun overlayPermissionIntent(): Intent =
         Intent(

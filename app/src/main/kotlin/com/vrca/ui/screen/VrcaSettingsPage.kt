@@ -210,52 +210,39 @@ internal fun SettingsPage(
                 icon = Icons.Filled.MusicNote,
                 title = "Notification access",
                 subtitle = if (BuildConfig.IS_HEADSET_BUILD)
-                    "Lets VRC-A read Now Playing. On Quest, Horizon has no reliable in-VR toggle for sideloaded apps — use the ADB command below to grant it."
+                    "Lets VRC-A read Now Playing. Opens Android's settings — tap VRC-A in the list, then turn on Allow notification access."
                 else
                     "Lets VRC-A read Now Playing. Turn it on in the list that opens.",
                 primary = "Open",
                 granted = listenerGranted
             ) { vm.launchNotificationAccess(ctx) }
 
-            // Quest-only: the reliable grant path. Horizon OS does NOT expose a
-            // working in-VR toggle to ENABLE a sideloaded app's notification
-            // listener (the deep-link only lands on our page once it's ALREADY
-            // enabled). ADB is the reliable route — same command VRC-NEXUS uses.
-            // Shown only while access is missing.
+            // Quest-only: the "Allow restricted settings" step. Android 13+ GREYS
+            // OUT the notification-access toggle for SIDELOADED apps until the user
+            // opens App Info -> 3-dot menu -> "Allow restricted settings". Shown
+            // only while access is still missing.
             if (BuildConfig.IS_HEADSET_BUILD && !listenerGranted) {
-                val adbCmd = vm.notificationAccessAdbCommand()
                 Surface(
                     color = MaterialTheme.colorScheme.surfaceVariant,
                     shape = MaterialTheme.shapes.medium,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("Grant on Quest via ADB", style = MaterialTheme.typography.titleSmall)
+                        Text("Toggle greyed out? Allow restricted settings", style = MaterialTheme.typography.titleSmall)
                         Text(
-                            "Horizon OS blocks the in-VR toggle for sideloaded apps, so run this once from a PC (or wireless ADB). It only turns ON VRC-A's reader and changes nothing else.",
+                            "On a sideloaded app, Android hides the notification toggle until you allow restricted settings. Do this once, then turn on notification access above.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Text(
-                            "1. On the headset: Settings > System > Developer > enable USB debugging.\n" +
-                            "2. Connect the Quest to a PC (or set up wireless ADB).\n" +
-                            "3. Run this command:",
+                            "1. Tap \"Open App info\" below.\n" +
+                            "2. Tap the 3-dot menu (top right).\n" +
+                            "3. Tap \"Allow restricted settings\" (enter your headset PIN if asked).\n" +
+                            "4. Go back and turn on Allow notification access.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        SelectionContainer {
-                            Text(
-                                adbCmd,
-                                fontFamily = FontFamily.Monospace,
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        }
-                        TextButton(onClick = {
-                            val clip = ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
-                                as? android.content.ClipboardManager
-                            clip?.setPrimaryClip(android.content.ClipData.newPlainText("adb", adbCmd))
-                            android.widget.Toast.makeText(ctx, "Copied ADB command", android.widget.Toast.LENGTH_SHORT).show()
-                        }) { Text("Copy command") }
+                        TextButton(onClick = { vm.launchAppInfo(ctx) }) { Text("Open App info") }
                     }
                 }
             }
@@ -396,35 +383,6 @@ internal fun SettingsPage(
                         Text("Playing: ${vm.nowPlayingIsPlaying}", style = MaterialTheme.typography.bodySmall)
                         Text("Title: ${vm.lastNowPlayingTitle}", style = MaterialTheme.typography.bodySmall)
                         Text("Artist: ${vm.lastNowPlayingArtist}", style = MaterialTheme.typography.bodySmall)
-
-                        Text("Notification access (last attempt)", style = MaterialTheme.typography.labelMedium)
-                        val notifDiag by vm.notifAccessDiag.collectAsState()
-                        SelectionContainer {
-                            Text(
-                                text = notifDiag.ifBlank { "(not tried yet — tap 'Open notification access' below)" },
-                                fontFamily = FontFamily.Monospace,
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        }
-                        TextButton(onClick = { vm.launchNotificationAccess(ctx) }) {
-                            Text("Open notification access")
-                        }
-                        Text("ADB grant command (reliable on Quest)", style = MaterialTheme.typography.labelMedium)
-                        SelectionContainer {
-                            Text(
-                                text = vm.notificationAccessAdbCommand(),
-                                fontFamily = FontFamily.Monospace,
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        }
-                        TextButton(onClick = {
-                            val clip = ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
-                                as? android.content.ClipboardManager
-                            clip?.setPrimaryClip(
-                                android.content.ClipData.newPlainText("adb", vm.notificationAccessAdbCommand())
-                            )
-                            android.widget.Toast.makeText(ctx, "Copied ADB command", android.widget.Toast.LENGTH_SHORT).show()
-                        }) { Text("Copy ADB command") }
 
                         Text("OSC Output Preview", style = MaterialTheme.typography.labelMedium)
                         SelectionContainer {
