@@ -304,20 +304,45 @@ class DiscordRpcService : Service() {
         DiscordRpcState.status = DiscordRpcStatus.CONNECTING
         DiscordRpcState.failureMessage = null
 
-        val hasCookies = CookieManager.getInstance()
-            .getCookie("https://discord.com")
-            ?.isNotBlank() == true
-
-        if (!hasCookies) {
-            Log.w(TAG, "No Discord cookies — user must log in via WebView first")
-            updateNotif("Not signed into Discord — sign in from settings")
-            DiscordRpcState.status = DiscordRpcStatus.SESSION_EXPIRED
-            DiscordRpcState.failureMessage = "Not signed in — open settings to sign in"
-            return START_STICKY
-        }
-
-        loadWebView()
+        startIntended = true
+        cookieRetries = 0
+        tryStartWithCookies()
         return START_STICKY
+    }
+
+    @Volatile private var startIntended = false
+    private var cookieRetries = 0
+    private val COOKIE_MAX_RETRIES = 6   // ~6s of retries before giving up
+
+    /**
+     * Start the RPC once Discord cookies are present, RETRYING for a few seconds
+     * first instead of declaring SESSION_EXPIRED immediately. On the headset the
+     * login cookies can commit LATE (slow Quest storage + heavy concurrent startup),
+     * so the RPC used to start, find no cookies, and show "sign in again" — the
+     * login->sign-in loop. Retrying bridges the commit delay; only after ~6s with no
+     * cookies is it treated as genuinely not-signed-in. Status stays CONNECTING (not
+     * SESSION_EXPIRED) during retries so the UI doesn't flash "sign in".
+     */
+    private fun tryStartWithCookies() {
+        val hasCookies = CookieManager.getInstance()
+            .getCookie("https://discord.com")?.isNotBlank() == true
+        if (hasCookies) {
+            cookieRetries = 0
+            loadWebView()
+            return
+        }
+        if (cookieRetries < COOKIE_MAX_RETRIES) {
+            cookieRetries++
+            Log.w(TAG, "No Discord cookies yet — retry $cookieRetries/$COOKIE_MAX_RETRIES")
+            DiscordRpcState.status = DiscordRpcStatus.CONNECTING
+            DiscordRpcState.failureMessage = null
+            mainHandler.postDelayed({ if (startIntended) tryStartWithCookies() }, 1000)
+            return
+        }
+        Log.w(TAG, "No Discord cookies after retries — user must log in")
+        updateNotif("Not signed into Discord — sign in from settings")
+        DiscordRpcState.status = DiscordRpcStatus.SESSION_EXPIRED
+        DiscordRpcState.failureMessage = "Not signed in — open settings to sign in"
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
@@ -1115,6 +1140,7 @@ class DiscordRpcService : Service() {
         cacheMaintenanceJob = null
         shimReady = false
         isRunning = false
+        startIntended = false   // stop any pending cookie-retry loop
         // No bookkeeping needed here: online_start_epoch + last_online_seen are already
         // persisted on every online tick, so the grace-window carry-on works on the next
         // launch whether this teardown ran (swipe/stop) or the process was killed outright.
