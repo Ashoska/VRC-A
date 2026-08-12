@@ -375,11 +375,15 @@ object InstanceRosterManager {
                 delay(POLL_MS); continue
             }
 
-            // "VRChat is open" — prefer the fast/reliable OSCQuery service signal
-            // (cleared within ~250ms of a real close, immune to AFK log quiet); fall
-            // back to log-mtime staleness only when OSC is disabled (service down).
-            val alive = com.vrca.osc.VrcaOscQuery.isServiceUp() ||
-                (System.currentTimeMillis() - newest.lastModified < LOG_STALE_MS)
+            // "VRChat is open": OSC is always enabled for a chatbox app, so once
+            // OSCQuery has worked it's AUTHORITATIVE (up = open, aged-out = closed) —
+            // immune to an AFK user's quiet log, and it never lets a recent log write
+            // mask a real close. Log-mtime freshness is used ONLY as the startup
+            // bridge, before OSCQuery has resolved+polled for the first time.
+            val alive = if (com.vrca.osc.VrcaOscQuery.hasEverPolledOk())
+                com.vrca.osc.VrcaOscQuery.isServiceUp()
+            else
+                System.currentTimeMillis() - newest.lastModified < LOG_STALE_MS
             publish(context, state, newest.id, alive)
             waitForChange()
         }

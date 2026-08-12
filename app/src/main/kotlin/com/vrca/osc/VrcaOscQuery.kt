@@ -16,53 +16,111 @@ import java.net.URL
  *
  * So instead of listening for a push that never comes, we:
  *   1. mDNS-discover VRChat's `_oscjson._tcp` service (NsdManager) → host:port.
- *   2. Poll `GET http://host:port/avatar/parameters` (~1s) — one request returns the
- *      whole avatar-parameter subtree WITH current values.
+ *   2. Poll `GET http://host:port/avatar/parameters` (~250ms) — one request returns
+ *      the whole avatar-parameter subtree WITH current values.
  *   3. Fold each param's VALUE into [VrcaOscState] so the chatbox tokens
  *      `{mute}` `{afk}` `{movement}` `{scale}` `{param:Name}` resolve.
  *
  * Needs cleartext HTTP (OSCQuery is plain http on the LAN) — permitted on the
  * headset build only. Headset-started (VRChat runs on the same Quest, advertising
- * OSC_IP 127.0.0.1). The old UDP receiver ([VrcaOscReceiver]) stays as a no-cost
- * fallback for the `/avatar/change` event and PC push setups.
+ * OSC_IP 127.0.0.1).
+ *
+ * Robustness (hard-won on-device): discovery RE-ARMS. NsdManager discovery started
+ * before the network / VRChat is up either fails or misses VRChat's later launch, so
+ * the poll loop (a) re-starts discovery if it isn't active, and (b) periodically
+ * restarts it while VRChat hasn't been found — so opening VRChat AFTER VRC-A is
+ * picked up without reopening VRC-A. Liveness is grace-based: a single failed poll
+ * does NOT drop `host` (one HTTP hiccup would otherwise disable it); `isServiceUp()`
+ * ages out `UP_GRACE_MS` after the last OK poll, and only SUSTAINED failure re-arms
+ * discovery (VRChat closed / restarted on a new port).
  */
 object VrcaOscQuery {
 
     private const val TAG = "VrcaOscQuery"
     private const val SERVICE_TYPE = "_oscjson._tcp."
-    // Poll as fast as is reasonable over the LAN/loopback. The chatbox itself is
-    // rate-limited to 0.5s, so this keeps a value at most ~250ms stale when a send
-    // fires. One GET of /avatar/parameters per cycle (the eyeheight fallback GET only
-    // fires when EyeHeightAsMeters isn't a param), so it's light.
     private const val POLL_MS = 250L
+    // isServiceUp() stays true this long after the last successful poll — rides out
+    // a transient HTTP/network hiccup without flickering "VRChat closed".
+    private const val UP_GRACE_MS = 12_000L
+    // Re-arm discovery this often while VRChat hasn't been found (catches VRChat
+    // opened AFTER VRC-A, even if NsdManager's continuous discovery missed it).
+    private const val REARM_MS = 20_000L
+    // Sustained poll failure this long → drop host + re-discover (VRChat closed, or
+    // restarted on a new OSCQuery port).
+    private const val REDISCOVER_AFTER_FAIL_MS = 20_000L
 
     @Volatile private var started = false
     @Volatile private var host: String? = null
     @Volatile private var port: Int = 0
     @Volatile private var serviceName: String = ""
+    @Volatile private var lastPollOkMs = 0L
+    @Volatile private var discoveryActive = false
+    @Volatile private var lastDiscoveryStartMs = 0L
+    private var appContext: Context? = null
 
     private var nsd: NsdManager? = null
     private var discoveryListener: NsdManager.DiscoveryListener? = null
 
-    /**
-     * True while VRChat's OSCQuery service is currently reachable — i.e. VRChat is
-     * running (with OSC enabled). The poll clears `host` within ~250ms of VRChat's
-     * HTTP going unreachable (closed), and onServiceLost clears it on mDNS loss, so
-     * this is a FAST, reliable "VRChat is open" signal — far better than log
-     * staleness for an AFK user whose log may go quiet for minutes. It's false when
-     * OSC is disabled in VRChat (then callers fall back to log staleness).
-     */
-    fun isServiceUp(): Boolean = host != null && port > 0
+    /** True while VRChat's OSCQuery service is reachable (VRChat open, OSC on). */
+    fun isServiceUp(): Boolean =
+        host != null && lastPollOkMs > 0L && System.currentTimeMillis() - lastPollOkMs < UP_GRACE_MS
 
-    /** Idempotent. Starts mDNS discovery + the poll loop. */
+    /** True once we've had at least one successful poll this process (OSCQuery has
+     *  actually worked). Callers use log-staleness only BEFORE this is true. */
+    fun hasEverPolledOk(): Boolean = lastPollOkMs > 0L
+
+    /** Idempotent. The poll loop manages discovery (start / re-arm). */
     fun start(context: Context) {
         if (started) return
         started = true
-        startDiscovery(context.applicationContext)
+        appContext = context.applicationContext
         startPollLoop()
     }
 
-    // ---- discovery -----------------------------------------------------------
+    // ---- poll + discovery management ----------------------------------------
+
+    private fun startPollLoop() {
+        Thread({
+            while (started) {
+                val ctx = appContext
+                if (ctx != null) {
+                    val now = System.currentTimeMillis()
+                    // (Re)arm discovery if it isn't running, or periodically while
+                    // VRChat still hasn't been found (booted before VRChat / missed).
+                    if (!discoveryActive || (host == null && now - lastDiscoveryStartMs > REARM_MS)) {
+                        restartDiscovery(ctx)
+                    }
+                    val h = host; val p = port
+                    if (h != null && p > 0) {
+                        if (pollParams(h, p)) {
+                            lastPollOkMs = System.currentTimeMillis()
+                        } else if (lastPollOkMs > 0L &&
+                            System.currentTimeMillis() - lastPollOkMs > REDISCOVER_AFTER_FAIL_MS
+                        ) {
+                            // Sustained failure → VRChat closed / restarted. Drop the
+                            // stale host and re-discover (a restart may use a new port).
+                            host = null; port = 0
+                            restartDiscovery(ctx)
+                        }
+                    }
+                }
+                VrcaOscState.tickLiveness()
+                try { Thread.sleep(POLL_MS) } catch (_: InterruptedException) { break }
+            }
+        }, "vrca-oscquery").apply { isDaemon = true; start() }
+    }
+
+    private fun restartDiscovery(context: Context) {
+        stopDiscovery()
+        startDiscovery(context)
+    }
+
+    private fun stopDiscovery() {
+        val m = nsd; val l = discoveryListener
+        if (m != null && l != null) runCatching { m.stopServiceDiscovery(l) }
+        discoveryActive = false
+        discoveryListener = null
+    }
 
     private fun startDiscovery(context: Context) {
         val manager = context.getSystemService(Context.NSD_SERVICE) as? NsdManager
@@ -71,6 +129,7 @@ object VrcaOscQuery {
             return
         }
         nsd = manager
+        lastDiscoveryStartMs = System.currentTimeMillis()
 
         val resolveListener = object : NsdManager.ResolveListener {
             override fun onResolveFailed(info: NsdServiceInfo?, errorCode: Int) {
@@ -86,10 +145,16 @@ object VrcaOscQuery {
         }
 
         val listener = object : NsdManager.DiscoveryListener {
-            override fun onStartDiscoveryFailed(t: String?, e: Int) { updateDiag("discovery start failed err=$e") }
-            override fun onStopDiscoveryFailed(t: String?, e: Int) {}
-            override fun onDiscoveryStarted(t: String?) { updateDiag("discovery started") }
-            override fun onDiscoveryStopped(t: String?) {}
+            override fun onStartDiscoveryFailed(t: String?, e: Int) {
+                discoveryActive = false
+                updateDiag("discovery start failed err=$e")
+            }
+            override fun onStopDiscoveryFailed(t: String?, e: Int) { discoveryActive = false }
+            override fun onDiscoveryStarted(t: String?) {
+                discoveryActive = true
+                updateDiag("discovery started")
+            }
+            override fun onDiscoveryStopped(t: String?) { discoveryActive = false }
             override fun onServiceFound(info: NsdServiceInfo) {
                 // Only VRChat's own OSCQuery service (others may exist on the LAN).
                 if (!info.serviceName.startsWith("VRChat", ignoreCase = true)) return
@@ -103,28 +168,16 @@ object VrcaOscQuery {
             }
         }
         discoveryListener = listener
-        runCatching { manager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener) }
-    }
-
-    // ---- poll ----------------------------------------------------------------
-
-    private fun startPollLoop() {
-        Thread({
-            while (started) {
-                val h = host
-                val p = port
-                if (h != null && p > 0) {
-                    val ok = pollParams(h, p)
-                    if (!ok) { host = null; port = 0 } // dropped → wait for re-discovery
-                }
-                VrcaOscState.tickLiveness()
-                try { Thread.sleep(POLL_MS) } catch (_: InterruptedException) { break }
-            }
-        }, "vrca-oscquery").apply { isDaemon = true; start() }
+        try {
+            manager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
+        } catch (e: Exception) {
+            discoveryActive = false
+            updateDiag("discover error: ${e.message}")
+        }
     }
 
     /** GET the whole avatar-parameter subtree and fold every value. Returns false
-     *  on a network error (host gone), true otherwise. */
+     *  on a network error (VRChat unreachable), true otherwise. */
     private fun pollParams(h: String, p: Int): Boolean {
         val body = httpGetBody("http://$h:$p/avatar/parameters") ?: return false
         return try {
@@ -172,11 +225,9 @@ object VrcaOscQuery {
     }
 
     private fun httpGetBody(url: String): String? {
-        // ALWAYS disconnect in finally. This runs 4x/second (250ms poll) on the
-        // headset ONLY — an exception between openConnection and disconnect would
-        // leak a connection/socket every failed poll, and at that rate the process
-        // fd limit is reached fast (the phone never runs this, which is why the
-        // "chatbox randomly stops" was headset-only).
+        // ALWAYS disconnect in finally. This runs 4x/second on the headset ONLY —
+        // an exception between openConnection and disconnect would leak a connection
+        // every failed poll, and at that rate the process fd limit is reached fast.
         var conn: HttpURLConnection? = null
         return try {
             conn = (URL(url).openConnection() as HttpURLConnection).apply {
