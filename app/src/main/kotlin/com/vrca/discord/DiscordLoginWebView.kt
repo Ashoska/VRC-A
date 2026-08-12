@@ -101,7 +101,15 @@ fun DiscordLoginWebView(
                                             if (result == "true" && !loggedIn) {
                                                 Log.d("DiscordLogin", "Login confirmed: webpack loaded, no login form")
                                                 loggedIn = true
-                                                onLoginComplete()
+                                                // Persist the login cookies BEFORE signalling completion.
+                                                // onLoginComplete → the RPC service starts + loads its own
+                                                // discord.com WebView; if the cookies aren't committed yet it
+                                                // loads UNAUTHENTICATED, Discord redirects to /login, and the
+                                                // RPC reports SESSION_EXPIRED — the "log in, then it says sign
+                                                // in again" loop. flush() commits them; a short delay lets the
+                                                // async flush land before the RPC reads the cookie store.
+                                                CookieManager.getInstance().flush()
+                                                handler.postDelayed({ onLoginComplete() }, 350)
                                             } else if (retryCount < maxRetries && !loggedIn) {
                                                 retryCount++
                                                 Log.d("DiscordLogin", "Probe returned $result — retry $retryCount/$maxRetries")
