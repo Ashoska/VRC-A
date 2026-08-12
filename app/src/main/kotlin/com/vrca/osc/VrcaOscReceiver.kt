@@ -45,12 +45,15 @@ object VrcaOscReceiver {
                 bind(InetSocketAddress(PORT))
             }
             socket = sock
+            VrcaOscState.diagBound = true
+            VrcaOscState.diagBindError = ""
             Log.i(TAG, "OSC-in listening on $PORT")
             val buf = ByteArray(2048)
             while (running) {
                 val packet = DatagramPacket(buf, buf.size)
                 try {
                     sock.receive(packet)
+                    VrcaOscState.diagRxPackets++
                     runCatching { parse(packet.data, packet.offset, packet.length) }
                 } catch (e: SocketTimeoutException) {
                     VrcaOscState.tickLiveness() // let isLive expire when VRChat is quiet
@@ -59,6 +62,8 @@ object VrcaOscReceiver {
                 }
             }
         } catch (e: Exception) {
+            VrcaOscState.diagBound = false
+            VrcaOscState.diagBindError = e.javaClass.simpleName + ": " + (e.message ?: "")
             Log.w(TAG, "failed to bind $PORT (another OSC app using it?)", e)
         } finally {
             runCatching { socket?.close() }
@@ -73,6 +78,7 @@ object VrcaOscReceiver {
     private fun parse(data: ByteArray, offset: Int, length: Int) {
         val c = Cursor(data, offset, offset + length)
         val address = readString(c) ?: return
+        VrcaOscState.diagLastAddress = address
         if (address == "#bundle") return // VRChat avatar params aren't bundled
         val tags = readString(c) ?: return
         if (!tags.startsWith(",")) return

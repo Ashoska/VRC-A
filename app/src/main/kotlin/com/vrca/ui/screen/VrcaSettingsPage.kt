@@ -384,6 +384,24 @@ internal fun SettingsPage(
                         Text("Title: ${vm.lastNowPlayingTitle}", style = MaterialTheme.typography.bodySmall)
                         Text("Artist: ${vm.lastNowPlayingArtist}", style = MaterialTheme.typography.bodySmall)
 
+                        if (BuildConfig.IS_HEADSET_BUILD) {
+                            Text("OSC-in (VRChat → VRC-A :9001)", style = MaterialTheme.typography.labelMedium)
+                            var oscInDiag by remember { mutableStateOf(com.vrca.osc.VrcaOscState.diagString()) }
+                            androidx.compose.runtime.LaunchedEffect(Unit) {
+                                while (true) {
+                                    oscInDiag = com.vrca.osc.VrcaOscState.diagString()
+                                    kotlinx.coroutines.delay(1000)
+                                }
+                            }
+                            SelectionContainer {
+                                Text(
+                                    oscInDiag,
+                                    fontFamily = FontFamily.Monospace,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                        }
+
                         Text("OSC Output Preview", style = MaterialTheme.typography.labelMedium)
                         SelectionContainer {
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {

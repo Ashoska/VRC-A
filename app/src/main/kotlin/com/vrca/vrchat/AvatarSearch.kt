@@ -50,23 +50,38 @@ object AvatarSearch {
                 ?: return@withContext emptyList()
             (0 until arr.length()).mapNotNull { i ->
                 val a = arr.optJSONObject(i) ?: return@mapNotNull null
-                val id = a.optString("id", "").ifBlank { a.optString("avatar_id", "") }
+                // Real avtrdb schema: id = "vrc_id"; author is an OBJECT {name,vrc_id};
+                // thumbnail = "image_url"; platforms = "compatibility" (["pc","android",
+                // "ios"]). (The old code guessed id/authorName/thumbnailImageUrl/
+                // unityPackages — all absent — so every result was dropped.)
+                val id = a.optString("vrc_id", "").ifBlank { a.optString("id", "") }
                 if (id.isBlank()) return@mapNotNull null
-                val platforms = a.optJSONArray("unityPackages")?.let { up ->
-                    (0 until up.length()).mapNotNull {
-                        up.optJSONObject(it)?.optString("platform", "")?.takeIf { p -> p.isNotBlank() }
-                    }.map { VrchatAuthManager.prettyPlatform(it) }.filter { it.isNotBlank() }.distinct()
+                val author = a.optJSONObject("author")?.optString("name", "")
+                    ?: a.optString("authorName", "")
+                val platforms = a.optJSONArray("compatibility")?.let { comp ->
+                    (0 until comp.length()).mapNotNull {
+                        comp.optString(it, "").takeIf { p -> p.isNotBlank() }
+                    }.map { prettyAvtrdbPlatform(it) }.filter { it.isNotBlank() }.distinct()
                 } ?: emptyList()
                 Result(
                     id = id,
                     name = a.optString("name", ""),
-                    author = a.optString("authorName", "").ifBlank { a.optString("author_name", "") },
-                    imageUrl = a.optString("thumbnailImageUrl", "").ifBlank { a.optString("imageUrl", "") },
+                    author = author,
+                    imageUrl = a.optString("image_url", "").ifBlank { a.optString("thumbnailImageUrl", "") },
                     platforms = platforms
                 )
             }
         } catch (e: Exception) {
             Log.w(TAG, "avtrdb search failed", e); emptyList()
         }
+    }
+
+    /** avtrdb's `compatibility` values ("pc"/"android"/"ios") -> display labels.
+     *  (Distinct from VRChat's `standalonewindows`/`android` platform strings.) */
+    private fun prettyAvtrdbPlatform(raw: String): String = when (raw.trim().lowercase()) {
+        "pc", "standalonewindows", "windows" -> "PC"
+        "android", "quest" -> "Quest"
+        "ios" -> "iOS"
+        else -> ""
     }
 }

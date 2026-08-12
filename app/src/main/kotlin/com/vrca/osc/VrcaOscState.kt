@@ -30,6 +30,28 @@ object VrcaOscState {
     private const val LIVE_WINDOW_MS = 8_000L
     private const val MOVING_THRESHOLD = 0.10f // m/s magnitude to read as "moving"
 
+    // ---- diagnostics (headset OSC-in debugging) ------------------------------
+    @Volatile var diagBound = false
+    @Volatile var diagBindError = ""
+    @Volatile var diagRxPackets = 0L
+    @Volatile var diagLastAddress = ""
+
+    fun diagString(): String = buildString {
+        append("bound=").append(diagBound)
+        if (diagBindError.isNotBlank()) append("  bindErr=").append(diagBindError)
+        append("  rxPackets=").append(diagRxPackets)
+        append("  live=").append(isLive)
+        append("  params=").append(params.size)
+        if (diagLastAddress.isNotBlank()) append("\nlastAddr=").append(diagLastAddress)
+        append("\nmute=").append(muteSelf)
+        append("  afk=").append(afk)
+        append("  moving=").append(moving)
+        append("  scale=").append(scaleLabel.ifBlank { "(none)" })
+        if (params.isNotEmpty()) {
+            append("\nkeys: ").append(params.keys.take(12).joinToString(", "))
+        }
+    }
+
     fun onParam(name: String, value: Any?) {
         if (value != null) params[name] = value
         lastRxMs = System.currentTimeMillis()
