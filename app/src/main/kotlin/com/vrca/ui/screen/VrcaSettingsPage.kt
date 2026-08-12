@@ -423,6 +423,28 @@ internal fun SettingsPage(
                                     style = MaterialTheme.typography.bodySmall
                                 )
                             }
+
+                            // Instance roster: shows the log file + parsed
+                            // location/world/roster + the last log lines with what the
+                            // parser made of each — so a "not in a world" with a
+                            // readable log reveals which lines didn't match.
+                            Text("Instance roster (log parse)", style = MaterialTheme.typography.labelMedium)
+                            var rosterDiag by remember { mutableStateOf("") }
+                            androidx.compose.runtime.LaunchedEffect(Unit) {
+                                while (true) {
+                                    rosterDiag = runCatching {
+                                        com.vrca.vrchat.InstanceRosterManager.diagString(ctx)
+                                    }.getOrDefault("(err)")
+                                    kotlinx.coroutines.delay(1500)
+                                }
+                            }
+                            SelectionContainer {
+                                Text(
+                                    rosterDiag,
+                                    fontFamily = FontFamily.Monospace,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
                         }
 
                         Text("OSC Output Preview", style = MaterialTheme.typography.labelMedium)

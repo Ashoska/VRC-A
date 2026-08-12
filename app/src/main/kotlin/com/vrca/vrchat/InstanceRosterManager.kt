@@ -107,6 +107,50 @@ object InstanceRosterManager {
     private val _flow = MutableStateFlow(RosterUi())
     val flow: StateFlow<RosterUi> = _flow.asStateFlow()
 
+    // Diagnostics (Settings -> Debug): the current log ref + folded state, so we can
+    // see WHY a readable log shows "not in a world" — which lines the parser matched.
+    @Volatile private var lastRef: LogRef? = null
+    @Volatile private var lastState: VrcLogParser.InstanceState? = null
+
+    /** Human diag: access, the log file being read, the parsed location/world/roster,
+     *  and the last ~14 raw log lines tagged with what the parser made of each — so
+     *  an unparsed OnPlayerJoined / Joining line's exact format is visible. */
+    fun diagString(context: Context): String {
+        val sb = StringBuilder()
+        sb.append(if (hasAnyAccess(context)) "access=OK" else "access=NONE").append('\n')
+        val ref = lastRef
+        if (ref == null) { sb.append("no log selected yet"); return sb.toString() }
+        sb.append("log=").append(ref.id.substringAfterLast('/')).append("  size=").append(ref.size)
+            .append("  age=").append((System.currentTimeMillis() - ref.lastModified) / 1000).append("s\n")
+        val st = lastState
+        sb.append("location=").append(st?.location ?: "null")
+            .append("\nworld=").append(st?.worldName ?: "null")
+            .append("  roster=").append(st?.roster?.size ?: 0).append('\n')
+        sb.append("--- last log lines (parse result) ---\n")
+        val tail = runCatching { readTail(context, ref, 4000) }.getOrDefault("")
+        tail.split('\n').filter { it.isNotBlank() }.takeLast(14).forEach { line ->
+            val ev = VrcLogParser.parseLine(line)
+            val tag = ev?.let { it::class.simpleName } ?: "—"
+            sb.append('[').append(tag).append("] ").append(line.trim().take(78)).append('\n')
+        }
+        return sb.toString()
+    }
+
+    private fun readTail(context: Context, ref: LogRef, bytes: Int): String {
+        val buf: ByteArray = if (ref.uri != null) {
+            context.contentResolver.openInputStream(ref.uri)?.use { input ->
+                readFrom(input, (ref.size - bytes).coerceAtLeast(0))
+            } ?: ByteArray(0)
+        } else {
+            RandomAccessFile(File(ref.id), "r").use { raf ->
+                val start = (raf.length() - bytes).coerceAtLeast(0)
+                raf.seek(start)
+                ByteArray((raf.length() - start).toInt()).also { raf.readFully(it) }
+            }
+        }
+        return String(buf, Charsets.UTF_8)
+    }
+
     private val started = AtomicBoolean(false)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -384,6 +428,7 @@ object InstanceRosterManager {
                 com.vrca.osc.VrcaOscQuery.isServiceUp()
             else
                 System.currentTimeMillis() - newest.lastModified < LOG_STALE_MS
+            lastRef = newest; lastState = state
             publish(context, state, newest.id, alive)
             waitForChange()
         }
