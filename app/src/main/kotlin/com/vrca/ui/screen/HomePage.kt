@@ -193,6 +193,20 @@ private val HOME_TWO_COL_THRESHOLD = 560.dp
 // panel drops to two, then one.
 private val HOME_THREE_COL_THRESHOLD = 820.dp
 
+/** A column-scroll modifier that only grabs vertical drags when the content
+ *  ACTUALLY overflows the column. Compose's `verticalScroll` otherwise consumes
+ *  drag gestures even when everything fits, so a fixed-height column (the preview
+ *  bubble, or the toggles list while Manual Send is collapsed) could be
+ *  rubber-band "scrolled" to nowhere. `state.maxValue` is 0 while content fits
+ *  and becomes > 0 once it overflows (e.g. Manual Send expands, or the roster
+ *  fills up), so scrolling switches on exactly when there's somewhere to go.
+ *  Each call site gets its own remembered ScrollState (keyed by call position). */
+@Composable
+private fun scrollWhenOverflowing(): Modifier {
+    val state = rememberScrollState()
+    return Modifier.verticalScroll(state, enabled = state.maxValue > 0)
+}
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 internal fun HomePage(
@@ -374,13 +388,13 @@ internal fun HomePage(
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         Column(
-                            Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
+                            Modifier.weight(1f).fillMaxHeight().then(scrollWhenOverflowing()),
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             preview(false)
                         }
                         Column(
-                            Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
+                            Modifier.weight(1f).fillMaxHeight().then(scrollWhenOverflowing()),
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             QuickTogglesSection(
@@ -394,7 +408,7 @@ internal fun HomePage(
                             ManualSendCard(vm = vm, isBanned = isBanned)
                         }
                         Column(
-                            Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
+                            Modifier.weight(1f).fillMaxHeight().then(scrollWhenOverflowing()),
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             InstanceRosterPanel()
@@ -409,14 +423,14 @@ internal fun HomePage(
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         Column(
-                            Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
+                            Modifier.weight(1f).fillMaxHeight().then(scrollWhenOverflowing()),
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             preview(false)
                             InstanceRosterPanel()
                         }
                         Column(
-                            Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
+                            Modifier.weight(1f).fillMaxHeight().then(scrollWhenOverflowing()),
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             QuickTogglesSection(
@@ -434,7 +448,7 @@ internal fun HomePage(
                 // Small/shrunk panel: single scrolling column.
                 else -> {
                     Column(
-                        Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+                        Modifier.fillMaxSize().then(scrollWhenOverflowing()),
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         preview(true)

@@ -45,7 +45,23 @@
             android:resizeableActivity="false"
             android:minAspectRatio="1.6"
             android:maxAspectRatio="1.6"
-            tools:node="merge" />
+            tools:node="merge">
+            <!-- Force the LAUNCH size to the intended 16:10 monitor panel
+                 (1024x640 dp). This is the closest thing to "lock the size" that
+                 Horizon OS actually honors: every fresh launch RESETS to this
+                 size (so a bad manual resize is undone just by reopening), and
+                 min = default hints the OS to refuse shrinking below it. Horizon
+                 still ultimately owns 2D-panel resize (Android has no hard lock),
+                 but combined with the aspect-ratio pins + the width-responsive
+                 layout, the panel opens correct every time and degrades
+                 gracefully if the user does force a resize. -->
+            <layout
+                android:defaultWidth="1024dp"
+                android:defaultHeight="640dp"
+                android:minWidth="1024dp"
+                android:minHeight="640dp"
+                android:gravity="center" />
+        </activity>
     </application>
 
 </manifest>
