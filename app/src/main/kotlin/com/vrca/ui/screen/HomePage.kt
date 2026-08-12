@@ -870,11 +870,9 @@ private fun PreviewAndTogglesCard(
                     }
                 }
 
-                // Headset: keep the silhouette full size, just trim the gap above
-                // it a little so the preview column clears the panel bottom.
                 Canvas(
                     modifier = Modifier
-                        .padding(top = if (isHeadset) 4.dp else 8.dp)
+                        .padding(top = 8.dp)
                         .height(120.dp)
                         .width(120.dp)
                 ) {
@@ -1159,9 +1157,7 @@ private fun QuickTogglesGrid(
 ) {
     var timeMenuOpen by remember { mutableStateOf(false) }
 
-    // Headset: very slightly tighter pill spacing so the 9-pill list + Manual
-    // Send fit the fixed-height column without tipping into a scroll.
-    Column(verticalArrangement = Arrangement.spacedBy(if (BuildConfig.IS_HEADSET_BUILD) 5.dp else 6.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         vm.cardOrder.forEach { component ->
             when (component) {
                 "Pinned" -> TogglePill(
