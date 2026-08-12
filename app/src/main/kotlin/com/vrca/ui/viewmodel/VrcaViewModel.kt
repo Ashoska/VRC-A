@@ -2075,15 +2075,21 @@ class VrcaViewModel(
         userInputIpState.value = ip
     }
 
+    // On the headset VRChat is on THIS device, so the OSC target is ALWAYS
+    // 127.0.0.1 — a custom IP (from an old build / stray entry) must never override
+    // it (that would send the chatbox to the wrong place). Phone/admin unaffected.
+    private fun oscTargetFor(address: String): String =
+        if (BuildConfig.IS_HEADSET_BUILD) "127.0.0.1" else address
+
     fun ipAddressApply(address: String) {
-        remoteVrcaOsc.ipAddress = address
+        remoteVrcaOsc.ipAddress = oscTargetFor(address)
         viewModelScope.launch { userPreferencesRepository.saveIpAddress(address) }
         startSelfSyncLoopIfNeeded()
         attachModerationListenersLoopOnce()
     }
 
     fun ipAddressApplyRuntimeOnly(address: String) {
-        remoteVrcaOsc.ipAddress = address
+        remoteVrcaOsc.ipAddress = oscTargetFor(address)
         startSelfSyncLoopIfNeeded()
         attachModerationListenersLoopOnce()
     }

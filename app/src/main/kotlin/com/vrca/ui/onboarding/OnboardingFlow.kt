@@ -679,6 +679,30 @@ private fun PermissionRow(
 
 @Composable
 private fun StepIpEntry() {
+    // Headset: VRChat runs on THIS device, so OSC always targets 127.0.0.1 — there
+    // is no IP to enter (that's a phone-only concept, where you point VRC-A at the
+    // headset over the LAN). Show a short note instead of the IP form + warnings.
+    if (com.vrca.BuildConfig.IS_HEADSET_BUILD) {
+        StepContainer(
+            title = "Connection",
+            subtitle = "You're on a Quest, so there's no IP address to set up."
+        ) {
+            ElevatedCard {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Nothing to enter here", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "On a phone you'd type your headset's IP so VRC-A can reach VRChat over your network. " +
+                            "On the headset itself, VRChat is right here — VRC-A talks to it directly on this device, " +
+                            "automatically. Just tap Next.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+        return
+    }
+
     val ctx = LocalContext.current
     val repo = (ctx.applicationContext as VrcaApplication).userPreferencesRepository
     val scope = rememberCoroutineScope()
@@ -944,7 +968,10 @@ private fun StepTestMessage(
     var targetPort by remember { mutableStateOf(9000) }
 
     LaunchedEffect(Unit) {
-        targetIp = repo.ip1Address.first()
+        // Headset: VRChat is on this device, so the test targets 127.0.0.1 (a stale
+        // saved IP would make the loopback ping fail and block Finish).
+        targetIp = if (com.vrca.BuildConfig.IS_HEADSET_BUILD) "127.0.0.1"
+                   else repo.ip1Address.first()
         targetPort = repo.port.first()
     }
 
