@@ -15,7 +15,10 @@ import android.service.notification.StatusBarNotification
 
 class NowPlayingListenerService : NotificationListenerService() {
 
-    private val allowedPackages = setOf(
+    // Native music apps (exact-matched — deliberately NOT a fuzzy "contains spotify"
+    // substring, which would mislabel YouTube vs YouTube Music and catch unrelated
+    // packages). Ad/pause refinements downstream key on these exact ids.
+    private val musicPackages = setOf(
         "com.spotify.music",
         "com.google.android.youtube",
         "com.google.android.apps.youtube.music",
@@ -25,6 +28,74 @@ class NowPlayingListenerService : NotificationListenerService() {
         "com.amazon.mp3",
         "com.bandcamp.android"
     )
+
+    // Media played through a BROWSER (a web player like the Spotify / YouTube Music
+    // web app) publishes its MediaSession under the BROWSER's package, not the music
+    // app's — e.g. on Quest the Spotify web player runs in Chrome, so the session
+    // package is "com.android.chrome" (confirmed on-device). Without these the
+    // browser session is filtered out and nothing shows. Exact-matched to stay
+    // precise; this is a broad sweep of the common Android/Quest browsers so web
+    // playback works on both the phone and headset builds.
+    private val browserPackages = setOf(
+        "com.android.chrome", "com.chrome.beta", "com.chrome.dev", "com.chrome.canary",
+        "com.google.android.apps.chrome", "org.chromium.chrome",
+        "com.oculus.browser",
+        "org.mozilla.firefox", "org.mozilla.firefox_beta", "org.mozilla.fenix",
+        "org.mozilla.focus", "org.mozilla.klar",
+        "com.microsoft.emmx", "com.microsoft.emmx.beta", "com.microsoft.emmx.dev",
+        "com.brave.browser", "com.brave.browser_beta", "com.brave.browser_nightly",
+        "com.opera.browser", "com.opera.browser.beta", "com.opera.mini.native", "com.opera.gx",
+        "com.sec.android.app.sbrowser", "com.sec.android.app.sbrowser.beta",
+        "com.vivaldi.browser", "com.vivaldi.browser.snapshot",
+        "com.kiwibrowser.browser",
+        "com.duckduckgo.mobile.android",
+        "com.UCMobile.intl", "com.UCMobile",
+        "com.yandex.browser", "com.yandex.browser.beta",
+        "com.ecosia.android",
+        "acr.browser.lightning", "com.jamal2367.styx",
+        "com.mi.globalbrowser", "com.mi.globalbrowser.mini",
+        "com.heytap.browser", "com.coloros.browser",
+        "com.qwant.liberty",
+        "org.torproject.torbrowser",
+        "mark.via.gp", "mark.via",
+        "com.cloudmosa.puffinFree", "com.cloudmosa.puffin",
+        "com.naver.whale",
+        "com.aloha.browser",
+        "com.sec.android.app.samsungapps.browser",
+        "com.htc.sense.browser", "com.asus.browser", "com.android.browser"
+    )
+
+    // Browsers detected DYNAMICALLY from the system: any package that handles a
+    // web (ACTION_VIEW https) intent IS a browser. Android 11+ makes web handlers
+    // visible without a <queries> entry, so this needs no manifest changes and
+    // covers EVERY installed browser automatically — no hand-maintained list can.
+    // Merged with the hard-coded set above as a belt-and-suspenders fallback.
+    // Cached; refreshed on each listener (re)connect so a newly-installed browser
+    // is picked up.
+    @Volatile private var cachedBrowserPkgs: Set<String>? = null
+
+    private fun browserPkgs(): Set<String> {
+        cachedBrowserPkgs?.let { return it }
+        val found = mutableSetOf<String>()
+        try {
+            val intent = android.content.Intent(
+                android.content.Intent.ACTION_VIEW,
+                android.net.Uri.parse("https://example.com")
+            )
+            val resolved = packageManager.queryIntentActivities(
+                intent, android.content.pm.PackageManager.MATCH_ALL
+            )
+            for (ri in resolved) ri.activityInfo?.packageName?.let { found.add(it) }
+        } catch (_: Throwable) { }
+        val result = browserPackages + found
+        cachedBrowserPkgs = result
+        return result
+    }
+
+    /** True for any media session we should read: a native music app, or a browser
+     *  (native or dynamically-detected) hosting a web player. Exact-match only. */
+    private fun isTrackedMediaPkg(pkg: String): Boolean =
+        pkg in musicPackages || pkg in browserPkgs()
 
     // YouTube keeps reporting STATE_PLAYING + speed=1f even while PAUSED, so the
     // only reliable pause signal is that the raw position stops advancing across
@@ -126,6 +197,10 @@ class NowPlayingListenerService : NotificationListenerService() {
         super.onListenerConnected()
         NowPlayingState.setConnected(true)
 
+        // Recompute the installed-browser set on every (re)connect so a browser
+        // installed since the last scan is picked up.
+        cachedBrowserPkgs = null
+
         try {
             activeNotifications?.forEach { sbn -> onNotificationPosted(sbn) }
         } catch (_: Throwable) { }
@@ -143,7 +218,7 @@ class NowPlayingListenerService : NotificationListenerService() {
             val l = android.media.session.MediaSessionManager.OnActiveSessionsChangedListener { controllers ->
                 controllers?.forEach { controller ->
                     val pkg = controller.packageName ?: return@forEach
-                    if (allowedPackages.isNotEmpty() && pkg !in allowedPackages) return@forEach
+                    if (!isTrackedMediaPkg(pkg)) return@forEach
                     val token = controller.sessionToken ?: return@forEach
                     ensureControllerForPackage(pkg, token)
                 }
@@ -171,7 +246,7 @@ class NowPlayingListenerService : NotificationListenerService() {
             ) ?: return
             for (controller in controllers) {
                 val pkg = controller.packageName ?: continue
-                if (allowedPackages.isNotEmpty() && pkg !in allowedPackages) continue
+                if (!isTrackedMediaPkg(pkg)) continue
                 val token = controller.sessionToken ?: continue
                 ensureControllerForPackage(pkg, token)
             }
@@ -193,7 +268,7 @@ class NowPlayingListenerService : NotificationListenerService() {
         val notif = sbn.notification ?: return
         val extras = notif.extras ?: return
 
-        if (allowedPackages.isNotEmpty() && pkg !in allowedPackages) return
+        if (!isTrackedMediaPkg(pkg)) return
 
         val token = getMediaSessionToken(extras) ?: return
 
