@@ -44,6 +44,16 @@ object VrcaOscQuery {
     private var nsd: NsdManager? = null
     private var discoveryListener: NsdManager.DiscoveryListener? = null
 
+    /**
+     * True while VRChat's OSCQuery service is currently reachable — i.e. VRChat is
+     * running (with OSC enabled). The poll clears `host` within ~250ms of VRChat's
+     * HTTP going unreachable (closed), and onServiceLost clears it on mDNS loss, so
+     * this is a FAST, reliable "VRChat is open" signal — far better than log
+     * staleness for an AFK user whose log may go quiet for minutes. It's false when
+     * OSC is disabled in VRChat (then callers fall back to log staleness).
+     */
+    fun isServiceUp(): Boolean = host != null && port > 0
+
     /** Idempotent. Starts mDNS discovery + the poll loop. */
     fun start(context: Context) {
         if (started) return

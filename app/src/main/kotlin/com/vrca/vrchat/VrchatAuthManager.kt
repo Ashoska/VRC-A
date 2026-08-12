@@ -73,36 +73,75 @@ object VrchatAuthManager {
     // Encrypted prefs
     // ------------------------------------------------------------------
 
-    private fun getPrefs(context: Context) = try {
+    // In-memory guard so many getPrefs() calls in ONE launch count as a single
+    // failure (the persisted counter must reflect distinct LAUNCHES, not calls).
+    @Volatile private var prefsFailCountedThisLaunch = false
+    // Delete + recreate the encrypted store only after this many CONSECUTIVE failed
+    // launches (real MasterKey corruption). A single transient failure never wipes.
+    private val PREFS_FAIL_DELETE_THRESHOLD = 4
+
+    private fun createEncryptedPrefs(context: Context): android.content.SharedPreferences {
         val masterKey = MasterKey.Builder(context)
             .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
             .build()
-        EncryptedSharedPreferences.create(
-            context,
-            PREFS_FILE,
-            masterKey,
+        return EncryptedSharedPreferences.create(
+            context, PREFS_FILE, masterKey,
             EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
         )
-    } catch (e: Exception) {
-        Log.e(TAG, "EncryptedSharedPreferences init failed — attempting recovery", e)
+    }
+
+    private fun healthPrefs(context: Context) =
+        context.getSharedPreferences("vrca_prefs_health", Context.MODE_PRIVATE)
+
+    /**
+     * Encrypted store for the VRChat session (cookie + saved credentials).
+     *
+     * CRITICAL: a failure here does NOT immediately delete the store. On a headset
+     * REBOOT the Android Keystore is frequently not ready when the app initialises
+     * at boot, so EncryptedSharedPreferences.create() throws TRANSIENTLY — and the
+     * old code wiped the saved session on that first failure, which is exactly the
+     * "VRChat logs the user out after restarting the headset" bug. Now a failure
+     * returns null (session preserved) and increments a per-LAUNCH counter; the
+     * destructive delete+recreate only runs after several consecutive failed
+     * launches (genuine MasterKey corruption). A success resets the counter.
+     */
+    private fun getPrefs(context: Context): android.content.SharedPreferences? {
         try {
-            // Delete corrupted prefs file and its encrypted key file, then retry
+            val p = createEncryptedPrefs(context)
+            // Success → clear the persisted failure count.
+            if (healthPrefs(context).getInt("enc_fail_launches", 0) != 0) {
+                healthPrefs(context).edit().putInt("enc_fail_launches", 0).apply()
+            }
+            return p
+        } catch (e: Exception) {
+            Log.e(TAG, "EncryptedSharedPreferences init failed (transient?)", e)
+        }
+
+        val fails = if (!prefsFailCountedThisLaunch) {
+            prefsFailCountedThisLaunch = true
+            val n = healthPrefs(context).getInt("enc_fail_launches", 0) + 1
+            healthPrefs(context).edit().putInt("enc_fail_launches", n).apply()
+            n
+        } else {
+            healthPrefs(context).getInt("enc_fail_launches", 0)
+        }
+
+        // Transient (Keystore not ready right after a reboot) — DO NOT wipe the saved
+        // session. Retry on the next call / next launch.
+        if (fails < PREFS_FAIL_DELETE_THRESHOLD) return null
+
+        // Persistent across several launches → treat as real corruption: delete +
+        // recreate as a last resort (this is the only path that clears the session).
+        return try {
             val prefsFile = java.io.File(context.applicationInfo.dataDir + "/shared_prefs/" + PREFS_FILE + ".xml")
             val keyFile = java.io.File(context.applicationInfo.dataDir + "/shared_prefs/" + PREFS_FILE + ".xml.__androidx_security_crypto_encrypted_prefs__")
             if (prefsFile.exists()) prefsFile.delete()
             if (keyFile.exists()) keyFile.delete()
-            Log.i(TAG, "Deleted corrupted prefs files, re-creating EncryptedSharedPreferences")
-            val masterKey = MasterKey.Builder(context)
-                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-                .build()
-            EncryptedSharedPreferences.create(
-                context,
-                PREFS_FILE,
-                masterKey,
-                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-            )
+            Log.i(TAG, "Persistent EncryptedSharedPreferences failure — recreating store")
+            val p = createEncryptedPrefs(context)
+            healthPrefs(context).edit().putInt("enc_fail_launches", 0).apply()
+            p
         } catch (e2: Exception) {
             Log.e(TAG, "EncryptedSharedPreferences recovery also failed", e2)
             null

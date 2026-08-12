@@ -57,12 +57,14 @@ object InstanceRosterManager {
     // flushing the log line (vs the old 10s REST poll). The only downstream pace
     // limit is the Discord RPC's own ~1.5s debounce (Discord rate-limits OP 3).
     private const val POLL_MS = 1_000L
-    // If the log file hasn't been written to in this long, VRChat isn't running
-    // (closed / headset shut down) — with Logging=FULL VRChat writes constantly, so
-    // a frozen mtime reliably means "not running". We then hand presence back to
-    // REST (which shows offline) instead of showing the last instance / running the
-    // uptime+RPC timer forever. Survives a reboot too (the file's mtime persists).
-    private const val LOG_STALE_MS = 120_000L
+    // FALLBACK-ONLY staleness: used to decide "VRChat closed" only when the fast,
+    // reliable OSCQuery "service up" signal isn't available (OSC disabled in
+    // VRChat). Longer (5 min) so an AFK user in a quiet instance — whose log can go
+    // minutes without a write — isn't falsely flagged closed. When OSC IS enabled,
+    // VrcaOscQuery.isServiceUp() detects a real close within ~250ms, so this
+    // threshold doesn't gate those users. The file mtime persists across a reboot,
+    // so a fresh boot still doesn't re-read a very old log as "in-instance".
+    private const val LOG_STALE_MS = 300_000L
     private const val PREFS = "vrca_roster"
     private const val KEY_TREE_URI = "saf_tree_uri"
 
@@ -373,7 +375,11 @@ object InstanceRosterManager {
                 delay(POLL_MS); continue
             }
 
-            val alive = System.currentTimeMillis() - newest.lastModified < LOG_STALE_MS
+            // "VRChat is open" — prefer the fast/reliable OSCQuery service signal
+            // (cleared within ~250ms of a real close, immune to AFK log quiet); fall
+            // back to log-mtime staleness only when OSC is disabled (service down).
+            val alive = com.vrca.osc.VrcaOscQuery.isServiceUp() ||
+                (System.currentTimeMillis() - newest.lastModified < LOG_STALE_MS)
             publish(context, state, newest.id, alive)
             waitForChange()
         }
