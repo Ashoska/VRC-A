@@ -104,17 +104,23 @@ class VrcaOsc(
             com.vrca.app.ChatboxStats.increment()
         }
         CoroutineScope(Dispatchers.IO).launch {
-
+            if (delay > 0) delay(delay)
             val message = OSCMessage(address, arguments)
-            val sender = OSCPortOut(inetAddress, port)
-            delay(delay)
+            // Create the socket AFTER the delay and ALWAYS close it in finally.
+            // A UDP socket leaked per send (e.g. an exception before close, or the
+            // coroutine cancelled mid-delay) would exhaust the process fd limit
+            // after a while and silently break ALL sends until the app/headset is
+            // restarted — a prime suspect for "the chatbox randomly stops".
+            var sender: OSCPortOut? = null
             try {
+                sender = OSCPortOut(inetAddress, port)
                 sender.send(message)
                 Log.d(TAG, "Message: ${message.address}  ${message.arguments}")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed send Message: $message")
+                Log.e(TAG, "Failed send Message: $message", e)
+            } finally {
+                runCatching { sender?.close() }
             }
-            sender.close()
         }
     }
 
@@ -127,13 +133,15 @@ class VrcaOsc(
     fun sendEyeHeight(meters: Float) {
         val clamped = meters.coerceIn(0.01f, 10000f)
         CoroutineScope(Dispatchers.IO).launch {
+            var sender: OSCPortOut? = null
             try {
-                val sender = OSCPortOut(inetAddress, port)
+                sender = OSCPortOut(inetAddress, port)
                 sender.send(OSCMessage("/avatar/eyeheight", listOf(clamped)))
-                sender.close()
                 Log.d(TAG, "eyeheight -> $clamped")
             } catch (e: Exception) {
                 Log.e(TAG, "eyeheight send failed", e)
+            } finally {
+                runCatching { sender?.close() }
             }
         }
     }

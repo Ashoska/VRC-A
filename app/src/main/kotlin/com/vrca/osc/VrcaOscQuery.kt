@@ -30,7 +30,11 @@ object VrcaOscQuery {
 
     private const val TAG = "VrcaOscQuery"
     private const val SERVICE_TYPE = "_oscjson._tcp."
-    private const val POLL_MS = 1000L
+    // Poll as fast as is reasonable over the LAN/loopback. The chatbox itself is
+    // rate-limited to 0.5s, so this keeps a value at most ~250ms stale when a send
+    // fires. One GET of /avatar/parameters per cycle (the eyeheight fallback GET only
+    // fires when EyeHeightAsMeters isn't a param), so it's light.
+    private const val POLL_MS = 250L
 
     @Volatile private var started = false
     @Volatile private var host: String? = null
@@ -116,22 +120,26 @@ object VrcaOscQuery {
         return try {
             val contents = JSONObject(body).optJSONObject("CONTENTS") ?: return true
             var count = 0
+            var sawEyeHeight = false
             val keys = contents.keys()
             while (keys.hasNext()) {
                 val name = keys.next()
                 val node = contents.optJSONObject(name) ?: continue
                 val value = extractValue(node) ?: continue
                 VrcaOscState.onParam(name, value)
+                if (name == "EyeHeightAsMeters") sawEyeHeight = true
                 count++
             }
-            // Also read the canonical /avatar/eyeheight node (a top-level address,
-            // not under /avatar/parameters) so the eye-height read works even if the
-            // EyeHeightAsMeters PARAM isn't present. Fed as EyeHeightAsMeters so
-            // {scale} + the size control's live read both pick it up.
-            httpGetBody("http://$h:$p/avatar/eyeheight")?.let { ehBody ->
-                runCatching {
-                    val v = JSONObject(ehBody).optJSONArray("VALUE")?.takeIf { it.length() > 0 }?.get(0)
-                    (v as? Number)?.toFloat()?.let { VrcaOscState.onParam("EyeHeightAsMeters", it) }
+            // Only when EyeHeightAsMeters isn't a param, fall back to the canonical
+            // top-level /avatar/eyeheight node (one extra small GET) so the eye-height
+            // read still works. Fed as EyeHeightAsMeters so {scale} + the size
+            // control's live read both pick it up.
+            if (!sawEyeHeight) {
+                httpGetBody("http://$h:$p/avatar/eyeheight")?.let { ehBody ->
+                    runCatching {
+                        val v = JSONObject(ehBody).optJSONArray("VALUE")?.takeIf { it.length() > 0 }?.get(0)
+                        (v as? Number)?.toFloat()?.let { VrcaOscState.onParam("EyeHeightAsMeters", it) }
+                    }
                 }
             }
             updateDiag("polling $serviceName @ $h:$p — $count params")

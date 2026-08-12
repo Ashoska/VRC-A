@@ -2504,6 +2504,7 @@ class VrcaViewModel(
 
     private var nowPlayingJob: Job? = null
     private var keepaliveJob: Job? = null
+    private var unifiedSendJob: Job? = null
 
     private var inferredIsPlaying = false
     private var lastTrackKeyForInference: String = ""
@@ -3191,8 +3192,47 @@ class VrcaViewModel(
         startCycle(local)
         startNowPlayingSender(local)
         manageKeepaliveLoop(local)
+        // Change-driven sender: catches ANY component change within 0.5s regardless
+        // of which feature loops are running.
+        startUnifiedSendLoop(local)
         rebuildAndMaybeSendCombined(forceSend = true, local = local)
         startSelfSyncLoopIfNeeded()
+    }
+
+    /**
+     * The authoritative change-driven sender. While [oscSending], it rebuilds the
+     * combined chatbox text every 0.5s (VRChat's rate-limit floor) and transmits
+     * ONLY when the text changed since the last send (dedup lives in
+     * [rebuildAndMaybeSendCombined], which also re-sends after 3s to keep the box
+     * alive). So ANY update to ANY component — a resolved token
+     * ({mute}/{song}/{time}/{world}/…), the current cycle line, now-playing, an
+     * edited line — appears in VRChat within 0.5s, instead of waiting for a
+     * feature-specific loop (the old model only flushed non-music changes on the
+     * 3s keepalive or the cycle interval). The per-feature loops still run (cycle
+     * for rotation timing; the dedup makes their sends harmless overlap).
+     * Self-restarting: if the coroutine ever dies it's re-launched by
+     * [ensureSendLoopAlive] (the send watchdog).
+     */
+    private fun startUnifiedSendLoop(local: Boolean = false) {
+        unifiedSendJob?.cancel()
+        unifiedSendJob = viewModelScope.launch {
+            while (oscSending && !isBanned) {
+                try {
+                    rebuildAndMaybeSendCombined(forceSend = true, local = local)
+                } catch (_: Throwable) { /* never let one bad tick kill the loop */ }
+                delay(SEND_FLOOR_MS)
+            }
+        }
+    }
+
+    /** Send-loop watchdog: if we're supposed to be sending but the unified loop
+     *  isn't alive (killed by an exception / coroutine cancellation), restart it.
+     *  This is the resilience for "the chatbox randomly stops" — a dead send loop
+     *  now self-heals instead of needing an app/headset restart. Called from the
+     *  hourly heartbeat + the OSCQuery poll's liveness tick cadence is separate. */
+    fun ensureSendLoopAlive(local: Boolean = false) {
+        if (!oscSending || isBanned) return
+        if (unifiedSendJob?.isActive != true) startUnifiedSendLoop(local)
     }
 
     /** STOP: stop transmitting over OSC and clear the VRChat chatbox. Does NOT
@@ -3254,9 +3294,19 @@ class VrcaViewModel(
     private fun startUptimeHeartbeat() {
         uptimeHeartbeatJob?.cancel()
         uptimeHeartbeatJob = viewModelScope.launch {
+            var sinceHeartbeat = 0L
             while (oscSending) {
-                FeatureSessionStore.heartbeatSending(app.applicationContext)
-                delay(60_000L)
+                // Send-loop watchdog every ~15s: if we should be sending but the
+                // unified loop isn't alive, restart it (resilience for "the chatbox
+                // randomly stops" — a dead loop self-heals instead of needing a
+                // restart). Cheap no-op when the loop is healthy.
+                ensureSendLoopAlive()
+                delay(15_000L)
+                sinceHeartbeat += 15_000L
+                if (sinceHeartbeat >= 60_000L) {
+                    FeatureSessionStore.heartbeatSending(app.applicationContext)
+                    sinceHeartbeat = 0L
+                }
             }
         }
     }
@@ -4445,6 +4495,8 @@ class VrcaViewModel(
         stopAfkSender(clearFromChatbox = false)
         keepaliveJob?.cancel()
         keepaliveJob = null
+        unifiedSendJob?.cancel()
+        unifiedSendJob = null
         if (clearFromChatbox && !isBanned) clearChatbox()
         startSelfSyncLoopIfNeeded()
     }
