@@ -4656,10 +4656,17 @@ class VrcaViewModel(
             // the neutral "Ad" label + the bar — so nothing leaks.
             val adDur = nowPlayingDurationMs
             if (adDur > 0L) {
-                val spd = if (nowPlayingSpeed > 0f) nowPlayingSpeed else 1f
-                val elapsed = SystemClock.elapsedRealtime() - nowPlayingPositionUpdateTimeMs
-                val adj = (elapsed * spd).toLong()
-                val pos = (nowPlayingPositionMs + max(0L, adj)).coerceAtMost(adDur)
+                // Honor a PAUSE during the ad: only extrapolate the countdown while
+                // actually playing; otherwise freeze at the last reported position.
+                // (The bug forced speed to 1 unconditionally — nowPlayingSpeed is 0
+                // when paused — so the ad timer kept advancing while the user had it
+                // paused.) The bar's dot stays forced-"playing" (last two args) to
+                // avoid flicker at the ad/song boundary; only the POSITION freezes.
+                val pos = if (nowPlayingIsPlaying) {
+                    val spd = if (nowPlayingSpeed > 0f) nowPlayingSpeed else 1f
+                    val elapsed = SystemClock.elapsedRealtime() - nowPlayingPositionUpdateTimeMs
+                    (nowPlayingPositionMs + max(0L, (elapsed * spd).toLong())).coerceAtMost(adDur)
+                } else nowPlayingPositionMs.coerceAtMost(adDur)
                 val bar = renderProgressBar(spotifyPreset, pos, max(1L, adDur), true, true)
                 val time = "${fmtTime(pos)}/${fmtTime(adDur)}"
                 return listOfNotNull(label, (bar + time).takeIf { it.isNotBlank() })
