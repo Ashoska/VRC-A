@@ -86,7 +86,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -790,7 +789,13 @@ private fun PreviewAndTogglesCard(
                                     Text(
                                         text = previewText,
                                         modifier = Modifier.fillMaxWidth(),
-                                        fontFamily = FontFamily.Monospace,
+                                        // App default (proportional) font: the
+                                        // old FontFamily.Monospace mapped to the
+                                        // SYSTEM monospace, which Horizon OS renders
+                                        // as a distinct typewriter face — so the
+                                        // preview looked wrong only on the headset.
+                                        // Proportional also matches VRChat's real
+                                        // chatbox font (see TitleCleaner width calib).
                                         style = MaterialTheme.typography.bodyMedium,
                                         fontSize = previewFontSize,
                                         lineHeight = previewLineHeight,
@@ -824,7 +829,13 @@ private fun PreviewAndTogglesCard(
                                     Text(
                                         text = previewText,
                                         modifier = Modifier.fillMaxWidth(),
-                                        fontFamily = FontFamily.Monospace,
+                                        // App default (proportional) font: the
+                                        // old FontFamily.Monospace mapped to the
+                                        // SYSTEM monospace, which Horizon OS renders
+                                        // as a distinct typewriter face — so the
+                                        // preview looked wrong only on the headset.
+                                        // Proportional also matches VRChat's real
+                                        // chatbox font (see TitleCleaner width calib).
                                         style = MaterialTheme.typography.bodyMedium,
                                         fontSize = previewFontSize,
                                         lineHeight = previewLineHeight,
@@ -903,7 +914,7 @@ private fun PreviewAndTogglesCard(
                     Text(
                         text = previewText,
                         modifier = Modifier.fillMaxWidth(),
-                        fontFamily = FontFamily.Monospace,
+                        // App default (proportional) font — see note above.
                         style = MaterialTheme.typography.bodySmall,
                         textAlign = TextAlign.Center,
                         softWrap = true,
@@ -933,7 +944,7 @@ private fun PreviewAndTogglesCard(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(12.dp),
-                    fontFamily = FontFamily.Monospace,
+                    // App default (proportional) font — see note above.
                     style = MaterialTheme.typography.bodySmall,
                     // Same explicit bright color as the expanded bubble — the
                     // surfaceVariant Surface otherwise dims text to onSurfaceVariant.
