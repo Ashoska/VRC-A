@@ -4667,11 +4667,13 @@ class VrcaViewModel(
                     val elapsed = SystemClock.elapsedRealtime() - nowPlayingPositionUpdateTimeMs
                     (nowPlayingPositionMs + max(0L, (elapsed * spd).toLong())).coerceAtMost(adDur)
                 } else nowPlayingPositionMs.coerceAtMost(adDur)
-                val bar = renderProgressBar(spotifyPreset, pos, max(1L, adDur), true, true)
+                // dotIsPlaying reflects the REAL play state so the pause symbol shows
+                // when the user pauses the ad (was forced true, hiding the pause).
+                val bar = renderProgressBar(spotifyPreset, pos, max(1L, adDur), nowPlayingIsPlaying, true)
                 val time = "${fmtTime(pos)}/${fmtTime(adDur)}"
                 return listOfNotNull(label, (bar + time).takeIf { it.isNotBlank() })
             }
-            val bar = renderProgressBar(spotifyPreset, 0L, 1L, true, true)
+            val bar = renderProgressBar(spotifyPreset, 0L, 1L, nowPlayingIsPlaying, true)
             return listOfNotNull(label, bar.takeIf { it.isNotBlank() })
         }
 

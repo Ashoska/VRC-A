@@ -687,8 +687,15 @@ class NowPlayingListenerService : NotificationListenerService() {
 
                 // YouTube: push EVERY cycle so the position-stall pause detector
                 // (NowPlayingState) gets consecutive samples. Other players only
-                // push on a real change / every 4s to stay quiet.
-                if (changed || stateChanged || sincePush >= 4000L || pkg in youtubePackages) {
+                // push on a real change / every 4s to stay quiet. EXCEPTION: during
+                // an ad/DJ special window (esp. a BROWSER web player, which — like
+                // the YouTube app — keeps reporting STATE_PLAYING with a frozen
+                // position when paused) also push every cycle, so a pause DURING an
+                // ad is detected in ~1.5s instead of waiting the ~4s until the next
+                // periodic push (the "ad only pauses after ~5s" bug).
+                if (changed || stateChanged || sincePush >= 4000L ||
+                    pkg in youtubePackages || isSpecialWindowActive(pkg)
+                ) {
                     pushSnapshot(pkg, md, pb, controller)
                 }
                 lastPlayingStateByPackage[pkg] = nowPlaying
