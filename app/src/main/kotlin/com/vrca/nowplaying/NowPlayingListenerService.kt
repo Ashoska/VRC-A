@@ -97,6 +97,11 @@ class NowPlayingListenerService : NotificationListenerService() {
     private fun isTrackedMediaPkg(pkg: String): Boolean =
         pkg in musicPackages || pkg in browserPkgs()
 
+    // Browser packages currently identified as running the Spotify web player (by
+    // artwork host). Such a session gets the native-Spotify ad filter. Cleared when
+    // the session is torn down or the browser plays a non-Spotify source.
+    private val spotifyBrowserPkgs = mutableSetOf<String>()
+
     // YouTube keeps reporting STATE_PLAYING + speed=1f even while PAUSED, so the
     // only reliable pause signal is that the raw position stops advancing across
     // snapshots. That stall check (in NowPlayingState) needs fresh samples every
@@ -340,6 +345,7 @@ class NowPlayingListenerService : NotificationListenerService() {
         } catch (_: Throwable) {
         }
         lastPlayingStateByPackage.remove(pkg)
+        spotifyBrowserPkgs.remove(pkg)
     }
 
     private fun teardownAllControllers() {
@@ -360,7 +366,12 @@ class NowPlayingListenerService : NotificationListenerService() {
      * Only classifies based on explicit metadata strings from Spotify.
      * No stall-based heuristics — those caused false positives on song skips.
      */
-    private fun classifySpecial(pkg: String, title: String, artist: String): SpecialKind? {
+    private fun classifySpecial(
+        pkg: String,
+        title: String,
+        artist: String,
+        spotifyLike: Boolean
+    ): SpecialKind? {
         val t = title.trim().lowercase()
         val a = artist.trim().lowercase()
 
@@ -374,8 +385,11 @@ class NowPlayingListenerService : NotificationListenerService() {
         if (t.startsWith("advertisement") || a.startsWith("advertisement")) return SpecialKind.AD
 
         // Beyond that universal case, only Spotify gets the looser keyword matching —
-        // other players legitimately use these words in real song titles.
-        if (pkg != "com.spotify.music") return null
+        // other players legitimately use these words in real song titles. spotifyLike
+        // is true for the native app AND for a browser session identified as the
+        // Spotify web player (via its artwork host), so browser Spotify gets the same
+        // ad filter as the native app.
+        if (!spotifyLike) return null
 
         val looksLikeAd =
             t == "ad" ||
@@ -531,7 +545,28 @@ class NowPlayingListenerService : NotificationListenerService() {
             lastMetaChangeElapsedByPackage[pkg] = SystemClock.elapsedRealtime()
         }
 
-        val special = if (ytAdDetected) SpecialKind.AD else classifySpecial(pkg, title, artist)
+        // Identify a browser session that is actually the Spotify web player, so it
+        // gets the SAME ad filter as the native app. Spotify artwork is served from
+        // *.scdn.co / *.spotifycdn.com — if a browser session shows that art we mark
+        // the browser package as "Spotify mode" (latched, since an ad may drop the
+        // artwork mid-break), and clear it if the browser later plays a non-Spotify
+        // source. The native app is always Spotify.
+        run {
+            if (pkg != "com.spotify.music") {
+                val artUri = (metadata?.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI)
+                    ?: metadata?.getString(MediaMetadata.METADATA_KEY_ART_URI)
+                    ?: metadata?.getString(MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI)
+                    ?: "").lowercase()
+                if (artUri.isNotBlank()) {
+                    if (artUri.contains("scdn.co") || artUri.contains("spotifycdn") ||
+                        artUri.contains("spotify")
+                    ) spotifyBrowserPkgs.add(pkg) else spotifyBrowserPkgs.remove(pkg)
+                }
+            }
+        }
+        val spotifyLike = pkg == "com.spotify.music" || pkg in spotifyBrowserPkgs
+
+        val special = if (ytAdDetected) SpecialKind.AD else classifySpecial(pkg, title, artist, spotifyLike)
         var adInfo = ""
         if (special != null) {
             when (special) {

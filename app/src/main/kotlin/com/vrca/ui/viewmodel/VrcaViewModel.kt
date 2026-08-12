@@ -4645,8 +4645,8 @@ class VrcaViewModel(
         // title with a progress bar instead of "Ad 1 of 1". Check the explicit ad
         // flag FIRST and return early so ads always show their index.
         if (nowPlayingIsAd) {
-            // The ad index ("Ad 1 of 1") was unreliable, so just show a bare "Ad".
-            val label = "Ad"
+            // The ad index ("Ad 1 of 1") was unreliable, so just show a bare label.
+            val label = "Advertisement"
             if (!musicShowProgress) return listOf(label)
             // Keep the progress bar during ads — it must NEVER vanish. Ads always
             // play, so force playing and render the ad's OWN position/duration
