@@ -1990,26 +1990,39 @@ class VrcaViewModel(
         // dropped at the chokepoint, so the chatbox is silently dead until the
         // user reopens (a fresh VM whose Keystore is now ready seeds it false).
         //
-        // A CONNECTED pipeline is definitive proof the session is valid, so clear
-        // the gate the moment it connects. This can NEVER unblock a genuine
-        // sign-out: logout() wipes the saved credentials, so the pipeline can't
-        // reconnect; and we double-confirm isLoggedIn() now reads true.
+        // A CONNECTED pipeline is definitive proof the VRChat session is valid —
+        // the WebSocket handshake REQUIRES a valid auth cookie, so a live
+        // connection means the session is good regardless of what the local
+        // Keystore says. Clear the gate the moment it connects.
+        //
+        // CRITICAL: do NOT also re-check isLoggedIn() here. On Quest the Keystore
+        // can still be not-ready WHEN the pipeline connects (the pipeline used a
+        // cookie it read earlier), so isLoggedIn() reads false and an isLoggedIn
+        // guard BAILS — leaving the gate stuck true forever. That was the exact
+        // reported bug: the UI still shows "Sending" (oscSending stayed true from
+        // restoreFeatureSession) but every send is dropped at the blocked gate,
+        // and Stop/Start can't fix it because neither touches `blocked` — only a
+        // full reopen did. A genuine sign-out clears the cookie so the pipeline
+        // can't be connected here, so clearing on connect is always safe.
         viewModelScope.launch {
             com.vrca.vrchat.VrchatPipelineState.isConnectedFlow.collect { connected ->
                 if (!connected) return@collect
-                if (!com.vrca.vrchat.VrchatAuthManager.isLoggedIn(app.applicationContext)) return@collect
                 val wasGated = vrchatLoggedOut || vrchatAuthDead
                 if (wasGated) {
                     vrchatLoggedOut = false
                     vrchatAuthDead = false
                     com.vrca.vrchat.VrchatPipelineState.authDead = false
                     refreshOscBlockGate()
-                    // If a transient block had already torn down sending (a spurious
-                    // authDead calls stopSending), resume now that the session is
-                    // proven alive AND the user had sending armed. Safe: a real
-                    // sign-out disarms restore and won't reconnect, so this only
-                    // fires for a genuine transient. pendingRestore is a pure read.
-                    if (!oscSending && !isBanned) {
+                    if (oscSending) {
+                        // Loop is already running (seed scenario) but was gated —
+                        // force an immediate resend so the chatbox comes back at
+                        // once instead of waiting for the ~3s keepalive tick.
+                        rebuildAndMaybeSendCombined(forceSend = true)
+                    } else if (!isBanned) {
+                        // A transient block had torn down sending (a spurious
+                        // authDead calls stopSending) — resume now that the session
+                        // is proven alive and the user had sending armed. Safe: a
+                        // real sign-out disarms restore and won't reconnect.
                         val pending = com.vrca.app.FeatureSessionStore.pendingRestore(app.applicationContext)
                         if (pending?.sending == true && pending.anyEnabled) startSending()
                     }
@@ -3371,6 +3384,24 @@ class VrcaViewModel(
                 // randomly stops" — a dead loop self-heals instead of needing a
                 // restart). Cheap no-op when the loop is healthy.
                 ensureSendLoopAlive()
+                // Gate re-assert (headset): if we're sending and the pipeline is
+                // CONNECTED (proof the VRChat session is valid) but a transient
+                // block flag is somehow still set, clear it + force a resend. This
+                // self-heals the "UI says Sending but nothing transmits, and
+                // Stop/Start won't fix it, only a reopen does" state within ~15s no
+                // matter what set the gate — a headless-revival Keystore-not-ready
+                // seed, a reconnect authDead, or a tab-out/in that left it
+                // half-broken — even when isConnectedFlow never re-emits (the app
+                // stayed running). Safe: only clears while genuinely connected, and
+                // refreshOscBlockGate preserves a real forced-update block.
+                if (com.vrca.vrchat.VrchatPipelineState.isConnected &&
+                    (vrchatLoggedOut || vrchatAuthDead)) {
+                    vrchatLoggedOut = false
+                    vrchatAuthDead = false
+                    com.vrca.vrchat.VrchatPipelineState.authDead = false
+                    refreshOscBlockGate()
+                    rebuildAndMaybeSendCombined(forceSend = true)
+                }
                 delay(15_000L)
                 sinceHeartbeat += 15_000L
                 if (sinceHeartbeat >= 60_000L) {
