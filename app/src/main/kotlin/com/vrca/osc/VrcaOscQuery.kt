@@ -4,125 +4,164 @@ import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.util.Log
+import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * OSCQuery discovery PROBE (verification step, not the full client yet).
+ * OSC-in for Quest via **OSCQuery pull** (VRChat won't push avatar params over UDP
+ * on Quest — only `/avatar/change` — but it DOES serve every param's live value over
+ * its OSCQuery HTTP server, confirmed on-device:
+ *   GET /avatar/parameters/MuteSelf -> {"TYPE":"T","VALUE":[true]}
  *
- * VRChat won't PUSH avatar-parameter OSC output on Quest (only `/avatar/change`),
- * but its OSCQuery wiki says VRChat on **Android is not limited like Windows** and
- * can SERVE "all the available OSC addresses and their readable values" over HTTP.
- * So the plan is to PULL params instead of waiting for a push: discover VRChat's
- * `_oscjson._tcp` service via mDNS, then HTTP-GET its namespace JSON (which carries
- * each node's current VALUE) and poll `MuteSelf`/`AFK`/`ScaleFactor`.
+ * So instead of listening for a push that never comes, we:
+ *   1. mDNS-discover VRChat's `_oscjson._tcp` service (NsdManager) → host:port.
+ *   2. Poll `GET http://host:port/avatar/parameters` (~1s) — one request returns the
+ *      whole avatar-parameter subtree WITH current values.
+ *   3. Fold each param's VALUE into [VrcaOscState] so the chatbox tokens
+ *      `{mute}` `{afk}` `{movement}` `{scale}` `{param:Name}` resolve.
  *
- * This probe just confirms the hypothesis on-device: does VRChat on THIS Quest
- * advertise an OSCQuery service, and does its JSON include readable param values?
- * Results are written to [VrcaOscState.oscQueryDiag] for the Settings -> Debug
- * readout. If it works, the full poll-based client replaces this.
+ * Needs cleartext HTTP (OSCQuery is plain http on the LAN) — permitted on the
+ * headset build only. Headset-started (VRChat runs on the same Quest, advertising
+ * OSC_IP 127.0.0.1). The old UDP receiver ([VrcaOscReceiver]) stays as a no-cost
+ * fallback for the `/avatar/change` event and PC push setups.
  */
 object VrcaOscQuery {
 
     private const val TAG = "VrcaOscQuery"
     private const val SERVICE_TYPE = "_oscjson._tcp."
+    private const val POLL_MS = 1000L
 
-    @Volatile private var scanning = false
+    @Volatile private var started = false
+    @Volatile private var host: String? = null
+    @Volatile private var port: Int = 0
+    @Volatile private var serviceName: String = ""
 
-    /** Kick off a one-shot mDNS discovery + HTTP probe. Safe to call repeatedly. */
-    fun probe(context: Context) {
-        if (scanning) return
-        scanning = true
-        VrcaOscState.oscQueryDiag = "scanning for $SERVICE_TYPE …"
+    private var nsd: NsdManager? = null
+    private var discoveryListener: NsdManager.DiscoveryListener? = null
 
-        val nsd = context.getSystemService(Context.NSD_SERVICE) as? NsdManager
-        if (nsd == null) {
+    /** Idempotent. Starts mDNS discovery + the poll loop. */
+    fun start(context: Context) {
+        if (started) return
+        started = true
+        startDiscovery(context.applicationContext)
+        startPollLoop()
+    }
+
+    // ---- discovery -----------------------------------------------------------
+
+    private fun startDiscovery(context: Context) {
+        val manager = context.getSystemService(Context.NSD_SERVICE) as? NsdManager
+        if (manager == null) {
             VrcaOscState.oscQueryDiag = "NsdManager unavailable"
-            scanning = false
             return
         }
-
-        val found = StringBuilder()
-        var resolvedAny = false
+        nsd = manager
 
         val resolveListener = object : NsdManager.ResolveListener {
-            override fun onResolveFailed(serviceInfo: NsdServiceInfo?, errorCode: Int) {
-                found.append("\nresolve failed: ${serviceInfo?.serviceName} err=$errorCode")
-                VrcaOscState.oscQueryDiag = found.toString()
+            override fun onResolveFailed(info: NsdServiceInfo?, errorCode: Int) {
+                Log.w(TAG, "resolve failed ${info?.serviceName} err=$errorCode")
             }
-
-            override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
-                resolvedAny = true
-                val host = serviceInfo.host?.hostAddress ?: "?"
-                val port = serviceInfo.port
-                found.append("\nRESOLVED ${serviceInfo.serviceName} @ $host:$port")
-                VrcaOscState.oscQueryDiag = found.toString()
-                // HTTP-probe the OSCQuery root + HOST_INFO on an IO thread.
-                Thread {
-                    val rootInfo = httpGet("http://$host:$port/")
-                    val hostInfo = httpGet("http://$host:$port/?HOST_INFO")
-                    found.append("\n  HOST_INFO: ").append(hostInfo.take(180))
-                    val hasParams = rootInfo.contains("/avatar/parameters", true) ||
-                        rootInfo.contains("MuteSelf", true)
-                    found.append("\n  root ${rootInfo.length}B  hasParams=$hasParams")
-                    // Try reading MuteSelf's node directly (its VALUE tells us pull works).
-                    val mute = httpGet("http://$host:$port/avatar/parameters/MuteSelf")
-                    if (mute.isNotBlank()) found.append("\n  MuteSelf node: ").append(mute.take(160))
-                    VrcaOscState.oscQueryDiag = found.toString()
-                }.start()
+            override fun onServiceResolved(info: NsdServiceInfo) {
+                val h = info.host?.hostAddress ?: return
+                host = h
+                port = info.port
+                serviceName = info.serviceName
+                updateDiag("resolved $serviceName @ $h:$port")
             }
         }
 
-        val discoveryListener = object : NsdManager.DiscoveryListener {
-            override fun onStartDiscoveryFailed(serviceType: String?, errorCode: Int) {
-                VrcaOscState.oscQueryDiag = "discovery start failed err=$errorCode"
-                scanning = false
+        val listener = object : NsdManager.DiscoveryListener {
+            override fun onStartDiscoveryFailed(t: String?, e: Int) { updateDiag("discovery start failed err=$e") }
+            override fun onStopDiscoveryFailed(t: String?, e: Int) {}
+            override fun onDiscoveryStarted(t: String?) { updateDiag("discovery started") }
+            override fun onDiscoveryStopped(t: String?) {}
+            override fun onServiceFound(info: NsdServiceInfo) {
+                // Only VRChat's own OSCQuery service (others may exist on the LAN).
+                if (!info.serviceName.startsWith("VRChat", ignoreCase = true)) return
+                runCatching { nsd?.resolveService(info, resolveListener) }
             }
-            override fun onStopDiscoveryFailed(serviceType: String?, errorCode: Int) {}
-            override fun onDiscoveryStarted(serviceType: String?) {
-                found.append("discovery started")
-                VrcaOscState.oscQueryDiag = found.toString()
-            }
-            override fun onDiscoveryStopped(serviceType: String?) {
-                if (!resolvedAny) {
-                    found.append("\n(no $SERVICE_TYPE services found — VRChat OSCQuery not advertised?)")
-                    VrcaOscState.oscQueryDiag = found.toString()
+            override fun onServiceLost(info: NsdServiceInfo?) {
+                if (info?.serviceName == serviceName) {
+                    host = null; port = 0
+                    updateDiag("service lost: ${info?.serviceName}")
                 }
-                scanning = false
             }
-            override fun onServiceFound(serviceInfo: NsdServiceInfo) {
-                found.append("\nfound: ${serviceInfo.serviceName}")
-                VrcaOscState.oscQueryDiag = found.toString()
-                runCatching { nsd.resolveService(serviceInfo, resolveListener) }
-            }
-            override fun onServiceLost(serviceInfo: NsdServiceInfo?) {}
         }
+        discoveryListener = listener
+        runCatching { manager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener) }
+    }
 
-        try {
-            nsd.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
-            // Stop the scan after 8s (mDNS answers arrive within a couple seconds).
-            Thread {
-                Thread.sleep(8000)
-                runCatching { nsd.stopServiceDiscovery(discoveryListener) }
-                scanning = false
-            }.start()
+    // ---- poll ----------------------------------------------------------------
+
+    private fun startPollLoop() {
+        Thread({
+            while (started) {
+                val h = host
+                val p = port
+                if (h != null && p > 0) {
+                    val ok = pollParams(h, p)
+                    if (!ok) { host = null; port = 0 } // dropped → wait for re-discovery
+                }
+                VrcaOscState.tickLiveness()
+                try { Thread.sleep(POLL_MS) } catch (_: InterruptedException) { break }
+            }
+        }, "vrca-oscquery").apply { isDaemon = true; start() }
+    }
+
+    /** GET the whole avatar-parameter subtree and fold every value. Returns false
+     *  on a network error (host gone), true otherwise. */
+    private fun pollParams(h: String, p: Int): Boolean {
+        val body = httpGetBody("http://$h:$p/avatar/parameters") ?: return false
+        return try {
+            val contents = JSONObject(body).optJSONObject("CONTENTS") ?: return true
+            var count = 0
+            val keys = contents.keys()
+            while (keys.hasNext()) {
+                val name = keys.next()
+                val node = contents.optJSONObject(name) ?: continue
+                val value = extractValue(node) ?: continue
+                VrcaOscState.onParam(name, value)
+                count++
+            }
+            updateDiag("polling $serviceName @ $h:$p — $count params")
+            true
         } catch (e: Exception) {
-            VrcaOscState.oscQueryDiag = "discover error: ${e.message}"
-            scanning = false
+            Log.w(TAG, "parse /avatar/parameters failed", e); false
         }
     }
 
-    private fun httpGet(url: String): String = try {
+    /** VALUE is a 1-element array; TYPE T/F = bool, i = int, f = float. */
+    private fun extractValue(node: JSONObject): Any? {
+        val arr = node.optJSONArray("VALUE") ?: return null
+        if (arr.length() == 0) return null
+        return when (val v = arr.get(0)) {
+            is Boolean -> v
+            is Number -> v
+            is String -> v
+            else -> null
+        }
+    }
+
+    private fun httpGetBody(url: String): String? = try {
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 3000; readTimeout = 3000; requestMethod = "GET"
+            connectTimeout = 2500; readTimeout = 2500; requestMethod = "GET"
         }
         val code = conn.responseCode
-        val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
-            ?.bufferedReader()?.readText().orEmpty()
+        val body = if (code in 200..299) conn.inputStream.bufferedReader().readText() else null
         conn.disconnect()
-        "[$code] $body"
+        body
     } catch (e: Exception) {
-        Log.w(TAG, "httpGet $url failed", e)
-        "ERR ${e.javaClass.simpleName}: ${e.message}"
+        null
+    }
+
+    private fun updateDiag(s: String) {
+        VrcaOscState.oscQueryDiag = buildString {
+            append(s)
+            append("\nmute=").append(VrcaOscState.muteSelf)
+            append("  afk=").append(VrcaOscState.afk)
+            append("  moving=").append(VrcaOscState.moving)
+            append("  scale=").append(VrcaOscState.scaleLabel.ifBlank { "(none)" })
+        }
     }
 }

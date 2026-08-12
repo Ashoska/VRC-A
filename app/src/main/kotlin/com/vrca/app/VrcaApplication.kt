@@ -98,6 +98,10 @@ class VrcaApplication : Application(), ViewModelStoreOwner {
         // so this only receives on the same device as VRChat (the Quest).
         if (com.vrca.BuildConfig.IS_HEADSET_BUILD) {
             com.vrca.osc.VrcaOscReceiver.start()
+            // OSC-in on Quest: VRChat won't push params over UDP, but it SERVES their
+            // live values over OSCQuery HTTP. Discover VRChat's service + poll params
+            // so {mute}/{afk}/{movement}/{scale}/{param:Name} resolve.
+            com.vrca.osc.VrcaOscQuery.start(applicationContext)
         }
 
         // Cap Firestore offline cache (default is 100 MB — far more than needed).

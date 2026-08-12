@@ -413,8 +413,8 @@ internal fun SettingsPage(
                                     kotlinx.coroutines.delay(1000)
                                 }
                             }
-                            TextButton(onClick = { com.vrca.osc.VrcaOscQuery.probe(ctx) }) {
-                                Text("Scan for VRChat OSCQuery")
+                            TextButton(onClick = { com.vrca.osc.VrcaOscQuery.start(ctx) }) {
+                                Text("Start / rescan OSCQuery")
                             }
                             SelectionContainer {
                                 Text(
