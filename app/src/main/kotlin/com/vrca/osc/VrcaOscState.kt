@@ -31,6 +31,8 @@ object VrcaOscState {
     private const val MOVING_THRESHOLD = 0.10f // m/s magnitude to read as "moving"
 
     // ---- diagnostics (headset OSC-in debugging) ------------------------------
+    /** OSCQuery discovery-probe results (VrcaOscQuery). */
+    @Volatile var oscQueryDiag = "(not scanned)"
     @Volatile var diagBound = false
     @Volatile var diagBindError = ""
     @Volatile var diagRxPackets = 0L

@@ -400,6 +400,29 @@ internal fun SettingsPage(
                                     style = MaterialTheme.typography.bodySmall
                                 )
                             }
+
+                            // OSCQuery probe: VRChat won't PUSH params on Quest, but
+                            // its wiki says Android VRChat SERVES param values over
+                            // OSCQuery HTTP. This scans for VRChat's _oscjson._tcp
+                            // service + reads MuteSelf to prove we can PULL params.
+                            Text("OSCQuery probe (pull params)", style = MaterialTheme.typography.labelMedium)
+                            var oscQ by remember { mutableStateOf(com.vrca.osc.VrcaOscState.oscQueryDiag) }
+                            androidx.compose.runtime.LaunchedEffect(Unit) {
+                                while (true) {
+                                    oscQ = com.vrca.osc.VrcaOscState.oscQueryDiag
+                                    kotlinx.coroutines.delay(1000)
+                                }
+                            }
+                            TextButton(onClick = { com.vrca.osc.VrcaOscQuery.probe(ctx) }) {
+                                Text("Scan for VRChat OSCQuery")
+                            }
+                            SelectionContainer {
+                                Text(
+                                    oscQ,
+                                    fontFamily = FontFamily.Monospace,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
                         }
 
                         Text("OSC Output Preview", style = MaterialTheme.typography.labelMedium)
