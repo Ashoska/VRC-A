@@ -9,16 +9,20 @@
   tall phone shape. Content stays width-responsive (see VrcaScreen framing) so
   a user resizing the panel toward the 384x500 dp minimum never looks broken.
 
-  Lock the panel to a FIXED size so the user cannot resize/reshape it (which
-  was reshuffling the layout): android:resizeableActivity="false" tells
-  Horizon OS to open the app in a single fixed panel, and min/maxAspectRatio
-  pin the 16:10 shape so even if Horizon lets the user tug the panel, the
-  aspect can't change and the layout can't reshuffle.
-  (Honest caveat: Horizon OS ultimately owns 2D-panel window management and may
-  still allow resizing regardless of these flags — Android has no hard "no
-  resize" for VR panels. The real safeguard is the width-responsive framing in
-  VrcaScreen + the Home 3/2/1-column thresholds, which degrade gracefully at
-  any size, so resizing is harmless even when it can't be prevented.)
+  RESIZABLE — the app must FILL whatever panel size Horizon gives it.
+  Previously this set android:resizeableActivity="false" + min/maxAspectRatio
+  to "lock" the panel, but Horizon OS owns 2D-panel resize and ignores those
+  flags — and worse, a NON-resizable activity gets letterboxed: when the user
+  enlarged the panel, Android rendered the app at its fixed size top-anchored
+  and padded the rest with the grey window background (the "big empty grey area
+  below the nav bar when resized" bug). Horizon also reverts a user's resize to
+  the default panel on its own, so locking bought nothing. So the activity is
+  now RESIZABLE: the responsive Compose layout (VrcaScreen monitor framing + the
+  Home 3/2/1-column thresholds) reflows to fill any size, with NO letterbox.
+  The base MainActivity already declares configChanges for screenSize/
+  screenLayout/smallestScreenSize, so a resize relayouts in place (no Activity
+  recreation / flicker while dragging). screenOrientation stays landscape so it
+  opens in the monitor shape.
 
   MANAGE_EXTERNAL_STORAGE: the headset build reads VRChat's output log to build
   the instance roster (InstanceRosterManager). Only the headset flavor requests
@@ -36,32 +40,14 @@
          admin builds keep cleartext BLOCKED); it does NOT downgrade any existing
          https:// call — it only permits http when we explicitly use it. -->
     <application
-        android:resizeableActivity="false"
+        android:resizeableActivity="true"
         android:usesCleartextTraffic="true"
         tools:node="merge">
         <activity
             android:name=".app.MainActivity"
             android:screenOrientation="sensorLandscape"
-            android:resizeableActivity="false"
-            android:minAspectRatio="1.6"
-            android:maxAspectRatio="1.6"
-            tools:node="merge">
-            <!-- Force the LAUNCH size to the intended 16:10 monitor panel
-                 (1024x640 dp). This is the closest thing to "lock the size" that
-                 Horizon OS actually honors: every fresh launch RESETS to this
-                 size (so a bad manual resize is undone just by reopening), and
-                 min = default hints the OS to refuse shrinking below it. Horizon
-                 still ultimately owns 2D-panel resize (Android has no hard lock),
-                 but combined with the aspect-ratio pins + the width-responsive
-                 layout, the panel opens correct every time and degrades
-                 gracefully if the user does force a resize. -->
-            <layout
-                android:defaultWidth="1024dp"
-                android:defaultHeight="640dp"
-                android:minWidth="1024dp"
-                android:minHeight="640dp"
-                android:gravity="center" />
-        </activity>
+            android:resizeableActivity="true"
+            tools:node="merge" />
     </application>
 
 </manifest>
