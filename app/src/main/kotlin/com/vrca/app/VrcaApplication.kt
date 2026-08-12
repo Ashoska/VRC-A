@@ -86,6 +86,10 @@ class VrcaApplication : Application(), ViewModelStoreOwner {
         // Lifetime chatbox-send counter (boot screen stat).
         ChatboxStats.attach(applicationContext)
 
+        // "In VRChat" uptime timer (Home uptime label) — restore across a kill
+        // within the grace window, like the Discord RPC counter.
+        com.vrca.vrchat.VrchatUptime.attach(applicationContext)
+
         // Best-effort weather for the {weather} chatbox token (IP-geo + open-meteo).
         WeatherProvider.start()
 

@@ -1014,8 +1014,10 @@ private fun PreviewAndTogglesCard(
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    "Stop sending" + if (vm.sendingSinceMs > 0L)
-                        " · ${formatUptime(nowTickMs - vm.sendingSinceMs)}" else "",
+                    // Uptime = time IN VRChat (presence-driven, matches the Discord
+                    // RPC counter), not how long the chatbox has been sending.
+                    "Stop sending" + if (vm.vrchatOnlineSinceMs > 0L)
+                        " · ${formatUptime(nowTickMs - vm.vrchatOnlineSinceMs)}" else "",
                     color = MaterialTheme.colorScheme.onError
                 )
             }

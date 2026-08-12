@@ -2348,6 +2348,14 @@ class VrcaViewModel(
         private set
     private var uptimeHeartbeatJob: Job? = null
 
+    // "In VRChat" uptime — the epoch (ms) since the user came online in VRChat,
+    // mirrored from VrchatUptime (presence-driven, grace + crash-restore, matches
+    // the Discord RPC counter regardless of whether the RPC is enabled). 0 when not
+    // in VRChat. This is what the Home uptime label shows (how long IN VRChat, not
+    // how long the chatbox has been sending).
+    var vrchatOnlineSinceMs by mutableStateOf(0L)
+        private set
+
     // Epoch ms of the cycle sender's next line advance — drives the Home
     // "Next cycle in 12s" ticker. 0 when the cycle loop isn't running.
     var nextCycleAtMs by mutableStateOf(0L)
@@ -2650,6 +2658,21 @@ class VrcaViewModel(
 
         // VRChat sign-out hard-blocks OSC until re-login (Settings Accounts).
         startVrchatAuthGateWatcher()
+
+        // Drive the "in VRChat" uptime timer from live presence (regardless of the
+        // Discord RPC), and mirror its start epoch into observable VM state.
+        viewModelScope.launch {
+            com.vrca.vrchat.VrchatPipelineState.presenceFlow.collect { p ->
+                com.vrca.vrchat.VrchatUptime.update(
+                    app.applicationContext,
+                    inVrchat = p?.isOnlineInVRChat == true,
+                    now = System.currentTimeMillis()
+                )
+            }
+        }
+        viewModelScope.launch {
+            com.vrca.vrchat.VrchatUptime.startFlow.collect { vrchatOnlineSinceMs = it }
+        }
 
         // Live-mode loop: idle until an admin starts watching.
         startLiveSyncWatcher()
