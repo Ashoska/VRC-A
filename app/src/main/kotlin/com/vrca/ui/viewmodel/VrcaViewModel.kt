@@ -3308,6 +3308,36 @@ class VrcaViewModel(
         }
     }
 
+    /** Headset Debug: a one-line snapshot of the ENTIRE chatbox send path so a
+     *  "stopped sending" report can be read off-device instead of guessed at. If
+     *  sending ever stops again, this says exactly why — is the master gate on,
+     *  is the loop alive, is the OSC gate blocking (and which flag), is the target
+     *  resolvable, is the pipeline connected, is a manual hold stuck, how long
+     *  since the last actual send. */
+    fun sendHealthDiag(): String {
+        val now = System.currentTimeMillis()
+        val loopAlive = unifiedSendJob?.isActive == true
+        val lastSendAgo = if (lastCombinedSendMs > 0) "${(now - lastCombinedSendMs) / 1000}s ago" else "never"
+        val connected = com.vrca.vrchat.VrchatPipelineState.isConnected
+        return buildString {
+            append("sending=").append(oscSending)
+            append("   loop=").append(if (loopAlive) "alive" else "DEAD")
+            append('\n')
+            append("blocked=").append(remoteVrcaOsc.blocked)
+            append("  [update=").append(forceUpdatePending)
+            append(" loggedOut=").append(vrchatLoggedOut)
+            append(" authDead=").append(vrchatAuthDead).append(']')
+            append('\n')
+            append("target=").append(remoteVrcaOsc.ipAddress)
+            append(if (remoteVrcaOsc.addressResolvable) " (ok)" else " (UNRESOLVED)")
+            append('\n')
+            append("pipeline=").append(if (connected) "connected" else "DISCONNECTED")
+            append("   manualHold=").append(manualHoldActive())
+            append('\n')
+            append("last send=").append(lastSendAgo)
+        }
+    }
+
     /** Send-loop watchdog: if we're supposed to be sending but the unified loop
      *  isn't alive (killed by an exception / coroutine cancellation), restart it.
      *  This is the resilience for "the chatbox randomly stops" — a dead send loop

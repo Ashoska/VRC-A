@@ -384,6 +384,27 @@ internal fun SettingsPage(
                         Text("Title: ${vm.lastNowPlayingTitle}", style = MaterialTheme.typography.bodySmall)
                         Text("Artist: ${vm.lastNowPlayingArtist}", style = MaterialTheme.typography.bodySmall)
 
+                        // Chatbox send health — the whole send path at a glance. If
+                        // sending ever stops, this reveals exactly why (master gate,
+                        // loop alive, OSC block + which flag, target resolvable,
+                        // pipeline connected, manual hold, last-send age). Shown on all
+                        // builds so a "stopped sending" report is read, not guessed.
+                        Text("Chatbox send health", style = MaterialTheme.typography.labelMedium)
+                        var sendHealth by remember { mutableStateOf(vm.sendHealthDiag()) }
+                        androidx.compose.runtime.LaunchedEffect(Unit) {
+                            while (true) {
+                                sendHealth = vm.sendHealthDiag()
+                                kotlinx.coroutines.delay(1000)
+                            }
+                        }
+                        SelectionContainer {
+                            Text(
+                                sendHealth,
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+
                         if (BuildConfig.IS_HEADSET_BUILD) {
                             Text("OSC-in (VRChat → VRC-A :9001)", style = MaterialTheme.typography.labelMedium)
                             var oscInDiag by remember { mutableStateOf(com.vrca.osc.VrcaOscState.diagString()) }
