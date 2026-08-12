@@ -376,7 +376,7 @@ internal fun HomePage(
         // page. Wide → two columns (Preview + alerts LEFT, Quick Toggles + Manual Send
         // RIGHT), each column scrolls internally so alert cards can't push the layout.
         // Narrow/shrunk → a single scrollable column that still fills the panel.
-        BoxWithConstraints(Modifier.fillMaxSize().padding(14.dp)) {
+        BoxWithConstraints(Modifier.fillMaxSize().padding(10.dp)) {
             when {
                 // Full Quest panel (1024dp): THREE columns.
                 //   left  = skinny preview
@@ -870,9 +870,11 @@ private fun PreviewAndTogglesCard(
                     }
                 }
 
+                // Headset: keep the silhouette full size, just trim the gap above
+                // it a little so the preview column clears the panel bottom.
                 Canvas(
                     modifier = Modifier
-                        .padding(top = 8.dp)
+                        .padding(top = if (isHeadset) 4.dp else 8.dp)
                         .height(120.dp)
                         .width(120.dp)
                 ) {
@@ -1157,7 +1159,9 @@ private fun QuickTogglesGrid(
 ) {
     var timeMenuOpen by remember { mutableStateOf(false) }
 
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    // Headset: very slightly tighter pill spacing so the 9-pill list + Manual
+    // Send fit the fixed-height column without tipping into a scroll.
+    Column(verticalArrangement = Arrangement.spacedBy(if (BuildConfig.IS_HEADSET_BUILD) 5.dp else 6.dp)) {
         vm.cardOrder.forEach { component ->
             when (component) {
                 "Pinned" -> TogglePill(
