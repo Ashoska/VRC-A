@@ -662,6 +662,10 @@ fun VrcaScreen(
         VrchatAuthManager.getStoredUserId(ctx)?.isNotBlank() == true
     val ipSet = remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(Unit) {
+        // Headset forces the OSC target to 127.0.0.1 (loopback to VRChat on the
+        // same device), so there is no user IP to set — always treat it as set so
+        // the "Headset IP not set" health warning never shows on Quest.
+        if (BuildConfig.IS_HEADSET_BUILD) { ipSet.value = true; return@LaunchedEffect }
         chatboxViewModel.userPreferencesRepository.ipAddress.collect { ip ->
             ipSet.value = ip.isNotBlank() && ip != "127.0.0.1"
         }
