@@ -872,7 +872,10 @@ private fun PreviewAndTogglesCard(
 
                 Canvas(
                     modifier = Modifier
-                        .padding(top = 8.dp)
+                        // Headset: trim the empty gap above the silhouette (not the
+                        // silhouette itself) to clear the last few dp of overflow in
+                        // the preview column so it no longer slightly scrolls.
+                        .padding(top = if (isHeadset) 4.dp else 8.dp)
                         .height(120.dp)
                         .width(120.dp)
                 ) {
