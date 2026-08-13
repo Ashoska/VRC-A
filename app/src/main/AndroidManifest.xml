@@ -101,6 +101,19 @@
             android:name=".vrchat.NotificationActionReceiver"
             android:exported="false" />
 
+        <!-- Device shutdown: cleanly close the Discord gateway so the RPC presence
+             disappears when the device powers off (a Quest full-power-off otherwise
+             leaves the socket un-closed and Discord keeps showing the RPC). -->
+        <receiver
+            android:name=".discord.DeviceShutdownReceiver"
+            android:exported="false">
+            <intent-filter android:priority="1000">
+                <action android:name="android.intent.action.ACTION_SHUTDOWN" />
+                <action android:name="android.intent.action.QUICKBOOT_POWEROFF" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWEROFF" />
+            </intent-filter>
+        </receiver>
+
         <!-- Local reminder for events the user signed up for (Add to Calendar) -->
         <receiver
             android:name=".vrchat.EventReminderReceiver"

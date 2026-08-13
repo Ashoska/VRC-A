@@ -82,6 +82,25 @@ class DiscordRpcService : Service() {
         const val ACTION_START = "com.vrca.DISCORD_RPC_START"
         const val ACTION_STOP = "com.vrca.DISCORD_RPC_STOP"
 
+        // Process-wide handle to the live RPC WebView so the ACTION_SHUTDOWN
+        // receiver can cleanly close the Discord gateway before the device powers
+        // off (see VRCA_closeGateway). @Volatile: set on the main thread, read from
+        // the receiver thread.
+        @Volatile
+        private var activeWebView: WebView? = null
+
+        /** Cleanly clear the RPC + CLOSE the Discord gateway on device shutdown, so
+         *  Discord drops the session and the presence disappears — mirroring what a
+         *  phone/PC does when its OS closes the socket on shutdown. Best-effort:
+         *  posts the JS on the main thread; the caller (DeviceShutdownReceiver) uses
+         *  goAsync + a short wait so the close frame has time to flush before death. */
+        fun closeGatewayForShutdown() {
+            val wv = activeWebView ?: return
+            Handler(Looper.getMainLooper()).post {
+                runCatching { wv.evaluateJavascript("window.VRCA_closeGateway && window.VRCA_closeGateway()") {} }
+            }
+        }
+
         private const val MAX_SHIM_RETRIES = 5
         private const val MAX_SESSION_RECOVERIES = 3
         private const val SHIM_RETRY_BASE_DELAY_MS = 3000L
@@ -477,6 +496,7 @@ class DiscordRpcService : Service() {
                 loadUrl("https://discord.com/channels/@me")
             }
             webView = wv
+            activeWebView = wv
             // Keep JS timers running in the background (global to the process; never
             // call pauseTimers) and seed the visibility signal as VISIBLE so Chromium
             // doesn't background-throttle the Discord gateway heartbeat. No overlay
@@ -1170,6 +1190,7 @@ class DiscordRpcService : Service() {
                     wv.loadUrl("about:blank")
                     wv.destroy()
                     webView = null
+                    activeWebView = null
                 }, 1500)
             }
         }
@@ -1531,6 +1552,35 @@ private const val MODULE_FINDER_JS = """
                         afk: false
                     }
                 }));
+                return 'ok';
+            } catch(e) {
+                return 'err:' + e.message;
+            }
+        };
+
+        // Clean shutdown: clear the activity (OP 3 empty activities) AND cleanly
+        // CLOSE the gateway socket. A clean WebSocket close makes Discord drop this
+        // session and its presence IMMEDIATELY — the reason a phone/PC clears the
+        // RPC on shutdown (the OS closes the socket) but a Quest full-power-off does
+        // not (VRC-A's socket is severed without a clean close, so Discord's session
+        // lingers). Called from the ACTION_SHUTDOWN receiver before the headset dies.
+        window.VRCA_closeGateway = function() {
+            try {
+                window._vrca_activityGen = (window._vrca_activityGen || 0) + 1;
+                window._vrca_activity = null;
+                try { localStorage.removeItem('_vrca_last_activity'); } catch(e) {}
+                var gw = window._vrca_gatewayWs;
+                if (!gw) return 'no_gateway';
+                var origSend = window._vrca_origSend;
+                if (origSend && gw.readyState === 1) {
+                    try {
+                        origSend.call(gw, JSON.stringify({
+                            op: 3,
+                            d: { since: 0, activities: [], status: window._vrca_user_status || 'online', afk: false }
+                        }));
+                    } catch(e) {}
+                }
+                try { gw.close(1000, 'shutdown'); } catch(e) {}
                 return 'ok';
             } catch(e) {
                 return 'err:' + e.message;
