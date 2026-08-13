@@ -379,6 +379,33 @@ object InstanceRosterManager {
         var state = VrcLogParser.InstanceState()
 
         while (scope.isActive) {
+            // Log-INDEPENDENT "VRChat closed" detection — the fix for "the Discord
+            // RPC stays frozen in-world after the headset is shut down / asleep"
+            // (headset-only; mobile presence is REST-driven and already goes
+            // offline correctly). OSCQuery reachability is the authoritative "VRChat
+            // is open" signal once it has worked (VRChat runs its OSCQuery HTTP
+            // server whenever OSC is enabled, which it is for a chatbox user). If
+            // it's now DOWN (12s grace built into isServiceUp), VRChat closed or the
+            // headset slept (Horizon suspends VRChat), so force presence OFFLINE so
+            // the RPC's LAST pushed state is "Not in VRChat" instead of a stale
+            // "Join Me - <world>". This runs BEFORE the log-access / no-log bailouts
+            // below, so it works even without All-files/SAF log access — the log
+            // path only ADDS the roster + faster hop detection when access exists.
+            if (com.vrca.osc.VrcaOscQuery.hasEverPolledOk() &&
+                !com.vrca.osc.VrcaOscQuery.isServiceUp()) {
+                if (BuildConfig.IS_HEADSET_BUILD) {
+                    VrchatPipelineState.applyLogPresence(
+                        active = false, inWorld = false,
+                        location = null, worldName = null, playerCount = 0,
+                        seedUserId = "", seedDisplayName = ""
+                    )
+                }
+                stopObserver()
+                platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear()
+                _flow.value = RosterUi(status = Status.IDLE)
+                currentId = null; offset = 0L; state = VrcLogParser.InstanceState()
+                delay(POLL_MS); continue
+            }
             if (!hasAnyAccess(context)) {
                 // No log access -> let REST drive presence on the headset.
                 VrchatPipelineState.headsetLogActive = false

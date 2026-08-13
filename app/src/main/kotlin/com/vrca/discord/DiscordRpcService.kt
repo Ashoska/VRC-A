@@ -961,6 +961,23 @@ class DiscordRpcService : Service() {
         if (now - lastPushAttemptMs < PUSH_MIN_INTERVAL_MS) return
         lastPushAttemptMs = now
 
+        // HEADSET: the RPC represents VRChat presence ONLY. When the user is NOT in
+        // VRChat (VRChat closed / headset shut down or asleep), CLEAR the activity
+        // entirely instead of pushing a "Not in VRChat / Using VRC-A" fallback — on
+        // the headset VRChat and VRC-A share ONE device, so once the headset is off
+        // there is nothing to show. Pushing a CLEAR makes that the LAST state
+        // Discord retains, so the RPC disappears and STAYS gone after the headset
+        // dies (the "shut down 5h ago but still showing" bug). Paired with the
+        // OSCQuery-close detection that flips isOnlineInVRChat=false the moment
+        // VRChat's OSCQuery service goes away. Mobile is unaffected: the phone is a
+        // separate always-on device, so "Not in VRChat / Using VRC-A" is accurate
+        // there and still shown.
+        if (com.vrca.BuildConfig.IS_HEADSET_BUILD &&
+            com.vrca.vrchat.VrchatPipelineState.presence?.isOnlineInVRChat != true) {
+            clearActivity()
+            return
+        }
+
         val activity = buildActivityJson()
         val escaped = activity.toString()
             .replace("\\", "\\\\")
