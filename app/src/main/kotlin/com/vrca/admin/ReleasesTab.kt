@@ -272,6 +272,24 @@ internal fun parseApkInfo(ctx: Context, apkPath: String): Pair<Long, String>? {
     } catch (_: Throwable) { null }
 }
 
+/** The applicationId of a picked APK, used to ROUTE a global publish to the right
+ *  fleet doc + stamp `packageName` so cross-variant releases are ignored. */
+internal fun parseApkPackage(ctx: Context, apkPath: String): String? {
+    return try {
+        val pm = ctx.packageManager
+        val pi = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            pm.getPackageArchiveInfo(apkPath, android.content.pm.PackageManager.PackageInfoFlags.of(0))
+        } else {
+            pm.getPackageArchiveInfo(apkPath, 0)
+        }
+        pi?.packageName
+    } catch (_: Throwable) { null }
+}
+
+/** Headset APK applicationId — a global publish of this package routes to the
+ *  headset-only doc so it can never reach mobile. */
+internal const val HEADSET_APP_ID = "com.gremlin.inc.headset"
+
 internal suspend fun copyUriToCache(ctx: Context, uri: android.net.Uri): File? {
     return try {
         val tmp = File(ctx.cacheDir, "upload_tmp.apk")
@@ -337,6 +355,11 @@ internal fun ReleasesTab(
     var pickedFileName  by rememberSaveable { mutableStateOf("") }
     var parsedCode      by rememberSaveable { mutableLongStateOf(0L) }
     var parsedName      by rememberSaveable { mutableStateOf("") }
+    // The picked APK's applicationId — routes the publish to the right fleet:
+    // com.gremlin.inc.headset -> releases/latest_headset (headset only),
+    // anything else -> releases/latest (mobile). Also written as the doc's
+    // packageName so clients ignore a release for a different variant.
+    var parsedPackage   by rememberSaveable { mutableStateOf("") }
     var parseError      by rememberSaveable { mutableStateOf("") }
     var cachedApkPath   by remember { mutableStateOf("") }
 
@@ -359,10 +382,14 @@ internal fun ReleasesTab(
     // EDITS the live content instead of starting blank. The "seeded" flag lives in
     // AdminRuntime (process lifetime) so the LaunchedEffect(Unit) re-run on an
     // Activity recreation (media picker) never re-seeds over in-progress edits.
+    // The global doc this tab reads/retracts follows the picked APK's fleet, so
+    // picking a headset APK shows + retracts the HEADSET release; otherwise mobile.
+    val currentGlobalDoc = if (parsedPackage == HEADSET_APP_ID) "latest_headset" else "latest"
+
     suspend fun loadCurrent() {
         setGlobalLoading(true)
         runCatching {
-            val snap = db.collection("releases").document("latest").get().await()
+            val snap = db.collection("releases").document(currentGlobalDoc).get().await()
             if (snap.exists()) {
                 liveVersionCode = snap.getLong("versionCode") ?: 0L
                 liveVersionName = snap.getString("versionName").orEmpty()
@@ -386,12 +413,15 @@ internal fun ReleasesTab(
     }
 
     LaunchedEffect(Unit) { loadCurrent() }
+    // Reload the live-release panel when the picked APK's fleet changes (mobile
+    // <-> headset), so it reflects the doc the publish/retract will actually hit.
+    LaunchedEffect(currentGlobalDoc) { loadCurrent() }
 
     val filePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri: android.net.Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
-        parseError = ""; parsedCode = 0L; parsedName = ""
+        parseError = ""; parsedCode = 0L; parsedName = ""; parsedPackage = ""
         pickedFileName = ""; cachedApkPath = ""; uploadDone = false
 
         scope.launch {
@@ -413,6 +443,7 @@ internal fun ReleasesTab(
             }
             parsedCode = info.first
             parsedName = info.second
+            parsedPackage = parseApkPackage(ctx, tmp.absolutePath).orEmpty()
         }
     }
 
@@ -457,8 +488,14 @@ internal fun ReleasesTab(
                     onProgress = { uploadProgress = it }
                 )
 
-                // Step 3: write Firestore releases/latest
-                uploadPhase = "Publishing release info..."
+                // Step 3: write the GLOBAL release doc. Route by the APK's OWN
+                // package: a headset APK goes to releases/latest_headset (headset
+                // fleet only), anything else to releases/latest (mobile). The
+                // packageName is stamped so clients ignore a release for the other
+                // variant — a headset global release can never reach mobile.
+                val isHeadsetApk = parsedPackage == HEADSET_APP_ID
+                val targetDoc = if (isHeadsetApk) "latest_headset" else "latest"
+                uploadPhase = "Publishing ${if (isHeadsetApk) "HEADSET" else "mobile"} release..."
                 val data = hashMapOf<String, Any>(
                     "versionCode"       to parsedCode,
                     "versionName"       to parsedName,
@@ -466,10 +503,11 @@ internal fun ReleasesTab(
                     "requiredMinCode"   to (editRequiredMin.toLongOrNull() ?: 0L),
                     "notes"             to notesPlain,
                     "bodyDoc"           to bodyDocJson,
+                    "packageName"       to parsedPackage,
                     "publishedAt"       to FieldValue.serverTimestamp(),
                     "publishedByDevice" to BuildConfig.APPLICATION_ID
                 )
-                db.collection("releases").document("latest")
+                db.collection("releases").document(targetDoc)
                     .set(data, SetOptions.merge())
                     .await()
 
@@ -479,7 +517,7 @@ internal fun ReleasesTab(
 
                 // clean up temp file
                 runCatching { apkFile.delete() }
-                cachedApkPath = ""; pickedFileName = ""; parsedCode = 0L; parsedName = ""
+                cachedApkPath = ""; pickedFileName = ""; parsedCode = 0L; parsedName = ""; parsedPackage = ""
                 AdminRuntime.clearEditor("release")  // blocks + notes + seeded flag
 
             }.onFailure { e ->
@@ -579,7 +617,7 @@ internal fun ReleasesTab(
                                 showRetractConfirm = false
                                 scope.launch {
                                     runCatching {
-                                        db.collection("releases").document("latest").delete().await()
+                                        db.collection("releases").document(currentGlobalDoc).delete().await()
                                         liveVersionCode = 0L; liveVersionName = ""; liveDownloadUrl = ""
                                         liveRequiredMin = 0L; liveNotes = ""; livePublishedAt = null
                                     }.onFailure { setError(it.message) }
@@ -630,6 +668,17 @@ internal fun ReleasesTab(
                                 fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
                             Text("versionName = ${parsedName.ifBlank { "(blank)" }}",
                                 fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
+                            Text("package = ${parsedPackage.ifBlank { "(unknown)" }}",
+                                fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
+                            // Make the publish target unmistakable — routed by package.
+                            val headsetApk = parsedPackage == HEADSET_APP_ID
+                            Text(
+                                if (headsetApk) "→ Publishes to the HEADSET fleet (releases/latest_headset). Mobile is NOT affected."
+                                else "→ Publishes to the MOBILE fleet (releases/latest). Headset is NOT affected.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (headsetApk) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                     }
 

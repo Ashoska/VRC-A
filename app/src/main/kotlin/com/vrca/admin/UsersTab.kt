@@ -1522,6 +1522,7 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
             }
             val tParsedCode = picked?.versionCode ?: 0L
             val tParsedName = picked?.versionName.orEmpty()
+            val tParsedPackage = picked?.packageName.orEmpty()
             val tParseError = picked?.error.orEmpty()
             val tCachedApkPath = picked?.cachePath.orEmpty()
 
@@ -1620,6 +1621,10 @@ internal fun DetailBlock(d: UserDetail, docId: String, db: FirebaseFirestore, se
                             "requiredMinCode"   to 0L,
                             "notes"             to notesPlain,
                             "bodyDoc"           to bodyDocJson,
+                            // Stamp the APK's package so a device on a different
+                            // variant ignores a mistargeted release instead of
+                            // soft-bricking on the forced-update wall.
+                            "packageName"       to tParsedPackage,
                             "publishedAt"       to com.google.firebase.firestore.FieldValue.serverTimestamp(),
                             "publishedByDevice" to BuildConfig.APPLICATION_ID
                         )

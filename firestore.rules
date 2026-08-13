@@ -216,7 +216,7 @@ service cloud.firestore {
       allow create, update: if isOwner()
         && request.resource.data.keys().hasOnly([
           "versionCode", "versionName", "downloadUrl",
-          "requiredMinCode", "notes", "bodyDoc",
+          "requiredMinCode", "notes", "bodyDoc", "packageName",
           "publishedAt", "publishedByDevice"
         ])
         && (request.resource.data.versionCode is int || request.resource.data.versionCode is float)
@@ -229,7 +229,7 @@ service cloud.firestore {
       // release, a known non-hash id) is explicitly excluded so no client can
       // retract the global release for everyone.
       allow delete: if isOwner()
-        || (docId != "latest" && isOwnerOfDeviceDoc(docId));
+        || (docId != "latest" && docId != "latest_headset" && isOwnerOfDeviceDoc(docId));
     }
 
     /* =========================

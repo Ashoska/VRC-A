@@ -427,6 +427,10 @@ fun VrcaApp() {
                         }
                         val url = snap.getString("downloadUrl").orEmpty()
                         if (url.isBlank()) return@addSnapshotListener
+                        // Variant guard: a release APK for a different app package
+                        // (headset vs mobile) must never force-install here.
+                        if (com.vrca.update.releaseTargetsOtherVariant(
+                                snap.getString("packageName").orEmpty())) return@addSnapshotListener
                         val code = snap.getLong("versionCode") ?: return@addSnapshotListener
                         if (code <= BuildConfig.VERSION_CODE) {
                             // The user is already on (or past) this targeted version —
@@ -460,8 +464,11 @@ fun VrcaApp() {
         // closed). Complements the 6h background poll (which still catches an update pushed
         // while backgrounded). Never DOWNGRADES a newer targeted release already shown.
         DisposableEffect(Unit) {
+            // Variant-specific global doc: headset reads releases/latest_headset,
+            // mobile reads releases/latest — so a headset "release to all" never
+            // reaches mobile and vice-versa (Option B).
             val latestRef = FirebaseFirestore.getInstance()
-                .collection("releases").document("latest")
+                .collection("releases").document(com.vrca.update.globalReleaseDocId())
             val reg = latestRef.addSnapshotListener { snap, _ ->
                 if (snap == null || !snap.exists()) {
                     // Admin RETRACTED the global release: if the popup is currently showing
@@ -475,6 +482,10 @@ fun VrcaApp() {
                 }
                 val url = snap.getString("downloadUrl").orEmpty()
                 if (url.isBlank()) return@addSnapshotListener
+                // Variant guard (defense in depth; the doc id already separates the
+                // fleets): never force-install a different-package APK.
+                if (com.vrca.update.releaseTargetsOtherVariant(
+                        snap.getString("packageName").orEmpty())) return@addSnapshotListener
                 val code = snap.getLong("versionCode") ?: return@addSnapshotListener
                 // Cache patch notes for the currently-installed version so Settings →
                 // What's New can show them offline. Zero extra read — this listener
