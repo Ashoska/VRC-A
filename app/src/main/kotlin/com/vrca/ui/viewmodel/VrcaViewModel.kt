@@ -348,7 +348,7 @@ class VrcaViewModel(
         "vrchatUserId", "vrchatDisplayName", "vrchatState", "vrchatStatus",
         "vrchatStatusDescription", "vrchatWorld", "vrchatLocation",
         "vrchatInstancePlayerCount", "vrchatInstanceCapacity",
-        "vrchatPlatform", "vrchatIsOnline"
+        "vrchatPlatform", "vrchatIsOnline", "instanceRoster"
     )
 
     private fun readLastSelfSyncMs(): Long = prefs().getLong(PREF_LAST_SELF_SYNC_MS, 0L)
@@ -544,11 +544,20 @@ class VrcaViewModel(
         // existing write — 0 extra cost).
         "versionName" to BuildConfig.VERSION_NAME,
         "versionCode" to BuildConfig.VERSION_CODE,
-        "lastReportedTime" to if (timeEnabled) currentTimeString() else "",
+        // Guarded: a throw here (malformed timeMode) must NOT nuke the whole watched
+        // write. See buildInstanceRosterJson note below.
+        "lastReportedTime" to runCatching { if (timeEnabled) currentTimeString() else "" }.getOrDefault(""),
         // Headset log-derived instance roster (who's in the user's world), so the
         // admin can see it remotely. JSON string; empty off the headset / not in a
         // world. Rides this existing watched write — zero extra Firestore cost.
-        "instanceRoster" to buildInstanceRosterJson(),
+        // CRITICAL: guarded with runCatching. This is the ONLY headset-specific field
+        // in the live payload, and performLiveSync evaluates buildLivePayload() INSIDE
+        // its own runCatching — so if this threw, the ENTIRE watched write (preview,
+        // roster, liveness) was silently swallowed while the pipeline service's
+        // separate presence loop kept lastSeenAt fresh. That produced the exact
+        // "last-seen updates while watching but the preview + instance roster never
+        // do" bug. Never let a single derived field abort the map construction.
+        "instanceRoster" to runCatching { buildInstanceRosterJson() }.getOrDefault(""),
         "lastTimeUpdateAt" to FieldValue.serverTimestamp(),
         "lastActiveAt" to FieldValue.serverTimestamp(),
         "lastSeenAt" to FieldValue.serverTimestamp()
@@ -650,9 +659,15 @@ class VrcaViewModel(
         if (!initialDataLoaded) return
         val deviceHash = readDeviceHashFromPrefs()
         if (!isValidDeviceHash(deviceHash)) return
+        // Build the payload OUTSIDE the write's runCatching. buildLivePayload is now
+        // throw-proof (its derived fields are guarded), but constructing it here keeps
+        // a hypothetical build failure from ever being conflated with a write attempt —
+        // a build that returns null skips the cycle cleanly rather than silently
+        // swallowing preview/roster/liveness for the whole watched session.
+        val payload = runCatching { buildLivePayload() }.getOrNull() ?: return
         runCatching {
             db.collection(COL_USERS).document(deviceHash)
-                .set(buildLivePayload(), SetOptions.merge())
+                .set(payload, SetOptions.merge())
                 .await()
         }
     }
@@ -728,6 +743,13 @@ class VrcaViewModel(
         put("nowPlayingTitle", lastNowPlayingTitle.takeIf { it != "(blank)" }?.trim().orEmpty())
         put("nowPlayingArtist", lastNowPlayingArtist.takeIf { it != "(blank)" }?.trim().orEmpty())
         put("activePackage", activePackage)
+        // Headset log-derived instance roster on the hourly delta too (guarded), so an
+        // UNWATCHED headset user's roster refreshes via the hourly catch-up — not only
+        // while an admin is actively watching. Empty off the headset / not in a world.
+        // Delta-compared like every other field, so it costs zero extra writes (rides
+        // the write that already fires). This is why the admin detail previously showed
+        // a stale/empty roster unless the user happened to be watched at the time.
+        put("instanceRoster", runCatching { buildInstanceRosterJson() }.getOrDefault(""))
         VrchatPipelineState.presence?.let { p ->
             put("vrchatUserId", p.userId)
             put("vrchatDisplayName", p.displayName)
