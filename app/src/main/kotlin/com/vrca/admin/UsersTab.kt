@@ -127,7 +127,13 @@ internal data class UserRow(
     // even if the user's app reopened and wrote a fresh lastActiveAt — so a kill
     // holds offline briefly instead of instantly bouncing back online.
     val killSignal: Timestamp? = null,
-    val versionName: String = ""
+    val versionName: String = "",
+    // Build variant (applicationId) — distinguishes mobile (com.scrapw.chatbox)
+    // from headset (com.gremlin.inc.headset) etc. Used to keep different-build
+    // installs of the SAME VRChat account as separate directory rows (so an admin
+    // can test/verify each), and to render a build chip. Written to every user doc
+    // by buildUserSnapshot.
+    val appId: String = ""
     // Profile pictures are NOT stored in Firestore and NOT displayed in the
     // admin UI — AdminAvatar shows the name initial (the on-demand VRChat+
     // fetch never worked reliably and was removed).
@@ -352,8 +358,21 @@ internal fun parseUserRow(d: com.google.firebase.firestore.DocumentSnapshot): Us
         isOnlineInApp = d.getBoolean("isOnlineInApp") ?: false,
         offlineAt = d.getTimestamp("offlineAt"),
         killSignal = d.getTimestamp("killSignal"),
-        versionName = (d.getString("versionName") ?: "").trim()
+        versionName = (d.getString("versionName") ?: "").trim(),
+        appId = (d.getString("appId") ?: "").trim()
     )
+}
+
+/** Short build-variant label for a directory row, or null (mobile shows a label
+ *  only when the same account also appears on another build, to avoid clutter). */
+internal fun variantLabel(appId: String, duplicated: Boolean): String? {
+    val a = appId.trim().lowercase()
+    return when {
+        a.isBlank() -> null
+        a.contains("headset") || a.contains("gremlin") -> "Quest"
+        a.endsWith(".admin") -> "Admin"
+        else -> if (duplicated) "Mobile" else null   // public mobile build
+    }
 }
 
 @Composable
@@ -419,25 +438,55 @@ internal fun UsersTab(
         derivedStateOf {
             val q = search.trim()
             val nowMs = System.currentTimeMillis()
-            // Collapse duplicate rows for the same VRChat account (same vrchatUserId
-            // on multiple phones = separate device docs). Keep ONE representative per
-            // vrchatUserId — preferring online, then freshest — so each person shows
-            // once. Rows that never logged into VRChat (blank vrchatUserId) are kept
-            // as distinct entries. Original sort order is preserved.
+            // Dedup duplicate rows PER (vrchatUserId, appId): two installs of the SAME
+            // build on the same account collapse to one representative (online, then
+            // freshest). DIFFERENT builds of the same account (mobile vs headset) are
+            // kept as SEPARATE rows so an admin can test/verify each independently —
+            // the headset-only instance roster is invisible when a mobile row wins a
+            // cross-variant collapse. Rows that never logged into VRChat (blank
+            // vrchatUserId) are kept as distinct entries.
             val best = HashMap<String, UserRow>()
             for (u in users) {
                 val vid = u.vrchatUserId.trim()
                 if (vid.isBlank()) continue
-                val ex = best[vid]
-                if (ex == null || preferRow(u, ex, nowMs)) best[vid] = u
+                val key = vid + "|" + u.appId.trim()
+                val ex = best[key]
+                if (ex == null || preferRow(u, ex, nowMs)) best[key] = u
             }
             val keepDocIds = best.values.mapTo(HashSet()) { it.docId }
-            users.asSequence()
+            val filtered = users.asSequence()
                 .filter { it.vrchatUserId.trim().isBlank() || it.docId in keepDocIds }
                 .filter { if (filterWarned) it.warned else true }
                 .filter { if (filterBanned) it.banned else true }
                 .filter { rowMatches(it, q) }
                 .toList()
+            // Group the SAME user's rows (their mobile + headset installs) so they're
+            // ALWAYS adjacent, while the overall order still follows last-seen: each
+            // group is positioned by its FRESHEST device, and within a group the
+            // freshest variant is listed first. Blank-vrchatUserId rows (never signed
+            // into VRChat) are their own singleton groups keyed by docId, so they sort
+            // individually exactly as before.
+            fun eff(u: UserRow): Long = (u.lastActiveAt ?: u.lastSeenAt)?.toDate()?.time ?: 0L
+            fun gkey(u: UserRow): String {
+                val vid = u.vrchatUserId.trim()
+                return if (vid.isBlank()) "doc:" + u.docId else "vid:" + vid
+            }
+            filtered
+                .groupBy { gkey(it) }
+                .values
+                .sortedByDescending { grp -> grp.maxOf { eff(it) } }
+                .flatMap { grp -> grp.sortedByDescending { eff(it) } }
+        }
+    }
+    // VRChat accounts that appear on more than one build in the current list — used
+    // to show a disambiguating build chip only where it matters.
+    val duplicatedVids by remember {
+        derivedStateOf {
+            filteredUsers.groupBy { it.vrchatUserId.trim() }
+                .asSequence()
+                .filter { it.key.isNotBlank() && it.value.size > 1 }
+                .map { it.key }
+                .toHashSet()
         }
     }
 
@@ -1071,6 +1120,8 @@ internal fun UsersTab(
                             if (u.vrchatIsOnline) StatusPill("VRC", AdminTone.Info)
                             if (u.banned) StatusPill("BAN", AdminTone.Error)
                             if (u.warned) StatusPill("WARN", AdminTone.Warn)
+                            variantLabel(u.appId, u.vrchatUserId.trim() in duplicatedVids)
+                                ?.let { StatusPill(it, AdminTone.Neutral) }
                             if (u.versionName.isNotBlank()) {
                                 Text(
                                     u.versionName,

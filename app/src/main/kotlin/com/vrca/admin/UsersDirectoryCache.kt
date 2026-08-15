@@ -57,6 +57,7 @@ internal object UsersDirectoryCache {
                 put("offlineAt", tsMs(u.offlineAt))
                 put("killSignal", tsMs(u.killSignal))
                 put("versionName", u.versionName)
+                put("appId", u.appId)
             })
         }
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -93,7 +94,8 @@ internal object UsersDirectoryCache {
                     isOnlineInApp = o.optBoolean("isOnlineInApp"),
                     offlineAt = msTs(o.optLong("offlineAt")),
                     killSignal = msTs(o.optLong("killSignal")),
-                    versionName = o.optString("versionName", "")
+                    versionName = o.optString("versionName", ""),
+                    appId = o.optString("appId", "")
                 )
             }
         } catch (_: Throwable) {
