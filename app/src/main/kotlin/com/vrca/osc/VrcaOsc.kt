@@ -18,6 +18,14 @@ class VrcaOsc(
     var port: Int
 ) {
 
+    companion object {
+        // Send-stall self-heal cadence. STALL_MS is comfortably above the sender's
+        // ~3s content-dedup ceiling, so only a REAL stall (actively dispatching but
+        // nothing succeeding) trips it — never a paused/idle app.
+        private const val SEND_WATCHDOG_MS = 4_000L
+        private const val SEND_STALL_MS = 8_000L
+    }
+
     val TAG: String
         get() = "OSC@$ipAddress:$port"
 
@@ -154,6 +162,31 @@ class VrcaOsc(
                 // Drop the socket so the NEXT send rebuilds it (self-heal).
                 runCatching { persistentSender?.close() }
                 persistentSender = null
+            }
+        }
+    }
+
+    // Self-heal watchdog: if we're actively DISPATCHING sends but none have SUCCEEDED
+    // for a while, the socket/address has gone bad (or a send is wedged) — drop the
+    // socket so the next send rebuilds it, and re-resolve the target. This turns a
+    // stalled send path into a ~seconds recovery instead of the "wait an hour / restart
+    // the app" behaviour. Only fires when we're genuinely trying (dispatched recently)
+    // yet nothing lands, so an idle/paused app never triggers it. Runs on the send
+    // thread, so persistentSender is touched safely (single-threaded).
+    init {
+        sendScope.launch {
+            while (true) {
+                delay(SEND_WATCHDOG_MS)
+                val now = System.currentTimeMillis()
+                val tryingNow = now - VrcaOscState.sendDispatchedMs < SEND_STALL_MS
+                val notLanding = now - VrcaOscState.sendOkMs > SEND_STALL_MS
+                if (tryingNow && notLanding) {
+                    Log.w(TAG, "send stall (>${SEND_STALL_MS}ms dispatching with no ok) → rebuild socket + re-resolve")
+                    runCatching { persistentSender?.close() }
+                    persistentSender = null
+                    runCatching { InetAddress.getByName(ipAddress) }
+                        .onSuccess { inetAddress = it; addressResolvable = true }
+                }
             }
         }
     }
