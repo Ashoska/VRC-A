@@ -104,6 +104,17 @@ class VrcaViewModel(
 
         private const val SEND_FLOOR_MS = 500L
 
+        // NowPlaying send RESAMPLE cadence. The sender loop must sample the progress
+        // more often than the value changes (once/sec) so a tick the SEND_FLOOR gate
+        // drops (it lands <500ms after the last actual send) is retried well within
+        // the SAME second — otherwise the retry waited a full 500ms and, if that
+        // delay ran long under load, landed in the NEXT second's window, so the
+        // in-between second was never sent and VRChat jumped 2s while the in-app
+        // preview (a 60ms ticker) stayed smooth. Actual OSC traffic is unchanged:
+        // rebuildAndMaybeSendCombined still floors real sends to SEND_FLOOR_MS and
+        // dedups identical text, so sends stay ≤1 per 500ms (≈1/sec on change).
+        private const val NOWPLAYING_RESAMPLE_MS = 250L
+
         // NowPlaying position-anchor smoothing. Media players report position
         // rounded/jittered by up to ~1s and re-sample on their own cadence, so
         // blindly re-anchoring the extrapolation on every snapshot made the floored
@@ -4689,9 +4700,13 @@ class VrcaViewModel(
         nowPlayingJob?.cancel()
         nowPlayingJob = viewModelScope.launch {
             while (spotifyEnabled && oscSending && !isBanned) {
-                // run on a 0.5s cadence so OSC updates match VRChat's chatbox rate limit
+                // Resample every 250ms (NOT 500ms): the actual OSC send is still floored
+                // to SEND_FLOOR_MS + deduped inside rebuildAndMaybeSendCombined, so real
+                // traffic stays ≈1/sec — but the faster resample means a floor-dropped
+                // value-change is retried within the same second instead of risking a
+                // 2s jump in the SENT stream (see NOWPLAYING_RESAMPLE_MS).
                 rebuildAndMaybeSendCombined(forceSend = true, local = local)
-                delay(SEND_FLOOR_MS)
+                delay(NOWPLAYING_RESAMPLE_MS)
             }
         }
         startSelfSyncLoopIfNeeded()
