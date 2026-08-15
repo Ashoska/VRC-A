@@ -803,6 +803,30 @@ fun VrcaApp() {
         }
     }
 
+    // Cold-start Keystore race (Quest especially, where every reopen is a fresh
+    // process): on a cold start the Android Keystore is frequently NOT ready when
+    // this composes, so VrchatAuthManager.isLoggedIn() — which reads
+    // EncryptedSharedPreferences — returns FALSE TRANSIENTLY even though the VRChat
+    // session is perfectly valid (documented in VrchatAuthManager.getPrefs). That
+    // left `vrcLoginDone` seeded false with nothing to ever flip it true (only a
+    // fresh loggedInSignal does, and no re-login happens), so
+    // runPhase2AndStartPipeline never ran → the VRChat pipeline never started. The
+    // VM's OSC-gate self-heal waits for a pipeline CONNECTION, so it could never
+    // fire either — the chatbox showed "Sending" but transmitted nothing until a
+    // full reopen (a process whose Keystore happened to be ready). Re-check for a
+    // few seconds and flip `vrcLoginDone` true the moment the session reads back;
+    // that starts the pipeline, which lets the existing gate self-heal clear the
+    // block. A genuinely logged-out user never reads true, so nothing starts.
+    // Not bumped through reloginTick — it's the SAME account, just a delayed read.
+    LaunchedEffect(Unit) {
+        var attempts = 0
+        while (!vrcLoginDone && attempts < 20) {
+            kotlinx.coroutines.delay(750)
+            attempts++
+            if (VrchatAuthManager.isLoggedIn(ctx)) vrcLoginDone = true
+        }
+    }
+
     // If VRC login succeeded but Phase 2 hasn't run yet (first run after login).
     // Also keyed on reloginTick so a Settings re-login (possibly a DIFFERENT
     // VRChat account) re-runs the ban check + pipeline restart.
