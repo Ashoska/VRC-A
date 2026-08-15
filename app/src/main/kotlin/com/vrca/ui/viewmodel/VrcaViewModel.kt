@@ -104,6 +104,16 @@ class VrcaViewModel(
 
         private const val SEND_FLOOR_MS = 500L
 
+        // NowPlaying position-anchor smoothing. Media players report position
+        // rounded/jittered by up to ~1s and re-sample on their own cadence, so
+        // blindly re-anchoring the extrapolation on every snapshot made the floored
+        // seconds occasionally JUMP forward by 2 (or stall) — very visible now that
+        // the combined chatbox pushes every 0.5s. While the SAME track keeps playing
+        // we keep the existing smooth anchor when the incoming sample disagrees with
+        // what it predicts by less than this; a bigger gap (a real seek) or a track
+        // change / pause-resume re-anchors so genuine jumps still snap.
+        private const val POSITION_RESYNC_TOLERANCE_MS = 1_500L
+
         // Manual Send takeover: a manual message pauses the automated chatbox
         // (Pinned/Cycle/Music/Time) for this long so people can read it. Extended
         // on every manual send / live keystroke; in Live mode it counts from the
@@ -2991,14 +3001,32 @@ class VrcaViewModel(
                 nowPlayingDetected = s.detected
 
                 nowPlayingDurationMs = s.durationMs
-                nowPlayingPositionMs = s.positionMs
-                nowPlayingPositionUpdateTimeMs = s.positionUpdateTimeMs
-                nowPlayingSpeed = s.playbackSpeed
-                nowPlayingReportedIsPlaying = s.isPlaying
 
                 val key = "${s.title.trim()}|${s.artist.trim()}|${s.durationMs}"
                 val trackChanged =
                     key != lastTrackKeyForInference && (s.title.isNotBlank() || s.artist.isNotBlank())
+
+                // Position-anchor smoothing (see POSITION_RESYNC_TOLERANCE_MS): keep the
+                // existing smooth anchor while the same track keeps playing and the new
+                // sample only jitters within tolerance of what the current anchor predicts.
+                // Re-anchor on a track change, a pause/resume, or a real seek. Computed
+                // BEFORE overwriting speed/reported-playing so it reads the PREVIOUS anchor.
+                val keepAnchor = !trackChanged &&
+                    s.isPlaying && s.playbackSpeed > 0f &&
+                    nowPlayingReportedIsPlaying && nowPlayingSpeed > 0f &&
+                    nowPlayingPositionUpdateTimeMs > 0L &&
+                    run {
+                        val dtMs = s.positionUpdateTimeMs - nowPlayingPositionUpdateTimeMs
+                        val predicted = nowPlayingPositionMs +
+                            max(0L, (dtMs.toFloat() * nowPlayingSpeed).toLong())
+                        abs(s.positionMs - predicted) <= POSITION_RESYNC_TOLERANCE_MS
+                    }
+                if (!keepAnchor) {
+                    nowPlayingPositionMs = s.positionMs
+                    nowPlayingPositionUpdateTimeMs = s.positionUpdateTimeMs
+                }
+                nowPlayingSpeed = s.playbackSpeed
+                nowPlayingReportedIsPlaying = s.isPlaying
                 if (trackChanged) {
                     lastTrackKeyForInference = key
                     lastMovementAtMs = System.currentTimeMillis()
@@ -3596,10 +3624,26 @@ class VrcaViewModel(
 
     /** Auto-save the live Pinned text into the currently-selected preset slot —
      *  the selected slot mirrors the editor, so switching slots is the only save.
-     *  No-op when nothing is selected (slot 0) so existing presets aren't clobbered. */
+     *
+     *  When NOTHING is selected (slot 0 — a fresh install, whose default message is
+     *  empty so [migrateLiveContentIntoPresetSlot] parked nothing), the typed text
+     *  would otherwise live only in [afkMessage] and be DESTROYED the first time the
+     *  user taps a chip (which loads the empty slot over the editor). So the moment
+     *  there's real content we ADOPT a slot: prefer one already holding this exact
+     *  text, else the first EMPTY slot, then select it so subsequent edits track it.
+     *  If all slots are full with distinct content we stay at 0 (never clobber a
+     *  deliberate save — the same invariant the migration uses). */
     private fun autoSaveSelectedAfkPreset(text: String) {
-        if (selectedAfkPreset !in 1..3) return
-        val idx = selectedAfkPreset - 1
+        var slot = selectedAfkPreset
+        if (slot !in 1..3) {
+            val live = text.trim()
+            if (live.isEmpty()) return
+            val match = (1..3).firstOrNull { afkPresetTexts[it - 1].trim() == live }
+            slot = match ?: (1..3).firstOrNull { afkPresetTexts[it - 1].isBlank() } ?: return
+            selectedAfkPreset = slot
+            viewModelScope.launch { userPreferencesRepository.saveSelectedAfkPreset(slot) }
+        }
+        val idx = slot - 1
         afkPresetTexts[idx] = text
         viewModelScope.launch {
             when (idx + 1) {
@@ -3746,12 +3790,23 @@ class VrcaViewModel(
 
     /** Auto-save the live cycle lines into the selected cycle preset slot — the
      *  selected slot mirrors the editor, so switching slots is the only save.
-     *  No-op when nothing is selected (slot 0) so existing presets aren't clobbered. */
+     *
+     *  When NOTHING is selected (slot 0) we ADOPT a slot the moment there are real
+     *  cycle lines — prefer one already holding these exact lines, else the first
+     *  EMPTY slot — so a fresh user's lines can't be destroyed by the first chip tap
+     *  (see [autoSaveSelectedAfkPreset]). All slots full with distinct content → stay
+     *  at 0 (never clobber a deliberate save). */
     private fun autoSaveSelectedCyclePreset() {
-        if (selectedCyclePreset !in 1..5) return
-        val s = selectedCyclePreset
-        val idx = s - 1
         val messages = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(MAX_CYCLE_LINES).joinToString("\n")
+        var s = selectedCyclePreset
+        if (s !in 1..5) {
+            if (messages.isEmpty()) return
+            val match = (1..5).firstOrNull { cyclePresetMessages[it - 1].trim() == messages }
+            s = match ?: (1..5).firstOrNull { cyclePresetMessages[it - 1].isBlank() } ?: return
+            selectedCyclePreset = s
+            viewModelScope.launch { userPreferencesRepository.saveSelectedCyclePreset(s) }
+        }
+        val idx = s - 1
         // Mute CSV aligned to the SAME non-empty lines the preset saves (empty
         // lines are dropped from `messages`, so the flags must skip them too) —
         // otherwise the indices wouldn't line up when the preset reloads.
@@ -4434,6 +4489,20 @@ class VrcaViewModel(
                     userPreferencesRepository.saveSelectedCyclePreset(target)
                 }
             }
+        }
+        // Force preset 1 for a genuinely-NEW install (default message is empty, so the
+        // parking above did nothing and nothing is selected). Guarded to ALL slots
+        // being blank so an existing user who never made presets is the only other
+        // case affected — and there slot 1 is empty too, so selecting it loads nothing
+        // over their editor. This is what makes a brand-new user see preset 1 selected
+        // immediately (so the first thing they type has a home slot), per design.
+        if (selectedAfkPreset == 0 && (1..3).all { afkPresetTexts[it - 1].isBlank() }) {
+            selectedAfkPreset = 1
+            userPreferencesRepository.saveSelectedAfkPreset(1)
+        }
+        if (selectedCyclePreset == 0 && (1..5).all { cyclePresetMessages[it - 1].isBlank() }) {
+            selectedCyclePreset = 1
+            userPreferencesRepository.saveSelectedCyclePreset(1)
         }
         userPreferencesRepository.savePresetSeedMigrated(true)
     }
