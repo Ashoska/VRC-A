@@ -3396,6 +3396,20 @@ class VrcaViewModel(
             append("   manualHold=").append(manualHoldActive())
             append('\n')
             append("last send=").append(lastSendAgo)
+            // Real UDP-send telemetry (distinct from the "called sendMessage" time
+            // above): tells apart a throwing send, a never-run (starved) coroutine,
+            // and a landed-but-not-received packet. See VrcaOscState send telemetry.
+            val okAgo = if (com.vrca.osc.VrcaOscState.sendOkMs > 0)
+                "${(now - com.vrca.osc.VrcaOscState.sendOkMs) / 1000}s ago" else "never"
+            val dispAgo = if (com.vrca.osc.VrcaOscState.sendDispatchedMs > 0)
+                "${(now - com.vrca.osc.VrcaOscState.sendDispatchedMs) / 1000}s ago" else "never"
+            append('\n')
+            append("udp ok=").append(okAgo)
+            append("  dispatched=").append(dispAgo)
+            append("  failStreak=").append(com.vrca.osc.VrcaOscState.sendFailStreak)
+            if (com.vrca.osc.VrcaOscState.sendError.isNotBlank()) {
+                append("\nsendErr=").append(com.vrca.osc.VrcaOscState.sendError)
+            }
         }
     }
 

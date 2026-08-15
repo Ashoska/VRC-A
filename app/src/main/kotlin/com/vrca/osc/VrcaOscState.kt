@@ -45,6 +45,26 @@ object VrcaOscState {
         java.io.File("/proc/self/fd").list()?.size ?: -1
     }.getOrDefault(-1)
 
+    // ---- outbound send telemetry (chatbox / eyeheight fail diagnosis) --------
+    // The VM's "last send" only records when sendMessage was CALLED (synchronous),
+    // not whether the async UDP packet actually left — so a silently-failing send
+    // looked healthy. These record the async result: `dispatched` = the send was
+    // handed to the IO coroutine; `ok` = OSCPortOut.send() returned without throwing.
+    // If dispatched is fresh but ok is stale with no error → the coroutine never ran
+    // (IO-pool starvation). If sendError is set → send() is throwing (with the cause).
+    // If ok is fresh but VRChat is stale → it left but didn't land (target/VRChat side).
+    @Volatile var sendDispatchedMs = 0L
+    @Volatile var sendOkMs = 0L
+    @Volatile var sendError = ""
+    @Volatile var sendFailStreak = 0
+
+    fun recordSendDispatch() { sendDispatchedMs = System.currentTimeMillis() }
+    fun recordSendOk() { sendOkMs = System.currentTimeMillis(); sendError = ""; sendFailStreak = 0 }
+    fun recordSendFail(e: Throwable) {
+        sendError = "${e.javaClass.simpleName}: ${e.message}"
+        if (sendFailStreak < Int.MAX_VALUE) sendFailStreak++
+    }
+
     fun diagString(): String = buildString {
         append("fds=").append(openFdCount()).append('\n')
         append("bound=").append(diagBound)

@@ -103,6 +103,10 @@ class VrcaOsc(
         if (address == "/chatbox/input" && (arguments.firstOrNull() as? String)?.isNotBlank() == true) {
             com.vrca.app.ChatboxStats.increment()
         }
+        // Telemetry: stamp the DISPATCH synchronously (proves the caller reached us)
+        // so the diag can tell a starved/never-run coroutine (dispatch fresh, ok
+        // stale, no error) from a throwing send (sendError set) or a landed one.
+        VrcaOscState.recordSendDispatch()
         CoroutineScope(Dispatchers.IO).launch {
             if (delay > 0) delay(delay)
             val message = OSCMessage(address, arguments)
@@ -115,8 +119,10 @@ class VrcaOsc(
             try {
                 sender = OSCPortOut(inetAddress, port)
                 sender.send(message)
+                VrcaOscState.recordSendOk()
                 Log.d(TAG, "Message: ${message.address}  ${message.arguments}")
             } catch (e: Exception) {
+                VrcaOscState.recordSendFail(e)
                 Log.e(TAG, "Failed send Message: $message", e)
             } finally {
                 runCatching { sender?.close() }
@@ -132,13 +138,16 @@ class VrcaOsc(
      *  the chatbox `blocked` gate. */
     fun sendEyeHeight(meters: Float) {
         val clamped = meters.coerceIn(0.01f, 10000f)
+        VrcaOscState.recordSendDispatch()
         CoroutineScope(Dispatchers.IO).launch {
             var sender: OSCPortOut? = null
             try {
                 sender = OSCPortOut(inetAddress, port)
                 sender.send(OSCMessage("/avatar/eyeheight", listOf(clamped)))
+                VrcaOscState.recordSendOk()
                 Log.d(TAG, "eyeheight -> $clamped")
             } catch (e: Exception) {
+                VrcaOscState.recordSendFail(e)
                 Log.e(TAG, "eyeheight send failed", e)
             } finally {
                 runCatching { sender?.close() }
