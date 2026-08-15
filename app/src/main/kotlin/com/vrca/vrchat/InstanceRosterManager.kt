@@ -65,6 +65,13 @@ object InstanceRosterManager {
     // threshold doesn't gate those users. The file mtime persists across a reboot,
     // so a fresh boot still doesn't re-read a very old log as "in-instance".
     private const val LOG_STALE_MS = 300_000L
+    // After the log shows a Disconnected ("good night server") — VRChat quit /
+    // headset shutdown / went to background — we force offline INSTANTLY instead of
+    // waiting out OSCQuery's ~12s grace. But if OSCQuery then reports VRChat is still
+    // up for longer than this window, it was a brief background pause that resumed,
+    // so we defer back to OSCQuery and the RETAINED roster fold repopulates. A hair
+    // longer than isServiceUp()'s own grace so a real close's service-down lands first.
+    private const val SUSPEND_RESUME_CONFIRM_MS = 15_000L
     private const val PREFS = "vrca_roster"
     private const val KEY_TREE_URI = "saf_tree_uri"
 
@@ -111,6 +118,9 @@ object InstanceRosterManager {
     // see WHY a readable log shows "not in a world" — which lines the parser matched.
     @Volatile private var lastRef: LogRef? = null
     @Volatile private var lastState: VrcLogParser.InstanceState? = null
+    // Wall-clock when the current log-suspend (Disconnected) began, 0 when not
+    // suspended. Drives the instant-offline-until-resume gate in runLoop.
+    @Volatile private var suspendSinceMs: Long = 0L
 
     /** Human diag: access, the log file being read, the parsed location/world/roster,
      *  and the last ~14 raw log lines tagged with what the parser made of each — so
@@ -125,7 +135,9 @@ object InstanceRosterManager {
         val st = lastState
         sb.append("location=").append(st?.location ?: "null")
             .append("\nworld=").append(st?.worldName ?: "null")
-            .append("  roster=").append(st?.roster?.size ?: 0).append('\n')
+            .append("  roster=").append(st?.roster?.size ?: 0)
+            .append(if (st?.suspended == true) "  suspended=true (good-night seen)" else "")
+            .append('\n')
         sb.append("--- last log lines (parse result) ---\n")
         val tail = runCatching { readTail(context, ref, 4000) }.getOrDefault("")
         tail.split('\n').filter { it.isNotBlank() }.takeLast(14).forEach { line ->
@@ -451,10 +463,25 @@ object InstanceRosterManager {
             // immune to an AFK user's quiet log, and it never lets a recent log write
             // mask a real close. Log-mtime freshness is used ONLY as the startup
             // bridge, before OSCQuery has resolved+polled for the first time.
-            val alive = if (com.vrca.osc.VrcaOscQuery.hasEverPolledOk())
+            val serviceUp = if (com.vrca.osc.VrcaOscQuery.hasEverPolledOk())
                 com.vrca.osc.VrcaOscQuery.isServiceUp()
             else
                 System.currentTimeMillis() - newest.lastModified < LOG_STALE_MS
+            // Instant "left the instance" from the log: VRChat writes a networking
+            // "good night server" goodbye the moment it disconnects (quit / headset
+            // shutdown / extended background), which we see in real time while the app
+            // is alive (and on the next boot's replay after a shutdown). Force offline
+            // NOW instead of waiting OSCQuery's ~12s grace — but KEEP the fold, and once
+            // OSCQuery confirms VRChat is genuinely still up past that grace (a brief
+            // pause that resumed) OR real in-instance activity clears state.suspended,
+            // the retained roster repopulates. suspendSinceMs deliberately rides its
+            // original stamp through a confirmed resume (no re-stamp flicker).
+            val nowMs = System.currentTimeMillis()
+            if (state.suspended) { if (suspendSinceMs == 0L) suspendSinceMs = nowMs }
+            else suspendSinceMs = 0L
+            val resumedConfirmed = suspendSinceMs != 0L && serviceUp &&
+                nowMs - suspendSinceMs > SUSPEND_RESUME_CONFIRM_MS
+            val alive = serviceUp && (suspendSinceMs == 0L || resumedConfirmed)
             lastRef = newest; lastState = state
             publish(context, state, newest.id, alive)
             waitForChange()

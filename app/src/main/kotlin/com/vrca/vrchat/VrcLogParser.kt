@@ -47,6 +47,16 @@ object VrcLogParser {
         /** Local player LEFT the instance (`OnLeftRoom`). Clears the roster. */
         object LeftRoom : LogEvent()
 
+        /** VRChat's networking logged its instance goodbye ("...good night
+         *  server!") — the local player DISCONNECTED (quit / headset shutdown /
+         *  extended background). Distinct from [LeftRoom] (a clean in-client
+         *  instance leave), which VRChat does NOT write on a quit/shutdown. This
+         *  flags [InstanceState.suspended] WITHOUT clearing the roster, so the
+         *  reader can force "not in an instance" instantly (rather than waiting out
+         *  OSCQuery's grace) while a brief background pause that resumes still
+         *  repopulates the retained roster. */
+        object Disconnected : LogEvent()
+
         /** Another player entered the instance. `userId` is null on the older
          *  log format that logged only the display name. */
         data class PlayerJoined(val displayName: String, val userId: String?) : LogEvent()
@@ -119,6 +129,9 @@ object VrcLogParser {
         RE_JOINING_ROOM.find(body)?.let { return LogEvent.EnteringRoom(it.groupValues[1].trim()) }
         if (RE_JOINED.containsMatchIn(body)) return LogEvent.JoinedRoom
         if (RE_LEFT_ROOM.containsMatchIn(body)) return LogEvent.LeftRoom
+        // VRChat's netcode goodbye on disconnect (quit / headset shutdown). Not
+        // "[Behaviour]"-prefixed, so match the distinctive phrase directly.
+        if (body.contains("good night server", ignoreCase = true)) return LogEvent.Disconnected
         RE_PLAYER_JOINED.find(body)?.let { m ->
             val name = m.groupValues[1].trim()
             if (name.isNotEmpty()) {
@@ -156,6 +169,11 @@ object VrcLogParser {
         val worldName: String? = null,
         val nonce: String? = null,
         val joinedRoom: Boolean = false,
+        // Set by a Disconnected event ("good night server") and cleared by any real
+        // in-instance activity (join/leave/hop). The roster is RETAINED while this is
+        // true so a brief background pause repopulates on resume; the reader treats a
+        // suspended state as "not present in an instance right now".
+        val suspended: Boolean = false,
         // Keyed by userId when known, else by a "name:<displayName>" fallback so
         // the older name-only log format still tracks a person.
         val roster: Map<String, RosterEntry> = emptyMap()
@@ -184,15 +202,19 @@ object VrcLogParser {
             // re-announce via OnPlayerJoined once loaded in.
             roster = emptyMap()
         )
-        is LogEvent.EnteringRoom -> state.copy(worldName = event.worldName)
-        LogEvent.JoinedRoom -> state.copy(joinedRoom = true)
+        // Real in-instance activity clears `suspended` (see Disconnected): the local
+        // player is demonstrably present again.
+        is LogEvent.EnteringRoom -> state.copy(worldName = event.worldName, suspended = false)
+        LogEvent.JoinedRoom -> state.copy(joinedRoom = true, suspended = false)
         LogEvent.LeftRoom -> InstanceState() // wiped — we're between instances
+        LogEvent.Disconnected -> state.copy(suspended = true) // roster RETAINED
         is LogEvent.PlayerJoined -> {
             val key = rosterKey(event.userId, event.displayName)
             // Preserve an existing entry's join time / avatar on a duplicate
             // join line (VRChat can re-log on reconnect).
             val existing = state.roster[key]
             state.copy(
+                suspended = false,
                 roster = state.roster + (key to RosterEntry(
                     displayName = event.displayName,
                     userId = event.userId,
@@ -204,13 +226,14 @@ object VrcLogParser {
         }
         is LogEvent.PlayerLeft -> {
             val key = rosterKey(event.userId, event.displayName)
-            state.copy(roster = state.roster - key)
+            state.copy(suspended = false, roster = state.roster - key)
         }
         is LogEvent.AvatarSwitch -> {
             // Match by display name (avatar lines carry no usr_ id).
             val entry = state.roster.entries.firstOrNull { it.value.displayName == event.displayName }
             if (entry == null) state
             else state.copy(
+                suspended = false,
                 roster = state.roster + (entry.key to entry.value.copy(avatarName = event.avatarName))
             )
         }
