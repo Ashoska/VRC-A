@@ -107,72 +107,49 @@ class VrcaOsc(
             sendOscMessage("/chatbox/typing", listOf(effective))
         }
 
-    // ---- ONE reused socket on ONE dedicated send thread ----------------------
-    // Replaces the old "new OSCPortOut + new CoroutineScope(Dispatchers.IO) per
-    // send", whose churn is the root of the "chatbox randomly stops (restart fixes
-    // it)" faults: a send whose finally didn't close leaked an fd toward EMFILE, and
-    // blocked/piled-up send coroutines could exhaust the SHARED 64-thread IO pool so
-    // new sends never ran (UDP dies while the OSCQuery HTTP poll — on its own
-    // long-lived coroutine — keeps working, exactly the observed symptom). One reused
-    // socket keeps the fd count flat, serialises sends (no socket race), and can't
-    // starve the IO pool. It self-heals: rebuilt on a target (ip/port) change and
-    // dropped+rebuilt after any send error, so the NEXT send recovers with no restart.
+    // ---- FRESH socket per send on ONE dedicated send thread ------------------
+    // A FRESH OSCPortOut is opened+closed for every send (like VRC-NEXUS and VRC-A's
+    // original code) — NOT a long-lived reused socket. A reused socket was tried and
+    // reverted: a device capture during the "chatbox stops" fault showed our send
+    // SUCCEEDING (udp ok / failStreak=0) while VRChat received nothing, and only
+    // REOPENING VRC-A fixed it. Reopening VRC-A can't change VRChat's port, so the bad
+    // state was in OUR socket — a persistent socket that reports success but stops
+    // delivering (stale after VRChat re-inits its OSC on the same 127.0.0.1:9000). A
+    // fresh socket per send reconnects to the live VRChat every time, so it can't get
+    // stuck. The dedicated SINGLE thread is kept (not the shared Dispatchers.IO pool),
+    // so sends can't starve that pool; open+close per send on one thread is ~1/sec
+    // (deduped) and always closed in finally, so no fd churn/leak.
     private val sendDispatcher =
         Executors.newSingleThreadExecutor { r -> Thread(r, "vrca-osc-send").apply { isDaemon = true } }
             .asCoroutineDispatcher()
     private val sendScope = CoroutineScope(sendDispatcher)
-    // Touched ONLY on sendDispatcher (single thread) → no locking needed.
-    private var persistentSender: OSCPortOut? = null
-    private var boundAddr: InetAddress? = null
-    private var boundPort: Int = -1
 
-    /** (Re)use one socket for the current target; rebuild on a target change or after
-     *  a prior error dropped it. Runs on [sendDispatcher] only. */
-    private fun sender(): OSCPortOut? {
-        val addr = inetAddress
-        val p = port
-        val cur = persistentSender
-        if (cur != null && boundAddr == addr && boundPort == p) return cur
-        runCatching { cur?.close() }
-        persistentSender = null
-        return try {
-            OSCPortOut(addr, p).also { persistentSender = it; boundAddr = addr; boundPort = p }
-        } catch (e: Exception) {
-            VrcaOscState.recordSendFail(e)
-            Log.e(TAG, "OSC socket open failed", e)
-            null
-        }
-    }
-
-    /** Serialised send on the dedicated thread with the reused socket. `recordSendDispatch`
-     *  is stamped SYNCHRONOUSLY (in the caller thread) so the diag can tell a wedged/
-     *  never-run send (dispatch fresh, ok stale) from a throwing one (sendError set). */
+    /** Serialised send on the dedicated thread with a FRESH socket each time.
+     *  `recordSendDispatch` is stamped SYNCHRONOUSLY (caller thread) so the diag can
+     *  tell a wedged/never-run send (dispatch fresh, ok stale) from a throwing one. */
     private fun dispatchSend(message: OSCMessage, delay: Long = 0) {
         VrcaOscState.recordSendDispatch()
         sendScope.launch {
             if (delay > 0) delay(delay)
-            val s = sender() ?: return@launch
+            var sender: OSCPortOut? = null
             try {
-                s.send(message)
+                sender = OSCPortOut(inetAddress, port)
+                sender.send(message)
                 VrcaOscState.recordSendOk()
                 Log.d(TAG, "Message: ${message.address}  ${message.arguments}")
             } catch (e: Exception) {
                 VrcaOscState.recordSendFail(e)
                 Log.e(TAG, "Failed send Message: $message", e)
-                // Drop the socket so the NEXT send rebuilds it (self-heal).
-                runCatching { persistentSender?.close() }
-                persistentSender = null
+            } finally {
+                runCatching { sender?.close() }
             }
         }
     }
 
-    // Self-heal watchdog: if we're actively DISPATCHING sends but none have SUCCEEDED
-    // for a while, the socket/address has gone bad (or a send is wedged) — drop the
-    // socket so the next send rebuilds it, and re-resolve the target. This turns a
-    // stalled send path into a ~seconds recovery instead of the "wait an hour / restart
-    // the app" behaviour. Only fires when we're genuinely trying (dispatched recently)
-    // yet nothing lands, so an idle/paused app never triggers it. Runs on the send
-    // thread, so persistentSender is touched safely (single-threaded).
+    // Light self-heal: if we're actively DISPATCHING but nothing has SUCCEEDED for a
+    // while, re-resolve the target address (a fresh socket already reconnects each
+    // send, so there's nothing to "unstick" — this only covers a stale DNS/address).
+    // Fires only while genuinely trying, so an idle/paused app never triggers it.
     init {
         sendScope.launch {
             while (true) {
@@ -181,9 +158,7 @@ class VrcaOsc(
                 val tryingNow = now - VrcaOscState.sendDispatchedMs < SEND_STALL_MS
                 val notLanding = now - VrcaOscState.sendOkMs > SEND_STALL_MS
                 if (tryingNow && notLanding) {
-                    Log.w(TAG, "send stall (>${SEND_STALL_MS}ms dispatching with no ok) → rebuild socket + re-resolve")
-                    runCatching { persistentSender?.close() }
-                    persistentSender = null
+                    Log.w(TAG, "send stall (>${SEND_STALL_MS}ms dispatching with no ok) → re-resolve target")
                     runCatching { InetAddress.getByName(ipAddress) }
                         .onSuccess { inetAddress = it; addressResolvable = true }
                 }
