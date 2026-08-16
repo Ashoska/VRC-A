@@ -3439,6 +3439,9 @@ class VrcaViewModel(
             if (com.vrca.osc.VrcaOscState.sendError.isNotBlank()) {
                 append("\nsendErr=").append(com.vrca.osc.VrcaOscState.sendError)
             }
+            // REAL delivery proof (not "udp ok", which is a lie for UDP): the
+            // eyeheight round-trip. DELIVERED = VRChat actually received our send.
+            append('\n').append(com.vrca.osc.VrcaOscState.deliveryDiag())
         }
     }
 

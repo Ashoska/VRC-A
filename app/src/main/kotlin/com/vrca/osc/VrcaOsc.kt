@@ -183,7 +183,13 @@ class VrcaOsc(
      *  avatar/world actually permit. A deliberate one-shot control, so it bypasses
      *  the chatbox `blocked` gate (routes straight to dispatchSend). */
     fun sendEyeHeight(meters: Float) {
-        dispatchSend(OSCMessage("/avatar/eyeheight", listOf(meters.coerceIn(0.01f, 10000f))))
+        val clamped = meters.coerceIn(0.01f, 10000f)
+        // Arm the delivery canary BEFORE dispatch: if VRChat receives this, the
+        // EyeHeightAsMeters readback (OSCQuery) moves and the send is confirmed
+        // DELIVERED — the one positive proof of receipt on the headset (udp ok is
+        // meaningless for UDP). If the readback never moves, outbound OSC is dead.
+        VrcaOscState.recordEyeHeightSend(clamped)
+        dispatchSend(OSCMessage("/avatar/eyeheight", listOf(clamped)))
     }
 
     /** Send text to the chatbox VERBATIM (no minimal-background suffix, no manual

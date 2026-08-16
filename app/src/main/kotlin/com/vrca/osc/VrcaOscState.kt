@@ -65,6 +65,50 @@ object VrcaOscState {
         if (sendFailStreak < Int.MAX_VALUE) sendFailStreak++
     }
 
+    // ---- REAL delivery canary (eyeheight round-trip) -------------------------
+    // `udp ok` only means the OS accepted our datagram — for UDP that says NOTHING
+    // about VRChat receiving it, so a dead outbound path still reads "healthy".
+    // The ONE positive-confirmation channel the headset gives us: when we send
+    // /avatar/eyeheight, VRChat APPLIES it and the new value comes back as the
+    // EyeHeightAsMeters param over OSCQuery. So if the readback MOVES after a send,
+    // VRChat genuinely received it (outbound OSC alive); if it never moves, our
+    // send left the app but VRChat never got it (the exact "chatbox stops but
+    // OSCQuery-in still works" fault, now provable instead of guessed).
+    private const val EYE_CONFIRM_WINDOW_MS = 4_000L
+    private const val EYE_CONFIRM_EPS = 0.01f
+    @Volatile var eyeHeightSentMs = 0L
+    @Volatile var eyeHeightSentTarget = 0f
+    @Volatile private var eyeHeightPreSend: Float? = null
+    @Volatile var eyeHeightConfirmedMs = 0L
+    @Volatile private var eyeHeightCanaryArmed = false
+
+    /** Arm the canary on an eyeheight send. Only a send that actually CHANGES the
+     *  current height can be confirmed (a no-op resize produces no readback move). */
+    fun recordEyeHeightSend(target: Float) {
+        eyeHeightSentMs = System.currentTimeMillis()
+        eyeHeightSentTarget = target
+        val pre = _eyeHeight.value
+        eyeHeightPreSend = pre
+        eyeHeightConfirmedMs = 0L
+        eyeHeightCanaryArmed = pre == null || kotlin.math.abs(target - pre) > EYE_CONFIRM_EPS
+    }
+
+    /** Human-readable delivery verdict for the diag panel. */
+    fun deliveryDiag(): String {
+        val sent = eyeHeightSentMs
+        if (sent == 0L) return "size probe: (change your avatar size to test delivery)"
+        val now = System.currentTimeMillis()
+        val sentAgo = (now - sent) / 1000
+        if (!eyeHeightCanaryArmed) return "size probe: sent ${sentAgo}s ago (no size change — can't confirm)"
+        val conf = eyeHeightConfirmedMs
+        return when {
+            conf >= sent -> "size probe: DELIVERED ✓ (VRChat applied it ${(now - conf) / 1000}s ago)"
+            now - sent > EYE_CONFIRM_WINDOW_MS ->
+                "size probe: NOT DELIVERED ✗ (sent ${sentAgo}s ago, readback never moved = outbound OSC dead)"
+            else -> "size probe: sent ${sentAgo}s ago, awaiting VRChat readback…"
+        }
+    }
+
     fun diagString(): String = buildString {
         append("fds=").append(openFdCount()).append('\n')
         append("bound=").append(diagBound)
@@ -105,7 +149,20 @@ object VrcaOscState {
         lastRxMs = System.currentTimeMillis()
         if (!_live.value) _live.value = true
         if (name == "EyeHeightAsMeters") {
-            (value as? Number)?.toFloat()?.let { _eyeHeight.value = it }
+            (value as? Number)?.toFloat()?.let { f ->
+                _eyeHeight.value = f
+                // Delivery canary: a pending eyeheight send is CONFIRMED the moment
+                // the readback moves off its pre-send value (VRChat received+applied).
+                val sent = eyeHeightSentMs
+                if (eyeHeightCanaryArmed && eyeHeightConfirmedMs < sent &&
+                    System.currentTimeMillis() - sent in 0..EYE_CONFIRM_WINDOW_MS
+                ) {
+                    val pre = eyeHeightPreSend
+                    if (pre == null || kotlin.math.abs(f - pre) > EYE_CONFIRM_EPS) {
+                        eyeHeightConfirmedMs = System.currentTimeMillis()
+                    }
+                }
+            }
         }
     }
 
