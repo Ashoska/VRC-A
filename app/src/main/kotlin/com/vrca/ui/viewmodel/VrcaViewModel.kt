@@ -39,6 +39,7 @@ import com.vrca.ui.common.resolveTimeZone
 import com.vrca.vrchat.VrchatPipelineState
 import com.vrca.ui.conversation.ConversationUiState
 import com.vrca.ui.conversation.Message
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
@@ -2420,12 +2421,19 @@ class VrcaViewModel(
     var minSendIntervalSeconds by mutableStateOf(2)
         private set
 
-    private var lastCombinedSendMs = 0L
+    // @Volatile: the send loops now run OFF the main thread (Dispatchers.Default) so a
+    // main-thread stall can't freeze them (that stall was skipping a whole second of
+    // music progress → the "VRChat jumps 2s while the preview is fine" bug). These
+    // send-bookkeeping fields are therefore read/written from both the send thread and
+    // main-thread callers; @Volatile gives clean visibility. Any residual race is
+    // benign (at worst one duplicate or one skipped-dedup send, which VRChat renders
+    // identically).
+    @Volatile private var lastCombinedSendMs = 0L
 
     // Content-change dedup: skip redundant OSC sends when the text hasn't changed.
     // Re-sends every 10s even if unchanged so VRChat doesn't clear the chatbox.
-    private var lastSentCombinedText = ""
-    private var lastSentMs = 0L
+    @Volatile private var lastSentCombinedText = ""
+    @Volatile private var lastSentMs = 0L
 
     // =========================
     // OSC send gate (master switch)
@@ -3359,7 +3367,15 @@ class VrcaViewModel(
      */
     private fun startUnifiedSendLoop(local: Boolean = false) {
         unifiedSendJob?.cancel()
-        unifiedSendJob = viewModelScope.launch {
+        // Dispatchers.Default (NOT the main thread): a main-thread stall — GC, a heavy
+        // recomposition, a VRChat frame hitch on the Quest — used to freeze this loop
+        // along with everything else on Main. If the freeze spanned a full second, the
+        // in-between music second was never sent and VRChat jumped 2s, even though the
+        // position (extrapolated from elapsedRealtime, which keeps ticking) was correct.
+        // Off Main, the loop keeps its 0.5s cadence regardless of UI-thread load, so
+        // every second is transmitted. buildCombinedText reads SnapshotState (thread-safe)
+        // and the actual UDP send is already off-thread (VrcaOsc send thread).
+        unifiedSendJob = viewModelScope.launch(Dispatchers.Default) {
             while (oscSending && !isBanned) {
                 try {
                     rebuildAndMaybeSendCombined(forceSend = true, local = local)
@@ -4712,7 +4728,9 @@ class VrcaViewModel(
         keepaliveJob?.cancel()
         keepaliveJob = null
         nowPlayingJob?.cancel()
-        nowPlayingJob = viewModelScope.launch {
+        // Off the main thread (see startUnifiedSendLoop) so a UI-thread stall can't
+        // freeze the resample and skip a music second.
+        nowPlayingJob = viewModelScope.launch(Dispatchers.Default) {
             while (spotifyEnabled && oscSending && !isBanned) {
                 // Resample every 250ms (NOT 500ms): the actual OSC send is still floored
                 // to SEND_FLOOR_MS + deduped inside rebuildAndMaybeSendCombined, so real
