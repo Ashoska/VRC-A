@@ -4580,13 +4580,30 @@ object VrchatPipelineState {
         // drives presence as always. Passthrough when the log isn't active yet (no
         // file access), so REST still works on the headset until the log takes over.
         set(value) {
-            _presence.value = if (value != null && BuildConfig.IS_HEADSET_BUILD && headsetLogActive)
-                applyHeadsetLogOverride(value) else value
+            _presence.value = when {
+                value == null || !BuildConfig.IS_HEADSET_BUILD -> value
+                // VRChat is known-CLOSED via the log (roster cleared instantly). Keep
+                // forcing offline on EVERY write so a STALE REST poll — VRChat's API
+                // lags the actual close by a while and still returns the old instance —
+                // can't re-populate the VRChat-tab location / RPC. Without this the
+                // location flapped back to the old world until REST finally caught up,
+                // while the roster (pure log) had already vanished. Cleared when the log
+                // goes active again (VRChat reopened) or log access is lost (REST drives).
+                headsetLogForceOffline -> value.copy(
+                    location = "offline", worldName = "", instancePlayerCount = 0,
+                    isOnlineInVRChat = false, state = "offline"
+                )
+                headsetLogActive -> applyHeadsetLogOverride(value)
+                else -> value
+            }
         }
 
     // --- headset log-derived self-presence (plan §9) ---
     /** The headset has a working VRChat log driving self-presence. */
     @Volatile var headsetLogActive = false
+    /** The log has confirmed VRChat is CLOSED — force presence offline on every write
+     *  (incl. stale REST) until the log goes active again or log access is lost. */
+    @Volatile var headsetLogForceOffline = false
     @Volatile var headsetLogInWorld = false
     @Volatile var headsetLogLocation: String? = null
     @Volatile var headsetLogWorldName: String? = null
@@ -4615,14 +4632,25 @@ object VrchatPipelineState {
     fun applyLogPresence(
         active: Boolean, inWorld: Boolean,
         location: String?, worldName: String?, playerCount: Int,
-        seedUserId: String, seedDisplayName: String
+        seedUserId: String, seedDisplayName: String,
+        // True only when VRChat is CONFIDENTLY closed (OSCQuery HTTP down, or the log's
+        // "good night server" goodbye). A mere log-mtime staleness fallback (OSC
+        // disabled + user AFK, log quiet for >5min) passes false: we must NOT latch
+        // offline then, or an AFK-but-still-present user gets forced offline and the
+        // REST poll (which correctly shows them in-world) can't rescue it. OSCQuery is
+        // immune to AFK, so a real VRC-A user (OSC on) is unaffected either way.
+        confirmedClosed: Boolean = true
     ) {
-        val wasActive = headsetLogActive
+        // "Was the log controlling presence" = it was active OR already force-offline.
+        val wasControlling = headsetLogActive || headsetLogForceOffline
         headsetLogActive = active
         headsetLogInWorld = inWorld
         headsetLogLocation = location
         headsetLogWorldName = worldName
         headsetLogPlayerCount = playerCount
+        // Clear the latch when VRChat is back (active) OR when we're NOT confident it's
+        // closed (let REST drive an AFK/idle user). Only a confident close keeps it.
+        if (active || !confirmedClosed) headsetLogForceOffline = false
         val cur = _presence.value
         when {
             cur == null -> {
@@ -4638,17 +4666,22 @@ object VrchatPipelineState {
                     )
                 }
             }
-            // Log just went STALE (VRChat closed / headset shutting down). The log
+            // Log confirmed VRChat CLOSED (VRChat quit / headset shutting down). The log
             // was driving presence and there's no "left" event, so force offline NOW
             // instead of showing the last instance (and running the uptime/RPC timer)
-            // forever. REST confirms on its next poll; if VRChat reopens the log goes
-            // active again and re-seeds. Only fire on the active->inactive edge.
-            !active && wasActive -> {
+            // forever — AND latch headsetLogForceOffline so the next stale REST poll
+            // can't flap the old location back (the "roster clears instantly but the
+            // location/RPC lag" bug). Cleared when VRChat reopens (active=true above).
+            !active && wasControlling && confirmedClosed -> {
+                headsetLogForceOffline = true
                 _presence.value = cur.copy(
                     location = "offline", worldName = "", instancePlayerCount = 0,
                     isOnlineInVRChat = false, state = "offline"
                 )
             }
+            // Not confident (log-staleness fallback / AFK): headsetLogActive is now false
+            // and the latch is cleared, so this re-run of the setter is a PASSTHROUGH —
+            // REST drives presence and correctly keeps an AFK-but-present user in-world.
             else -> presence = cur // re-run the setter so the updated override is applied
         }
     }

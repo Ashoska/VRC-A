@@ -421,6 +421,9 @@ object InstanceRosterManager {
             if (!hasAnyAccess(context)) {
                 // No log access -> let REST drive presence on the headset.
                 VrchatPipelineState.headsetLogActive = false
+                // No log signal available → REST is the authority; don't keep forcing
+                // offline (that latch is only for a log-CONFIRMED VRChat close).
+                VrchatPipelineState.headsetLogForceOffline = false
                 stopObserver()
                 _flow.value = _flow.value.copy(status = Status.NEEDS_PERMISSION)
                 delay(POLL_MS); continue
@@ -429,6 +432,9 @@ object InstanceRosterManager {
             val newest = findNewestLog(context)
             if (newest == null) {
                 VrchatPipelineState.headsetLogActive = false
+                // No log signal available → REST is the authority; don't keep forcing
+                // offline (that latch is only for a log-CONFIRMED VRChat close).
+                VrchatPipelineState.headsetLogForceOffline = false
                 stopObserver()
                 _flow.value = RosterUi(status = Status.NO_LOG)
                 currentId = null; offset = 0L; state = VrcLogParser.InstanceState()
@@ -452,6 +458,9 @@ object InstanceRosterManager {
             } catch (e: Exception) {
                 Log.w(TAG, "read failed for ${newest.id}", e)
                 VrchatPipelineState.headsetLogActive = false
+                // No log signal available → REST is the authority; don't keep forcing
+                // offline (that latch is only for a log-CONFIRMED VRChat close).
+                VrchatPipelineState.headsetLogForceOffline = false
                 stopObserver()
                 _flow.value = RosterUi(status = Status.NO_LOG, logPath = newest.id)
                 currentId = null; offset = 0L; state = VrcLogParser.InstanceState()
@@ -482,8 +491,16 @@ object InstanceRosterManager {
             val resumedConfirmed = suspendSinceMs != 0L && serviceUp &&
                 nowMs - suspendSinceMs > SUSPEND_RESUME_CONFIRM_MS
             val alive = serviceUp && (suspendSinceMs == 0L || resumedConfirmed)
+            // We're CONFIDENT VRChat is closed only when OSCQuery (which has actually
+            // polled) reports its HTTP down, or the log wrote "good night server"
+            // (suspend). If !alive is merely the log-mtime staleness FALLBACK (OSC
+            // disabled + quiet log), we are NOT confident — could be an AFK user still
+            // in-world — so presence is handed to REST instead of latched offline.
+            val confirmedClosed =
+                (com.vrca.osc.VrcaOscQuery.hasEverPolledOk() && !serviceUp) ||
+                (suspendSinceMs != 0L && !resumedConfirmed)
             lastRef = newest; lastState = state
-            publish(context, state, newest.id, alive)
+            publish(context, state, newest.id, alive, confirmedClosed)
             waitForChange()
         }
     }
@@ -536,7 +553,15 @@ object InstanceRosterManager {
 
     // ---- publish + platform enrichment --------------------------------------
 
-    private fun publish(context: Context, state: VrcLogParser.InstanceState, logPath: String, alive: Boolean = true) {
+    private fun publish(
+        context: Context, state: VrcLogParser.InstanceState, logPath: String,
+        alive: Boolean = true,
+        // True when VRChat is CONFIDENTLY closed (OSCQuery down / "good night server"),
+        // false when !alive is only the log-mtime staleness fallback (possible AFK).
+        // Only a confident close latches presence offline (suppressing stale REST); a
+        // staleness fallback hands presence to REST so an AFK user stays in-world.
+        confirmedClosed: Boolean = true
+    ) {
         // VRChat stopped writing the log (closed / headset shut down). There's no
         // "left" line in that case, so the last state would otherwise show us in an
         // instance forever. Hand presence back to REST (active=false → the log
@@ -547,7 +572,8 @@ object InstanceRosterManager {
                 VrchatPipelineState.applyLogPresence(
                     active = false, inWorld = false,
                     location = null, worldName = null, playerCount = 0,
-                    seedUserId = "", seedDisplayName = ""
+                    seedUserId = "", seedDisplayName = "",
+                    confirmedClosed = confirmedClosed
                 )
             }
             platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear()
