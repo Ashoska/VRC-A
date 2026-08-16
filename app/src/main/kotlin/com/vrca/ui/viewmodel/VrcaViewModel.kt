@@ -116,15 +116,17 @@ class VrcaViewModel(
         // dedups identical text, so sends stay ≤1 per 500ms (≈1/sec on change).
         private const val NOWPLAYING_RESAMPLE_MS = 250L
 
-        // NowPlaying position-anchor smoothing. Media players report position
-        // rounded/jittered by up to ~1s and re-sample on their own cadence, so
-        // blindly re-anchoring the extrapolation on every snapshot made the floored
-        // seconds occasionally JUMP forward by 2 (or stall) — very visible now that
-        // the combined chatbox pushes every 0.5s. While the SAME track keeps playing
-        // we keep the existing smooth anchor when the incoming sample disagrees with
-        // what it predicts by less than this; a bigger gap (a real seek) or a track
-        // change / pause-resume re-anchors so genuine jumps still snap.
-        private const val POSITION_RESYNC_TOLERANCE_MS = 1_500L
+        // NowPlaying position-anchor smoothing. Media players (browser MediaSessions
+        // especially) report position rounded/jittered and re-sample on their own
+        // cadence (~every 3s for a browser), so blindly re-anchoring on every snapshot
+        // made the displayed second STUTTER — smooth for a few seconds, then a hard
+        // ~2s snap when a jittery push disagreed with our extrapolation, repeating.
+        // We treat our own 1x extrapolation as the smooth source of truth and only
+        // re-anchor (accept a hard jump) on a genuine LARGE seek (> this), a track
+        // change, or a real pause. 3s comfortably absorbs a browser's ~2s report
+        // jitter; a constant small offset from reality is imperceptible on a progress
+        // bar, whereas the repeated snap was very visible.
+        private const val POSITION_RESYNC_TOLERANCE_MS = 3_000L
 
         // Manual Send takeover: a manual message pauses the automated chatbox
         // (Pinned/Cycle/Music/Time) for this long so people can read it. Extended
@@ -3030,18 +3032,25 @@ class VrcaViewModel(
                     key != lastTrackKeyForInference && (s.title.isNotBlank() || s.artist.isNotBlank())
 
                 // Position-anchor smoothing (see POSITION_RESYNC_TOLERANCE_MS): keep the
-                // existing smooth anchor while the same track keeps playing and the new
-                // sample only jitters within tolerance of what the current anchor predicts.
-                // Re-anchor on a track change, a pause/resume, or a real seek. Computed
-                // BEFORE overwriting speed/reported-playing so it reads the PREVIOUS anchor.
-                val keepAnchor = !trackChanged &&
-                    s.isPlaying && s.playbackSpeed > 0f &&
-                    nowPlayingReportedIsPlaying && nowPlayingSpeed > 0f &&
+                // existing smooth anchor while the same track is playing and the new
+                // sample only jitters within tolerance of what the anchor predicts.
+                // Re-anchor on a track change, a real pause, or a genuine large seek.
+                // Computed BEFORE overwriting speed/reported-playing so it reads the
+                // PREVIOUS anchor. Deliberately tolerant of a browser flickering
+                // speed=0 / isPlaying=false on a single push: we keep the anchor as long
+                // as EITHER side reports playing (a sustained pause flips both false
+                // within a snapshot, which then re-anchors), and use a 1x speed fallback
+                // in the prediction so a reported speed of 0 doesn't zero out the drift
+                // math. Requiring BOTH sides to report speed>0/playing was what let a
+                // single jittery push break the anchor and snap.
+                val playingish = s.isPlaying || nowPlayingReportedIsPlaying
+                val keepAnchor = !trackChanged && playingish &&
                     nowPlayingPositionUpdateTimeMs > 0L &&
                     run {
+                        val spd = if (nowPlayingSpeed > 0f) nowPlayingSpeed else 1f
                         val dtMs = s.positionUpdateTimeMs - nowPlayingPositionUpdateTimeMs
                         val predicted = nowPlayingPositionMs +
-                            max(0L, (dtMs.toFloat() * nowPlayingSpeed).toLong())
+                            max(0L, (dtMs.toFloat() * spd).toLong())
                         abs(s.positionMs - predicted) <= POSITION_RESYNC_TOLERANCE_MS
                     }
                 if (!keepAnchor) {
@@ -5049,7 +5058,11 @@ class VrcaViewModel(
 
         val pos = if (effectiveIsPlaying && dur > 0L) {
             val elapsed = SystemClock.elapsedRealtime() - nowPlayingPositionUpdateTimeMs
-            val adj = (elapsed * nowPlayingSpeed).toLong()
+            // Some sources (notably browser MediaSessions) report playbackSpeed=0 while
+            // actually playing; multiplying by 0 would freeze the bar between the
+            // source's ~3s pushes. Fall back to 1x once we've decided it's playing.
+            val spd = if (nowPlayingSpeed > 0f) nowPlayingSpeed else 1f
+            val adj = (elapsed * spd).toLong()
             (posSnapshot + max(0L, adj)).coerceAtMost(dur)
         } else posSnapshot
 
