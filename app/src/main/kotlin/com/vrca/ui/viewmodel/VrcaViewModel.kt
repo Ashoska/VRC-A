@@ -2434,6 +2434,10 @@ class VrcaViewModel(
     // Re-sends every 10s even if unchanged so VRChat doesn't clear the chatbox.
     @Volatile private var lastSentCombinedText = ""
     @Volatile private var lastSentMs = 0L
+    // Serialises the floor/dedup/claim decision in rebuildAndMaybeSendCombined so the
+    // now-off-main send loops can't both fire within one 0.5s window (VRChat would
+    // coalesce/drop one, reading as a skipped second).
+    private val sendGateLock = Any()
 
     // =========================
     // OSC send gate (master switch)
@@ -4850,20 +4854,32 @@ class VrcaViewModel(
         if (!forceSend) return
         if (combined.isBlank()) return
 
+        // ATOMIC send gate. The send loops now run on Dispatchers.Default (multi-
+        // threaded), so two ticks can evaluate the floor/dedup concurrently; without a
+        // lock both could pass and fire within <500ms, and VRChat coalesces/drops one
+        // of those — which would itself look like a skipped second. Claim the send slot
+        // under a lock so exactly one caller per 500ms window proceeds. The floor also
+        // strictly enforces VRChat's 0.5s chatbox rate limit. sendToVrchatRaw only
+        // DISPATCHES to the off-thread OSC sender, so holding this briefly is cheap.
         val nowMs = System.currentTimeMillis()
-        if (nowMs - lastCombinedSendMs < SEND_FLOOR_MS) return
-
-        // Content-change dedup: skip the OSC send if the text is identical to
-        // what we last sent AND it's been less than 10s. This avoids wasteful
-        // repeated sends from the NowPlaying 500ms loop and keepalive loop
-        // when nothing has actually changed. The 10s ceiling ensures VRChat
-        // doesn't clear the chatbox (~15s inactivity timeout).
-        if (combined == lastSentCombinedText && nowMs - lastSentMs < 3_000L) return
-        lastSentCombinedText = combined
-        lastSentMs = nowMs
+        val allowed = synchronized(sendGateLock) {
+            when {
+                // Floor: never send faster than VRChat's 0.5s rate limit.
+                nowMs - lastCombinedSendMs < SEND_FLOOR_MS -> false
+                // Content-change dedup: skip an identical resend within 3s (the ceiling
+                // keeps VRChat from clearing the box after ~15s of silence).
+                combined == lastSentCombinedText && nowMs - lastSentMs < 3_000L -> false
+                else -> {
+                    lastSentCombinedText = combined
+                    lastSentMs = nowMs
+                    lastCombinedSendMs = nowMs
+                    true
+                }
+            }
+        }
+        if (!allowed) return
 
         sendToVrchatRaw(combined, local, addToConversation = false)
-        lastCombinedSendMs = nowMs
     }
 
     private fun buildCombinedText(cycleLineOverride: String?): String {
