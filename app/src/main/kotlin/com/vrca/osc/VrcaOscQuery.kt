@@ -4,6 +4,9 @@ import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.util.Log
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -53,6 +56,17 @@ object VrcaOscQuery {
     @Volatile private var host: String? = null
     @Volatile private var port: Int = 0
     @Volatile private var serviceName: String = ""
+
+    // VRChat's ACTUAL OSC-in UDP port, read from the OSCQuery HOST_INFO. On Quest,
+    // VRChat and VRC-A share the device, so 9000 can be contended and VRChat picks a
+    // DIFFERENT input port, advertising the real one ONLY here. The chatbox sender
+    // must target THIS (not a hardcoded 9000) or sends leave the app fine but VRChat
+    // never receives them — the headset-only "chatbox stops, reopen fixes it" bug.
+    // 0 = unknown yet (sender falls back to 9000). Reset on rediscovery.
+    private val _oscInPort = MutableStateFlow(0)
+    val oscInPortFlow: StateFlow<Int> = _oscInPort.asStateFlow()
+    @Volatile private var oscInIp: String = ""
+    @Volatile private var hostInfoFetchedFor: String = ""
     @Volatile private var lastPollOkMs = 0L
     @Volatile private var discoveryActive = false
     @Volatile private var lastDiscoveryStartMs = 0L
@@ -94,12 +108,18 @@ object VrcaOscQuery {
                     if (h != null && p > 0) {
                         if (pollParams(h, p)) {
                             lastPollOkMs = System.currentTimeMillis()
+                            // Read VRChat's ADVERTISED OSC-in endpoint once per resolved
+                            // service. DIAGNOSTIC ONLY for now (the sender still uses the
+                            // hardcoded 9000, matching VRC-NEXUS) — this lets us CONFIRM
+                            // whether VRChat is actually on 9000 or a different port when
+                            // the chatbox "stops" (udp ok but not received).
+                            if (hostInfoFetchedFor != "$h:$p") fetchHostInfo(h, p)
                         } else if (lastPollOkMs > 0L &&
                             System.currentTimeMillis() - lastPollOkMs > REDISCOVER_AFTER_FAIL_MS
                         ) {
                             // Sustained failure → VRChat closed / restarted. Drop the
                             // stale host and re-discover (a restart may use a new port).
-                            host = null; port = 0
+                            host = null; port = 0; hostInfoFetchedFor = ""
                             restartDiscovery(ctx)
                         }
                     }
@@ -162,7 +182,7 @@ object VrcaOscQuery {
             }
             override fun onServiceLost(info: NsdServiceInfo?) {
                 if (info?.serviceName == serviceName) {
-                    host = null; port = 0
+                    host = null; port = 0; hostInfoFetchedFor = ""
                     updateDiag("service lost: ${info?.serviceName}")
                 }
             }
@@ -173,6 +193,26 @@ object VrcaOscQuery {
         } catch (e: Exception) {
             discoveryActive = false
             updateDiag("discover error: ${e.message}")
+        }
+    }
+
+    /** DIAGNOSTIC: read VRChat's HOST_INFO once per resolved service to learn the
+     *  ADVERTISED OSC-in UDP endpoint (OSC_IP/OSC_PORT). The chatbox sender still
+     *  targets the hardcoded 9000 (matching VRC-NEXUS); this only lets the debug panel
+     *  show whether VRChat is actually on 9000 when the chatbox "stops" (udp ok but not
+     *  received). If it turns out VRChat is on a non-9000 port, wiring oscInPortFlow
+     *  into the sender is the justified fix. */
+    private fun fetchHostInfo(h: String, p: Int) {
+        val body = httpGetBody("http://$h:$p/?HOST_INFO") ?: return
+        runCatching {
+            val o = JSONObject(body)
+            val oscPort = o.optInt("OSC_PORT", 0)
+            val oscIp = o.optString("OSC_IP", "")
+            if (oscPort in 1..65535) {
+                _oscInPort.value = oscPort
+                oscInIp = oscIp
+                hostInfoFetchedFor = "$h:$p"
+            }
         }
     }
 
@@ -205,7 +245,11 @@ object VrcaOscQuery {
                     }
                 }
             }
-            updateDiag("polling $serviceName @ $h:$p — $count params")
+            updateDiag(
+                "polling $serviceName @ $h:$p — $count params" +
+                (if (_oscInPort.value > 0)
+                    "\nVRChat OSC-in advertised: ${oscInIp.ifBlank { "?" }}:${_oscInPort.value}" else "")
+            )
             true
         } catch (e: Exception) {
             Log.w(TAG, "parse /avatar/parameters failed", e); false
