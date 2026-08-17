@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.Button
@@ -33,7 +34,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.vrca.BuildConfig
@@ -225,7 +225,7 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
             modifier = Modifier.weight(1f)
         )
         if (m.platform.isNotBlank()) {
-            PlatformChip(m.platform)
+            PlatformSymbol(m.platform)
         } else if (m.userId == null) {
             // Older name-only log format: no id to resolve a platform from.
             Icon(
@@ -238,24 +238,39 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
     }
 }
 
+/**
+ * Circular BRAND-glyph platform badge — matches VRChat's own instance-card
+ * platform symbols and the event-alert `PlatformSymbols`: Windows blue, Android/
+ * Quest green, Apple light. Replaces the old text chip ("PC"/"Quest"/"iOS").
+ */
 @Composable
-private fun PlatformChip(platform: String) {
-    val color = when (platform) {
-        "PC" -> MaterialTheme.colorScheme.primary
-        "Quest" -> androidx.compose.ui.graphics.Color(0xFF2BCF5C)
-        "iOS" -> MaterialTheme.colorScheme.onSurfaceVariant
-        else -> MaterialTheme.colorScheme.onSurfaceVariant
+private fun PlatformSymbol(platform: String) {
+    val tint = when (platform) {
+        "PC" -> androidx.compose.ui.graphics.Color(0xFF2196F3)   // Windows blue
+        "Quest" -> androidx.compose.ui.graphics.Color(0xFF3DDC84) // Android brand green
+        "iOS" -> androidx.compose.ui.graphics.Color(0xFFE0E0E0)   // Apple light grey
+        else -> return
     }
     Surface(
-        shape = MaterialTheme.shapes.small,
-        color = color.copy(alpha = 0.20f)
+        shape = CircleShape,
+        color = tint.copy(alpha = 0.18f),
+        modifier = Modifier.size(22.dp)
     ) {
-        Text(
-            platform,
-            style = MaterialTheme.typography.labelSmall,
-            color = color,
-            fontFamily = FontFamily.SansSerif,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-        )
+        Box(Modifier.size(22.dp), contentAlignment = Alignment.Center) {
+            when (platform) {
+                "PC" -> Icon(
+                    androidx.compose.ui.res.painterResource(com.vrca.R.drawable.ic_platform_windows),
+                    contentDescription = "PC", tint = tint, modifier = Modifier.size(12.dp)
+                )
+                "Quest" -> Icon(
+                    Icons.Filled.Android,
+                    contentDescription = "Quest", tint = tint, modifier = Modifier.size(14.dp)
+                )
+                else -> Icon(
+                    androidx.compose.ui.res.painterResource(com.vrca.R.drawable.ic_platform_apple),
+                    contentDescription = "iOS", tint = tint, modifier = Modifier.size(12.dp)
+                )
+            }
+        }
     }
 }
