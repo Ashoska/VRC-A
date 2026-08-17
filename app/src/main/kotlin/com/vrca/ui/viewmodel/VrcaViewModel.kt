@@ -3032,7 +3032,9 @@ class VrcaViewModel(
             while (true) {
                 tickNowPlayingMovement()
                 tickCyclePreviewOnly()
-                nowPlayingIsPlaying = computeDisplayedPlaying()
+                val displayedPlaying = computeDisplayedPlaying()
+                maybeFreezeNowPlayingAnchor(displayedPlaying)
+                nowPlayingIsPlaying = displayedPlaying
                 rebuildCombinedPreviewOnly()
                 delay(UI_TICK_MS)
             }
@@ -3202,6 +3204,43 @@ class VrcaViewModel(
         } else {
             pauseCandidateSinceMs = 0L
         }
+    }
+
+    /**
+     * Kill the "+2s jump" that appears when playback resumes after a (often
+     * spurious) pause. The progress bar extrapolates from an anchor
+     * (nowPlayingPositionMs, nowPlayingPositionUpdateTimeMs). While NOT
+     * displaying-playing, buildNowPlayingLines shows the frozen posSnapshot — but
+     * the anchor TIME keeps advancing, so the instant play resumes it computes
+     * `posSnapshot + (now - anchorTime)` and SNAPS forward by the whole paused gap.
+     * A dense/accurate source (mobile Spotify/YouTube) self-corrects in a frame so
+     * it's invisible; a SPARSE, flickery source shows a stark skip. On the Quest the
+     * only media source is the browser MediaSession (com.oculus.browser), which
+     * pushes ~every few seconds and momentarily reports isPlaying=false — so its
+     * flicker freezes then snaps the bar every few seconds (the reported "+2s jump").
+     *
+     * Fix (source-agnostic, also correct for a genuine pause): while not
+     * displaying-playing, hold the bar in place AND keep the anchor time current, so
+     * resuming continues from where the bar visually stopped instead of snapping
+     * forward. On the play→pause edge, capture the currently-shown (extrapolated)
+     * position as the frozen value so pausing doesn't lurch the bar BACKWARD to a
+     * stale snapshot either. A real seek during pause still re-anchors via the next
+     * snapshot's keepAnchor drift check, so seeks aren't lost.
+     */
+    private fun maybeFreezeNowPlayingAnchor(displayedPlaying: Boolean) {
+        if (displayedPlaying) return
+        if (nowPlayingIsPlaying) {
+            // play→pause edge: freeze at exactly what buildNowPlayingLines was
+            // showing (same 1x-speed fallback), so the bar doesn't jump backward.
+            val spd = if (nowPlayingSpeed > 0f) nowPlayingSpeed else 1f
+            val elapsed = SystemClock.elapsedRealtime() - nowPlayingPositionUpdateTimeMs
+            val shown = nowPlayingPositionMs + max(0L, (elapsed * spd).toLong())
+            nowPlayingPositionMs =
+                (if (nowPlayingDurationMs > 0L) shown.coerceAtMost(nowPlayingDurationMs) else shown)
+                    .coerceAtLeast(0L)
+        }
+        // Keep the anchor time current every paused tick so resume doesn't count the gap.
+        nowPlayingPositionUpdateTimeMs = SystemClock.elapsedRealtime()
     }
 
     private fun computeDisplayedPlaying(): Boolean {
