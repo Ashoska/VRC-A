@@ -93,6 +93,10 @@ object InstanceRosterManager {
         /** "PC" / "Quest" / "iOS" / "" (unknown / not yet resolved). */
         val platform: String,
         val avatarName: String?,
+        /** avtr_ id of their worn avatar (from the log), or "" if not seen yet.
+         *  Targets the clone/wear button; updates when they switch avatars. */
+        val avatarId: String = "",
+        val avatarCreator: String? = null,
         /** In the user's VRChat friends list — sorted near the top, shown yellow. */
         val isFriend: Boolean = false,
         /** The local user themselves — pinned to the very top, shown purple. */
@@ -638,6 +642,8 @@ object InstanceRosterManager {
                 userId = e.userId,
                 platform = plat,
                 avatarName = e.avatarName,
+                avatarId = e.avatarId ?: "",
+                avatarCreator = e.avatarCreator,
                 isFriend = e.userId != null && friends.contains(e.userId),
                 isSelf = isSelfMember,
                 profilePicUrl = pfp

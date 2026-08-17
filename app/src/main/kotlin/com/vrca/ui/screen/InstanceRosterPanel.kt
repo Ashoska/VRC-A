@@ -15,12 +15,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Android
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.Button
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -29,6 +31,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -180,6 +184,7 @@ private fun HintState(text: String) {
 @Composable
 private fun MemberRow(m: InstanceRosterManager.Member) {
     val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
     Row(
         Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -234,6 +239,34 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
                 tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
                 modifier = Modifier.size(12.dp)
             )
+        }
+        // Clone/wear button — targets the avtr_ id harvested from the log for this
+        // user (updates when they switch avatars). Hidden for yourself and until an
+        // id is known. VRChat equips it if your account has access; otherwise its
+        // own error is surfaced. Headset only (the roster only runs there).
+        if (!m.isSelf && m.avatarId.isNotBlank()) {
+            IconButton(
+                onClick = {
+                    val id = m.avatarId
+                    val name = m.avatarName ?: "avatar"
+                    scope.launch {
+                        val res = com.vrca.vrchat.VrchatAuthManager.selectAvatar(ctx, id)
+                        android.widget.Toast.makeText(
+                            ctx,
+                            if (res.ok) "Cloning $name…" else (res.error ?: "Couldn't clone avatar"),
+                            android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                },
+                modifier = Modifier.size(28.dp)
+            ) {
+                Icon(
+                    Icons.Filled.ContentCopy,
+                    contentDescription = "Clone avatar",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
         }
     }
 }

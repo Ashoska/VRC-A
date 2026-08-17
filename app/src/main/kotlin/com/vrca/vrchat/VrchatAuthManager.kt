@@ -414,6 +414,34 @@ object VrchatAuthManager {
         }
 
     /**
+     * Wear / clone the avatar with [avatarId] (an `avtr_…` id harvested from the
+     * VRChat log's avatar-load lines — the API hides other users' current avatar
+     * id, so the log is the only source). `PUT /avatars/{id}/select` — VRChat
+     * equips it when this account has access (public / your own) and returns its
+     * OWN error otherwise (a private avatar you can't access can't be pulled).
+     */
+    suspend fun selectAvatar(context: Context, avatarId: String): InviteResult =
+        withContext(Dispatchers.IO) {
+            val id = avatarId.trim()
+            if (!id.startsWith("avtr_")) return@withContext InviteResult(false, "No avatar id yet")
+            val cookieHeader = getCookieHeader(context)
+                ?: return@withContext InviteResult(false, "Not signed in to VRChat")
+            try {
+                val (code, respBody, rawCookies) = put("$BASE/avatars/$id/select", "", cookieHeader)
+                if (code == 200) {
+                    captureRolledCookies(context, rawCookies)
+                    InviteResult(true)
+                } else {
+                    Log.w(TAG, "selectAvatar returned $code for $id body=${respBody.take(200)}")
+                    InviteResult(false, parseVrcError(respBody, code))
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "selectAvatar failed", e)
+                InviteResult(false, "Network error")
+            }
+        }
+
+    /**
      * Headers required to LOAD an auth-gated VRChat image (`api.vrchat.cloud`
      * file/image URLs require the session cookie + a User-Agent). Returned to the
      * Coil image loader so the admin's session can render other users' VRChat+
@@ -1789,6 +1817,31 @@ object VrchatAuthManager {
     ): Triple<Int, String, List<String>> {
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
+            setRequestProperty("User-Agent", USER_AGENT)
+            setRequestProperty("Content-Type", "application/json")
+            setRequestProperty("Accept", "application/json")
+            if (cookieHeader != null) setRequestProperty("Cookie", cookieHeader)
+            doOutput = true
+            connectTimeout = 15_000
+            readTimeout = 15_000
+        }
+        conn.outputStream.use { it.write(body.toByteArray()) }
+        val code = conn.responseCode
+        val responseBody = try {
+            (if (code < 400) conn.inputStream else conn.errorStream)
+                ?.bufferedReader()?.readText() ?: ""
+        } catch (e: IOException) { "" }
+        val cookies = conn.headerFields["Set-Cookie"] ?: emptyList()
+        return Triple(code, responseBody, cookies)
+    }
+
+    private fun put(
+        url: String,
+        body: String,
+        cookieHeader: String?
+    ): Triple<Int, String, List<String>> {
+        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = "PUT"
             setRequestProperty("User-Agent", USER_AGENT)
             setRequestProperty("Content-Type", "application/json")
             setRequestProperty("Accept", "application/json")
