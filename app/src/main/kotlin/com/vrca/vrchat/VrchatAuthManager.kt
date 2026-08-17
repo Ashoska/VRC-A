@@ -1303,24 +1303,29 @@ object VrchatAuthManager {
     ): String? = withContext(Dispatchers.IO) {
         if (avatarName.isBlank()) return@withContext null
         val wornFileId = fileIdOf(fetchUserInfo(context, userId)?.wornAvatarThumbUrl.orEmpty())
-        val candidates = try { com.vrca.vrchat.AvatarSearch.search(avatarName) } catch (e: Exception) { emptyList() }
+        val candidates = try { com.vrca.vrchat.AvatarSearch.searchCandidates(avatarName) }
+            catch (e: Exception) { emptyList() }
         if (candidates.isEmpty()) return@withContext null
         val authorNorm = author.trim().lowercase()
-        val authorMatches = candidates.filter {
-            authorNorm.isNotBlank() && it.author.trim().lowercase() == authorNorm
-        }
-        // Confirm by image file id (the accuracy guarantee). Try author-matches
-        // first, then the rest — capped so we don't spam GET /avatars.
         if (wornFileId != null) {
-            val ranked = (authorMatches + candidates.filter { it !in authorMatches }).take(6)
+            // 1. DIRECT match — a DB (VRCX-style) already gave VRChat's raw image
+            //    file id and it equals the worn one. Exact, no extra VRChat call.
+            candidates.firstOrNull { it.imageFileId == wornFileId }?.let { return@withContext it.id }
+            // 2. CONFIRM proxied-image candidates (avtrdb) via VRChat GET /avatars/{id}.
+            //    Author (from the log) ranks first; capped so we don't spam VRChat.
+            val ranked = candidates.filter { it.imageFileId == null }
+                .sortedByDescending { if (authorNorm.isNotBlank() && it.author.trim().lowercase() == authorNorm) 1 else 0 }
+                .take(6)
             for (c in ranked) {
-                if (c.id.isBlank()) continue
                 if (fetchAvatarThumbFileId(context, c.id) == wornFileId) return@withContext c.id
                 kotlinx.coroutines.delay(250)
             }
         }
-        // No image confirmation possible (worn thumb hidden / not on any candidate):
-        // fall back to a single unambiguous name+author match.
+        // 3. No image confirmation possible (worn thumb hidden / not on any candidate):
+        //    fall back to a single unambiguous name+author match.
+        val authorMatches = candidates.filter {
+            authorNorm.isNotBlank() && it.author.trim().lowercase() == authorNorm
+        }
         if (authorMatches.size == 1) return@withContext authorMatches[0].id
         null
     }

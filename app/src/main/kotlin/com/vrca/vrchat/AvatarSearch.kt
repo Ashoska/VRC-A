@@ -2,7 +2,11 @@ package com.vrca.vrchat
 
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -74,6 +78,90 @@ object AvatarSearch {
         } catch (e: Exception) {
             Log.w(TAG, "avtrdb search failed", e); emptyList()
         }
+    }
+
+    // ---- multi-DB candidate resolve (for the roster clone button) ------------
+
+    /** A resolve candidate from ANY avatar DB. `imageFileId` is the RAW VRChat
+     *  `file_…` id when the DB exposes VRChat's real image url (lets the caller
+     *  confirm the match with NO extra VRChat call); null for DBs that proxy their
+     *  images (those are confirmed via VRChat's `GET /avatars/{id}`). */
+    data class Candidate(
+        val id: String,
+        val name: String,
+        val author: String,
+        val imageFileId: String?
+    )
+
+    private val FILE_ID = Regex("""file_[0-9a-fA-F-]{36}""")
+
+    /**
+     * Query MULTIPLE avatar databases by name and merge candidates (deduped by
+     * avtr_ id). More sources = better coverage; a WRONG candidate is harmless
+     * because the caller confirms every one by the worn avatar's unique image file
+     * id. avtrdb proxies its images (imageFileId null → needs a GET /avatars
+     * confirm); the VRCX-style `vrcx_search.php` mirrors return VRChat's RAW image
+     * url (imageFileId set → direct confirm, no VRChat call). Each source fails soft.
+     */
+    suspend fun searchCandidates(query: String): List<Candidate> = coroutineScope {
+        if (query.isBlank()) return@coroutineScope emptyList()
+        val q = URLEncoder.encode(query.trim(), "UTF-8")
+        listOf(
+            async { avtrdbCandidates(q) },
+            async { vrcxCandidates("https://requi.dev/vrcx_search.php?search=$q") },
+            async { vrcxCandidates("https://avtr.just-h.party/vrcx_search.php?search=$q") }
+        ).awaitAll().flatten().filter { it.id.startsWith("avtr_") }.distinctBy { it.id }
+    }
+
+    private suspend fun avtrdbCandidates(encodedQuery: String): List<Candidate> = withContext(Dispatchers.IO) {
+        val body = httpGet("$BASE?query=$encodedQuery&page=0") ?: return@withContext emptyList()
+        try {
+            val arr = JSONObject(body).optJSONArray("avatars") ?: return@withContext emptyList()
+            (0 until arr.length()).mapNotNull { i ->
+                val a = arr.optJSONObject(i) ?: return@mapNotNull null
+                val id = a.optString("vrc_id", "").ifBlank { a.optString("id", "") }
+                if (id.isBlank()) return@mapNotNull null
+                val author = a.optJSONObject("author")?.optString("name", "") ?: a.optString("authorName", "")
+                // avtrdb image is proxied (thumb.avtrdb.com/avtr_…) → no VRChat file id.
+                Candidate(id, a.optString("name", ""), author, null)
+            }
+        } catch (e: Exception) { emptyList() }
+    }
+
+    /** VRCX-style `vrcx_search.php` sources: a JSON array (or {results:[…]}) whose
+     *  items carry VRChat's RAW imageUrl/thumbnailImageUrl. Tolerant to key names. */
+    private suspend fun vrcxCandidates(url: String): List<Candidate> = withContext(Dispatchers.IO) {
+        val body = httpGet(url) ?: return@withContext emptyList()
+        try {
+            val arr: JSONArray = if (body.trimStart().startsWith("[")) JSONArray(body)
+                else JSONObject(body).let { it.optJSONArray("results") ?: it.optJSONArray("avatars") }
+                    ?: return@withContext emptyList()
+            (0 until arr.length()).mapNotNull { i ->
+                val a = arr.optJSONObject(i) ?: return@mapNotNull null
+                val id = a.optString("id", "")
+                    .ifBlank { a.optString("avatarId", "") }
+                    .ifBlank { a.optString("vrc_id", "") }
+                if (!id.startsWith("avtr_")) return@mapNotNull null
+                val author = a.optString("authorName", "")
+                    .ifBlank { a.optJSONObject("author")?.optString("name", "") ?: "" }
+                val img = a.optString("thumbnailImageUrl", "").ifBlank { a.optString("imageUrl", "") }
+                Candidate(id, a.optString("name", ""), author, FILE_ID.find(img)?.value)
+            }
+        } catch (e: Exception) { emptyList() }
+    }
+
+    private fun httpGet(url: String): String? {
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                setRequestProperty("User-Agent", "VRC-A/1.0 (VRChat companion)")
+                setRequestProperty("Accept", "application/json")
+                connectTimeout = 12_000; readTimeout = 12_000
+            }
+            if (conn.responseCode != 200) null
+            else conn.inputStream.bufferedReader().readText()
+        } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
     }
 
     /** avtrdb's `compatibility` values ("pc"/"android"/"ios") -> display labels.
