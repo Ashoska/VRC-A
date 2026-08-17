@@ -192,7 +192,12 @@ object VrcLogParser {
         val suspended: Boolean = false,
         // Keyed by userId when known, else by a "name:<displayName>" fallback so
         // the older name-only log format still tracks a person.
-        val roster: Map<String, RosterEntry> = emptyMap()
+        val roster: Map<String, RosterEntry> = emptyMap(),
+        // Avatar names seen (by display name) BEFORE the player was in the roster.
+        // VRChat logs `Switching X to avatar Y` BEFORE `OnPlayerJoined X`, so the
+        // switch would otherwise be dropped and the avatar (→ clone button) wouldn't
+        // appear until the person changed avatar again. Buffered here, applied on join.
+        val pendingAvatarByName: Map<String, String> = emptyMap()
     ) {
         val playerCount: Int get() = roster.size
     }
@@ -227,15 +232,19 @@ object VrcLogParser {
         is LogEvent.PlayerJoined -> {
             val key = rosterKey(event.userId, event.displayName)
             // Preserve an existing entry's join time / avatar on a duplicate
-            // join line (VRChat can re-log on reconnect).
+            // join line (VRChat can re-log on reconnect). Apply any avatar name that
+            // was logged BEFORE this join line (the `Switching`-before-`OnPlayerJoined`
+            // ordering) so the avatar/clone button is available from the moment they join.
             val existing = state.roster[key]
+            val buffered = state.pendingAvatarByName[event.displayName]
             state.copy(
                 suspended = false,
+                pendingAvatarByName = if (buffered != null) state.pendingAvatarByName - event.displayName else state.pendingAvatarByName,
                 roster = state.roster + (key to RosterEntry(
                     displayName = event.displayName,
                     userId = event.userId,
                     joinedAtMs = existing?.joinedAtMs ?: nowMs,
-                    avatarName = existing?.avatarName,
+                    avatarName = existing?.avatarName ?: buffered,
                     avatarCreator = existing?.avatarCreator,
                     platform = existing?.platform ?: ""
                 ))
@@ -248,9 +257,13 @@ object VrcLogParser {
         is LogEvent.AvatarSwitch -> {
             // Match by display name (avatar lines carry no usr_ id). Only the avatar
             // NAME is logged — the exact id is resolved on demand (see the roster
-            // clone button → VrchatAuthManager.resolveWornAvatarId).
+            // clone button → VrchatAuthManager.resolveWornAvatarId). If the player
+            // isn't in the roster yet (VRChat logs the switch BEFORE OnPlayerJoined),
+            // buffer the name so it's applied the moment they join.
             val entry = state.roster.entries.firstOrNull { it.value.displayName == event.displayName }
-            if (entry == null) state
+            if (entry == null) state.copy(
+                pendingAvatarByName = state.pendingAvatarByName + (event.displayName to event.avatarName)
+            )
             else state.copy(
                 suspended = false,
                 roster = state.roster + (entry.key to entry.value.copy(avatarName = event.avatarName))
