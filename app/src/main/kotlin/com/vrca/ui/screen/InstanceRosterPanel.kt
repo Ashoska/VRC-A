@@ -243,49 +243,68 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
                 modifier = Modifier.size(12.dp)
             )
         }
-        // Clone/wear button. Quest never logs another player's avatar id, so on tap
-        // we resolve it EXACTLY: search the avatar DB by the logged name, then
-        // confirm the match by the worn avatar's unique image file id (see
-        // VrchatAuthManager.resolveWornAvatarId) and select it. Hidden for yourself
-        // and until we know the avatar name. Shows a spinner while resolving.
-        if (!m.isSelf && !m.avatarName.isNullOrBlank() && m.userId != null) {
-            var busy by remember(m.userId) { mutableStateOf(false) }
-            IconButton(
-                onClick = {
-                    if (busy) return@IconButton
-                    busy = true
-                    val uid = m.userId
-                    val name = m.avatarName
-                    val author = m.avatarCreator ?: ""
-                    scope.launch {
-                        val id = com.vrca.vrchat.VrchatAuthManager
-                            .resolveWornAvatarId(ctx, uid, name, author)
-                        val msg = if (id == null) {
-                            "Couldn't find $name in any avatar database"
-                        } else {
-                            val res = com.vrca.vrchat.VrchatAuthManager.selectAvatar(ctx, id)
-                            if (res.ok) "Cloned $name — shows on your next avatar reload"
-                            else (res.error ?: "Couldn't wear this avatar")
-                        }
-                        android.widget.Toast.makeText(ctx, msg, android.widget.Toast.LENGTH_LONG).show()
-                        busy = false
-                    }
-                },
-                modifier = Modifier.size(28.dp)
-            ) {
-                if (busy) {
+        // Clone/wear button. The exact avatar id is PRE-RESOLVED in the background
+        // as soon as we know the avatar name (Quest never logs it — see
+        // InstanceRosterManager.resolveAvatars → resolveWornAvatarId), so the tap is
+        // instant. Three states: null = still resolving (spinner), "" = no cloneable
+        // match in any database (greyed out), non-blank = ready (select on tap).
+        // Shown only for others once we know their avatar. Re-resolves on a switch.
+        if (!m.isSelf && m.userId != null && !m.avatarName.isNullOrBlank()) {
+            val avaId = m.avatarId
+            when {
+                avaId == null -> Box(Modifier.size(28.dp), contentAlignment = Alignment.Center) {
                     androidx.compose.material3.CircularProgressIndicator(
                         strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(16.dp)
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                        modifier = Modifier.size(14.dp)
                     )
-                } else {
+                }
+                avaId.isBlank() -> IconButton(
+                    onClick = {}, enabled = false, modifier = Modifier.size(28.dp)
+                ) {
                     Icon(
                         Icons.Filled.ContentCopy,
-                        contentDescription = "Clone avatar",
-                        tint = MaterialTheme.colorScheme.primary,
+                        contentDescription = "No cloneable avatar found",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
                         modifier = Modifier.size(16.dp)
                     )
+                }
+                else -> {
+                    var busy by remember(avaId) { mutableStateOf(false) }
+                    IconButton(
+                        onClick = {
+                            if (busy) return@IconButton
+                            busy = true
+                            val name = m.avatarName
+                            scope.launch {
+                                val res = com.vrca.vrchat.VrchatAuthManager.selectAvatar(ctx, avaId)
+                                android.widget.Toast.makeText(
+                                    ctx,
+                                    if (res.ok) "Cloned $name — shows on your next avatar reload"
+                                    else (res.error ?: "Couldn't wear this avatar"),
+                                    android.widget.Toast.LENGTH_LONG
+                                ).show()
+                                busy = false
+                            }
+                        },
+                        enabled = !busy,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        if (busy) {
+                            androidx.compose.material3.CircularProgressIndicator(
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        } else {
+                            Icon(
+                                Icons.Filled.ContentCopy,
+                                contentDescription = "Clone avatar",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
                 }
             }
         }

@@ -94,8 +94,13 @@ object InstanceRosterManager {
         val platform: String,
         val avatarName: String?,
         /** Avatar author (log `Unpacking Avatar (… by …)`). With avatarName this
-         *  resolves the exact avatar id on demand for the clone button. */
+         *  resolves the exact avatar id for the clone button. */
         val avatarCreator: String? = null,
+        /** PRE-RESOLVED clone target (resolved in the background as soon as the
+         *  avatar name is known, so the tap is instant): null = still resolving,
+         *  "" = no cloneable match found (button greyed out), non-blank = the
+         *  avtr_ id ready to select. Re-resolves when they switch avatars. */
+        val avatarId: String? = null,
         /** In the user's VRChat friends list — sorted near the top, shown yellow. */
         val isFriend: Boolean = false,
         /** The local user themselves — pinned to the very top, shown purple. */
@@ -215,6 +220,16 @@ object InstanceRosterManager {
     private val lastAvatarByUser = ConcurrentHashMap<String, String>()
     // Last published roster entries (carry joinedAtMs) for the periodic pfp sweep.
     @Volatile private var lastEntries: List<VrcLogParser.RosterEntry> = emptyList()
+    // Pre-resolved clone id per user for their CURRENT avatar. avatarIdCache value:
+    // "" = resolved, no cloneable match (grey out); non-blank = the avtr_ id.
+    // avatarIdResolvedFor tracks which avatarName that id is FOR, so an avatar switch
+    // (name change) re-resolves. In-flight guard + single-flight so a big instance
+    // resolves top-to-bottom without bursting the DBs/VRChat.
+    private val avatarIdCache = ConcurrentHashMap<String, String>()
+    private val avatarIdResolvedFor = ConcurrentHashMap<String, String>()
+    private val avatarResolveInFlight = ConcurrentHashMap.newKeySet<String>()
+    private val resolvingAvatars = java.util.concurrent.atomic.AtomicBoolean(false)
+    private const val RESOLVE_PACE_MS = 1_000L
     private val enrichAttempts = ConcurrentHashMap<String, Int>()
     // Per-user platform (/users/{id} -> last_platform) is the ONLY source for a
     // NON-friend (friends come free in the bulk friends list). VRChat hard
@@ -428,7 +443,7 @@ object InstanceRosterManager {
                     )
                 }
                 stopObserver()
-                platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList()
+                platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarResolveInFlight.clear()
                 _flow.value = RosterUi(status = Status.IDLE)
                 currentId = null; offset = 0L; state = VrcLogParser.InstanceState()
                 delay(POLL_MS); continue
@@ -591,7 +606,7 @@ object InstanceRosterManager {
                     confirmedClosed = confirmedClosed
                 )
             }
-            platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList()
+            platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarResolveInFlight.clear()
             _flow.value = RosterUi(status = Status.IDLE, worldName = null, location = null, members = emptyList(), logPath = logPath)
             return
         }
@@ -618,7 +633,7 @@ object InstanceRosterManager {
         // in memory across a session (the reader writes NOTHING per-user to disk;
         // this just keeps RAM bounded to the current instance).
         if (!inWorld) {
-            platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList()
+            platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarResolveInFlight.clear()
             _flow.value = RosterUi(
                 status = Status.IDLE, worldName = state.worldName,
                 location = state.location, members = emptyList(), logPath = logPath
@@ -648,12 +663,19 @@ object InstanceRosterManager {
             }
             val pfp = if (isSelfMember) (selfPresence?.profilePicUrl ?: "")
                       else e.userId?.let { pfpCache[it] } ?: ""
+            // Pre-resolved clone target: null = still resolving (or not applicable),
+            // "" = resolved with no cloneable match (gray out), non-blank = ready.
+            // Only valid when resolved FOR the current avatar name (an avatar switch
+            // invalidates it → null again → the button shows "resolving" and re-runs).
+            val avaId: String? = if (!isSelfMember && e.userId != null && !e.avatarName.isNullOrBlank() &&
+                avatarIdResolvedFor[e.userId] == e.avatarName) avatarIdCache[e.userId] else null
             Member(
                 displayName = e.displayName,
                 userId = e.userId,
                 platform = plat,
                 avatarName = e.avatarName,
                 avatarCreator = e.avatarCreator,
+                avatarId = avaId,
                 isFriend = e.userId != null && friends.contains(e.userId),
                 isSelf = isSelfMember,
                 profilePicUrl = pfp
@@ -680,6 +702,20 @@ object InstanceRosterManager {
             if (prev != null && prev != ava) {
                 scope.launch { delay(PFP_SWITCH_DELAY_MS); refetchPfp(context, uid) }
             }
+        }
+
+        // Pre-resolve clone ids in the background so the button is instant + can grey
+        // out when there's no cloneable match. Resolve for anyone (non-self) whose
+        // current avatar name isn't resolved yet (a switch changes the name → re-run).
+        // Single-flight, paced; the next publish re-queues anyone this pass skipped.
+        val toResolve = ordered.filter { e ->
+            e.userId != null && e.userId != self && !e.avatarName.isNullOrBlank() &&
+                avatarIdResolvedFor[e.userId] != e.avatarName && avatarResolveInFlight.add(e.userId!!)
+        }
+        if (toResolve.isNotEmpty() && resolvingAvatars.compareAndSet(false, true)) {
+            scope.launch { try { resolveAvatars(context, toResolve) } finally { resolvingAvatars.set(false) } }
+        } else {
+            toResolve.forEach { avatarResolveInFlight.remove(it.userId!!) }
         }
 
         // One ordered enrichment pass at a time (single-flight). Skip self — its
@@ -729,6 +765,31 @@ object InstanceRosterManager {
                 if (n >= MAX_ENRICH_ATTEMPTS) { platformCache[id] = ""; enrichAttempts.remove(id) }
                 delay(ENRICH_FAIL_BACKOFF_MS) // back off harder after a failed call
             }
+        }
+    }
+
+    /** Resolve each member's exact clone id in the background (paced, single-flight)
+     *  and republish the row with it (or "" when nothing cloneable was found). */
+    private suspend fun resolveAvatars(context: Context, list: List<VrcLogParser.RosterEntry>) {
+        for (e in list) {
+            val uid = e.userId ?: continue
+            val name = e.avatarName ?: continue
+            avatarResolveInFlight.remove(uid)
+            val id = try {
+                VrchatAuthManager.resolveWornAvatarId(context, uid, name, e.avatarCreator ?: "")
+            } catch (ex: Exception) { null }
+            avatarIdCache[uid] = id ?: ""
+            avatarIdResolvedFor[uid] = name
+            _flow.value.let { cur ->
+                if (cur.members.any { it.userId == uid && it.avatarName == name }) {
+                    _flow.value = cur.copy(
+                        members = cur.members.map { m ->
+                            if (m.userId == uid && m.avatarName == name) m.copy(avatarId = id ?: "") else m
+                        }
+                    )
+                }
+            }
+            delay(RESOLVE_PACE_MS) // pace the DB + VRChat calls
         }
     }
 
