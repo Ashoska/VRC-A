@@ -112,6 +112,17 @@ class NowPlayingListenerService : NotificationListenerService() {
         "com.google.android.apps.youtube.music"
     )
 
+    // Packages that get the continuous 500ms poll for DENSE position/play-state
+    // sampling. YouTube needs it for its stall-based pause detection; the Quest
+    // browser (com.oculus.browser) needs it because its MediaSession pushes only
+    // sparse (~3s) callbacks and momentarily reports isPlaying=false between them —
+    // which, at that sampling rate, froze then snapped the progress bar every few
+    // seconds ("+2s jump" on the headset). Dense sampling keeps the anchor fresh so
+    // the bar tracks real time. IMPORTANT: this set ONLY gates POLLING — the
+    // YouTube-specific stall/ad-detection logic stays keyed on youtubePackages, so
+    // the browser still uses normal motion-based play detection, not the YT hacks.
+    private val continuouslyPolledPackages = youtubePackages + "com.oculus.browser"
+
     // YouTube ads are short (5–60s, rarely up to 3 min). Anything non-seekable
     // beyond this threshold is a live stream, not an ad.
     private val YOUTUBE_AD_MAX_DURATION_MS = 5 * 60 * 1000L
@@ -333,7 +344,7 @@ class NowPlayingListenerService : NotificationListenerService() {
             // YouTube lies about play-state while paused; run a continuous 500ms
             // poll so the stall detector gets the consecutive position samples it
             // needs to flip to paused (and freeze the progress bar) within ~1s.
-            if (pkg in youtubePackages) startPollForRealTrack(pkg, controller)
+            if (pkg in continuouslyPolledPackages) startPollForRealTrack(pkg, controller)
         } catch (_: Throwable) {
         }
     }
@@ -618,10 +629,12 @@ class NowPlayingListenerService : NotificationListenerService() {
             } else if (pkg == "com.spotify.music" && controller != null) {
                 startPollForRealTrack(pkg, controller)
             }
-        } else if (pkg !in youtubePackages) {
+        } else if (pkg !in continuouslyPolledPackages) {
             // Normal track — stop polling if we were.
-            // EXCEPT YouTube: its continuous pause-detection poll must keep running
-            // (it pushes normal tracks every cycle and would otherwise stop itself here).
+            // EXCEPT the continuously-polled set (YouTube + the Quest browser): their
+            // poll must keep running on normal tracks too (they push every cycle and
+            // would otherwise stop themselves here, re-introducing the sparse-sampling
+            // freeze/snap for the browser).
             stopPoll(pkg)
         }
 
@@ -694,7 +707,7 @@ class NowPlayingListenerService : NotificationListenerService() {
                 // ad is detected in ~1.5s instead of waiting the ~4s until the next
                 // periodic push (the "ad only pauses after ~5s" bug).
                 if (changed || stateChanged || sincePush >= 4000L ||
-                    pkg in youtubePackages || isSpecialWindowActive(pkg)
+                    pkg in continuouslyPolledPackages || isSpecialWindowActive(pkg)
                 ) {
                     pushSnapshot(pkg, md, pb, controller)
                 }
@@ -703,7 +716,7 @@ class NowPlayingListenerService : NotificationListenerService() {
                 // The Spotify ad/DJ poll is a short transient window; YouTube's pause
                 // poll must live as long as the session does (it self-stops when the
                 // controller changes above, or on teardown/destroy/notif-removed).
-                if (pkg !in youtubePackages && SystemClock.elapsedRealtime() - startAt >= maxMs) {
+                if (pkg !in continuouslyPolledPackages && SystemClock.elapsedRealtime() - startAt >= maxMs) {
                     stopPoll(pkg)
                     return
                 }
