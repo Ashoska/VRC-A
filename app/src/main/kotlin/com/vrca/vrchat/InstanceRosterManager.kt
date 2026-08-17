@@ -211,6 +211,10 @@ object InstanceRosterManager {
     // load memory-only (no disk) so they're truly temporary — see the panel.
     private val pfpCache = ConcurrentHashMap<String, String>()
     private val enrichInFlight = ConcurrentHashMap.newKeySet<String>()
+    // avatarName last seen per user → detect a SWITCH to refetch that pic 5s later.
+    private val lastAvatarByUser = ConcurrentHashMap<String, String>()
+    // Last published roster entries (carry joinedAtMs) for the periodic pfp sweep.
+    @Volatile private var lastEntries: List<VrcLogParser.RosterEntry> = emptyList()
     private val enrichAttempts = ConcurrentHashMap<String, Int>()
     // Per-user platform (/users/{id} -> last_platform) is the ONLY source for a
     // NON-friend (friends come free in the bulk friends list). VRChat hard
@@ -223,6 +227,13 @@ object InstanceRosterManager {
     private const val MAX_ENRICH_ATTEMPTS = 40
     private const val ENRICH_PACE_MS = 500L          // gentle gradual fill (top-to-bottom)
     private const val ENRICH_FAIL_BACKOFF_MS = 5000L // back off hard on a 429 (insurance)
+    // PFP auto-refresh (a person's pic can change mid-session — VRChat+ custom pic /
+    // gallery / avatar pic). Re-fetch 5s after an avatar SWITCH, and sweep everyone
+    // present >=10min every 3min, 5s apart (so a full instance doesn't burst VRChat).
+    private const val PFP_SWITCH_DELAY_MS = 5_000L
+    private const val PFP_CYCLE_MS = 180_000L        // 3 min
+    private const val PFP_MIN_PRESENCE_MS = 600_000L // 10 min
+    private const val PFP_STAGGER_MS = 5_000L
     // Single-flight guard so platforms resolve as ONE ordered top-to-bottom pass
     // (not several concurrent passes that would race the rate limit).
     private val enriching = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -244,6 +255,7 @@ object InstanceRosterManager {
         if (!started.compareAndSet(false, true)) return
         val app = context.applicationContext
         scope.launch { runLoop(app) }
+        startPfpRefreshLoop(app)
     }
 
     // ---- access: All-files (File) + SAF (folder grant) -----------------------
@@ -416,7 +428,7 @@ object InstanceRosterManager {
                     )
                 }
                 stopObserver()
-                platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear()
+                platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList()
                 _flow.value = RosterUi(status = Status.IDLE)
                 currentId = null; offset = 0L; state = VrcLogParser.InstanceState()
                 delay(POLL_MS); continue
@@ -579,7 +591,7 @@ object InstanceRosterManager {
                     confirmedClosed = confirmedClosed
                 )
             }
-            platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear()
+            platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList()
             _flow.value = RosterUi(status = Status.IDLE, worldName = null, location = null, members = emptyList(), logPath = logPath)
             return
         }
@@ -606,7 +618,7 @@ object InstanceRosterManager {
         // in memory across a session (the reader writes NOTHING per-user to disk;
         // this just keeps RAM bounded to the current instance).
         if (!inWorld) {
-            platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear()
+            platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList()
             _flow.value = RosterUi(
                 status = Status.IDLE, worldName = state.worldName,
                 location = state.location, members = emptyList(), logPath = logPath
@@ -655,6 +667,21 @@ object InstanceRosterManager {
             logPath = logPath
         )
 
+        // PFP refresh trigger: detect an avatar SWITCH (avatarName changed vs last
+        // seen) and re-fetch that person's pic 5s later (the switch may change their
+        // avatar-derived pic). The first sighting isn't a switch (initial enrich
+        // already fetched it). The periodic sweep (startPfpRefreshLoop) covers
+        // VRChat+/gallery changes that happen without an avatar switch.
+        lastEntries = ordered
+        for (e in ordered) {
+            val uid = e.userId ?: continue
+            val ava = e.avatarName ?: continue
+            val prev = lastAvatarByUser.put(uid, ava)
+            if (prev != null && prev != ava) {
+                scope.launch { delay(PFP_SWITCH_DELAY_MS); refetchPfp(context, uid) }
+            }
+        }
+
         // One ordered enrichment pass at a time (single-flight). Skip self — its
         // platform + pic come from the VRChat tab's presence, no fetch needed.
         val needs = ordered.mapNotNull { it.userId }
@@ -701,6 +728,43 @@ object InstanceRosterManager {
                 enrichAttempts[id] = n
                 if (n >= MAX_ENRICH_ATTEMPTS) { platformCache[id] = ""; enrichAttempts.remove(id) }
                 delay(ENRICH_FAIL_BACKOFF_MS) // back off harder after a failed call
+            }
+        }
+    }
+
+    /** Re-fetch one member's profile pic and republish their row if it changed. */
+    private suspend fun refetchPfp(context: Context, userId: String) {
+        val info = try { VrchatAuthManager.fetchUserInfo(context, userId) } catch (e: Exception) { null } ?: return
+        val newPfp = info.profilePicUrl
+        if (newPfp.isBlank() || newPfp == pfpCache[userId]) return
+        pfpCache[userId] = newPfp
+        _flow.value.let { cur ->
+            if (cur.members.any { it.userId == userId }) {
+                _flow.value = cur.copy(
+                    members = cur.members.map { m -> if (m.userId == userId) m.copy(profilePicUrl = newPfp) else m }
+                )
+            }
+        }
+    }
+
+    /** Periodic pfp sweep for VRChat+/gallery pic changes (no avatar switch fires
+     *  for those). Every 3 min, re-fetch every member present >=10 min, one at a
+     *  time 5s apart in join order, so a full instance never bursts VRChat's REST. */
+    private fun startPfpRefreshLoop(context: Context) {
+        scope.launch {
+            while (scope.isActive) {
+                delay(PFP_CYCLE_MS)
+                if (_flow.value.status != Status.LIVE) continue
+                val now = System.currentTimeMillis()
+                val self = try { VrchatAuthManager.getStoredUserId(context) } catch (e: Exception) { null }
+                val due = lastEntries
+                    .filter { it.userId != null && it.userId != self && now - it.joinedAtMs >= PFP_MIN_PRESENCE_MS }
+                    .sortedBy { it.joinedAtMs }
+                for (e in due) {
+                    if (!scope.isActive || _flow.value.status != Status.LIVE) break
+                    refetchPfp(context, e.userId!!)
+                    delay(PFP_STAGGER_MS)
+                }
             }
         }
     }
