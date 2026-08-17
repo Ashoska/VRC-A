@@ -2767,6 +2767,25 @@ class VrcaViewModel(
                     if (ip.isNotBlank()) remoteVrcaOsc.ipAddress = ip
                 }
             }
+        } else {
+            // Headset: VRChat runs on the SAME Quest, but sending to hardcoded
+            // 127.0.0.1:9000 was PROVEN undelivered on-device — the eyeheight
+            // delivery canary read NOT DELIVERED for minutes (`udp ok` but the
+            // EyeHeightAsMeters readback never moved) while OSCQuery to VRChat's
+            // discovered host stayed live the whole time. So outbound UDP to
+            // loopback is what dies; the reachable host isn't. Follow the SAME
+            // endpoint our OSCQuery polls reach VRChat at (its mDNS host = the
+            // device LAN IP) + VRChat's advertised OSC-in port. Falls back to
+            // loopback:9000 until discovery resolves; only re-points on a genuine
+            // host/port change (rare), so no socket thrash.
+            viewModelScope.launch {
+                com.vrca.osc.VrcaOscQuery.oscSendTargetFlow.collect { target ->
+                    val ip = target?.first ?: "127.0.0.1"
+                    val p = target?.second ?: 9000
+                    if (remoteVrcaOsc.port != p) remoteVrcaOsc.port = p
+                    if (remoteVrcaOsc.ipAddress != ip) remoteVrcaOsc.ipAddress = ip
+                }
+            }
         }
 
         // Public build: attach moderation listeners (also drives watcher detection

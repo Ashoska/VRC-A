@@ -66,6 +66,25 @@ object VrcaOscQuery {
     private val _oscInPort = MutableStateFlow(0)
     val oscInPortFlow: StateFlow<Int> = _oscInPort.asStateFlow()
     @Volatile private var oscInIp: String = ""
+
+    // The address the chatbox/eyeheight sender should target on the HEADSET. It is
+    // the SAME host our OSCQuery polls reach VRChat at (`host`, mDNS-resolved — on
+    // Quest the device's LAN IP, PROVEN reachable by every successful poll) paired
+    // with VRChat's advertised OSC-in UDP port (or 9000 until HOST_INFO is read).
+    // On-device proof: sending to hardcoded 127.0.0.1:9000 reported `udp ok` for
+    // minutes while the EyeHeightAsMeters readback never moved (VRChat received
+    // NOTHING), yet OSCQuery to `host` stayed live the whole time — i.e. loopback
+    // outbound UDP was dead but the reachable host wasn't. So we route OSC to the
+    // reachable host instead of loopback. Null until discovered (sender falls back
+    // to 127.0.0.1:9000). Never a wildcard — `host` is always a concrete address.
+    private val _oscSendTarget = MutableStateFlow<Pair<String, Int>?>(null)
+    val oscSendTargetFlow: StateFlow<Pair<String, Int>?> = _oscSendTarget.asStateFlow()
+
+    private fun updateSendTarget() {
+        val h = host
+        _oscSendTarget.value = if (h == null) null
+            else h to (if (_oscInPort.value in 1..65535) _oscInPort.value else 9000)
+    }
     @Volatile private var hostInfoFetchedFor: String = ""
     @Volatile private var lastPollOkMs = 0L
     @Volatile private var discoveryActive = false
@@ -109,10 +128,9 @@ object VrcaOscQuery {
                         if (pollParams(h, p)) {
                             lastPollOkMs = System.currentTimeMillis()
                             // Read VRChat's ADVERTISED OSC-in endpoint once per resolved
-                            // service. DIAGNOSTIC ONLY for now (the sender still uses the
-                            // hardcoded 9000, matching VRC-NEXUS) — this lets us CONFIRM
-                            // whether VRChat is actually on 9000 or a different port when
-                            // the chatbox "stops" (udp ok but not received).
+                            // service; it feeds the send target (the reachable host +
+                            // this port), the fix for loopback outbound UDP being dead
+                            // on Quest while OSCQuery to this host stays live.
                             if (hostInfoFetchedFor != "$h:$p") fetchHostInfo(h, p)
                         } else if (lastPollOkMs > 0L &&
                             System.currentTimeMillis() - lastPollOkMs > REDISCOVER_AFTER_FAIL_MS
@@ -120,6 +138,7 @@ object VrcaOscQuery {
                             // Sustained failure → VRChat closed / restarted. Drop the
                             // stale host and re-discover (a restart may use a new port).
                             host = null; port = 0; hostInfoFetchedFor = ""
+                            updateSendTarget()
                             restartDiscovery(ctx)
                         }
                     }
@@ -160,6 +179,7 @@ object VrcaOscQuery {
                 host = h
                 port = info.port
                 serviceName = info.serviceName
+                updateSendTarget()
                 updateDiag("resolved $serviceName @ $h:$port")
             }
         }
@@ -183,6 +203,7 @@ object VrcaOscQuery {
             override fun onServiceLost(info: NsdServiceInfo?) {
                 if (info?.serviceName == serviceName) {
                     host = null; port = 0; hostInfoFetchedFor = ""
+                    updateSendTarget()
                     updateDiag("service lost: ${info?.serviceName}")
                 }
             }
@@ -196,12 +217,11 @@ object VrcaOscQuery {
         }
     }
 
-    /** DIAGNOSTIC: read VRChat's HOST_INFO once per resolved service to learn the
-     *  ADVERTISED OSC-in UDP endpoint (OSC_IP/OSC_PORT). The chatbox sender still
-     *  targets the hardcoded 9000 (matching VRC-NEXUS); this only lets the debug panel
-     *  show whether VRChat is actually on 9000 when the chatbox "stops" (udp ok but not
-     *  received). If it turns out VRChat is on a non-9000 port, wiring oscInPortFlow
-     *  into the sender is the justified fix. */
+    /** Read VRChat's HOST_INFO once per resolved service to learn the ADVERTISED
+     *  OSC-in UDP endpoint (OSC_IP/OSC_PORT). On Quest, VRChat and VRC-A share the
+     *  device so 9000 can be contended and VRChat picks a DIFFERENT input port,
+     *  advertising the real one ONLY here — so this port feeds the send target
+     *  ([updateSendTarget]) alongside the reachable `host`. */
     private fun fetchHostInfo(h: String, p: Int) {
         val body = httpGetBody("http://$h:$p/?HOST_INFO") ?: return
         runCatching {
@@ -212,6 +232,7 @@ object VrcaOscQuery {
                 _oscInPort.value = oscPort
                 oscInIp = oscIp
                 hostInfoFetchedFor = "$h:$p"
+                updateSendTarget()
             }
         }
     }
