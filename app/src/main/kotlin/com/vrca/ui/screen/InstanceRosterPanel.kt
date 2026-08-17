@@ -31,7 +31,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -240,32 +243,50 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
                 modifier = Modifier.size(12.dp)
             )
         }
-        // Clone/wear button — targets the avtr_ id harvested from the log for this
-        // user (updates when they switch avatars). Hidden for yourself and until an
-        // id is known. VRChat equips it if your account has access; otherwise its
-        // own error is surfaced. Headset only (the roster only runs there).
-        if (!m.isSelf && m.avatarId.isNotBlank()) {
+        // Clone/wear button. Quest never logs another player's avatar id, so on tap
+        // we resolve it EXACTLY: search the avatar DB by the logged name, then
+        // confirm the match by the worn avatar's unique image file id (see
+        // VrchatAuthManager.resolveWornAvatarId) and select it. Hidden for yourself
+        // and until we know the avatar name. Shows a spinner while resolving.
+        if (!m.isSelf && !m.avatarName.isNullOrBlank() && m.userId != null) {
+            var busy by remember(m.userId) { mutableStateOf(false) }
             IconButton(
                 onClick = {
-                    val id = m.avatarId
-                    val name = m.avatarName ?: "avatar"
+                    if (busy) return@IconButton
+                    busy = true
+                    val uid = m.userId
+                    val name = m.avatarName
+                    val author = m.avatarCreator ?: ""
                     scope.launch {
-                        val res = com.vrca.vrchat.VrchatAuthManager.selectAvatar(ctx, id)
-                        android.widget.Toast.makeText(
-                            ctx,
-                            if (res.ok) "Cloning $name…" else (res.error ?: "Couldn't clone avatar"),
-                            android.widget.Toast.LENGTH_SHORT
-                        ).show()
+                        val id = com.vrca.vrchat.VrchatAuthManager
+                            .resolveWornAvatarId(ctx, uid, name, author)
+                        val msg = if (id == null) {
+                            "Couldn't find $name in any avatar database"
+                        } else {
+                            val res = com.vrca.vrchat.VrchatAuthManager.selectAvatar(ctx, id)
+                            if (res.ok) "Cloned $name — shows on your next avatar reload"
+                            else (res.error ?: "Couldn't wear this avatar")
+                        }
+                        android.widget.Toast.makeText(ctx, msg, android.widget.Toast.LENGTH_LONG).show()
+                        busy = false
                     }
                 },
                 modifier = Modifier.size(28.dp)
             ) {
-                Icon(
-                    Icons.Filled.ContentCopy,
-                    contentDescription = "Clone avatar",
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(16.dp)
-                )
+                if (busy) {
+                    androidx.compose.material3.CircularProgressIndicator(
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                } else {
+                    Icon(
+                        Icons.Filled.ContentCopy,
+                        contentDescription = "Clone avatar",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
             }
         }
     }

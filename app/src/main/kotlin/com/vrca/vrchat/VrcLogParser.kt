@@ -67,15 +67,9 @@ object VrcLogParser {
         /** A player switched avatars (`Switching <name> to avatar <avatar>`). */
         data class AvatarSwitch(val displayName: String, val avatarName: String) : LogEvent()
 
-        /** `Unpacking Avatar (<avatarName> by <author>)` — gives the avatar's author. */
+        /** `Unpacking Avatar (<avatarName> by <author>)` — gives the avatar's author,
+         *  used (with the avatar name) to resolve the exact avatar id on demand. */
         data class AvatarUnpack(val avatarName: String, val author: String) : LogEvent()
-
-        /** A bare `avtr_…` UUID seen on any line (avatar-load / API lines). The
-         *  `Switching … to avatar …` line only carries the avatar NAME; the real
-         *  avatar ID appears here, correlated to the user whose switch just fired
-         *  (the NEXUS approach — the VRChat API hides other users' current avatar id,
-         *  so the log is the only source). */
-        data class AvatarIdSeen(val avatarId: String) : LogEvent()
     }
 
     // Message-body matchers (prefix already stripped). VRChat prefixes most of
@@ -109,13 +103,11 @@ object VrcLogParser {
     private val RE_AVATAR_SWITCH = Regex(
         """\[Behaviour]\s+Switching\s+(.+?)\s+to avatar\s+(.+)$"""
     )
-    // "[Behaviour] Unpacking Avatar (<avatarName> by <author>)" — carries the author.
+    // "[…] Unpacking Avatar (<avatarName> by <author>)" — carries the author. On
+    // Quest this is logged by [AssetBundleDownloadManager], not [Behaviour], so the
+    // tag is left unanchored.
     private val RE_AVATAR_UNPACK = Regex(
-        """\[Behaviour]\s+Unpacking Avatar\s+\((.+?)\s+by\s+(.+?)\)\s*$"""
-    )
-    // A bare avtr_ UUID anywhere on a line (VRChat avatar id = avtr_ + 8-4-4-4-12).
-    private val RE_AVTR_ID = Regex(
-        """avtr_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"""
+        """Unpacking Avatar\s+\((.+?)\s+by\s+(.+?)\)\s*$"""
     )
     // Leading "YYYY.MM.DD HH:MM:SS   Level   -  " prefix (variable spacing).
     private val RE_PREFIX = Regex(
@@ -168,9 +160,6 @@ object VrcLogParser {
         RE_AVATAR_UNPACK.find(body)?.let { m ->
             return LogEvent.AvatarUnpack(m.groupValues[1].trim(), m.groupValues[2].trim())
         }
-        // Bare avtr_ id harvest — checked LAST so a structured line is parsed as
-        // itself first; only an otherwise-unmatched avatar-load line lands here.
-        RE_AVTR_ID.find(body)?.let { m -> return LogEvent.AvatarIdSeen(m.value) }
         return null
     }
 
@@ -180,11 +169,8 @@ object VrcLogParser {
         val userId: String?,
         val joinedAtMs: Long,
         val avatarName: String? = null,
-        // The avtr_ id of their currently-worn avatar, correlated from the bare
-        // avtr_ line that follows their `Switching … to avatar …` (null until seen).
-        // This is what the clone/wear button targets and it updates on every switch.
-        val avatarId: String? = null,
-        // Avatar author from `Unpacking Avatar (<name> by <author>)`, best-effort.
+        // Avatar author from `Unpacking Avatar (<name> by <author>)`. With the avatar
+        // NAME this resolves the exact avatar id on demand (Quest never logs the id).
         val avatarCreator: String? = null,
         // Filled by the platform-API hookup (VrchatAuthManager.fetchUserInfo →
         // prettyPlatform). Left blank by the parser; the reader enriches it.
@@ -206,11 +192,7 @@ object VrcLogParser {
         val suspended: Boolean = false,
         // Keyed by userId when known, else by a "name:<displayName>" fallback so
         // the older name-only log format still tracks a person.
-        val roster: Map<String, RosterEntry> = emptyMap(),
-        // The roster key of the user whose `Switching … to avatar …` most recently
-        // fired and is still awaiting its avtr_ id. The NEXT bare avtr_ line is
-        // assigned to this user, then this clears — the log's switch→load ordering.
-        val pendingAvatarUserKey: String? = null
+        val roster: Map<String, RosterEntry> = emptyMap()
     ) {
         val playerCount: Int get() = roster.size
     }
@@ -254,7 +236,6 @@ object VrcLogParser {
                     userId = event.userId,
                     joinedAtMs = existing?.joinedAtMs ?: nowMs,
                     avatarName = existing?.avatarName,
-                    avatarId = existing?.avatarId,
                     avatarCreator = existing?.avatarCreator,
                     platform = existing?.platform ?: ""
                 ))
@@ -262,29 +243,17 @@ object VrcLogParser {
         }
         is LogEvent.PlayerLeft -> {
             val key = rosterKey(event.userId, event.displayName)
-            state.copy(suspended = false, roster = state.roster - key, pendingAvatarUserKey = null)
+            state.copy(suspended = false, roster = state.roster - key)
         }
         is LogEvent.AvatarSwitch -> {
-            // Match by display name (avatar lines carry no usr_ id). Mark this user
-            // pending so the NEXT bare avtr_ line is assigned to them (the log emits
-            // the switch line, then the avatar-load line carrying the avtr_ id).
+            // Match by display name (avatar lines carry no usr_ id). Only the avatar
+            // NAME is logged — the exact id is resolved on demand (see the roster
+            // clone button → VrchatAuthManager.resolveWornAvatarId).
             val entry = state.roster.entries.firstOrNull { it.value.displayName == event.displayName }
             if (entry == null) state
             else state.copy(
                 suspended = false,
-                roster = state.roster + (entry.key to entry.value.copy(avatarName = event.avatarName)),
-                pendingAvatarUserKey = entry.key
-            )
-        }
-        is LogEvent.AvatarIdSeen -> {
-            // Assign to the user whose switch is pending, then clear the pending
-            // marker so a later user's avatar load can't overwrite it.
-            val key = state.pendingAvatarUserKey
-            val entry = key?.let { state.roster[it] }
-            if (entry == null) state
-            else state.copy(
-                roster = state.roster + (key to entry.copy(avatarId = event.avatarId)),
-                pendingAvatarUserKey = null
+                roster = state.roster + (entry.key to entry.value.copy(avatarName = event.avatarName))
             )
         }
         is LogEvent.AvatarUnpack -> {

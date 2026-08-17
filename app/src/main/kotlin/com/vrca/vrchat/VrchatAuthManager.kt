@@ -1224,7 +1224,11 @@ object VrchatAuthManager {
         val location: String,
         /** VRChat+ profile icon, else the worn avatar's thumbnail. For the roster
          *  row avatar (rides the SAME /users/{id} call — no extra request). */
-        val profilePicUrl: String = ""
+        val profilePicUrl: String = "",
+        /** RAW `currentAvatarThumbnailImageUrl` (an api/1/file/file_… url). Its
+         *  file id is a UNIQUE 1:1 key for the worn avatar — used to CONFIRM an
+         *  avatar-database match exactly (not a fuzzy name guess). */
+        val wornAvatarThumbUrl: String = ""
     )
 
     suspend fun fetchUserInfo(context: Context, userId: String): VrcUserInfo? = withContext(Dispatchers.IO) {
@@ -1253,12 +1257,72 @@ object VrchatAuthManager {
                 // avatar's thumbnail so everyone has SOMETHING to show.
                 profilePicUrl = j.optString("iconUrl", "")
                     .ifBlank { j.optString("userIcon", "") }
-                    .ifBlank { j.optString("currentAvatarThumbnailImageUrl", "") }
+                    .ifBlank { j.optString("currentAvatarThumbnailImageUrl", "") },
+                wornAvatarThumbUrl = j.optString("currentAvatarThumbnailImageUrl", "")
             )
         } catch (e: Exception) {
             Log.w(TAG, "fetchUserInfo($userId) failed", e)
             null
         }
+    }
+
+    /** Extract the stable `file_…` id from a VRChat file url (ignores the version
+     *  segment) — the unique key shared by an avatar's thumbnail across the
+     *  /users/{id} and /avatars/{id} responses. */
+    private fun fileIdOf(url: String): String? =
+        Regex("""file_[0-9a-fA-F-]{36}""").find(url)?.value
+
+    /** The worn-avatar thumbnail file id for a public avatar, via the PUBLIC
+     *  `GET /avatars/{id}`. Returns null on 404 (private/deleted) or error. */
+    private suspend fun fetchAvatarThumbFileId(context: Context, avatarId: String): String? =
+        withContext(Dispatchers.IO) {
+            val cookie = getCookieHeader(context) ?: return@withContext null
+            try {
+                val (code, body, raw) = get("$BASE/avatars/$avatarId", null, cookie)
+                if (code == 200) captureRolledCookies(context, raw)
+                if (code != 200 || !body.startsWith("{")) return@withContext null
+                val j = org.json.JSONObject(body)
+                fileIdOf(j.optString("thumbnailImageUrl", "").ifBlank { j.optString("imageUrl", "") })
+            } catch (e: Exception) { null }
+        }
+
+    /**
+     * Resolve a remote player's EXACT worn avatar id. Quest can't get it from the
+     * log (the avatar id isn't written) or the API (`/users/{id}` hides it), so we:
+     *  1. read the worn avatar's IMAGE file id from `/users/{id}` (a unique key),
+     *  2. search the avatar database (avtrdb) by the log's avatar NAME,
+     *  3. CONFIRM a candidate by fetching its public `GET /avatars/{id}` and matching
+     *     the image file id — an exact 1:1 check, immune to name collisions.
+     * `author` (from the log's `Unpacking Avatar (… by …)`) ranks candidates first.
+     * Returns the `avtr_` id, or null when no database has the avatar indexed
+     * (the only unavoidable miss — nothing public that people actually wear is
+     * usually absent). Best-effort fallback: a lone name+author match.
+     */
+    suspend fun resolveWornAvatarId(
+        context: Context, userId: String, avatarName: String, author: String
+    ): String? = withContext(Dispatchers.IO) {
+        if (avatarName.isBlank()) return@withContext null
+        val wornFileId = fileIdOf(fetchUserInfo(context, userId)?.wornAvatarThumbUrl.orEmpty())
+        val candidates = try { com.vrca.vrchat.AvatarSearch.search(avatarName) } catch (e: Exception) { emptyList() }
+        if (candidates.isEmpty()) return@withContext null
+        val authorNorm = author.trim().lowercase()
+        val authorMatches = candidates.filter {
+            authorNorm.isNotBlank() && it.author.trim().lowercase() == authorNorm
+        }
+        // Confirm by image file id (the accuracy guarantee). Try author-matches
+        // first, then the rest — capped so we don't spam GET /avatars.
+        if (wornFileId != null) {
+            val ranked = (authorMatches + candidates.filter { it !in authorMatches }).take(6)
+            for (c in ranked) {
+                if (c.id.isBlank()) continue
+                if (fetchAvatarThumbFileId(context, c.id) == wornFileId) return@withContext c.id
+                kotlinx.coroutines.delay(250)
+            }
+        }
+        // No image confirmation possible (worn thumb hidden / not on any candidate):
+        // fall back to a single unambiguous name+author match.
+        if (authorMatches.size == 1) return@withContext authorMatches[0].id
+        null
     }
 
     suspend fun fetchGroupName(context: Context, groupId: String): String? = withContext(Dispatchers.IO) {
