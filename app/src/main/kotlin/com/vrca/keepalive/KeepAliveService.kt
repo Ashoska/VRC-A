@@ -10,6 +10,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.net.wifi.WifiManager
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -50,8 +51,38 @@ class KeepAliveService : Service() {
     }
 
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
     private var loopJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.Default)
+
+    /** Acquire (idempotently) a WiFi lock so Android keeps the Wi-Fi interface
+     *  awake and STABLE while backgrounded / screen-off. This is the missing piece
+     *  vs the reference companion (which holds PARTIAL_WAKE_LOCK + a WiFi lock):
+     *  without it, Wi-Fi power management sleeps/re-associates the radio, which
+     *  re-evaluates the PROCESS's default-network binding — the transition that
+     *  makes outbound UDP to 127.0.0.1 silently stop delivering on Quest ("chatbox
+     *  stops, reopen fixes it") AND that drops the VRChat WebSocket / Discord
+     *  gateway / Firestore when backgrounded. FULL_LOW_LATENCY (API 29+) keeps the
+     *  radio hot; it degrades to FULL when backgrounded, which is exactly the
+     *  stay-connected behavior we want. Non-ref-counted; released on destroy. */
+    private fun ensureWifiLock() {
+        try {
+            if (wifiLock == null) {
+                val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                    ?: return
+                val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                else
+                    @Suppress("DEPRECATION") WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                wifiLock = wm.createWifiLock(mode, "$packageName:chatbox_wifi").apply {
+                    setReferenceCounted(false)
+                }
+            }
+            wifiLock?.let { if (!it.isHeld) it.acquire() }
+        } catch (t: Throwable) {
+            Log.e(TAG, "WifiLock acquire failed", t)
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -71,6 +102,9 @@ class KeepAliveService : Service() {
             }
         }
 
+        // Keep the Wi-Fi radio awake + the network binding stable (see ensureWifiLock).
+        ensureWifiLock()
+
         // Small periodic loop to keep the process "active" under some OEMs.
         // It also RE-ARMS the bounded wakelock each tick so the 6h timeout never
         // actually expires while the loop is alive — held-forever in practice,
@@ -88,6 +122,8 @@ class KeepAliveService : Service() {
                 } catch (t: Throwable) {
                     Log.e(TAG, "WakeLock re-acquire failed", t)
                 }
+                // Re-assert the WiFi lock in case an OEM force-released it.
+                ensureWifiLock()
                 Log.d(TAG, "tick")
             }
         }
@@ -104,6 +140,7 @@ class KeepAliveService : Service() {
             (com.vrca.app.AppShutdown.isManualKillFresh(this) ||
                 com.vrca.app.AppShutdown.isSwipedAway(this))) {
             try { wakeLock?.let { if (it.isHeld) it.release() } } catch (_: Throwable) {}
+            try { wifiLock?.let { if (it.isHeld) it.release() } } catch (_: Throwable) {}
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             val appCtx = applicationContext
@@ -160,6 +197,14 @@ class KeepAliveService : Service() {
         } catch (_: Throwable) {
         }
         wakeLock = null
+
+        try {
+            wifiLock?.let {
+                if (it.isHeld) it.release()
+            }
+        } catch (_: Throwable) {
+        }
+        wifiLock = null
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
