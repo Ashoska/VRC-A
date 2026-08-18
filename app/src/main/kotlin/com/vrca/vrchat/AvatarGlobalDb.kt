@@ -121,7 +121,7 @@ object AvatarGlobalDb {
      *  Returns true on a 2xx. Admin build only (needs the ADMIN_KEY). */
     suspend fun adminPush(
         context: Context, adminKey: String,
-        upserts: List<Entry>, removeFileIds: List<String>
+        upserts: List<Entry>, removeFileIds: List<String>, clearReports: List<String> = emptyList()
     ): Boolean {
         if (adminKey.isBlank()) return false
         val body = JSONObject().apply {
@@ -136,8 +136,34 @@ object AvatarGlobalDb {
                 }
             })
             put("removes", JSONArray(removeFileIds))
+            put("clearReports", JSONArray(clearReports))
         }.toString()
         return kotlinx.coroutines.withContext(Dispatchers.IO) { post("$WORKER_URL/admin", body) }
+    }
+
+    /** A pending dead/rename report the admin bot should verify. */
+    data class Report(val fileId: String, val avatarId: String, val status: String)
+
+    /** Fetch the PENDING reports from the Worker so the bot verifies only those
+     *  (not the whole catalog). Admin build only (needs ADMIN_KEY). */
+    suspend fun fetchReports(adminKey: String): List<Report> = kotlinx.coroutines.withContext(Dispatchers.IO) {
+        if (adminKey.isBlank()) return@withContext emptyList()
+        var conn: HttpURLConnection? = null
+        try {
+            conn = (URL("$WORKER_URL/admin/reports?key=${java.net.URLEncoder.encode(adminKey, "UTF-8")}")
+                .openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                connectTimeout = 12_000; readTimeout = 12_000
+            }
+            if (conn.responseCode != 200) return@withContext emptyList()
+            val arr = JSONObject(conn.inputStream.bufferedReader().readText()).optJSONArray("reports")
+                ?: return@withContext emptyList()
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val f = o.optString("fileId", ""); if (!f.startsWith("file_")) return@mapNotNull null
+                Report(f, o.optString("avatarId", ""), o.optString("status", "dead"))
+            }
+        } catch (e: Exception) { emptyList() } finally { runCatching { conn?.disconnect() } }
     }
 
     /** Name search over the catalog (for the in-app avatar search). */
@@ -183,15 +209,21 @@ object AvatarGlobalDb {
         }
     }
 
-    /** Report an entry as dead (404/private) or renamed so the file self-heals. */
-    fun report(context: Context, fileId: String, status: String, name: String? = null) {
+    /** Report an entry as dead (404/private) or renamed so the file self-heals. The
+     *  avatarId lets the admin bot verify it WITHOUT a catalog lookup, so the bot only
+     *  ever checks REPORTED avatars (scales to a huge catalog). */
+    fun report(context: Context, fileId: String, avatarId: String, status: String, name: String? = null) {
         if (!fileId.startsWith("file_")) return
         val app = context.applicationContext
         scope.launch {
             val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             val arr = JSONArray(prefs.getString(KEY_REPORTS, "[]"))
+            // Dedup within the local queue by file id.
+            for (i in 0 until arr.length()) {
+                if (arr.optJSONObject(i)?.optString("fileId") == fileId) return@launch
+            }
             arr.put(JSONObject().apply {
-                put("fileId", fileId); put("status", status)
+                put("fileId", fileId); put("avatarId", avatarId); put("status", status)
                 if (name != null) put("name", name)
             })
             prefs.edit().putString(KEY_REPORTS, arr.toString()).apply()
@@ -353,8 +385,21 @@ object AvatarGlobalDb {
     private suspend fun harvestLibrary(context: Context) {
         try {
             val lib = VrchatAuthManager.ownAvatarLibrary(context)
-            for (e in lib) contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms)
-            if (lib.isNotEmpty()) ownAvatar = "library +${lib.size} ${nowShort()}"
+            var added = 0; var privateRemoved = 0
+            for (a in lib) {
+                val e = a.entry
+                if (a.isPublic) {
+                    contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms)
+                    added++
+                } else if (a.ownUpload && map.containsKey(e.fileId)) {
+                    // LOCAL public->private detection: the user made their own PUBLIC
+                    // avatar private -> it must leave the shared catalog. Report it so
+                    // the admin bot confirms + removes (the bot 404s a now-private one).
+                    report(context, e.fileId, e.avatarId, "dead")
+                    privateRemoved++
+                }
+            }
+            if (lib.isNotEmpty()) ownAvatar = "library +$added, ${privateRemoved} now-private ${nowShort()}"
         } catch (ex: Exception) { Log.w(TAG, "library harvest failed", ex) }
     }
 

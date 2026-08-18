@@ -1549,6 +1549,9 @@ object VrchatAuthManager {
             if (code == 200) captureRolledCookies(context, raw)
             if (code != 200 || !body.startsWith("{")) return@withContext null
             val j = org.json.JSONObject(body)
+            // PRIVACY: never contribute a non-public avatar (the owner can see their
+            // own private avatars via the API — those must NOT enter the shared catalog).
+            if (j.optString("releaseStatus", "public") != "public") return@withContext null
             val fileId = fileIdOf(j.optString("thumbnailImageUrl", "").ifBlank { j.optString("imageUrl", "") })
                 ?: return@withContext null
             val plats = j.optJSONArray("unityPackages")?.let { ups ->
@@ -1561,17 +1564,37 @@ object VrchatAuthManager {
         } catch (e: Exception) { null }
     }
 
-    /** The user's OWN avatar LIBRARY — uploaded avatars + favourites — as catalog
-     *  entries. All readable with ids (they're yours), so they're a big free seed
-     *  for the crowdsource catalog. Best-effort; empty on failure / not logged in. */
-    suspend fun ownAvatarLibrary(context: Context): List<CatalogEntry> = withContext(Dispatchers.IO) {
+    /** Does this avatar still exist? 200 -> true, 404/410 -> false (deleted),
+     *  anything else (rate limit / network) -> null (unknown, don't act). Used to
+     *  confirm a dead avatar before reporting it, so a transient clone failure never
+     *  wrongly culls a valid avatar. */
+    suspend fun avatarExists(context: Context, avatarId: String): Boolean? = withContext(Dispatchers.IO) {
+        val cookie = getCookieHeader(context) ?: return@withContext null
+        try {
+            val (code, _, raw) = get("$BASE/avatars/$avatarId", null, cookie)
+            if (code == 200) captureRolledCookies(context, raw)
+            when (code) { 200 -> true; 404, 410 -> false; else -> null }
+        } catch (e: Exception) { null }
+    }
+
+    /** One avatar from the user's own library, WITH its public/private state so the
+     *  caller can detect a local public↔private flip. `ownUpload` = the user created
+     *  it (so its releaseStatus is authoritative & they can flip it); favourites are
+     *  others' public avatars. */
+    data class OwnAvatar(val entry: CatalogEntry, val isPublic: Boolean, val ownUpload: Boolean)
+
+    /** The user's OWN avatar LIBRARY — their uploads (with real releaseStatus) +
+     *  favourites. All readable (they're yours), so a big free seed AND the source of
+     *  local private↔public detection. Best-effort; empty on failure / not logged in. */
+    suspend fun ownAvatarLibrary(context: Context): List<OwnAvatar> = withContext(Dispatchers.IO) {
         val cookie = getCookieHeader(context) ?: return@withContext emptyList()
-        val out = LinkedHashMap<String, CatalogEntry>()
-        val urls = listOf(
-            "$BASE/avatars?user=me&releaseStatus=all&n=100",
-            "$BASE/avatars/favorites?n=100"
+        val out = LinkedHashMap<String, OwnAvatar>()
+        // (url, ownUpload) — own uploads carry the real releaseStatus; favourites are public.
+        val sources = listOf(
+            "$BASE/avatars?user=me&releaseStatus=all&n=100&sort=updated" to true,
+            "$BASE/avatars/favorites?n=100" to false
         )
-        for (url in urls) {
+        for ((url, ownUpload) in sources) {
             try {
                 val (code, body, raw) = get(url, null, cookie)
                 if (code == 200) captureRolledCookies(context, raw)
@@ -1584,13 +1607,17 @@ object VrchatAuthManager {
                     val fileId = fileIdOf(
                         j.optString("thumbnailImageUrl", "").ifBlank { j.optString("imageUrl", "") }
                     ) ?: continue
+                    val isPublic = j.optString("releaseStatus", "public") == "public"
                     val plats = j.optJSONArray("unityPackages")?.let { ups ->
                         (0 until ups.length()).mapNotNull {
                             ups.optJSONObject(it)?.optString("platform", "")?.takeIf { s -> s.isNotBlank() }
                         }.map { prettyPlatform(it) }.filter { it.isNotBlank() }.distinct()
                     } ?: emptyList()
-                    out[fileId] = CatalogEntry(fileId, id, j.optString("name", ""),
-                        j.optString("authorName", ""), j.optString("authorId", ""), plats)
+                    out[fileId] = OwnAvatar(
+                        CatalogEntry(fileId, id, j.optString("name", ""),
+                            j.optString("authorName", ""), j.optString("authorId", ""), plats),
+                        isPublic, ownUpload
+                    )
                 }
                 kotlinx.coroutines.delay(300)
             } catch (e: Exception) { /* best-effort */ }

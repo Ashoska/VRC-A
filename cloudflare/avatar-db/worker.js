@@ -90,6 +90,10 @@ export default {
         if (body.status === "renamed" && typeof body.name === "string") {
           cur.name = body.name.slice(0, 100);
         }
+        // Store the avatar id so the bot can VERIFY without a catalog lookup.
+        if (typeof body.avatarId === "string" && body.avatarId.startsWith("avtr_")) {
+          cur.avatarId = body.avatarId;
+        }
         cur.count = (cur.count || 0) + 1;
         await env.AVATAR_KV.put(key, JSON.stringify(cur), { expirationTtl: 30 * 86400 });
         return json({ ok: true });
@@ -120,6 +124,25 @@ export default {
         });
       }
 
+      if (req.method === "GET" && url.pathname === "/admin/reports") {
+        // The bot fetches the PENDING dead/rename reports to verify — so it only
+        // ever checks REPORTED avatars, not the whole catalog (scales to millions).
+        if (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY) {
+          return json({ ok: false, error: "unauthorized" }, 401);
+        }
+        const rep = await env.AVATAR_KV.list({ prefix: "rep:" });
+        const out = [];
+        for (const k of rep.keys.slice(0, 200)) {
+          const val = await env.AVATAR_KV.get(k.name);
+          if (!val) continue;
+          try {
+            const r = JSON.parse(val);
+            out.push({ fileId: k.name.slice(4), avatarId: r.avatarId || "", status: r.status || "dead", count: r.count || 0 });
+          } catch (_) {}
+        }
+        return json({ ok: true, reports: out });
+      }
+
       if (req.method === "POST" && url.pathname === "/admin") {
         // Authoritative admin ops from the recheck sweep (bot VRChat session).
         // Requires the ADMIN_KEY secret. upserts OVERWRITE entries (refresh
@@ -140,7 +163,14 @@ export default {
         if (removes.length) {
           await env.AVATAR_KV.put("admr:" + crypto.randomUUID(), JSON.stringify(removes), { expirationTtl: 7 * 86400 });
         }
-        return json({ ok: true, upserts: upserts.length, removes: removes.length });
+        // Verified-ALIVE reports: clear them (the bot confirmed a false positive).
+        const clearReports = Array.isArray(body.clearReports)
+          ? body.clearReports.filter((f) => typeof f === "string" && f.startsWith("file_")).slice(0, 200)
+          : [];
+        for (const fid of clearReports) await env.AVATAR_KV.delete("rep:" + fid);
+        // A confirmed-dead report's rep: key is also cleared once removed.
+        for (const fid of removes) await env.AVATAR_KV.delete("rep:" + fid);
+        return json({ ok: true, upserts: upserts.length, removes: removes.length, cleared: clearReports.length });
       }
 
       if (req.method === "GET" && url.pathname === "/flush") {
