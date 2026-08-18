@@ -118,6 +118,25 @@ export default {
         });
       }
 
+      if (req.method === "GET" && url.pathname === "/where") {
+        // Authenticated live GET of the file -> GitHub's OWN download_url / html_url,
+        // so we can see EXACTLY where the Worker's commits land.
+        const repo = env.GH_REPO, path = env.DB_PATH, branch = env.GH_BRANCH || "main";
+        const apiUrl = `https://api.github.com/repos/${repo}/contents/${path}?ref=${encodeURIComponent(branch)}`;
+        const res = await fetch(apiUrl, { headers: ghHeaders(env) });
+        const out = { repo, path, branch, apiUrl, getStatus: res.status };
+        if (res.status === 200) {
+          const j = await res.json();
+          out.download_url = j.download_url;
+          out.html_url = j.html_url;
+          out.sha = j.sha;
+          out.size = j.size;
+        } else {
+          out.body = (await res.text().catch(() => "")).slice(0, 300);
+        }
+        return json(out);
+      }
+
       return json({ ok: false, error: "not found" }, 404);
     } catch (e) {
       return json({ ok: false, error: String(e) }, 500);
