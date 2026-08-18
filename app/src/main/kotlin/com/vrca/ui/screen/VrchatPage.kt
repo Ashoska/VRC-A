@@ -71,6 +71,7 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.PeopleAlt
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.outlined.PushPin
@@ -762,7 +763,7 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
         if (query.isBlank()) return
         searching = true; searched = true
         scope.launch {
-            results = com.vrca.vrchat.AvatarSearch.search(query)
+            results = com.vrca.vrchat.AvatarSearch.searchAll(ctx, query)
             searching = false
         }
     }
@@ -873,6 +874,8 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
 
 @Composable
 private fun AvatarResultRow(ctx: android.content.Context, r: com.vrca.vrchat.AvatarSearch.Result) {
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var cloning by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -902,6 +905,40 @@ private fun AvatarResultRow(ctx: android.content.Context, r: com.vrca.vrchat.Ava
                 maxLines = 1,
                 overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
             )
+        }
+        // Clone/wear this avatar directly (we have its id). Also contributes it to
+        // the global catalog (fetching its file id if the search source lacked one).
+        androidx.compose.material3.IconButton(
+            enabled = !cloning,
+            onClick = {
+                if (cloning) return@IconButton
+                cloning = true
+                scope.launch {
+                    val res = com.vrca.vrchat.VrchatAuthManager.selectAvatar(ctx, r.id)
+                    // Contribute to our catalog: use the search file id if present,
+                    // else resolve it once via GET /avatars/{id}.
+                    val fid = r.imageFileId ?: com.vrca.vrchat.VrchatAuthManager.avatarCatalogEntry(ctx, r.id)?.fileId
+                    if (fid != null) com.vrca.vrchat.AvatarGlobalDb.contribute(
+                        ctx, fid, r.id, r.name, r.author, r.authorId, r.platforms
+                    )
+                    android.widget.Toast.makeText(
+                        ctx,
+                        if (res.ok) "Cloned ${r.name.ifBlank { "avatar" }} — shows on your next avatar reload"
+                        else (res.error ?: "Couldn't wear this avatar"),
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                    cloning = false
+                }
+            }
+        ) {
+            if (cloning) {
+                androidx.compose.material3.CircularProgressIndicator(
+                    strokeWidth = 2.dp, modifier = Modifier.size(18.dp)
+                )
+            } else {
+                Icon(Icons.Filled.PeopleAlt, contentDescription = "Clone avatar",
+                    tint = MaterialTheme.colorScheme.primary)
+            }
         }
         androidx.compose.material3.IconButton(onClick = {
             runCatching {

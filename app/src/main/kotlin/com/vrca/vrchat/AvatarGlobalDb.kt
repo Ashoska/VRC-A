@@ -47,16 +47,18 @@ object AvatarGlobalDb {
 
     private const val PREFS = "vrca_avatar_db"
     private const val KEY_ETAG = "etag"
-    private const val KEY_BRANCH = "branch"      // remembered working branch (main/master)
+    private const val KEY_RAWURL = "rawurl"       // exact file URL learned from the Worker /health
     private const val KEY_QUEUE = "queue"        // pending contributions (JSON array)
     private const val KEY_REPORTS = "reports"    // pending reports (JSON array)
     private const val CACHE_FILE = "avatar_db.json"
     private const val REFRESH_MS = 30 * 60_000L  // every 30 min (+ once on open)
 
     data class Entry(
+        val fileId: String,
         val avatarId: String,
         val name: String,
         val author: String,
+        val authorId: String,
         val platforms: List<String>
     )
 
@@ -69,6 +71,9 @@ object AvatarGlobalDb {
 
     @Volatile private var lastPull = "never"
     @Volatile private var lastPost = "none"
+    @Volatile private var ownAvatar = "not harvested yet"
+    @Volatile private var lastContributed = "none"
+    @Volatile private var contributedCount = 0
 
     // ---- lifecycle -----------------------------------------------------------
 
@@ -89,6 +94,7 @@ object AvatarGlobalDb {
             while (isActive) {
                 delay(REFRESH_MS)
                 refresh(app)
+                harvestOwnAvatar(app)
                 flushQueue(app)
             }
         }
@@ -98,6 +104,9 @@ object AvatarGlobalDb {
 
     /** Resolve a worn avatar by its image file id (exact, offline, zero network). */
     fun lookup(fileId: String?): Entry? = fileId?.let { map[it] }
+
+    /** Number of catalog entries currently loaded (for the debug panels). */
+    fun entryCount(): Int = map.size
 
     /** Name search over the catalog (for the in-app avatar search). */
     fun searchByName(query: String, limit: Int = 30): List<Entry> {
@@ -114,9 +123,13 @@ object AvatarGlobalDb {
 
     /** Queue a newly-learned mapping and try to send it. No-op if we already have
      *  this file id (locally known = already in the global file or queued). */
-    fun contribute(context: Context, fileId: String, avatarId: String, name: String, author: String, platforms: List<String>) {
-        if (!FILE_RE.matches(fileId) && !fileId.startsWith("file_")) return
-        if (!avatarId.startsWith("avtr_")) return
+    fun contribute(
+        context: Context, fileId: String, avatarId: String,
+        name: String, author: String, authorId: String = "", platforms: List<String> = emptyList()
+    ) {
+        // Only add entries we ACTUALLY have a valid avatar id + file id for.
+        if (!FILE_RE.matches(fileId)) return
+        if (!AVTR_RE.matches(avatarId)) return
         if (map.containsKey(fileId)) return
         val app = context.applicationContext
         scope.launch {
@@ -128,10 +141,12 @@ object AvatarGlobalDb {
             }
             arr.put(JSONObject().apply {
                 put("fileId", fileId); put("avatarId", avatarId)
-                put("name", name); put("author", author)
+                put("name", name); put("author", author); put("authorId", authorId)
                 put("platforms", JSONArray(platforms))
             })
             prefs.edit().putString(KEY_QUEUE, arr.toString()).apply()
+            contributedCount++
+            lastContributed = "${name.ifBlank { avatarId }} (${nowShort()})"
             flushQueue(app)
         }
     }
@@ -208,40 +223,49 @@ object AvatarGlobalDb {
 
     private fun refresh(context: Context) {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val branch = prefs.getString(KEY_BRANCH, null)
-        val branches = if (branch != null) listOf(branch) else listOf("main", "master")
-        for (b in branches) {
-            val url = "https://raw.githubusercontent.com/$REPO/$b/$DB_PATH"
-            val etag = if (b == prefs.getString(KEY_BRANCH, "main")) prefs.getString(KEY_ETAG, null) else null
-            var conn: HttpURLConnection? = null
-            try {
-                conn = (URL(url).openConnection() as HttpURLConnection).apply {
-                    requestMethod = "GET"
-                    setRequestProperty("User-Agent", "VRC-A")
-                    if (etag != null) setRequestProperty("If-None-Match", etag)
-                    connectTimeout = 15_000; readTimeout = 15_000
+        // Read the file from EXACTLY where the Worker writes it — learn the URL from
+        // /health (echoes rawUrl), so no repo/branch/path mismatch is possible.
+        val rawUrl = fetchWorkerRawUrl()
+            ?: prefs.getString(KEY_RAWURL, null)
+            ?: "https://raw.githubusercontent.com/$REPO/main/$DB_PATH"
+        prefs.edit().putString(KEY_RAWURL, rawUrl).apply()
+        val etag = prefs.getString(KEY_ETAG, null)
+        var conn: HttpURLConnection? = null
+        try {
+            conn = (URL(rawUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                setRequestProperty("User-Agent", "VRC-A")
+                if (etag != null) setRequestProperty("If-None-Match", etag)
+                connectTimeout = 15_000; readTimeout = 15_000
+            }
+            when (conn.responseCode) {
+                304 -> lastPull = "304 (unchanged) ${nowShort()}"
+                200 -> {
+                    val text = conn.inputStream.bufferedReader().readText()
+                    parseInto(text)
+                    File(context.filesDir, CACHE_FILE).writeText(text)
+                    conn.getHeaderField("ETag")?.let { prefs.edit().putString(KEY_ETAG, it).apply() }
+                    lastPull = "pulled ${map.size} at ${nowShort()}"
                 }
-                when (conn.responseCode) {
-                    304 -> { lastPull = "304 (unchanged) ${nowShort()}"; prefs.edit().putString(KEY_BRANCH, b).apply(); return }
-                    200 -> {
-                        val text = conn.inputStream.bufferedReader().readText()
-                        parseInto(text)
-                        File(context.filesDir, CACHE_FILE).writeText(text)
-                        val newEtag = conn.getHeaderField("ETag")
-                        prefs.edit()
-                            .putString(KEY_BRANCH, b)
-                            .apply { if (newEtag != null) putString(KEY_ETAG, newEtag) }
-                            .apply()
-                        lastPull = "pulled ${map.size} at ${nowShort()}"
-                        return
-                    }
-                    404 -> continue // try the other branch
-                    else -> { lastPull = "http ${conn.responseCode} ${nowShort()}"; return }
-                }
-            } catch (e: Exception) {
-                lastPull = "error ${e.javaClass.simpleName} ${nowShort()}"
-            } finally { runCatching { conn?.disconnect() } }
-        }
+                else -> lastPull = "http ${conn.responseCode} at ${nowShort()} ($rawUrl)"
+            }
+        } catch (e: Exception) {
+            lastPull = "error ${e.javaClass.simpleName} ${nowShort()}"
+        } finally { runCatching { conn?.disconnect() } }
+    }
+
+    /** Ask the Worker where it writes (its /health echoes the exact rawUrl). */
+    private fun fetchWorkerRawUrl(): String? {
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL("$WORKER_URL/health").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                connectTimeout = 10_000; readTimeout = 10_000
+            }
+            if (conn.responseCode != 200) return null
+            val raw = JSONObject(conn.inputStream.bufferedReader().readText()).optString("rawUrl", "")
+            raw.takeIf { it.startsWith("https://raw.githubusercontent.com/") && !it.contains("/?/") }
+        } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
     }
 
     private fun parseInto(text: String) {
@@ -257,7 +281,10 @@ object AvatarGlobalDb {
                 val plats = o.optJSONArray("platforms")?.let { pa ->
                     (0 until pa.length()).mapNotNull { pa.optString(it, "").takeIf { s -> s.isNotBlank() } }
                 } ?: emptyList()
-                fresh[fileId] = Entry(id, o.optString("name", ""), o.optString("author", ""), plats)
+                fresh[fileId] = Entry(
+                    fileId, id, o.optString("name", ""),
+                    o.optString("author", ""), o.optString("authorId", ""), plats
+                )
             }
             map.clear(); map.putAll(fresh)
         } catch (e: Exception) { Log.w(TAG, "parse failed", e) }
@@ -269,9 +296,14 @@ object AvatarGlobalDb {
      *  read for themselves, which is the coverage the public DBs can't have. */
     private suspend fun harvestOwnAvatar(context: Context) {
         try {
-            val e = VrchatAuthManager.currentAvatarCatalogEntry(context) ?: return
-            contribute(context, e.fileId, e.avatarId, e.name, e.author, e.platforms)
-        } catch (ex: Exception) { Log.w(TAG, "own-avatar harvest failed", ex) }
+            val e = VrchatAuthManager.currentAvatarCatalogEntry(context)
+            if (e == null) { ownAvatar = "no current avatar (not logged in?) ${nowShort()}"; return }
+            ownAvatar = "${e.name.ifBlank { e.avatarId }} ${nowShort()}"
+            contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms)
+        } catch (ex: Exception) {
+            ownAvatar = "error ${ex.javaClass.simpleName}"
+            Log.w(TAG, "own-avatar harvest failed", ex)
+        }
     }
 
     // ---- diagnostics ---------------------------------------------------------
@@ -280,7 +312,10 @@ object AvatarGlobalDb {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val q = try { JSONArray(prefs.getString(KEY_QUEUE, "[]")).length() } catch (e: Exception) { 0 }
         val r = try { JSONArray(prefs.getString(KEY_REPORTS, "[]")).length() } catch (e: Exception) { 0 }
-        return "entries=${map.size}\npull=$lastPull\nqueue=$q reports=$r\nlastPost=$lastPost"
+        return "entries=${map.size}\npull=$lastPull\n" +
+            "ownAvatar=$ownAvatar\n" +
+            "contributed=$contributedCount last=$lastContributed\n" +
+            "queue=$q reports=$r\nlastPost=$lastPost"
     }
 
     private fun nowShort(): String = (android.os.SystemClock.elapsedRealtime() / 1000).let { "+${it}s" }

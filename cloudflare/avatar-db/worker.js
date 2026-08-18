@@ -99,6 +99,7 @@ export default {
         const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
         const pend = await env.AVATAR_KV.list({ prefix: "pend:" });
         const rep = await env.AVATAR_KV.list({ prefix: "rep:" });
+        const branch = env.GH_BRANCH || "main";
         return json({
           ok: true,
           entries: meta.entries || 0,
@@ -107,7 +108,13 @@ export default {
           lastFlush: meta.lastFlush || null,
           lastAdded: meta.lastAdded || 0,
           lastRemoved: meta.lastRemoved || 0,
-          version: 1,
+          // Where this Worker WRITES (so a repo/branch/path mismatch is visible):
+          repo: env.GH_REPO || "(unset)",
+          path: env.DB_PATH || "(unset)",
+          branch: branch,
+          rawUrl: `https://raw.githubusercontent.com/${env.GH_REPO || "?"}/${branch}/${env.DB_PATH || "?"}`,
+          lastCommit: meta.lastCommit || "none",
+          version: 2,
         });
       }
 
@@ -142,6 +149,13 @@ function b64decode(b64) {
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   return new TextDecoder().decode(bytes);
+}
+
+// One avatar per line, so the file is readable/diffable on GitHub as it grows.
+function serializeDb(db) {
+  const keys = Object.keys(db.avatars);
+  const lines = keys.map((k) => JSON.stringify(k) + ":" + JSON.stringify(db.avatars[k]));
+  return '{"version":' + (db.version || 1) + ',"avatars":{\n' + lines.join(",\n") + "\n}}";
 }
 
 async function flush(env) {
@@ -220,10 +234,11 @@ async function flush(env) {
   const entries = Object.keys(db.avatars).length;
 
   // 4. Commit only when something actually changed.
+  let lastCommit = "no change";
   if (added > 0 || removed > 0 || repClear.length > 0) {
     const putBody = {
       message: `avatar-db: +${added} -${removed} (${entries} total)`,
-      content: b64encode(JSON.stringify(db)),
+      content: b64encode(serializeDb(db)),
       branch,
     };
     if (sha) putBody.sha = sha;
@@ -232,8 +247,16 @@ async function flush(env) {
       headers,
       body: JSON.stringify(putBody),
     });
+    lastCommit = "PUT http " + putRes.status;
     if (putRes.status !== 200 && putRes.status !== 201) {
-      return; // sha conflict / error -> keep KV, retry next cron
+      // sha conflict / error -> keep KV, retry next cron. Record why for /health.
+      const errText = await putRes.text().catch(() => "");
+      await env.AVATAR_KV.put("meta", JSON.stringify({
+        lastFlush: new Date().toISOString(),
+        lastAdded: 0, lastRemoved: 0, entries,
+        lastCommit: lastCommit + " FAILED: " + errText.slice(0, 200),
+      }));
+      return;
     }
     // Only clear KV after a successful commit, so nothing is lost on failure.
     for (const name of pendKeys) await env.AVATAR_KV.delete(name);
@@ -247,6 +270,7 @@ async function flush(env) {
       lastAdded: added,
       lastRemoved: removed,
       entries,
+      lastCommit,
     })
   );
 }

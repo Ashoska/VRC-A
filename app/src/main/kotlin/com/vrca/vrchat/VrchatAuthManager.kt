@@ -1419,14 +1419,14 @@ object VrchatAuthManager {
                 catch (e: Exception) { emptyList() }
             byFile.firstOrNull { it.imageFileId == wornFileId }?.let {
                 com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via image file id"
-                com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, it.id, avatarName, author, emptyList())
+                com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, it.id, avatarName, author)
                 return@withContext it.id
             }
             // 0b. OFFICIAL: the author's public-avatars listing, matched by the worn
             //     image file id. No third-party DB; exact when VRChat permits it.
             resolveViaAuthorAvatars(context, wornFileId)?.let {
                 com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via author listing"
-                com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, it, avatarName, author, emptyList())
+                com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, it, avatarName, author)
                 return@withContext it
             }
         }
@@ -1452,7 +1452,7 @@ object VrchatAuthManager {
             //    file id and it equals the worn one. Exact, no extra VRChat call.
             candidates.firstOrNull { it.imageFileId == wornFileId }?.let {
                 com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name->fileid"
-                com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, it.id, avatarName, author, emptyList())
+                com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, it.id, avatarName, author)
                 return@withContext it.id
             }
             // 3. CONFIRM proxied-image candidates (avtrdb) via VRChat GET /avatars/{id}.
@@ -1463,7 +1463,7 @@ object VrchatAuthManager {
             for (c in ranked) {
                 if (fetchAvatarThumbFileId(context, c.id) == wornFileId) {
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name confirm"
-                    com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, c.id, avatarName, c.author, emptyList())
+                    com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, c.id, avatarName, c.author)
                     return@withContext c.id
                 }
                 kotlinx.coroutines.delay(250)
@@ -1521,6 +1521,7 @@ object VrchatAuthManager {
         val avatarId: String,
         val name: String,
         val author: String,
+        val authorId: String,
         val platforms: List<String>
     )
 
@@ -1555,7 +1556,8 @@ object VrchatAuthManager {
                     ups.optJSONObject(it)?.optString("platform", "")?.takeIf { s -> s.isNotBlank() }
                 }.map { prettyPlatform(it) }.filter { it.isNotBlank() }.distinct()
             } ?: emptyList()
-            CatalogEntry(fileId, avatarId, j.optString("name", ""), j.optString("authorName", ""), plats)
+            CatalogEntry(fileId, avatarId, j.optString("name", ""),
+                j.optString("authorName", ""), j.optString("authorId", ""), plats)
         } catch (e: Exception) { null }
     }
 

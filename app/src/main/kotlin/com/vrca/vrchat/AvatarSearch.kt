@@ -1,5 +1,6 @@
 package com.vrca.vrchat
 
+import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -29,7 +30,14 @@ object AvatarSearch {
         val author: String,
         val imageUrl: String,
         /** "PC"/"Quest"/"iOS" from the avatar's unity packages. */
-        val platforms: List<String>
+        val platforms: List<String>,
+        /** The author's `usr_` id when the source exposes it. */
+        val authorId: String = "",
+        /** VRChat's raw image `file_…` id when the source exposes it (VRCX mirrors +
+         *  our own catalog do; avtrdb proxies its image, so null there). */
+        val imageFileId: String? = null,
+        /** Which source it came from (for the per-DB debug + ranking). */
+        val source: String = ""
     )
 
     suspend fun search(query: String): List<Result> = withContext(Dispatchers.IO) {
@@ -72,7 +80,10 @@ object AvatarSearch {
                     name = a.optString("name", ""),
                     author = author,
                     imageUrl = a.optString("image_url", "").ifBlank { a.optString("thumbnailImageUrl", "") },
-                    platforms = platforms
+                    platforms = platforms,
+                    authorId = a.optJSONObject("author")?.optString("vrc_id", "") ?: "",
+                    imageFileId = null,
+                    source = "avtrdb"
                 )
             }
         } catch (e: Exception) {
@@ -90,7 +101,8 @@ object AvatarSearch {
         val id: String,
         val name: String,
         val author: String,
-        val imageFileId: String?
+        val imageFileId: String?,
+        val authorId: String = ""
     )
 
     private val FILE_ID = Regex("""file_[0-9a-fA-F-]{36}""")
@@ -140,8 +152,9 @@ object AvatarSearch {
                 val id = a.optString("vrc_id", "").ifBlank { a.optString("id", "") }
                 if (id.isBlank()) return@mapNotNull null
                 val author = a.optJSONObject("author")?.optString("name", "") ?: a.optString("authorName", "")
+                val authorId = a.optJSONObject("author")?.optString("vrc_id", "") ?: ""
                 // avtrdb image is proxied (thumb.avtrdb.com/avtr_…) → no VRChat file id.
-                Candidate(id, a.optString("name", ""), author, null)
+                Candidate(id, a.optString("name", ""), author, null, authorId)
             }
         } catch (e: Exception) { emptyList() }
     }
@@ -163,9 +176,105 @@ object AvatarSearch {
                 val author = a.optString("authorName", "")
                     .ifBlank { a.optJSONObject("author")?.optString("name", "") ?: "" }
                 val img = a.optString("thumbnailImageUrl", "").ifBlank { a.optString("imageUrl", "") }
-                Candidate(id, a.optString("name", ""), author, FILE_ID.find(img)?.value)
+                val authorId = a.optString("authorId", "").ifBlank { a.optJSONObject("author")?.optString("vrc_id", "") ?: "" }
+                Candidate(id, a.optString("name", ""), author, FILE_ID.find(img)?.value, authorId)
             }
         } catch (e: Exception) { emptyList() }
+    }
+
+    // ---- unified search (our catalog FIRST, then every DB) -------------------
+
+    /**
+     * Search EVERY source at once — our crowdsourced catalog FIRST, then avtrdb +
+     * the two VRCX mirrors — merged/deduped by avtr_ id. Any result that carries a
+     * VRChat image file id (VRCX mirrors + our catalog) is CONTRIBUTED back into our
+     * catalog immediately, so searching slowly fills our DB from the others.
+     */
+    suspend fun searchAll(context: Context, query: String): List<Result> = coroutineScope {
+        if (query.isBlank()) return@coroutineScope emptyList()
+        val q = URLEncoder.encode(query.trim(), "UTF-8")
+        val remote = listOf(
+            async { runCatching { search(query) }.getOrDefault(emptyList()) },
+            async { vrcxResults("https://requi.dev/vrcx_search.php?search=$q") },
+            async { vrcxResults("https://avtr.just-h.party/vrcx_search.php?search=$q") }
+        ).awaitAll().flatten()
+        val ours = catalogResults(query)
+        val merged = LinkedHashMap<String, Result>()
+        for (r in ours + remote) if (r.id.startsWith("avtr_")) merged.putIfAbsent(r.id, r)
+        val list = merged.values.toList()
+        // Fill our DB from the file-id-bearing results (free — no VRChat call).
+        for (r in list) {
+            val fid = r.imageFileId
+            if (fid != null && r.source != "catalog") {
+                AvatarGlobalDb.contribute(context, fid, r.id, r.name, r.author, r.authorId, r.platforms)
+            }
+        }
+        list
+    }
+
+    /** VRCX-style mirror results, parsed richly (image url + platforms) for display. */
+    private suspend fun vrcxResults(url: String): List<Result> = withContext(Dispatchers.IO) {
+        val body = httpGet(url) ?: return@withContext emptyList()
+        try {
+            val arr: JSONArray = if (body.trimStart().startsWith("[")) JSONArray(body)
+                else JSONObject(body).let { it.optJSONArray("results") ?: it.optJSONArray("avatars") }
+                    ?: return@withContext emptyList()
+            (0 until arr.length()).mapNotNull { i ->
+                val a = arr.optJSONObject(i) ?: return@mapNotNull null
+                val id = a.optString("id", "").ifBlank { a.optString("avatarId", "") }.ifBlank { a.optString("vrc_id", "") }
+                if (!id.startsWith("avtr_")) return@mapNotNull null
+                val author = a.optString("authorName", "").ifBlank { a.optJSONObject("author")?.optString("name", "") ?: "" }
+                val authorId = a.optString("authorId", "").ifBlank { a.optJSONObject("author")?.optString("vrc_id", "") ?: "" }
+                val img = a.optString("thumbnailImageUrl", "").ifBlank { a.optString("imageUrl", "") }
+                val plats = a.optJSONArray("platforms")?.let { pa ->
+                    (0 until pa.length()).mapNotNull { pa.optString(it, "").takeIf { s -> s.isNotBlank() } }
+                        .map { prettyAvtrdbPlatform(it) }.filter { it.isNotBlank() }.distinct()
+                } ?: emptyList()
+                Result(id, a.optString("name", ""), author, img, plats, authorId, FILE_ID.find(img)?.value, "vrcx")
+            }
+        } catch (e: Exception) { emptyList() }
+    }
+
+    /** Our own catalog as search results (image reconstructed from the file id). */
+    private fun catalogResults(query: String): List<Result> =
+        AvatarGlobalDb.searchByName(query).map { e ->
+            Result(
+                id = e.avatarId, name = e.name, author = e.author,
+                imageUrl = "https://api.vrchat.cloud/api/1/image/${e.fileId}/1/256",
+                platforms = e.platforms, authorId = e.authorId, imageFileId = e.fileId, source = "catalog"
+            )
+        }
+
+    // ---- per-DB health (Settings -> Debug) -----------------------------------
+
+    /** Probe each avatar source individually so a broken/misconfigured setup is
+     *  visible on-device. Uses a fixed common query. */
+    suspend fun dbHealthCheck(): String = coroutineScope {
+        val q = URLEncoder.encode("cat", "UTF-8")
+        val probes = listOf(
+            "avtrdb" to "$BASE?query=$q&page=0",
+            "requi.dev" to "https://requi.dev/vrcx_search.php?search=$q",
+            "just-h.party" to "https://avtr.just-h.party/vrcx_search.php?search=$q",
+            "worker" to "${AvatarGlobalDb.WORKER_URL}/health"
+        ).map { (name, url) ->
+            async { val (ok, info) = httpProbe(url); "$name: ${if (ok) "OK" else "FAIL"} $info" }
+        }
+        (probes.awaitAll() + "catalog(local): ${AvatarGlobalDb.entryCount()} entries").joinToString("\n")
+    }
+
+    private suspend fun httpProbe(url: String): Pair<Boolean, String> = withContext(Dispatchers.IO) {
+        var conn: HttpURLConnection? = null
+        try {
+            conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                connectTimeout = 10_000; readTimeout = 10_000
+            }
+            val code = conn.responseCode
+            val ok = code in 200..299
+            val len = if (ok) (conn.inputStream.bufferedReader().readText().length) else 0
+            ok to ("http $code" + if (ok) " (${len}b)" else "")
+        } catch (e: Exception) { false to e.javaClass.simpleName }
+        finally { runCatching { conn?.disconnect() } }
     }
 
     private fun httpGet(url: String): String? {

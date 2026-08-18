@@ -507,6 +507,27 @@ internal fun SettingsPage(
                             )
                         }
 
+                        // Per-DB health: probe each avatar source individually so a
+                        // misconfigured/blocked source is visible (tap to run).
+                        Text("Avatar DBs (tap to test)", style = MaterialTheme.typography.labelMedium)
+                        var dbHealth by remember { mutableStateOf("(not run)") }
+                        var dbTrigger by remember { mutableStateOf(0) }
+                        if (dbTrigger > 0) {
+                            androidx.compose.runtime.LaunchedEffect(dbTrigger) {
+                                dbHealth = "checking…"
+                                dbHealth = runCatching { com.vrca.vrchat.AvatarSearch.dbHealthCheck() }
+                                    .getOrElse { "error: ${it.javaClass.simpleName}" }
+                            }
+                        }
+                        TextButton(onClick = { dbTrigger++ }) { Text("Test all avatar databases") }
+                        SelectionContainer {
+                            Text(
+                                dbHealth,
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+
                         Text("OSC Output Preview", style = MaterialTheme.typography.labelMedium)
                         SelectionContainer {
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
