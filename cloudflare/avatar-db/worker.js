@@ -47,6 +47,7 @@ function validEntry(e) {
 }
 
 function cleanEntry(e) {
+  const now = Date.now();
   return {
     id: e.avatarId,
     name: typeof e.name === "string" ? e.name.slice(0, 100) : "",
@@ -55,7 +56,8 @@ function cleanEntry(e) {
     platforms: Array.isArray(e.platforms)
       ? e.platforms.filter((p) => typeof p === "string").slice(0, 4)
       : [],
-    added: Date.now(),
+    added: now,
+    checked: now, // last time the bot verified this avatar is alive (= added at first)
   };
 }
 
@@ -162,6 +164,14 @@ export default {
         }
         if (removes.length) {
           await env.AVATAR_KV.put("admr:" + crypto.randomUUID(), JSON.stringify(removes), { expirationTtl: 7 * 86400 });
+        }
+        // Batched "last checked" bumps from the bot's passive oldest-first sweep —
+        // applied on the next flush (rides the same commit, so it's ~free).
+        const checked = Array.isArray(body.checked)
+          ? body.checked.filter((f) => typeof f === "string" && f.startsWith("file_")).slice(0, 500)
+          : [];
+        if (checked.length) {
+          await env.AVATAR_KV.put("admk:" + crypto.randomUUID(), JSON.stringify(checked), { expirationTtl: 7 * 86400 });
         }
         // Verified-ALIVE reports: clear them (the bot confirmed a false positive).
         const clearReports = Array.isArray(body.clearReports)
@@ -376,6 +386,19 @@ async function flush(env) {
       for (const fid of arr) { if (db.avatars[fid]) { delete db.avatars[fid]; removed++; adminChanged = true; } }
     } catch (_) {}
   }
+  // Last-checked bumps (passive oldest-first sweep) — rides this same commit.
+  const admkKeys = [];
+  const nowChecked = Date.now();
+  const admk = await env.AVATAR_KV.list({ prefix: "admk:" });
+  for (const k of admk.keys) {
+    admkKeys.push(k.name);
+    const val = await env.AVATAR_KV.get(k.name);
+    if (!val) continue;
+    try {
+      const arr = JSON.parse(val);
+      for (const fid of arr) { if (db.avatars[fid]) { db.avatars[fid].checked = nowChecked; adminChanged = true; } }
+    } catch (_) {}
+  }
 
   const entries = Object.keys(db.avatars).length;
 
@@ -409,6 +432,7 @@ async function flush(env) {
     for (const name of repClear) await env.AVATAR_KV.delete(name);
     for (const name of admuKeys) await env.AVATAR_KV.delete(name);
     for (const name of admrKeys) await env.AVATAR_KV.delete(name);
+    for (const name of admkKeys) await env.AVATAR_KV.delete(name);
     // Migration done -> delete the stray "undefined" file.
     if (legacySha) {
       await fetch(`https://api.github.com/repos/${repo}/contents/undefined`, {

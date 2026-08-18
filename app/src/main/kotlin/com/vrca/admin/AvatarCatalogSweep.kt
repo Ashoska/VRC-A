@@ -36,6 +36,8 @@ object AvatarCatalogSweep {
     private const val PACE_MS = 1200L          // per avatar (bot account)
     private const val BATCH = 20               // ops per /admin push
     private const val POLL_MS = 30_000L        // poll for new reports every 30s
+    private const val PASSIVE_BATCH = 30       // oldest avatars per idle pass
+    private const val PASSIVE_PAUSE_MS = 5_000L
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var job: Job? = null
     @Volatile private var fullRescan = false
@@ -59,17 +61,22 @@ object AvatarCatalogSweep {
 
     private suspend fun loop(context: Context, adminKey: String) {
         while (running && scope.isActive) {
-            processReports(context, adminKey)            // PRIMARY: verify reported only
-            if (fullRescan) { fullRescan = false; fullCatalogPass(context, adminKey) }
+            val hadReports = processReports(context, adminKey)   // PRIMARY: verify reported
+            when {
+                fullRescan -> { fullRescan = false; fullCatalogPass(context, adminKey) }
+                // IDLE (no reports): passively verify the OLDEST-checked avatars.
+                !hadReports -> passiveOldestCheck(context, adminKey)
+            }
             if (!running) break
-            delay(POLL_MS)
+            delay(if (hadReports) POLL_MS else PASSIVE_PAUSE_MS)
         }
     }
 
-    /** Verify the PENDING reports (fetched from the Worker) — the scalable path. */
-    private suspend fun processReports(context: Context, adminKey: String) {
+    /** Verify the PENDING reports (fetched from the Worker) — the scalable path.
+     *  Returns true if there were reports to process. */
+    private suspend fun processReports(context: Context, adminKey: String): Boolean {
         val reports = AvatarGlobalDb.fetchReports(adminKey)
-        if (reports.isEmpty()) { status = "no pending reports — idle"; return }
+        if (reports.isEmpty()) return false
         status = "verifying ${reports.size} report(s)"
         val upserts = mutableListOf<AvatarGlobalDb.Entry>()
         val removes = mutableListOf<String>()
@@ -109,6 +116,49 @@ object AvatarCatalogSweep {
             AvatarGlobalDb.adminPush(context, adminKey, upserts.toList(), removes.toList(), clears.toList())
         }
         status = "reports done — checked=$checked removed=$removed refreshed=$refreshed"
+        return true
+    }
+
+    /** IDLE-time passive cleanup: verify the OLDEST-checked avatars (picked LOCALLY
+     *  from the cached catalog — no Cloudflare call to select), remove dead ones, and
+     *  BATCH-bump their last-checked time (rides the Worker's 10-min flush commit, so
+     *  it's ~free). Bounded per pass so it stays incremental. */
+    private suspend fun passiveOldestCheck(context: Context, adminKey: String) {
+        val entries = AvatarGlobalDb.snapshot().sortedBy { it.checked }.take(PASSIVE_BATCH)
+        if (entries.isEmpty()) { status = "catalog empty — idle"; return }
+        status = "passive check: oldest ${entries.size}"
+        val upserts = mutableListOf<AvatarGlobalDb.Entry>()
+        val removes = mutableListOf<String>()
+        val okChecked = mutableListOf<String>()   // alive + unchanged → just bump checked
+        for (e in entries) {
+            if (!running) break
+            val chk = BotVrchatSession.checkAvatar(context, e.avatarId)
+            checked++
+            if (chk == null) { delay(PACE_MS); continue }  // unknown → don't touch
+            if (!chk.alive) {
+                removes.add(e.fileId); removed++
+            } else {
+                val newFile = chk.fileId ?: e.fileId
+                val changed = chk.name != e.name || chk.author != e.author ||
+                    chk.authorId != e.authorId || chk.platforms != e.platforms || newFile != e.fileId
+                if (changed) {
+                    if (newFile != e.fileId) removes.add(e.fileId)  // re-key on image change
+                    upserts.add(e.copy(fileId = newFile, name = chk.name, author = chk.author,
+                        authorId = chk.authorId, platforms = chk.platforms))  // upsert bumps checked
+                    refreshed++
+                } else {
+                    okChecked.add(e.fileId)  // alive + identical → just bump last-checked
+                }
+            }
+            delay(PACE_MS)
+        }
+        // Advance the LOCAL checked time immediately so the next pass moves forward
+        // (the repo catches up on the flush ~10 min later).
+        AvatarGlobalDb.markCheckedLocally(okChecked + upserts.map { it.fileId })
+        if (removes.isNotEmpty() || upserts.isNotEmpty() || okChecked.isNotEmpty()) {
+            AvatarGlobalDb.adminPush(context, adminKey, upserts.toList(), removes.toList(), emptyList(), okChecked.toList())
+        }
+        status = "passive: checked=$checked removed=$removed refreshed=$refreshed"
     }
 
     /** One-time full-catalog walk (manual) — cleanup of pre-existing dead/private. */

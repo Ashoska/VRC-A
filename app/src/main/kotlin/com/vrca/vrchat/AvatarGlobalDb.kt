@@ -59,7 +59,10 @@ object AvatarGlobalDb {
         val name: String,
         val author: String,
         val authorId: String,
-        val platforms: List<String>
+        val platforms: List<String>,
+        /** Last time the bot verified this avatar is alive (epoch ms; 0 = never).
+         *  The passive sweep picks the OLDEST-checked first. */
+        val checked: Long = 0L
     )
 
     private val map = ConcurrentHashMap<String, Entry>()   // fileId -> entry
@@ -122,7 +125,8 @@ object AvatarGlobalDb {
      *  Returns true on a 2xx. Admin build only (needs the ADMIN_KEY). */
     suspend fun adminPush(
         context: Context, adminKey: String,
-        upserts: List<Entry>, removeFileIds: List<String>, clearReports: List<String> = emptyList()
+        upserts: List<Entry>, removeFileIds: List<String>,
+        clearReports: List<String> = emptyList(), checkedFileIds: List<String> = emptyList()
     ): Boolean {
         if (adminKey.isBlank()) return false
         val body = JSONObject().apply {
@@ -138,8 +142,16 @@ object AvatarGlobalDb {
             })
             put("removes", JSONArray(removeFileIds))
             put("clearReports", JSONArray(clearReports))
+            put("checked", JSONArray(checkedFileIds))
         }.toString()
         return kotlinx.coroutines.withContext(Dispatchers.IO) { post("$WORKER_URL/admin", body) }
+    }
+
+    /** Optimistically bump the local `checked` time so the passive sweep advances
+     *  through the catalog without waiting for the repo round-trip. */
+    fun markCheckedLocally(fileIds: Collection<String>) {
+        val now = System.currentTimeMillis()
+        for (fid in fileIds) map[fid]?.let { map[fid] = it.copy(checked = now) }
     }
 
     /** A pending dead/rename report the admin bot should verify. */
@@ -348,7 +360,8 @@ object AvatarGlobalDb {
                 } ?: emptyList()
                 fresh[fileId] = Entry(
                     fileId, id, o.optString("name", ""),
-                    o.optString("author", ""), o.optString("authorId", ""), plats
+                    o.optString("author", ""), o.optString("authorId", ""), plats,
+                    o.optLong("checked", o.optLong("added", 0L))
                 )
             }
             map.clear(); map.putAll(fresh)
