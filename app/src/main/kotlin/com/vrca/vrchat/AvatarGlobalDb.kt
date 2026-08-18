@@ -108,6 +108,37 @@ object AvatarGlobalDb {
     /** Number of catalog entries currently loaded (for the debug panels). */
     fun entryCount(): Int = map.size
 
+    /** A snapshot of every catalog entry — for the admin dead-check/refresh sweep. */
+    fun snapshot(): List<Entry> = map.values.toList()
+
+    /** Force a fresh pull of the catalog file (used by the admin sweep before it
+     *  walks entries, so it works on the latest data). */
+    fun forceRefresh(context: Context) { scope.launch { refresh(context.applicationContext) } }
+
+    /** POST authoritative admin ops (upserts/removes) to the Worker /admin endpoint.
+     *  `upserts` = entries to overwrite (refreshed fields), `removeFileIds` = dead.
+     *  Returns true on a 2xx. Admin build only (needs the ADMIN_KEY). */
+    suspend fun adminPush(
+        context: Context, adminKey: String,
+        upserts: List<Entry>, removeFileIds: List<String>
+    ): Boolean {
+        if (adminKey.isBlank()) return false
+        val body = JSONObject().apply {
+            put("key", adminKey)
+            put("upserts", JSONArray().apply {
+                upserts.forEach { e ->
+                    put(JSONObject().apply {
+                        put("fileId", e.fileId); put("avatarId", e.avatarId)
+                        put("name", e.name); put("author", e.author); put("authorId", e.authorId)
+                        put("platforms", JSONArray(e.platforms))
+                    })
+                }
+            })
+            put("removes", JSONArray(removeFileIds))
+        }.toString()
+        return kotlinx.coroutines.withContext(Dispatchers.IO) { post("$WORKER_URL/admin", body) }
+    }
+
     /** Name search over the catalog (for the in-app avatar search). */
     fun searchByName(query: String, limit: Int = 30): List<Entry> {
         val q = query.trim().lowercase()

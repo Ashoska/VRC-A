@@ -25,12 +25,21 @@ import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Divider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -396,6 +405,9 @@ internal fun DashboardTab(
         // Avatar catalog (crowdsourced clone DB) — live Worker health.
         item { AvatarCatalogCard() }
 
+        // Bot-account dead-check/refresh sweep controls.
+        item { AvatarSweepCard() }
+
         // Activity feed.
         item {
             AdminSectionCard(
@@ -551,6 +563,130 @@ private fun AvatarCatalogCard() {
             AdminLabeledRow("Last flush", lastFlush)
             AdminLabeledRow("Last commit", lastCommit, mono = true)
             AdminLabeledRow("Admin key", adminKey)
+        }
+    }
+}
+
+/**
+ * Bot-account catalog sweep controls: log a DEDICATED VRChat bot account in (so the
+ * admin's real account isn't rate-limited), enter the ADMIN_KEY (matching the Worker
+ * secret), and start/stop the continuous dead-avatar/refresh sweep. Admin build only.
+ */
+@Composable
+private fun AvatarSweepCard() {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val prefs = remember { ctx.getSharedPreferences("vrca_admin_local", Context.MODE_PRIVATE) }
+
+    var loggedIn by remember { mutableStateOf(BotVrchatSession.isLoggedIn(ctx)) }
+    var botName by remember { mutableStateOf(BotVrchatSession.botName(ctx)) }
+    var user by remember { mutableStateOf("") }
+    var pass by remember { mutableStateOf("") }
+    var needs2fa by remember { mutableStateOf(false) }
+    var is2faEmail by remember { mutableStateOf(false) }
+    var code by remember { mutableStateOf("") }
+    var msg by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var adminKey by remember { mutableStateOf(prefs.getString("avatar_admin_key", "") ?: "") }
+    var sweepProgress by remember { mutableStateOf(AvatarCatalogSweep.progress()) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            sweepProgress = AvatarCatalogSweep.progress()
+            loggedIn = BotVrchatSession.isLoggedIn(ctx)
+            delay(2000)
+        }
+    }
+
+    AdminSectionCard(title = "Catalog sweep (bot)", icon = Icons.Filled.SportsEsports, tone = AdminTone.Warn) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            when {
+                loggedIn -> {
+                    AdminLabeledRow("Bot", botName.ifBlank { "logged in" })
+                    TextButton(onClick = {
+                        BotVrchatSession.logout(ctx); AvatarCatalogSweep.stop()
+                        loggedIn = false; botName = ""
+                    }) { Text("Log out bot") }
+                }
+                needs2fa -> {
+                    OutlinedTextField(
+                        value = code, onValueChange = { code = it },
+                        label = { Text("2FA code") }, singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Button(
+                        enabled = !busy && code.isNotBlank(),
+                        onClick = {
+                            busy = true
+                            scope.launch {
+                                val r = BotVrchatSession.verify2FA(ctx, code.trim(), is2faEmail)
+                                msg = when (r) {
+                                    is BotVrchatSession.LoginResult.Success -> {
+                                        loggedIn = true; needs2fa = false
+                                        botName = BotVrchatSession.botName(ctx); "Bot logged in"
+                                    }
+                                    is BotVrchatSession.LoginResult.Error -> r.message
+                                    else -> ""
+                                }
+                                busy = false
+                            }
+                        }
+                    ) { Text("Verify") }
+                }
+                else -> {
+                    OutlinedTextField(
+                        value = user, onValueChange = { user = it },
+                        label = { Text("Bot username / email") }, singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = pass, onValueChange = { pass = it },
+                        label = { Text("Bot password") }, singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Button(
+                        enabled = !busy && user.isNotBlank() && pass.isNotBlank(),
+                        onClick = {
+                            busy = true
+                            scope.launch {
+                                val r = BotVrchatSession.login(ctx, user.trim(), pass)
+                                msg = when (r) {
+                                    is BotVrchatSession.LoginResult.Success -> {
+                                        loggedIn = true; pass = ""
+                                        botName = BotVrchatSession.botName(ctx); "Bot logged in"
+                                    }
+                                    is BotVrchatSession.LoginResult.Needs2FA -> {
+                                        needs2fa = true; is2faEmail = r.email; "Enter the 2FA code"
+                                    }
+                                    is BotVrchatSession.LoginResult.Error -> r.message
+                                }
+                                busy = false
+                            }
+                        }
+                    ) { Text("Log in bot") }
+                }
+            }
+
+            Divider()
+
+            OutlinedTextField(
+                value = adminKey,
+                onValueChange = { adminKey = it; prefs.edit().putString("avatar_admin_key", it).apply() },
+                label = { Text("Admin key (matches Worker ADMIN_KEY)") },
+                singleLine = true, modifier = Modifier.fillMaxWidth()
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    enabled = loggedIn && adminKey.isNotBlank() && !AvatarCatalogSweep.running,
+                    onClick = { AvatarCatalogSweep.start(ctx, adminKey.trim()) }
+                ) { Text("Start sweep") }
+                OutlinedButton(onClick = { AvatarCatalogSweep.stop() }) { Text("Stop") }
+            }
+            Text(sweepProgress, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+            if (msg.isNotBlank()) {
+                Text(msg, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
     }
 }
