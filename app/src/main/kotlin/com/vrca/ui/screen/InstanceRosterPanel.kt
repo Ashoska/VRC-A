@@ -243,15 +243,28 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
                 modifier = Modifier.size(12.dp)
             )
         }
-        // Clone/wear button. The exact avatar id is PRE-RESOLVED in the background
-        // as soon as we know the avatar name (Quest never logs it — see
-        // InstanceRosterManager.resolveAvatars → resolveWornAvatarId), so the tap is
-        // instant. Three states: null = still resolving (spinner), "" = no cloneable
-        // match in any database (greyed out), non-blank = ready (select on tap).
-        // Shown only for others once we know their avatar. Re-resolves on a switch.
-        if (!m.isSelf && m.userId != null && !m.avatarName.isNullOrBlank()) {
+        // Clone/wear button — shown for EVERY non-self member (no gaps). The exact
+        // avatar id is resolved by the worn image FILE ID (name-optional, so even an
+        // impostor'd player with no log avatar name gets one). States:
+        //  - no userId  -> greyed/disabled (unresolvable),
+        //  - avatarId null -> spinner (still resolving),
+        //  - avatarId ""   -> greyed (no cloneable match anywhere),
+        //  - avatarId set  -> ready (tap to clone). A failed clone (avatar now private/
+        //    deleted) confirms + reports it, then greys out.
+        if (!m.isSelf) {
             val avaId = m.avatarId
+            var deadLocally by remember(m.userId, m.avatarName, avaId) { mutableStateOf(false) }
             when {
+                m.userId == null || deadLocally -> IconButton(
+                    onClick = {}, enabled = false, modifier = Modifier.size(28.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.PeopleAlt,
+                        contentDescription = "No cloneable avatar",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
+                        modifier = Modifier.size(17.dp)
+                    )
+                }
                 avaId == null -> Box(Modifier.size(28.dp), contentAlignment = Alignment.Center) {
                     androidx.compose.material3.CircularProgressIndicator(
                         strokeWidth = 2.dp,
@@ -276,14 +289,24 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
                             if (busy) return@IconButton
                             busy = true
                             val name = m.avatarName
+                            val uid = m.userId
                             scope.launch {
                                 val res = com.vrca.vrchat.VrchatAuthManager.selectAvatar(ctx, avaId)
                                 android.widget.Toast.makeText(
                                     ctx,
-                                    if (res.ok) "Cloned $name — shows on your next avatar reload"
+                                    if (res.ok) "Cloned ${name ?: "avatar"} — shows on your next avatar reload"
                                     else (res.error ?: "Couldn't wear this avatar"),
                                     android.widget.Toast.LENGTH_LONG
                                 ).show()
+                                // Clone failed + avatar confirmed gone/private -> report + grey.
+                                if (!res.ok && uid != null &&
+                                    com.vrca.vrchat.VrchatAuthManager.avatarExists(ctx, avaId) == false) {
+                                    val fid = Regex("file_[0-9a-fA-F-]{36}").find(
+                                        com.vrca.vrchat.VrchatAuthManager.fetchUserInfo(ctx, uid)?.wornAvatarThumbUrl.orEmpty()
+                                    )?.value
+                                    if (fid != null) com.vrca.vrchat.AvatarGlobalDb.report(ctx, fid, avaId, "dead")
+                                    deadLocally = true
+                                }
                                 busy = false
                             }
                         },

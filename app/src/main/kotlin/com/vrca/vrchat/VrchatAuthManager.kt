@@ -1401,8 +1401,11 @@ object VrchatAuthManager {
     suspend fun resolveWornAvatarId(
         context: Context, userId: String, avatarName: String, author: String
     ): String? = withContext(Dispatchers.IO) {
-        if (avatarName.isBlank()) return@withContext null
         val wornFileId = fileIdOf(fetchUserInfo(context, userId)?.wornAvatarThumbUrl.orEmpty())
+        // NAME-OPTIONAL: resolve purely from the worn image file id (catalog /
+        // author-listing / image-file-id) — so an impostor'd player in a big instance
+        // (no Unpacking line, so no log avatar name) is still resolvable by their id.
+        if (avatarName.isBlank() && wornFileId == null) return@withContext null
         // GLOBAL crowdsourced catalog first — exact, offline, zero network. This is
         // the extra coverage no public DB has (ids VRC-A users contributed).
         com.vrca.vrchat.AvatarGlobalDb.lookup(wornFileId)?.let {
@@ -1429,6 +1432,12 @@ object VrchatAuthManager {
                 com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, it, avatarName, author)
                 return@withContext it
             }
+        }
+        // No log name (impostor'd player) — the file-id/catalog/author paths above were
+        // our only shot; a name search is impossible, so stop here.
+        if (avatarName.isBlank()) {
+            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "no name; not in catalog/author list"
+            return@withContext null
         }
         // 1. NAME search across VARIANTS — the log's avatar name often carries a
         //    descriptor the DB doesn't store ("Ball Python (handpuppet / head puppet)"
