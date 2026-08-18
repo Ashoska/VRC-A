@@ -47,6 +47,24 @@ object AvatarCatalogSweep {
         return ok
     }
 
+    /** SAFE fill-only refresh: fills in missing/changed pieces (platforms, author id,
+     *  name, image) from a fresh check but NEVER blanks an existing value with an empty
+     *  one — so a partial fetch can't harm a good entry. Returns the updated entry if
+     *  anything actually changed, else null. */
+    private fun safeRefresh(e: AvatarGlobalDb.Entry, chk: BotVrchatSession.AvatarCheck): AvatarGlobalDb.Entry? {
+        val newFile = chk.fileId ?: e.fileId
+        val newName = chk.name.ifBlank { e.name }
+        val newAuthor = chk.author.ifBlank { e.author }
+        val newAuthorId = chk.authorId.ifBlank { e.authorId }
+        val newPlatforms = if (chk.platforms.isNotEmpty()) chk.platforms else e.platforms
+        val changed = newFile != e.fileId || newName != e.name || newAuthor != e.author ||
+            newAuthorId != e.authorId || newPlatforms != e.platforms
+        return if (changed) e.copy(
+            fileId = newFile, name = newName, author = newAuthor,
+            authorId = newAuthorId, platforms = newPlatforms
+        ) else null
+    }
+
     private const val PACE_MS = 1200L          // per avatar (bot account)
     private const val BATCH = 20               // ops per /admin push
     private const val POLL_MS = 30_000L        // poll for new reports every 30s
@@ -107,18 +125,9 @@ object AvatarCatalogSweep {
             } else {
                 clears.add(r.fileId) // alive → false positive
                 val cur = AvatarGlobalDb.lookup(r.fileId)
-                if (cur != null) {
-                    val newFile = chk.fileId ?: cur.fileId
-                    val changed = chk.name != cur.name || chk.author != cur.author ||
-                        chk.authorId != cur.authorId || chk.platforms != cur.platforms || newFile != cur.fileId
-                    if (changed) {
-                        if (newFile != cur.fileId) removes.add(cur.fileId)
-                        upserts.add(cur.copy(
-                            fileId = newFile, name = chk.name, author = chk.author,
-                            authorId = chk.authorId, platforms = chk.platforms
-                        ))
-                        refreshed++
-                    }
+                if (cur != null) safeRefresh(cur, chk)?.let { upd ->
+                    if (upd.fileId != cur.fileId) removes.add(cur.fileId) // re-key on image change
+                    upserts.add(upd); refreshed++
                 }
             }
             if (upserts.size + removes.size + clears.size >= BATCH) {
@@ -153,14 +162,10 @@ object AvatarCatalogSweep {
             if (!chk.alive) {
                 removes.add(e.fileId); removed++
             } else {
-                val newFile = chk.fileId ?: e.fileId
-                val changed = chk.name != e.name || chk.author != e.author ||
-                    chk.authorId != e.authorId || chk.platforms != e.platforms || newFile != e.fileId
-                if (changed) {
-                    if (newFile != e.fileId) removes.add(e.fileId)  // re-key on image change
-                    upserts.add(e.copy(fileId = newFile, name = chk.name, author = chk.author,
-                        authorId = chk.authorId, platforms = chk.platforms))  // upsert bumps checked
-                    refreshed++
+                val upd = safeRefresh(e, chk)  // fill-only: never blanks good data
+                if (upd != null) {
+                    if (upd.fileId != e.fileId) removes.add(e.fileId)  // re-key on image change
+                    upserts.add(upd); refreshed++  // upsert bumps checked
                 } else {
                     okChecked.add(e.fileId)  // alive + identical → just bump last-checked
                 }

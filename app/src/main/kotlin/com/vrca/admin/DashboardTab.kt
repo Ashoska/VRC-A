@@ -600,6 +600,15 @@ private fun AvatarSweepCard() {
         }
     }
 
+    // Auto-start: whenever the bot is logged in and a key is set, keep the sweep
+    // running (oldest-first, auto-switching to reports as they arrive, then back) —
+    // so it's "always going" without a manual Start each time the admin app opens.
+    LaunchedEffect(loggedIn, adminKey) {
+        if (loggedIn && adminKey.isNotBlank() && !AvatarCatalogSweep.running) {
+            AvatarCatalogSweep.start(ctx, adminKey.trim())
+        }
+    }
+
     AdminSectionCard(title = "Catalog sweep (bot)", icon = Icons.Filled.SportsEsports, tone = AdminTone.Warn) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             when {
@@ -693,18 +702,9 @@ private fun AvatarSweepCard() {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    enabled = loggedIn && adminKey.isNotBlank() && !AvatarCatalogSweep.running,
-                    onClick = { AvatarCatalogSweep.start(ctx, adminKey.trim()) }
-                ) { Text("Start sweep") }
-                OutlinedButton(onClick = { AvatarCatalogSweep.stop() }) { Text("Stop") }
-            }
-            // One-time full-catalog rescan (cleanup of pre-existing dead/private).
-            TextButton(
-                enabled = AvatarCatalogSweep.running,
-                onClick = { AvatarCatalogSweep.requestFullRescan() }
-            ) { Text("Queue full rescan (one-time cleanup)") }
+            // No buttons — the sweep AUTO-RUNS (oldest-first, switching to reports as
+            // they arrive) whenever the bot is logged in + the key is set. It cleans
+            // the whole catalog over time on its own; nothing to press.
             Text(sweepProgress, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
             if (msg.isNotBlank()) {
                 Text(msg, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
