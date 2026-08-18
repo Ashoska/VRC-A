@@ -182,6 +182,35 @@ object AvatarSearch {
         } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
     }
 
+    /**
+     * On-headset diagnostics for avatar-id resolution — so a Quest user (who can't
+     * read logcat) can see in Settings -> Debug whether each resolve path worked.
+     * The `authorListing` line is the KEY one: it distinguishes "blocked (403)" from
+     * "returned data but it's NOT the author's avatars (request ignored)" from
+     * "worked, matched" from "worked, avatar not in the author's public list".
+     */
+    object Diag {
+        private const val MAX = 6
+        private val entries = ArrayDeque<String>()
+        /** Result of the most recent official author-avatars-listing attempt. */
+        @Volatile var authorListing: String = "(not attempted yet)"
+
+        @Synchronized fun record(line: String) {
+            entries.addFirst(line)
+            while (entries.size > MAX) entries.removeLast()
+        }
+
+        @Synchronized fun dump(): String = buildString {
+            append("Author listing: ").append(authorListing)
+            if (entries.isNotEmpty()) {
+                append("\n\nLast resolves:\n")
+                append(entries.joinToString("\n"))
+            } else {
+                append("\n\n(no resolves yet — open an instance)")
+            }
+        }
+    }
+
     /** avtrdb's `compatibility` values ("pc"/"android"/"ios") -> display labels.
      *  (Distinct from VRChat's `standalonewindows`/`android` platform strings.) */
     private fun prettyAvtrdbPlatform(raw: String): String = when (raw.trim().lowercase()) {

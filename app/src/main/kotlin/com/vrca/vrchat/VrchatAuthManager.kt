@@ -1304,9 +1304,21 @@ object VrchatAuthManager {
      */
     private suspend fun resolveViaAuthorAvatars(context: Context, wornFileId: String): String? =
         withContext(Dispatchers.IO) {
-            if (authorAvatarsListingBlocked) return@withContext null
-            val cookie = getCookieHeader(context) ?: return@withContext null
-            val authorId = fetchFileOwnerId(context, wornFileId) ?: return@withContext null
+            if (authorAvatarsListingBlocked) {
+                com.vrca.vrchat.AvatarSearch.Diag.authorListing = "disabled for session (was blocked earlier)"
+                return@withContext null
+            }
+            val cookie = getCookieHeader(context)
+            if (cookie == null) {
+                com.vrca.vrchat.AvatarSearch.Diag.authorListing = "no VRChat cookie"
+                return@withContext null
+            }
+            val authorId = fetchFileOwnerId(context, wornFileId)
+            if (authorId == null) {
+                com.vrca.vrchat.AvatarSearch.Diag.authorListing =
+                    "GET /file/$wornFileId gave no ownerId (file hidden?)"
+                return@withContext null
+            }
             try {
                 val (code, body, raw) = get(
                     "$BASE/avatars?userId=$authorId&releaseStatus=public&n=100&sort=updated",
@@ -1315,21 +1327,46 @@ object VrchatAuthManager {
                 if (code == 200) captureRolledCookies(context, raw)
                 if (code == 401 || code == 403) {
                     authorAvatarsListingBlocked = true
+                    com.vrca.vrchat.AvatarSearch.Diag.authorListing =
+                        "BLOCKED — HTTP $code listing author's avatars (disabled for session). VRChat forbids it."
                     Log.i(TAG, "author-avatars listing blocked ($code) — disabling for session")
                     return@withContext null
                 }
-                if (code != 200 || !body.startsWith("[")) return@withContext null
+                if (code != 200 || !body.startsWith("[")) {
+                    com.vrca.vrchat.AvatarSearch.Diag.authorListing = "HTTP $code (unexpected, not a list)"
+                    return@withContext null
+                }
                 val arr = org.json.JSONArray(body)
+                // Did VRChat actually return THIS author's avatars, or silently ignore
+                // our userId and hand back our own? (ownerMatch answers "worked vs asked
+                // wrong".) Also whether any matched the worn image file id.
+                var ownerMatches = 0
+                var fileMatch: String? = null
                 for (i in 0 until arr.length()) {
                     val a = arr.optJSONObject(i) ?: continue
+                    if (a.optString("authorId", "") == authorId) ownerMatches++
                     val thumb = a.optString("thumbnailImageUrl", "").ifBlank { a.optString("imageUrl", "") }
-                    if (fileIdOf(thumb) == wornFileId) {
+                    if (fileMatch == null && fileIdOf(thumb) == wornFileId) {
                         val id = a.optString("id", "")
-                        if (id.startsWith("avtr_")) return@withContext id
+                        if (id.startsWith("avtr_")) fileMatch = id
                     }
                 }
+                val n = arr.length()
+                com.vrca.vrchat.AvatarSearch.Diag.authorListing = when {
+                    fileMatch != null ->
+                        "WORKS — HTTP 200, $n avatars, ownerMatch=$ownerMatches, matched $fileMatch ✓"
+                    n == 0 ->
+                        "HTTP 200 but 0 avatars (author has no public avatars, or listing scoped out)"
+                    ownerMatches == 0 ->
+                        "IGNORED — HTTP 200, $n avatars but NONE are the author's (VRChat returned another/own list)"
+                    else ->
+                        "HTTP 200, $n author avatars, ownerMatch=$ownerMatches, but none match worn file (avatar not public-listed)"
+                }
+                fileMatch
+            } catch (e: Exception) {
+                com.vrca.vrchat.AvatarSearch.Diag.authorListing = "error: ${e.javaClass.simpleName}"
                 null
-            } catch (e: Exception) { null }
+            }
         }
 
     /** The worn-avatar thumbnail file id for a public avatar, via the PUBLIC

@@ -466,6 +466,26 @@ internal fun SettingsPage(
                                     style = MaterialTheme.typography.bodySmall
                                 )
                             }
+
+                            // Avatar-id resolve: shows whether each clone id resolved
+                            // and — the key line — whether VRChat's official
+                            // author-avatars listing WORKS, is BLOCKED (403), or is
+                            // IGNORED (returns a list that isn't the author's).
+                            Text("Avatar id resolve (clone)", style = MaterialTheme.typography.labelMedium)
+                            var avaDiag by remember { mutableStateOf(com.vrca.vrchat.AvatarSearch.Diag.dump()) }
+                            androidx.compose.runtime.LaunchedEffect(Unit) {
+                                while (true) {
+                                    avaDiag = com.vrca.vrchat.AvatarSearch.Diag.dump()
+                                    kotlinx.coroutines.delay(1500)
+                                }
+                            }
+                            SelectionContainer {
+                                Text(
+                                    avaDiag,
+                                    fontFamily = FontFamily.Monospace,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
                         }
 
                         Text("OSC Output Preview", style = MaterialTheme.typography.labelMedium)
