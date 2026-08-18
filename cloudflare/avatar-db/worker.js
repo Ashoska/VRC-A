@@ -224,22 +224,7 @@ async function flush(env) {
       db = { version: 1, avatars: {} };
     }
     if (!db.avatars) db.avatars = {};
-  } else if (getRes.status === 404) {
-    // MIGRATION: the real file is missing but early flushes (before DB_PATH was
-    // applied) wrote to a root file named "undefined". Adopt its 184 entries.
-    const legacy = await fetch(
-      `https://api.github.com/repos/${repo}/contents/undefined?ref=${encodeURIComponent(branch)}`,
-      { headers }
-    );
-    if (legacy.status === 200) {
-      const lj = await legacy.json();
-      try {
-        const ld = JSON.parse(b64decode(lj.content));
-        if (ld && ld.avatars) { db = ld; if (!db.avatars) db.avatars = {}; }
-      } catch (_) {}
-      legacySha = lj.sha;
-    }
-  } else {
+  } else if (getRes.status !== 404) {
     return; // transient GitHub error — leave KV untouched, retry next cron
   }
 
@@ -262,6 +247,28 @@ async function flush(env) {
         db.avatars[fileId] = batch[fileId];
         added++;
       }
+    }
+  }
+
+  // 2b. MIGRATION: fold in + delete any stray root "undefined" file (from before
+  //     DB_PATH was applied). Runs whether or not the real file already exists;
+  //     once "undefined" is gone this is a cheap no-op.
+  {
+    const legacy = await fetch(
+      `https://api.github.com/repos/${repo}/contents/undefined?ref=${encodeURIComponent(branch)}`,
+      { headers }
+    );
+    if (legacy.status === 200) {
+      const lj = await legacy.json();
+      try {
+        const ld = JSON.parse(b64decode(lj.content));
+        if (ld && ld.avatars) {
+          for (const fid of Object.keys(ld.avatars)) {
+            if (!db.avatars[fid]) { db.avatars[fid] = ld.avatars[fid]; added++; }
+          }
+        }
+      } catch (_) {}
+      legacySha = lj.sha;
     }
   }
 
