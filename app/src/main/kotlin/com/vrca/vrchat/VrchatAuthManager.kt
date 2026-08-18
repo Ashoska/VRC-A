@@ -1272,6 +1272,66 @@ object VrchatAuthManager {
     private fun fileIdOf(url: String): String? =
         Regex("""file_[0-9a-fA-F-]{36}""").find(url)?.value
 
+    // The author-public-avatars listing (below) is the potential OFFICIAL 100%
+    // path, but VRChat may block enumerating another user's avatars. If it ever
+    // returns 403/401 we set this so we stop attempting it for the session (never
+    // burn rate limit on a blocked endpoint). Reset on process restart.
+    @Volatile private var authorAvatarsListingBlocked = false
+
+    /** The `ownerId` (avatar AUTHOR's usr id) for a file, via `GET /file/{id}`.
+     *  File objects are readable, so this gives the exact author even for another
+     *  player's worn-avatar image (the log only has a display name). */
+    private suspend fun fetchFileOwnerId(context: Context, fileId: String): String? =
+        withContext(Dispatchers.IO) {
+            if (!fileId.startsWith("file_")) return@withContext null
+            val cookie = getCookieHeader(context) ?: return@withContext null
+            try {
+                val (code, body, raw) = get("$BASE/file/$fileId", null, cookie)
+                if (code == 200) captureRolledCookies(context, raw)
+                if (code != 200 || !body.startsWith("{")) return@withContext null
+                org.json.JSONObject(body).optString("ownerId", "").takeIf { it.startsWith("usr_") }
+            } catch (e: Exception) { null }
+        }
+
+    /**
+     * OFFICIAL resolve attempt: a PUBLIC avatar is listed among its author's public
+     * avatars, so — worn image file id → its file's `ownerId` (author) →
+     * `GET /avatars?userId={author}&releaseStatus=public` → the avatar whose
+     * thumbnail file id equals the worn one. When VRChat permits the listing this is
+     * exact and needs NO third-party database. If VRChat blocks enumerating another
+     * user's avatars (403/401) it self-disables for the session. Returns the avtr_ id
+     * or null (blocked / author unknown / not in the author's public list).
+     */
+    private suspend fun resolveViaAuthorAvatars(context: Context, wornFileId: String): String? =
+        withContext(Dispatchers.IO) {
+            if (authorAvatarsListingBlocked) return@withContext null
+            val cookie = getCookieHeader(context) ?: return@withContext null
+            val authorId = fetchFileOwnerId(context, wornFileId) ?: return@withContext null
+            try {
+                val (code, body, raw) = get(
+                    "$BASE/avatars?userId=$authorId&releaseStatus=public&n=100&sort=updated",
+                    null, cookie
+                )
+                if (code == 200) captureRolledCookies(context, raw)
+                if (code == 401 || code == 403) {
+                    authorAvatarsListingBlocked = true
+                    Log.i(TAG, "author-avatars listing blocked ($code) — disabling for session")
+                    return@withContext null
+                }
+                if (code != 200 || !body.startsWith("[")) return@withContext null
+                val arr = org.json.JSONArray(body)
+                for (i in 0 until arr.length()) {
+                    val a = arr.optJSONObject(i) ?: continue
+                    val thumb = a.optString("thumbnailImageUrl", "").ifBlank { a.optString("imageUrl", "") }
+                    if (fileIdOf(thumb) == wornFileId) {
+                        val id = a.optString("id", "")
+                        if (id.startsWith("avtr_")) return@withContext id
+                    }
+                }
+                null
+            } catch (e: Exception) { null }
+        }
+
     /** The worn-avatar thumbnail file id for a public avatar, via the PUBLIC
      *  `GET /avatars/{id}`. Returns null on 404 (private/deleted) or error. */
     private suspend fun fetchAvatarThumbFileId(context: Context, avatarId: String): String? =
@@ -1289,8 +1349,11 @@ object VrchatAuthManager {
     /**
      * Resolve a remote player's EXACT worn avatar id. Quest can't get it from the
      * log (the avatar id isn't written) or the API (`/users/{id}` hides it), so we:
-     *  1. read the worn avatar's IMAGE file id from `/users/{id}` (a unique key),
-     *  2. search the avatar database (avtrdb) by the log's avatar NAME,
+     *  0. read the worn avatar's IMAGE file id from `/users/{id}` (a unique key) and
+     *     look it up DIRECTLY by that file id (name-independent — catches renamed/
+     *     odd-named avatars a name search misses),
+     *  1. else search the avatar database (avtrdb) by the log's avatar NAME,
+     *  2. and confirm a name candidate by its image file id,
      *  3. CONFIRM a candidate by fetching its public `GET /avatars/{id}` and matching
      *     the image file id — an exact 1:1 check, immune to name collisions.
      * `author` (from the log's `Unpacking Avatar (… by …)`) ranks candidates first.
@@ -1303,6 +1366,19 @@ object VrchatAuthManager {
     ): String? = withContext(Dispatchers.IO) {
         if (avatarName.isBlank()) return@withContext null
         val wornFileId = fileIdOf(fetchUserInfo(context, userId)?.wornAvatarThumbUrl.orEmpty())
+        // 0. EXACT, NAME-INDEPENDENT: look the avatar up by its worn IMAGE FILE ID —
+        //    invariant per upload, so this resolves it even when the log's avatar name
+        //    is renamed/truncated/generic/colliding (the main gap that used to grey the
+        //    button out). A file-id hit whose image file id equals the worn one is a
+        //    guaranteed-correct match with zero VRChat calls.
+        if (wornFileId != null) {
+            val byFile = try { com.vrca.vrchat.AvatarSearch.searchCandidatesByImageFileId(wornFileId) }
+                catch (e: Exception) { emptyList() }
+            byFile.firstOrNull { it.imageFileId == wornFileId }?.let { return@withContext it.id }
+            // 0b. OFFICIAL: the author's public-avatars listing, matched by the worn
+            //     image file id. No third-party DB; exact when VRChat permits it.
+            resolveViaAuthorAvatars(context, wornFileId)?.let { return@withContext it }
+        }
         val candidates = try { com.vrca.vrchat.AvatarSearch.searchCandidates(avatarName) }
             catch (e: Exception) { emptyList() }
         if (candidates.isEmpty()) return@withContext null

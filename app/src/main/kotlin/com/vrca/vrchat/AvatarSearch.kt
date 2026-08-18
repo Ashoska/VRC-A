@@ -113,6 +113,24 @@ object AvatarSearch {
         ).awaitAll().flatten().filter { it.id.startsWith("avtr_") }.distinctBy { it.id }
     }
 
+    /**
+     * NAME-INDEPENDENT resolve: query the VRCX-style mirrors by the worn avatar's
+     * IMAGE FILE ID (`file_…`). Those mirrors emulate VRCX, whose avatar search
+     * matches image-file-id / image-url text — so this returns the EXACT avatar
+     * even when the log's avatar name is renamed, truncated, generic, or collides.
+     * The file id is invariant per upload, so a hit here is unambiguous. avtrdb is
+     * skipped (its free-text search is name-oriented and proxies images, so a file
+     * id wouldn't match). Fails soft (empty) when a mirror doesn't index by file id.
+     */
+    suspend fun searchCandidatesByImageFileId(fileId: String): List<Candidate> = coroutineScope {
+        if (!fileId.startsWith("file_")) return@coroutineScope emptyList()
+        val q = URLEncoder.encode(fileId, "UTF-8")
+        listOf(
+            async { vrcxCandidates("https://requi.dev/vrcx_search.php?search=$q") },
+            async { vrcxCandidates("https://avtr.just-h.party/vrcx_search.php?search=$q") }
+        ).awaitAll().flatten().filter { it.id.startsWith("avtr_") }.distinctBy { it.id }
+    }
+
     private suspend fun avtrdbCandidates(encodedQuery: String): List<Candidate> = withContext(Dispatchers.IO) {
         val body = httpGet("$BASE?query=$encodedQuery&page=0") ?: return@withContext emptyList()
         try {

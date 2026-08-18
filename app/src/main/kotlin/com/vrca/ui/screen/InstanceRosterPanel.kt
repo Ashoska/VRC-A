@@ -15,9 +15,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Android
-import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.PeopleAlt
 import androidx.compose.material3.Button
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
@@ -263,10 +263,10 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
                     onClick = {}, enabled = false, modifier = Modifier.size(28.dp)
                 ) {
                     Icon(
-                        Icons.Filled.ContentCopy,
+                        Icons.Filled.PeopleAlt,
                         contentDescription = "No cloneable avatar found",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
-                        modifier = Modifier.size(16.dp)
+                        modifier = Modifier.size(17.dp)
                     )
                 }
                 else -> {
@@ -298,10 +298,10 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
                             )
                         } else {
                             Icon(
-                                Icons.Filled.ContentCopy,
+                                Icons.Filled.PeopleAlt,
                                 contentDescription = "Clone avatar",
                                 tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(16.dp)
+                                modifier = Modifier.size(17.dp)
                             )
                         }
                     }
