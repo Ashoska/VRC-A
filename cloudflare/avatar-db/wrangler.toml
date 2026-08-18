@@ -1,0 +1,25 @@
+# Cloudflare Worker config for the VRC-A avatar catalog.
+# Used by Workers Builds (Git integration) to auto-deploy on every push, so the
+# Worker never has to be pasted into the dashboard by hand again.
+#
+# The GH_TOKEN secret is NOT here (secrets are set in the dashboard and persist
+# across deploys). Everything else — KV binding, vars, cron — is declared here so a
+# Git deploy reproduces the exact working config.
+
+name = "vrca-avatar-db"
+main = "worker.js"
+compatibility_date = "2026-08-18"
+
+# The pending-queue KV store. Replace the id with YOUR namespace id
+# (Cloudflare -> Storage & databases -> KV -> vrca-avatar-kv -> ID).
+[[kv_namespaces]]
+binding = "AVATAR_KV"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+
+[vars]
+GH_REPO = "Ashoska/VRC-A-Image-store"
+DB_PATH = "avatars/db.json"
+GH_BRANCH = "main"
+
+[triggers]
+crons = ["*/10 * * * *"]
