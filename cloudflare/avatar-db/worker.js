@@ -197,12 +197,23 @@ async function flush(env) {
   const repo = env.GH_REPO;
   const path = env.DB_PATH;
   const branch = env.GH_BRANCH || "main";
-  const apiUrl = `https://api.github.com/repos/${repo}/contents/${path}`;
   const headers = ghHeaders(env);
+
+  // GUARD: never write to an unset/undefined path (that created the "undefined"
+  // file). Abort and record the reason so /health shows it.
+  if (!path || path === "undefined" || !repo || repo === "undefined") {
+    await env.AVATAR_KV.put("meta", JSON.stringify({
+      lastFlush: new Date().toISOString(), lastAdded: 0, lastRemoved: 0,
+      entries: 0, lastCommit: "ERROR: GH_REPO/DB_PATH unset (repo=" + repo + " path=" + path + ")",
+    }));
+    return;
+  }
+  const apiUrl = `https://api.github.com/repos/${repo}/contents/${path}`;
 
   // 1. Load the current db.json (+ sha for the update).
   let db = { version: 1, avatars: {} };
   let sha;
+  let legacySha; // sha of a stray "undefined" file to migrate + delete
   const getRes = await fetch(apiUrl + "?ref=" + encodeURIComponent(branch), { headers });
   if (getRes.status === 200) {
     const j = await getRes.json();
@@ -213,7 +224,22 @@ async function flush(env) {
       db = { version: 1, avatars: {} };
     }
     if (!db.avatars) db.avatars = {};
-  } else if (getRes.status !== 404) {
+  } else if (getRes.status === 404) {
+    // MIGRATION: the real file is missing but early flushes (before DB_PATH was
+    // applied) wrote to a root file named "undefined". Adopt its 184 entries.
+    const legacy = await fetch(
+      `https://api.github.com/repos/${repo}/contents/undefined?ref=${encodeURIComponent(branch)}`,
+      { headers }
+    );
+    if (legacy.status === 200) {
+      const lj = await legacy.json();
+      try {
+        const ld = JSON.parse(b64decode(lj.content));
+        if (ld && ld.avatars) { db = ld; if (!db.avatars) db.avatars = {}; }
+      } catch (_) {}
+      legacySha = lj.sha;
+    }
+  } else {
     return; // transient GitHub error — leave KV untouched, retry next cron
   }
 
@@ -268,9 +294,9 @@ async function flush(env) {
 
   const entries = Object.keys(db.avatars).length;
 
-  // 4. Commit only when something actually changed.
+  // 4. Commit when something changed OR we're migrating the legacy "undefined" file.
   let lastCommit = "no change";
-  if (added > 0 || removed > 0 || repClear.length > 0) {
+  if (added > 0 || removed > 0 || repClear.length > 0 || legacySha) {
     const putBody = {
       message: `avatar-db: +${added} -${removed} (${entries} total)`,
       content: b64encode(serializeDb(db)),
@@ -296,6 +322,15 @@ async function flush(env) {
     // Only clear KV after a successful commit, so nothing is lost on failure.
     for (const name of pendKeys) await env.AVATAR_KV.delete(name);
     for (const name of repClear) await env.AVATAR_KV.delete(name);
+    // Migration done -> delete the stray "undefined" file.
+    if (legacySha) {
+      await fetch(`https://api.github.com/repos/${repo}/contents/undefined`, {
+        method: "DELETE",
+        headers,
+        body: JSON.stringify({ message: "avatar-db: migrate undefined -> " + path, sha: legacySha, branch }),
+      }).catch(() => {});
+      lastCommit += " (migrated from undefined)";
+    }
   }
 
   await env.AVATAR_KV.put(
