@@ -119,6 +119,19 @@ export default {
         });
       }
 
+      if (req.method === "GET" && url.pathname === "/flush") {
+        // Trigger a flush on demand and report the commit result (for diagnosis).
+        await flush(env);
+        const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+        return json({
+          triggered: true,
+          lastCommit: meta.lastCommit || "none",
+          entries: meta.entries || 0,
+          lastAdded: meta.lastAdded || 0,
+          lastFlush: meta.lastFlush || null,
+        });
+      }
+
       if (req.method === "GET" && url.pathname === "/where") {
         // Authenticated live GET of the file -> GitHub's OWN download_url / html_url,
         // so we can see EXACTLY where the Worker's commits land.
