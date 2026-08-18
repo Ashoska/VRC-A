@@ -488,6 +488,25 @@ internal fun SettingsPage(
                             }
                         }
 
+                        // Crowdsourced avatar catalog (all builds): entries loaded
+                        // from the global file, last pull (fresh vs 304), local
+                        // contribution queue size, and the last POST result.
+                        Text("Avatar catalog (global)", style = MaterialTheme.typography.labelMedium)
+                        var gdbDiag by remember { mutableStateOf(com.vrca.vrchat.AvatarGlobalDb.diag(ctx)) }
+                        androidx.compose.runtime.LaunchedEffect(Unit) {
+                            while (true) {
+                                gdbDiag = com.vrca.vrchat.AvatarGlobalDb.diag(ctx)
+                                kotlinx.coroutines.delay(1500)
+                            }
+                        }
+                        SelectionContainer {
+                            Text(
+                                gdbDiag,
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+
                         Text("OSC Output Preview", style = MaterialTheme.typography.labelMedium)
                         SelectionContainer {
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {

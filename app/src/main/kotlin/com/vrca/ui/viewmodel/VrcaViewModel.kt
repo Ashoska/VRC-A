@@ -2795,6 +2795,10 @@ class VrcaViewModel(
         // VRChat sign-out hard-blocks OSC until re-login (Settings Accounts).
         startVrchatAuthGateWatcher()
 
+        // Crowdsourced avatar-id catalog: pull the global file (on open + every
+        // 30 min), drain any queued contributions, seed our own current avatar.
+        com.vrca.vrchat.AvatarGlobalDb.start(app)
+
         // Drive the "in VRChat" uptime timer from live presence (regardless of the
         // Discord RPC), and mirror its start epoch into observable VM state.
         viewModelScope.launch {

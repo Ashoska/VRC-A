@@ -1403,6 +1403,12 @@ object VrchatAuthManager {
     ): String? = withContext(Dispatchers.IO) {
         if (avatarName.isBlank()) return@withContext null
         val wornFileId = fileIdOf(fetchUserInfo(context, userId)?.wornAvatarThumbUrl.orEmpty())
+        // GLOBAL crowdsourced catalog first — exact, offline, zero network. This is
+        // the extra coverage no public DB has (ids VRC-A users contributed).
+        com.vrca.vrchat.AvatarGlobalDb.lookup(wornFileId)?.let {
+            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog"
+            return@withContext it.avatarId
+        }
         // 0. EXACT, NAME-INDEPENDENT: look the avatar up by its worn IMAGE FILE ID —
         //    invariant per upload, so this resolves it even when the log's avatar name
         //    is renamed/truncated/generic/colliding (the main gap that used to grey the
@@ -1413,12 +1419,14 @@ object VrchatAuthManager {
                 catch (e: Exception) { emptyList() }
             byFile.firstOrNull { it.imageFileId == wornFileId }?.let {
                 com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via image file id"
+                com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, it.id, avatarName, author, emptyList())
                 return@withContext it.id
             }
             // 0b. OFFICIAL: the author's public-avatars listing, matched by the worn
             //     image file id. No third-party DB; exact when VRChat permits it.
             resolveViaAuthorAvatars(context, wornFileId)?.let {
                 com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via author listing"
+                com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, it, avatarName, author, emptyList())
                 return@withContext it
             }
         }
@@ -1444,6 +1452,7 @@ object VrchatAuthManager {
             //    file id and it equals the worn one. Exact, no extra VRChat call.
             candidates.firstOrNull { it.imageFileId == wornFileId }?.let {
                 com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name->fileid"
+                com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, it.id, avatarName, author, emptyList())
                 return@withContext it.id
             }
             // 3. CONFIRM proxied-image candidates (avtrdb) via VRChat GET /avatars/{id}.
@@ -1454,6 +1463,7 @@ object VrchatAuthManager {
             for (c in ranked) {
                 if (fetchAvatarThumbFileId(context, c.id) == wornFileId) {
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name confirm"
+                    com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, c.id, avatarName, c.author, emptyList())
                     return@withContext c.id
                 }
                 kotlinx.coroutines.delay(250)
@@ -1502,6 +1512,51 @@ object VrchatAuthManager {
         noParen.split(Regex("""\s[-|/]\s""")).firstOrNull()?.trim()
             ?.takeIf { it.length >= 2 }?.let { out += it }
         return out.toList().take(4)
+    }
+
+    /** A crowdsource-catalog entry: the avatar's image FILE ID (the key strangers
+     *  can read) plus its id/name/author/platforms. */
+    data class CatalogEntry(
+        val fileId: String,
+        val avatarId: String,
+        val name: String,
+        val author: String,
+        val platforms: List<String>
+    )
+
+    /** The local user's OWN current avatar as a catalog entry — the id they can
+     *  always read for themselves (from `/auth/user`). This is the coverage the
+     *  public DBs can't have. Returns null when not logged in / no current avatar. */
+    suspend fun currentAvatarCatalogEntry(context: Context): CatalogEntry? = withContext(Dispatchers.IO) {
+        val cookie = getCookieHeader(context) ?: return@withContext null
+        try {
+            val (code, body, raw) = get("$BASE/auth/user", null, cookie)
+            if (code == 200) captureRolledCookies(context, raw)
+            if (code != 200 || !body.startsWith("{")) return@withContext null
+            val avatarId = org.json.JSONObject(body).optString("currentAvatar", "")
+            if (!avatarId.startsWith("avtr_")) return@withContext null
+            avatarCatalogEntry(context, avatarId)
+        } catch (e: Exception) { null }
+    }
+
+    /** Build a catalog entry from the PUBLIC `GET /avatars/{id}` (name/author/
+     *  thumbnail file id/platforms). Used to seed the crowdsource catalog. */
+    suspend fun avatarCatalogEntry(context: Context, avatarId: String): CatalogEntry? = withContext(Dispatchers.IO) {
+        val cookie = getCookieHeader(context) ?: return@withContext null
+        try {
+            val (code, body, raw) = get("$BASE/avatars/$avatarId", null, cookie)
+            if (code == 200) captureRolledCookies(context, raw)
+            if (code != 200 || !body.startsWith("{")) return@withContext null
+            val j = org.json.JSONObject(body)
+            val fileId = fileIdOf(j.optString("thumbnailImageUrl", "").ifBlank { j.optString("imageUrl", "") })
+                ?: return@withContext null
+            val plats = j.optJSONArray("unityPackages")?.let { ups ->
+                (0 until ups.length()).mapNotNull {
+                    ups.optJSONObject(it)?.optString("platform", "")?.takeIf { s -> s.isNotBlank() }
+                }.map { prettyPlatform(it) }.filter { it.isNotBlank() }.distinct()
+            } ?: emptyList()
+            CatalogEntry(fileId, avatarId, j.optString("name", ""), j.optString("authorName", ""), plats)
+        } catch (e: Exception) { null }
     }
 
     suspend fun fetchGroupName(context: Context, groupId: String): String? = withContext(Dispatchers.IO) {
