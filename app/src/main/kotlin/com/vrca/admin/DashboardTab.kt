@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.Warning
@@ -392,6 +393,9 @@ internal fun DashboardTab(
             }
         }
 
+        // Avatar catalog (crowdsourced clone DB) — live Worker health.
+        item { AvatarCatalogCard() }
+
         // Activity feed.
         item {
             AdminSectionCard(
@@ -490,4 +494,63 @@ private fun relativeShort(timeMs: Long, nowMs: Long): String {
     val h = m / 60L
     if (h < 24L) return "${h}h"
     return "${h / 24L}d"
+}
+
+/**
+ * Live status of the crowdsourced avatar catalog (the Cloudflare Worker that owns
+ * `avatars/db.json`). Polls the Worker's cheap /health every 15s — entries, pending
+ * queue, last flush/commit, and whether the ADMIN_KEY is configured (needed for the
+ * dead-avatar/refresh sweep). Zero Firestore.
+ */
+@Composable
+private fun AvatarCatalogCard() {
+    var status by remember { mutableStateOf("loading…") }
+    var entries by remember { mutableStateOf("—") }
+    var pending by remember { mutableStateOf("—") }
+    var lastFlush by remember { mutableStateOf("—") }
+    var lastCommit by remember { mutableStateOf("—") }
+    var adminKey by remember { mutableStateOf("—") }
+    var tick by remember { mutableIntStateOf(0) }
+    LaunchedEffect(tick) {
+        while (true) {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    val conn = (java.net.URL("${com.vrca.vrchat.AvatarGlobalDb.WORKER_URL}/health")
+                        .openConnection() as java.net.HttpURLConnection).apply {
+                        connectTimeout = 10_000; readTimeout = 10_000
+                        setRequestProperty("User-Agent", "VRC-A")
+                    }
+                    conn.inputStream.bufferedReader().readText()
+                }
+            }.onSuccess { body ->
+                val j = JSONObject(body)
+                entries = j.optInt("entries").toString()
+                pending = "${j.optInt("pendingBatches")} batch / ${j.optInt("reports")} rep"
+                lastFlush = j.optString("lastFlush", "—")
+                lastCommit = j.optString("lastCommit", "—")
+                adminKey = if (j.optBoolean("adminKeySet")) "set" else "NOT set"
+                status = "live"
+            }.onFailure { status = "unreachable (${it.javaClass.simpleName})" }
+            delay(15_000)
+        }
+    }
+    AdminSectionCard(
+        title = "Avatar catalog",
+        icon = Icons.Filled.Storage,
+        tone = AdminTone.Info,
+        trailing = {
+            IconButton(onClick = { tick++ }) {
+                Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
+            }
+        }
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            AdminLabeledRow("Worker", status)
+            AdminLabeledRow("Avatars", entries)
+            AdminLabeledRow("Pending", pending)
+            AdminLabeledRow("Last flush", lastFlush)
+            AdminLabeledRow("Last commit", lastCommit, mono = true)
+            AdminLabeledRow("Admin key", adminKey)
+        }
+    }
 }
