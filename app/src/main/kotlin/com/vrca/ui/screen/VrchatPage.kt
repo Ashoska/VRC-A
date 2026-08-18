@@ -768,6 +768,8 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
         scope.launch {
             results = com.vrca.vrchat.AvatarSearch.searchAll(ctx, query)
             searching = false
+            // Fill our catalog from results that lacked a file id (avtrdb).
+            com.vrca.vrchat.AvatarGlobalDb.harvestSearchResults(ctx, results)
         }
     }
 

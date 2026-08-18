@@ -96,6 +96,7 @@ object AvatarGlobalDb {
                 delay(REFRESH_MS)
                 refresh(app)
                 harvestOwnAvatar(app)
+                harvestLibrary(app)
                 flushQueue(app)
             }
         }
@@ -378,6 +379,26 @@ object AvatarGlobalDb {
             ownAvatar = "${e.name.ifBlank { e.avatarId }} (changed) ${nowShort()}"
             contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms)
         } catch (ex: Exception) { Log.w(TAG, "avatar-change harvest failed", ex) }
+    }
+
+    /** Fill the catalog from SEARCH results that lacked a file id (avtrdb proxies its
+     *  images). Resolves each via GET /avatars/{id} (public-only, also fills platforms)
+     *  paced + capped, so searching slowly absorbs avtrdb too. Fire-and-forget. */
+    fun harvestSearchResults(context: Context, results: List<AvatarSearch.Result>) {
+        val app = context.applicationContext
+        scope.launch {
+            var n = 0
+            for (r in results) {
+                if (n >= 8) break
+                if (r.imageFileId != null) continue          // already contributed in searchAll
+                val fid = try { VrchatAuthManager.avatarCatalogEntry(app, r.id)?.fileId }
+                    catch (e: Exception) { null } ?: continue
+                if (map.containsKey(fid)) continue
+                contribute(app, fid, r.id, r.name, r.author, r.authorId, r.platforms)
+                n++
+                delay(600)
+            }
+        }
     }
 
     /** Seed the catalog from the user's OWN uploaded + favourited avatars (all
