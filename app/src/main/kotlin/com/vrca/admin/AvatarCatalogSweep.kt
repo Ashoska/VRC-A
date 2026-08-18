@@ -32,6 +32,20 @@ object AvatarCatalogSweep {
     @Volatile var refreshed = 0; private set
     @Volatile var removed = 0; private set
     @Volatile var status = "idle"; private set
+    @Volatile var pushError = ""; private set
+
+    /** Wrap adminPush so a REJECTED push (wrong/unset ADMIN_KEY on Cloudflare) is
+     *  surfaced instead of silently failing — otherwise the bot detects dead avatars
+     *  but nothing is removed. */
+    private suspend fun pushOps(
+        context: Context, adminKey: String,
+        upserts: List<AvatarGlobalDb.Entry>, removes: List<String>,
+        clears: List<String> = emptyList(), checked: List<String> = emptyList()
+    ): Boolean {
+        val ok = AvatarGlobalDb.adminPush(context, adminKey, upserts, removes, clears, checked)
+        pushError = if (ok) "" else "PUSH REJECTED — set ADMIN_KEY as a Secret on Cloudflare matching the app key"
+        return ok
+    }
 
     private const val PACE_MS = 1200L          // per avatar (bot account)
     private const val BATCH = 20               // ops per /admin push
@@ -43,7 +57,8 @@ object AvatarCatalogSweep {
     @Volatile private var fullRescan = false
 
     fun progress(): String =
-        "${if (running) "running" else "stopped"} · checked=$checked refreshed=$refreshed removed=$removed\n$status"
+        "${if (running) "running" else "stopped"} · checked=$checked refreshed=$refreshed removed=$removed\n$status" +
+            (if (pushError.isNotBlank()) "\n$pushError" else "")
 
     fun start(context: Context, adminKey: String) {
         if (running) return
@@ -107,13 +122,13 @@ object AvatarCatalogSweep {
                 }
             }
             if (upserts.size + removes.size + clears.size >= BATCH) {
-                AvatarGlobalDb.adminPush(context, adminKey, upserts.toList(), removes.toList(), clears.toList())
+                pushOps(context, adminKey, upserts.toList(), removes.toList(), clears.toList())
                 upserts.clear(); removes.clear(); clears.clear()
             }
             delay(PACE_MS)
         }
         if (upserts.isNotEmpty() || removes.isNotEmpty() || clears.isNotEmpty()) {
-            AvatarGlobalDb.adminPush(context, adminKey, upserts.toList(), removes.toList(), clears.toList())
+            pushOps(context, adminKey, upserts.toList(), removes.toList(), clears.toList())
         }
         status = "reports done — checked=$checked removed=$removed refreshed=$refreshed"
         return true
@@ -156,7 +171,7 @@ object AvatarCatalogSweep {
         // (the repo catches up on the flush ~10 min later).
         AvatarGlobalDb.markCheckedLocally(okChecked + upserts.map { it.fileId })
         if (removes.isNotEmpty() || upserts.isNotEmpty() || okChecked.isNotEmpty()) {
-            AvatarGlobalDb.adminPush(context, adminKey, upserts.toList(), removes.toList(), emptyList(), okChecked.toList())
+            pushOps(context, adminKey, upserts.toList(), removes.toList(), emptyList(), okChecked.toList())
         }
         status = "passive: checked=$checked removed=$removed refreshed=$refreshed"
     }
@@ -186,13 +201,13 @@ object AvatarCatalogSweep {
                 }
             }
             if (upserts.size + removes.size >= BATCH) {
-                AvatarGlobalDb.adminPush(context, adminKey, upserts.toList(), removes.toList())
+                pushOps(context, adminKey, upserts.toList(), removes.toList())
                 upserts.clear(); removes.clear()
             }
             delay(PACE_MS)
         }
         if (upserts.isNotEmpty() || removes.isNotEmpty()) {
-            AvatarGlobalDb.adminPush(context, adminKey, upserts.toList(), removes.toList())
+            pushOps(context, adminKey, upserts.toList(), removes.toList())
         }
         status = "full rescan done — checked=$checked removed=$removed refreshed=$refreshed"
     }

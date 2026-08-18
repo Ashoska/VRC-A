@@ -156,8 +156,13 @@ object BotVrchatSession {
                     connectTimeout = 15000; readTimeout = 15000
                 }
                 val code = conn.responseCode
-                if (code == 404 || code == 410)
+                // Not publicly accessible -> remove from the PUBLIC catalog: 404/410 =
+                // deleted/gone, 403 = private/forbidden (VRChat hides it from non-owners).
+                // A genuinely public avatar always returns 200 to anyone.
+                if (code == 404 || code == 410 || code == 403)
                     return@withContext AvatarCheck(false, null, "", "", "", emptyList())
+                // 401 (bot session dead) / 429 (rate limit) / 5xx / network -> UNKNOWN,
+                // skip (never mass-remove on a transient/auth failure).
                 if (code != 200) return@withContext null
                 val j = JSONObject(conn.inputStream.bufferedReader().readText())
                 val fileId = Regex("file_[0-9a-fA-F-]{36}").find(

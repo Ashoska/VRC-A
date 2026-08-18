@@ -593,7 +593,9 @@ private fun AvatarSweepCard() {
     LaunchedEffect(Unit) {
         while (true) {
             sweepProgress = AvatarCatalogSweep.progress()
-            loggedIn = BotVrchatSession.isLoggedIn(ctx)
+            // Don't flip to "logged in" while awaiting a 2FA code — the auth cookie is
+            // set before 2FA, so the poll would otherwise hide the 2FA field mid-typing.
+            if (!needs2fa) loggedIn = BotVrchatSession.isLoggedIn(ctx)
             delay(2000)
         }
     }
@@ -601,13 +603,7 @@ private fun AvatarSweepCard() {
     AdminSectionCard(title = "Catalog sweep (bot)", icon = Icons.Filled.SportsEsports, tone = AdminTone.Warn) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             when {
-                loggedIn -> {
-                    AdminLabeledRow("Bot", botName.ifBlank { "logged in" })
-                    TextButton(onClick = {
-                        BotVrchatSession.logout(ctx); AvatarCatalogSweep.stop()
-                        loggedIn = false; botName = ""
-                    }) { Text("Log out bot") }
-                }
+                // 2FA prompt takes priority so it can't be replaced mid-typing.
                 needs2fa -> {
                     OutlinedTextField(
                         value = code, onValueChange = { code = it },
@@ -632,6 +628,13 @@ private fun AvatarSweepCard() {
                             }
                         }
                     ) { Text("Verify") }
+                }
+                loggedIn -> {
+                    AdminLabeledRow("Bot", botName.ifBlank { "logged in" })
+                    TextButton(onClick = {
+                        BotVrchatSession.logout(ctx); AvatarCatalogSweep.stop()
+                        loggedIn = false; botName = ""
+                    }) { Text("Log out bot") }
                 }
                 else -> {
                     OutlinedTextField(
