@@ -14,7 +14,7 @@ compatibility_date = "2026-08-18"
 # (Cloudflare -> Storage & databases -> KV -> vrca-avatar-kv -> ID).
 [[kv_namespaces]]
 binding = "AVATAR_KV"
-id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+id = "e72fc7074f9f44c3b9cde9f6ac7a646b"
 
 [vars]
 GH_REPO = "Ashoska/VRC-A-Image-store"
