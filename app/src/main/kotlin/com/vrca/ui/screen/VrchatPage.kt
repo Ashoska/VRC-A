@@ -758,10 +758,13 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
     var results by remember { mutableStateOf<List<com.vrca.vrchat.AvatarSearch.Result>>(emptyList()) }
     var searching by remember { mutableStateOf(false) }
     var searched by remember { mutableStateOf(false) }
+    var shown by remember { mutableStateOf(12) }
+    // Avatar ids confirmed dead (image 404 + existence check) — hidden from results.
+    val deadIds = remember { androidx.compose.runtime.mutableStateListOf<String>() }
 
     fun runSearch() {
         if (query.isBlank()) return
-        searching = true; searched = true
+        searching = true; searched = true; shown = 12; deadIds.clear()
         scope.launch {
             results = com.vrca.vrchat.AvatarSearch.searchAll(ctx, query)
             searching = false
@@ -802,7 +805,16 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            results.take(12).forEach { r -> AvatarResultRow(ctx, r) }
+            val visible = results.filter { it.id !in deadIds }
+            visible.take(shown).forEach { r ->
+                AvatarResultRow(ctx, r, onDead = { if (it !in deadIds) deadIds.add(it) })
+            }
+            if (visible.size > shown) {
+                androidx.compose.material3.TextButton(
+                    onClick = { shown += 12 },
+                    modifier = Modifier.fillMaxWidth()
+                ) { Text("See more (${visible.size - shown} more)") }
+            }
 
             androidx.compose.material3.Divider()
 
@@ -873,7 +885,11 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
 }
 
 @Composable
-private fun AvatarResultRow(ctx: android.content.Context, r: com.vrca.vrchat.AvatarSearch.Result) {
+private fun AvatarResultRow(
+    ctx: android.content.Context,
+    r: com.vrca.vrchat.AvatarSearch.Result,
+    onDead: (String) -> Unit = {}
+) {
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     var cloning by remember { mutableStateOf(false) }
     Row(
@@ -886,6 +902,18 @@ private fun AvatarResultRow(ctx: android.content.Context, r: com.vrca.vrchat.Ava
             imageLoader = com.vrca.admin.VrchatImageLoader.get(ctx),
             contentDescription = null,
             contentScale = ContentScale.Crop,
+            // A dead avatar's thumbnail 404s. On an image error, CONFIRM the avatar is
+            // gone (avoids hiding a valid one on a network blip), then hide it + report
+            // it dead so the admin bot removes it from the catalog.
+            onError = {
+                scope.launch {
+                    if (com.vrca.vrchat.VrchatAuthManager.avatarExists(ctx, r.id) == false) {
+                        onDead(r.id)
+                        val fid = r.imageFileId
+                        if (fid != null) com.vrca.vrchat.AvatarGlobalDb.report(ctx, fid, r.id, "dead")
+                    }
+                }
+            },
             modifier = Modifier
                 .size(width = 56.dp, height = 42.dp)
                 .clip(androidx.compose.foundation.shape.RoundedCornerShape(6.dp))
@@ -927,6 +955,12 @@ private fun AvatarResultRow(ctx: android.content.Context, r: com.vrca.vrchat.Ava
                         else (res.error ?: "Couldn't wear this avatar"),
                         android.widget.Toast.LENGTH_LONG
                     ).show()
+                    // If the clone failed because the avatar is gone, hide + report it.
+                    if (!res.ok && com.vrca.vrchat.VrchatAuthManager.avatarExists(ctx, r.id) == false) {
+                        onDead(r.id)
+                        val df = r.imageFileId ?: fid
+                        if (df != null) com.vrca.vrchat.AvatarGlobalDb.report(ctx, df, r.id, "dead")
+                    }
                     cloning = false
                 }
             }
