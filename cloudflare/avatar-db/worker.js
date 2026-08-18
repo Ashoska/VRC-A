@@ -5,7 +5,7 @@
 // It is the ONLY writer of `avatars/db.json` in the image-store repo. Apps never
 // hold a GitHub token: they POST new avatar mappings here, this Worker validates
 // their FORMAT, stashes them in KV, and a cron flush merges them into the file in
-// ONE commit every ~15 minutes. Verification/culling is crowdsourced: apps that
+// ONE commit every ~10 minutes. Verification/culling is crowdsourced: apps that
 // find a dead/renamed avatar POST a report, and removals need a small quorum.
 //
 // Zero Firestore. Reads happen straight off the GitHub CDN in the apps.
@@ -21,7 +21,7 @@
 //   Variable:              GH_REPO    e.g. "Ashoska/VRC-A-Image-store"
 //   Variable:              DB_PATH    e.g. "avatars/db.json"
 //   Variable:              GH_BRANCH  e.g. "main"   (optional, defaults to main)
-//   Cron trigger:          */15 * * * *
+//   Cron trigger:          */10 * * * *
 // -----------------------------------------------------------------------------
 
 const AVTR_RE = /^avtr_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

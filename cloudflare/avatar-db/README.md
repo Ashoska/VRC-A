@@ -57,7 +57,7 @@ Save / Deploy after adding them.
 
 1. Worker → **Settings** → **Triggers** (or **Trigger Events**) → **Cron
    Triggers** → **Add Cron Trigger**.
-2. Enter `*/15 * * * *` (every 15 minutes) → **Add**.
+2. Enter `*/10 * * * *` (every 10 minutes) → **Add**.
 
 ## 6. Get the URL and test
 
@@ -77,8 +77,10 @@ Save / Deploy after adding them.
 ## How it behaves
 
 - Apps `POST /contribute` new avatar mappings → stashed in KV.
-- Every 15 min the cron merges everything pending into `avatars/db.json` in ONE
-  commit (you can watch the file grow on GitHub).
+- Every 10 min the cron merges everything pending into `avatars/db.json` in ONE
+  commit (you can watch the file grow on GitHub). The apps re-pull that file on
+  open and every 30 minutes, so a newly-contributed avatar goes global within
+  ~10-40 min.
 - Apps `POST /report` a dead/renamed avatar → the file self-heals (rename applied
   immediately; a removal needs `REMOVE_QUORUM` = 2 independent reports).
 - `GET /health` is cheap (KV only) and is what the admin panel polls live.
