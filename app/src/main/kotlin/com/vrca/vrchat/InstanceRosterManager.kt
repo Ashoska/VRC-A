@@ -778,7 +778,10 @@ object InstanceRosterManager {
             val id = try {
                 VrchatAuthManager.resolveWornAvatarId(context, uid, name, e.avatarCreator ?: "")
             } catch (ex: Exception) { null }
-            AvatarSearch.Diag.record("${e.displayName}: '$name' -> ${id ?: "no match"}")
+            val why = AvatarSearch.Diag.lastReason
+            AvatarSearch.Diag.record(
+                "${e.displayName}: '$name' -> ${id ?: "no match"}${if (why.isNotBlank()) " [$why]" else ""}"
+            )
             avatarIdCache[uid] = id ?: ""
             avatarIdResolvedFor[uid] = name
             _flow.value.let { cur ->

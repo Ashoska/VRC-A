@@ -194,6 +194,8 @@ object AvatarSearch {
         private val entries = ArrayDeque<String>()
         /** Result of the most recent official author-avatars-listing attempt. */
         @Volatile var authorListing: String = "(not attempted yet)"
+        /** Why the most recent resolve landed where it did (which path / why a miss). */
+        @Volatile var lastReason: String = ""
 
         @Synchronized fun record(line: String) {
             entries.addFirst(line)

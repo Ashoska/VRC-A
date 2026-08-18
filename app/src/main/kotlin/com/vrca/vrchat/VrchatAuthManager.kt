@@ -1411,36 +1411,97 @@ object VrchatAuthManager {
         if (wornFileId != null) {
             val byFile = try { com.vrca.vrchat.AvatarSearch.searchCandidatesByImageFileId(wornFileId) }
                 catch (e: Exception) { emptyList() }
-            byFile.firstOrNull { it.imageFileId == wornFileId }?.let { return@withContext it.id }
+            byFile.firstOrNull { it.imageFileId == wornFileId }?.let {
+                com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via image file id"
+                return@withContext it.id
+            }
             // 0b. OFFICIAL: the author's public-avatars listing, matched by the worn
             //     image file id. No third-party DB; exact when VRChat permits it.
-            resolveViaAuthorAvatars(context, wornFileId)?.let { return@withContext it }
+            resolveViaAuthorAvatars(context, wornFileId)?.let {
+                com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via author listing"
+                return@withContext it
+            }
         }
-        val candidates = try { com.vrca.vrchat.AvatarSearch.searchCandidates(avatarName) }
-            catch (e: Exception) { emptyList() }
-        if (candidates.isEmpty()) return@withContext null
+        // 1. NAME search across VARIANTS — the log's avatar name often carries a
+        //    descriptor the DB doesn't store ("Ball Python (handpuppet / head puppet)"
+        //    -> "Ball Python"), which makes a single-string search miss. Merge the
+        //    candidates from each variant (deduped by avtr_ id).
+        val variants = avatarNameVariants(avatarName)
+        val merged = LinkedHashMap<String, com.vrca.vrchat.AvatarSearch.Candidate>()
+        for (v in variants) {
+            val found = try { com.vrca.vrchat.AvatarSearch.searchCandidates(v) } catch (e: Exception) { emptyList() }
+            for (c in found) merged.putIfAbsent(c.id, c)
+            if (merged.size >= 30) break
+        }
+        val candidates = merged.values.toList()
+        if (candidates.isEmpty()) {
+            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "0 candidates in any DB (not indexed)"
+            return@withContext null
+        }
         val authorNorm = author.trim().lowercase()
         if (wornFileId != null) {
-            // 1. DIRECT match — a DB (VRCX-style) already gave VRChat's raw image
+            // 2. DIRECT match — a DB (VRCX-style) already gave VRChat's raw image
             //    file id and it equals the worn one. Exact, no extra VRChat call.
-            candidates.firstOrNull { it.imageFileId == wornFileId }?.let { return@withContext it.id }
-            // 2. CONFIRM proxied-image candidates (avtrdb) via VRChat GET /avatars/{id}.
+            candidates.firstOrNull { it.imageFileId == wornFileId }?.let {
+                com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name->fileid"
+                return@withContext it.id
+            }
+            // 3. CONFIRM proxied-image candidates (avtrdb) via VRChat GET /avatars/{id}.
             //    Author (from the log) ranks first; capped so we don't spam VRChat.
             val ranked = candidates.filter { it.imageFileId == null }
                 .sortedByDescending { if (authorNorm.isNotBlank() && it.author.trim().lowercase() == authorNorm) 1 else 0 }
                 .take(6)
             for (c in ranked) {
-                if (fetchAvatarThumbFileId(context, c.id) == wornFileId) return@withContext c.id
+                if (fetchAvatarThumbFileId(context, c.id) == wornFileId) {
+                    com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name confirm"
+                    return@withContext c.id
+                }
                 kotlinx.coroutines.delay(250)
             }
         }
-        // 3. No image confirmation possible (worn thumb hidden / not on any candidate):
-        //    fall back to a single unambiguous name+author match.
+        // 4. No image confirmation possible (worn thumb hidden / not on any candidate).
+        //    (a) a single unambiguous name+author match.
         val authorMatches = candidates.filter {
             authorNorm.isNotBlank() && it.author.trim().lowercase() == authorNorm
         }
-        if (authorMatches.size == 1) return@withContext authorMatches[0].id
+        if (authorMatches.size == 1) {
+            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name+author"
+            return@withContext authorMatches[0].id
+        }
+        // (b) a single EXACT-name match (author unknown or agreeing) — catches an
+        //     avatar that IS in a DB but whose worn thumbnail didn't confirm.
+        val wantNames = variants.map { normalizeAvatarName(it) }.filter { it.length >= 2 }.toSet()
+        val nameHits = candidates.filter {
+            normalizeAvatarName(it.name) in wantNames &&
+                (authorNorm.isBlank() || it.author.trim().lowercase() == authorNorm)
+        }.distinctBy { it.id }
+        if (nameHits.size == 1) {
+            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via unique exact-name"
+            return@withContext nameHits[0].id
+        }
+        com.vrca.vrchat.AvatarSearch.Diag.lastReason =
+            "${candidates.size} candidates, none confirmed (worn thumb hidden/mismatch or ambiguous name)"
         null
+    }
+
+    private fun normalizeAvatarName(s: String): String =
+        s.lowercase().replace(Regex("[^a-z0-9]"), "")
+
+    /** Query variants for a log avatar name: the raw name, the name with any
+     *  (bracketed) descriptor stripped, and the part before a " - " / " | " / " / "
+     *  separator — so a DB that stores the base name still matches. */
+    private fun avatarNameVariants(name: String): List<String> {
+        val out = LinkedHashSet<String>()
+        val n = name.trim()
+        if (n.length >= 2) out += n
+        val noParen = n.replace(Regex("""[\(\[\{][^)\]}]*[)\]}]"""), " ")
+            .replace(Regex("\\s+"), " ").trim()
+        if (noParen.length >= 2) out += noParen
+        n.split(Regex("""\s[-|/]\s""")).firstOrNull()?.trim()
+            ?.takeIf { it.length >= 2 }?.let { out += it }
+        noParen.split(Regex("""\s[-|/]\s""")).firstOrNull()?.trim()
+            ?.takeIf { it.length >= 2 }?.let { out += it }
+        return out.toList().take(4)
     }
 
     suspend fun fetchGroupName(context: Context, groupId: String): String? = withContext(Dispatchers.IO) {
