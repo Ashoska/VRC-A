@@ -23,8 +23,10 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -43,8 +45,10 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
@@ -52,6 +56,9 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.Divider
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -76,6 +83,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -83,6 +91,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -105,7 +114,7 @@ import java.security.MessageDigest
 
 internal enum class AppPage(val title: String) {
     Home("Home"),
-    Automations("Automations"),
+    Automations("Chatbox"),
     Music("Media"),
     VrchatStatus("VRChat"),
     Settings("Settings"),
@@ -244,6 +253,232 @@ private object DeviceId {
     }
 }
 
+/**
+ * Top-bar connection control (next to Settings). A Wi-Fi icon TINTED by the
+ * current OSC target's reachability — green = reachable, red = no reply, neutral =
+ * checking / not set (no text, per design). Tapping opens a small dropdown of the
+ * device IPs (the manual slots for now; the account centre will add real synced
+ * device IPs) — pick one to make it the OSC target, or "Edit / add IP…" for the
+ * full field. On the headset it's automatic (localhost), so the dropdown just
+ * shows that. Replaced the Home Connection card.
+ */
+@Composable
+private fun ConnectionButton(vm: com.vrca.ui.viewmodel.VrcaViewModel) {
+    val isHeadset = BuildConfig.IS_HEADSET_BUILD
+    val repo = vm.userPreferencesRepository
+    val scope = rememberCoroutineScope()
+
+    val ip by repo.ipAddress.collectAsState(initial = "")
+    var reachable by remember(ip) { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(ip, isHeadset) {
+        if (isHeadset) { reachable = true; return@LaunchedEffect }
+        if (ip.isBlank() || ip == "127.0.0.1") { reachable = null; return@LaunchedEffect }
+        while (true) {
+            reachable = com.vrca.ui.onboarding.pingHost(ip)
+            kotlinx.coroutines.delay(20_000L)
+        }
+    }
+
+    var menuOpen by remember { mutableStateOf(false) }
+    var editOpen by remember { mutableStateOf(false) }
+    val tint = when {
+        isHeadset || reachable == true -> Color(0xFF4CAF50)
+        reachable == false -> MaterialTheme.colorScheme.error
+        else -> LocalContentColor.current
+    }
+
+    Box {
+        IconButton(onClick = { menuOpen = true }) {
+            Icon(Icons.Filled.Wifi, contentDescription = "Connection", tint = tint)
+        }
+        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+            if (isHeadset) {
+                DropdownMenuItem(
+                    text = { Text("This headset · 127.0.0.1") },
+                    onClick = { menuOpen = false },
+                    leadingIcon = { Icon(Icons.Filled.Wifi, null, tint = Color(0xFF4CAF50)) }
+                )
+            } else {
+                val activeSlot by repo.activeIpSlot.collectAsState(initial = 1)
+                val n1 by repo.ip1Name.collectAsState(initial = "Home")
+                val n2 by repo.ip2Name.collectAsState(initial = "Hotspot")
+                val n3 by repo.ip3Name.collectAsState(initial = "Other")
+                val a1 by repo.ip1Address.collectAsState(initial = "")
+                val a2 by repo.ip2Address.collectAsState(initial = "")
+                val a3 by repo.ip3Address.collectAsState(initial = "")
+                val slots = listOf(Triple(1, n1, a1), Triple(2, n2, a2), Triple(3, n3, a3))
+                var anyShown = false
+                slots.forEach { (slot, name, addr) ->
+                    if (addr.isNotBlank()) {
+                        anyShown = true
+                        DropdownMenuItem(
+                            text = { Text(if (slot == activeSlot) "$name · $addr  ✓" else "$name · $addr") },
+                            onClick = {
+                                scope.launch { repo.saveActiveIpSlot(slot) }
+                                vm.ipAddressApply(addr)
+                                menuOpen = false
+                            }
+                        )
+                    }
+                }
+                if (anyShown) Divider()
+                DropdownMenuItem(
+                    text = { Text("Edit / add IP…") },
+                    onClick = { menuOpen = false; editOpen = true }
+                )
+            }
+        }
+    }
+
+    if (editOpen && !isHeadset) {
+        com.vrca.ui.common.VrcaCardDialog(onDismiss = { editOpen = false }) {
+            Column(
+                Modifier.padding(4.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text("Connection", style = MaterialTheme.typography.titleLarge)
+                Text(
+                    "Choose or enter the IP of the headset/PC running VRChat.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                com.vrca.ui.conversation.IpField(
+                    chatboxViewModel = vm,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                TextButton(
+                    onClick = { editOpen = false },
+                    modifier = Modifier.align(Alignment.End)
+                ) { Text("Done") }
+            }
+        }
+    }
+}
+
+/**
+ * Top-bar notification button (between the title and the connection button). A
+ * bell with a badge count; tapping drops down a scrollable, neatly organized list
+ * of ALL the alert types — setup-health rows, session-expired, account warning,
+ * VRChat status, and announcements (each collapsible; long ones scroll INSIDE the
+ * dropdown so they never push the tabs). Replaced the Home alert cards.
+ */
+@Composable
+private fun NotificationButton(
+    vm: com.vrca.ui.viewmodel.VrcaViewModel,
+    announcements: List<AnnouncementUi>,
+    moderation: ModerationUi,
+    vrcLinked: Boolean,
+    ipSet: Boolean?,
+    onNavigate: (AppPage) -> Unit
+) {
+    val ctx = LocalContext.current
+    var open by remember { mutableStateOf(false) }
+
+    val batteryOk = remember {
+        (ctx.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager)
+            .isIgnoringBatteryOptimizations(ctx.packageName)
+    }
+    val warned = moderation.warned && !(moderation.banned || moderation.deviceBanned)
+    val authDead = vm.vrchatAuthDead
+    val alertCount = announcements.size +
+        (if (!vrcLinked) 1 else 0) +
+        (if (ipSet == false) 1 else 0) +
+        (if (!batteryOk) 1 else 0) +
+        (if (warned) 1 else 0) +
+        (if (authDead) 1 else 0)
+
+    Box {
+        IconButton(onClick = { open = true }) {
+            // Pull the badge down-inward so it sits ON the bell instead of poking
+            // past the top-bar edge (it was clipping at the top on the headset).
+            BadgedBox(badge = {
+                if (alertCount > 0) Badge(modifier = Modifier.offset(x = (-2).dp, y = 4.dp)) { Text("$alertCount") }
+            }) {
+                Icon(Icons.Filled.Notifications, contentDescription = "Notifications")
+            }
+        }
+        DropdownMenu(
+            expanded = open,
+            onDismissRequest = { open = false },
+            modifier = Modifier.width(340.dp).heightIn(max = 520.dp)
+        ) {
+            Column(
+                Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text("Notifications", style = MaterialTheme.typography.titleSmall)
+                if (alertCount == 0) {
+                    Text(
+                        "You're all caught up.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    if (!vrcLinked) NotifHealthRow(
+                        "VRChat not linked",
+                        "OSC sending is blocked until you sign in."
+                    ) { open = false; onNavigate(AppPage.VrchatStatus) }
+                    if (ipSet == false) NotifHealthRow(
+                        "Headset IP not set",
+                        "Tap the connection icon (top right)."
+                    ) { open = false }
+                    if (!batteryOk) NotifHealthRow(
+                        "Battery optimization is on",
+                        "Android may pause VRC-A when the screen is off."
+                    ) {
+                        open = false
+                        runCatching {
+                            ctx.startActivity(
+                                Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                                    .setData(Uri.parse("package:${ctx.packageName}"))
+                            )
+                        }
+                    }
+                    if (authDead) com.vrca.ui.common.VrchatSessionExpiredBanner(
+                        onSignIn = { open = false; onNavigate(AppPage.VrchatStatus) }
+                    )
+                    if (warned) {
+                        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("You have been warned.", style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    moderation.warnReason.ifBlank { "No reason provided." },
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                        }
+                    }
+                    VrchatStatusBanner()
+                    announcements.forEach { a -> key(a.id) { AnnouncementCard(a) } }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NotifHealthRow(title: String, subtitle: String, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.tertiaryContainer,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+            Text(
+                title,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onTertiaryContainer
+            )
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.8f)
+            )
+        }
+    }
+}
+
 // Monitor-shape framing breakpoints (see the Scaffold content in VrcaScreen).
 // A phone stays below the threshold (portrait ~360-420 dp), so it's never
 // centered; Meta Quest's 1024 dp landscape panel is well above it, so the app
@@ -251,7 +486,9 @@ private object DeviceId {
 // phone-designed cards at a comfortable reading width instead of stretching
 // edge-to-edge across the wide panel.
 private val HEADSET_WIDE_THRESHOLD = 640.dp
-private val HEADSET_MAX_CONTENT_WIDTH = 720.dp
+// Wide enough to use most of the Quest 1024 dp panel (the two-column Home needs
+// the width) while keeping a small margin so content isn't edge-to-edge.
+private val HEADSET_MAX_CONTENT_WIDTH = 960.dp
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -425,6 +662,10 @@ fun VrcaScreen(
         VrchatAuthManager.getStoredUserId(ctx)?.isNotBlank() == true
     val ipSet = remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(Unit) {
+        // Headset forces the OSC target to 127.0.0.1 (loopback to VRChat on the
+        // same device), so there is no user IP to set — always treat it as set so
+        // the "Headset IP not set" health warning never shows on Quest.
+        if (BuildConfig.IS_HEADSET_BUILD) { ipSet.value = true; return@LaunchedEffect }
         chatboxViewModel.userPreferencesRepository.ipAddress.collect { ip ->
             ipSet.value = ip.isNotBlank() && ip != "127.0.0.1"
         }
@@ -443,6 +684,10 @@ fun VrcaScreen(
     // cover it. The icon buttons consume their own taps, so they still work.
     val topBarFocus = androidx.compose.ui.platform.LocalFocusManager.current
     Scaffold(
+            // Always fill the panel so the bottom nav stays pinned to the bottom.
+            // Without this the Scaffold could size to content on a resized Quest
+            // panel, floating the nav bar mid-window with empty space below it.
+            modifier = Modifier.fillMaxSize(),
             topBar = {
                 CenterAlignedTopAppBar(
                     modifier = Modifier.pointerInput(Unit) {
@@ -471,6 +716,19 @@ fun VrcaScreen(
                         }
                     },
                     actions = {
+                        // Headset ONLY: alerts live in this top-bar notification
+                        // button. Phones/admin keep the alert cards at the top of Home.
+                        if (BuildConfig.IS_HEADSET_BUILD) {
+                            NotificationButton(
+                                vm = chatboxViewModel,
+                                announcements = announcements,
+                                moderation = moderation,
+                                vrcLinked = vrcLinked,
+                                ipSet = ipSet.value,
+                                onNavigate = { page = it }
+                            )
+                        }
+                        ConnectionButton(vm = chatboxViewModel)
                         IconButton(onClick = { page = AppPage.Settings }) {
                             Icon(Icons.Filled.Settings, contentDescription = "Settings")
                         }
@@ -488,7 +746,12 @@ fun VrcaScreen(
                                 // Red dot = the Home setup-health checklist has
                                 // unresolved items (the only cross-tab signal;
                                 // the checklist itself lives on Home only).
-                                BadgedBox(badge = { if (setupNeedsAttention) Badge() }) {
+                                // Headset surfaces setup items in the top-bar
+                                // notification button, so the nav dot is redundant
+                                // there — suppress it.
+                                BadgedBox(badge = {
+                                    if (setupNeedsAttention && !BuildConfig.IS_HEADSET_BUILD) Badge()
+                                }) {
                                     Icon(Icons.Filled.Home, contentDescription = null)
                                 }
                             },
@@ -498,7 +761,7 @@ fun VrcaScreen(
                             selected = page == AppPage.Automations,
                             onClick = { page = AppPage.Automations },
                             icon = { Icon(Icons.Filled.Sync, contentDescription = null) },
-                            label = { Text("Automations") }
+                            label = { Text("Chatbox") }
                         )
                         NavigationBarItem(
                             selected = page == AppPage.Music,

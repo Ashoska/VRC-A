@@ -82,6 +82,25 @@ class DiscordRpcService : Service() {
         const val ACTION_START = "com.vrca.DISCORD_RPC_START"
         const val ACTION_STOP = "com.vrca.DISCORD_RPC_STOP"
 
+        // Process-wide handle to the live RPC WebView so the ACTION_SHUTDOWN
+        // receiver can cleanly close the Discord gateway before the device powers
+        // off (see VRCA_closeGateway). @Volatile: set on the main thread, read from
+        // the receiver thread.
+        @Volatile
+        private var activeWebView: WebView? = null
+
+        /** Cleanly clear the RPC + CLOSE the Discord gateway on device shutdown, so
+         *  Discord drops the session and the presence disappears — mirroring what a
+         *  phone/PC does when its OS closes the socket on shutdown. Best-effort:
+         *  posts the JS on the main thread; the caller (DeviceShutdownReceiver) uses
+         *  goAsync + a short wait so the close frame has time to flush before death. */
+        fun closeGatewayForShutdown() {
+            val wv = activeWebView ?: return
+            Handler(Looper.getMainLooper()).post {
+                runCatching { wv.evaluateJavascript("window.VRCA_closeGateway && window.VRCA_closeGateway()") {} }
+            }
+        }
+
         private const val MAX_SHIM_RETRIES = 5
         private const val MAX_SESSION_RECOVERIES = 3
         private const val SHIM_RETRY_BASE_DELAY_MS = 3000L
@@ -304,20 +323,45 @@ class DiscordRpcService : Service() {
         DiscordRpcState.status = DiscordRpcStatus.CONNECTING
         DiscordRpcState.failureMessage = null
 
-        val hasCookies = CookieManager.getInstance()
-            .getCookie("https://discord.com")
-            ?.isNotBlank() == true
-
-        if (!hasCookies) {
-            Log.w(TAG, "No Discord cookies — user must log in via WebView first")
-            updateNotif("Not signed into Discord — sign in from settings")
-            DiscordRpcState.status = DiscordRpcStatus.SESSION_EXPIRED
-            DiscordRpcState.failureMessage = "Not signed in — open settings to sign in"
-            return START_STICKY
-        }
-
-        loadWebView()
+        startIntended = true
+        cookieRetries = 0
+        tryStartWithCookies()
         return START_STICKY
+    }
+
+    @Volatile private var startIntended = false
+    private var cookieRetries = 0
+    private val COOKIE_MAX_RETRIES = 6   // ~6s of retries before giving up
+
+    /**
+     * Start the RPC once Discord cookies are present, RETRYING for a few seconds
+     * first instead of declaring SESSION_EXPIRED immediately. On the headset the
+     * login cookies can commit LATE (slow Quest storage + heavy concurrent startup),
+     * so the RPC used to start, find no cookies, and show "sign in again" — the
+     * login->sign-in loop. Retrying bridges the commit delay; only after ~6s with no
+     * cookies is it treated as genuinely not-signed-in. Status stays CONNECTING (not
+     * SESSION_EXPIRED) during retries so the UI doesn't flash "sign in".
+     */
+    private fun tryStartWithCookies() {
+        val hasCookies = CookieManager.getInstance()
+            .getCookie("https://discord.com")?.isNotBlank() == true
+        if (hasCookies) {
+            cookieRetries = 0
+            loadWebView()
+            return
+        }
+        if (cookieRetries < COOKIE_MAX_RETRIES) {
+            cookieRetries++
+            Log.w(TAG, "No Discord cookies yet — retry $cookieRetries/$COOKIE_MAX_RETRIES")
+            DiscordRpcState.status = DiscordRpcStatus.CONNECTING
+            DiscordRpcState.failureMessage = null
+            mainHandler.postDelayed({ if (startIntended) tryStartWithCookies() }, 1000)
+            return
+        }
+        Log.w(TAG, "No Discord cookies after retries — user must log in")
+        updateNotif("Not signed into Discord — sign in from settings")
+        DiscordRpcState.status = DiscordRpcStatus.SESSION_EXPIRED
+        DiscordRpcState.failureMessage = "Not signed in — open settings to sign in"
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
@@ -452,6 +496,7 @@ class DiscordRpcService : Service() {
                 loadUrl("https://discord.com/channels/@me")
             }
             webView = wv
+            activeWebView = wv
             // Keep JS timers running in the background (global to the process; never
             // call pauseTimers) and seed the visibility signal as VISIBLE so Chromium
             // doesn't background-throttle the Discord gateway heartbeat. No overlay
@@ -936,6 +981,23 @@ class DiscordRpcService : Service() {
         if (now - lastPushAttemptMs < PUSH_MIN_INTERVAL_MS) return
         lastPushAttemptMs = now
 
+        // HEADSET: the RPC represents VRChat presence ONLY. When the user is NOT in
+        // VRChat (VRChat closed / headset shut down or asleep), CLEAR the activity
+        // entirely instead of pushing a "Not in VRChat / Using VRC-A" fallback — on
+        // the headset VRChat and VRC-A share ONE device, so once the headset is off
+        // there is nothing to show. Pushing a CLEAR makes that the LAST state
+        // Discord retains, so the RPC disappears and STAYS gone after the headset
+        // dies (the "shut down 5h ago but still showing" bug). Paired with the
+        // OSCQuery-close detection that flips isOnlineInVRChat=false the moment
+        // VRChat's OSCQuery service goes away. Mobile is unaffected: the phone is a
+        // separate always-on device, so "Not in VRChat / Using VRC-A" is accurate
+        // there and still shown.
+        if (com.vrca.BuildConfig.IS_HEADSET_BUILD &&
+            com.vrca.vrchat.VrchatPipelineState.presence?.isOnlineInVRChat != true) {
+            clearActivity()
+            return
+        }
+
         val activity = buildActivityJson()
         val escaped = activity.toString()
             .replace("\\", "\\\\")
@@ -1115,6 +1177,7 @@ class DiscordRpcService : Service() {
         cacheMaintenanceJob = null
         shimReady = false
         isRunning = false
+        startIntended = false   // stop any pending cookie-retry loop
         // No bookkeeping needed here: online_start_epoch + last_online_seen are already
         // persisted on every online tick, so the grace-window carry-on works on the next
         // launch whether this teardown ran (swipe/stop) or the process was killed outright.
@@ -1127,6 +1190,7 @@ class DiscordRpcService : Service() {
                     wv.loadUrl("about:blank")
                     wv.destroy()
                     webView = null
+                    activeWebView = null
                 }, 1500)
             }
         }
@@ -1488,6 +1552,35 @@ private const val MODULE_FINDER_JS = """
                         afk: false
                     }
                 }));
+                return 'ok';
+            } catch(e) {
+                return 'err:' + e.message;
+            }
+        };
+
+        // Clean shutdown: clear the activity (OP 3 empty activities) AND cleanly
+        // CLOSE the gateway socket. A clean WebSocket close makes Discord drop this
+        // session and its presence IMMEDIATELY — the reason a phone/PC clears the
+        // RPC on shutdown (the OS closes the socket) but a Quest full-power-off does
+        // not (VRC-A's socket is severed without a clean close, so Discord's session
+        // lingers). Called from the ACTION_SHUTDOWN receiver before the headset dies.
+        window.VRCA_closeGateway = function() {
+            try {
+                window._vrca_activityGen = (window._vrca_activityGen || 0) + 1;
+                window._vrca_activity = null;
+                try { localStorage.removeItem('_vrca_last_activity'); } catch(e) {}
+                var gw = window._vrca_gatewayWs;
+                if (!gw) return 'no_gateway';
+                var origSend = window._vrca_origSend;
+                if (origSend && gw.readyState === 1) {
+                    try {
+                        origSend.call(gw, JSON.stringify({
+                            op: 3,
+                            d: { since: 0, activities: [], status: window._vrca_user_status || 'online', afk: false }
+                        }));
+                    } catch(e) {}
+                }
+                try { gw.close(1000, 'shutdown'); } catch(e) {}
                 return 'ok';
             } catch(e) {
                 return 'err:' + e.message;

@@ -33,8 +33,56 @@ fun DiscordLoginWebView(
     var loading by remember { mutableStateOf(true) }
     var loggedIn by remember { mutableStateOf(false) }
     val handler = remember { Handler(Looper.getMainLooper()) }
-    var dwellRunnable by remember { mutableStateOf<Runnable?>(null) }
-    val pendingRetries = remember { mutableListOf<Runnable>() }
+    var webViewRef by remember { mutableStateOf<WebView?>(null) }
+
+    // Completion is detected by a CONTINUOUS poll, independent of page-load
+    // callbacks — on a slow Quest WebView the post-login SPA redirect frequently
+    // does NOT fire a fresh onPageFinished, so the old "probe only inside
+    // onPageFinished for a /channels URL, give up after 4 retries" never
+    // completed there (login worked, cookies/localStorage persisted, but
+    // onLoginComplete never fired → the dialog never closed and
+    // discord_session_seeded was never set → "log in again" on reopen). The poll
+    // runs every ~1.2s regardless of navigation and also treats a present
+    // localStorage.token (the exact signal DiscordRpcService reads) as
+    // conclusive login, so redirect timing can't defeat it.
+    DisposableEffect(Unit) {
+        val jsProbe = "(function(){" +
+            "try{" +
+            "var hasLoginForm = !!document.querySelector('input[type=\"password\"], input[type=\"email\"], input[name=\"email\"]');" +
+            "var appMounted = (document.getElementById('app-mount')?.childElementCount || 0) > 0;" +
+            "var hasToken = false; try { hasToken = !!(window.localStorage && window.localStorage.getItem('token')); } catch(e) {}" +
+            "return (!hasLoginForm && (appMounted || hasToken));" +
+            "}catch(e){return false;}" +
+            "})()"
+        var polls = 0
+        val maxPolls = 90 // ~110s of open login before giving up
+        lateinit var poll: Runnable
+        poll = Runnable {
+            if (loggedIn) return@Runnable
+            val wv = webViewRef
+            val u = wv?.url ?: ""
+            // Only probe once we're plausibly on the app (not the login form),
+            // but the token check inside the probe is authoritative regardless.
+            val onApp = u.contains("discord.com/channels") || u.contains("discord.com/app") ||
+                u.contains("discord.com/@me")
+            if (wv != null && (onApp || polls > 3)) {
+                wv.evaluateJavascript(jsProbe) { result ->
+                    if (result == "true" && !loggedIn) {
+                        Log.d("DiscordLogin", "Login confirmed (poll $polls, url=$u)")
+                        loggedIn = true
+                        // Commit cookies before signalling completion so the RPC
+                        // service's own WebView loads authenticated (see flush note).
+                        CookieManager.getInstance().flush()
+                        handler.postDelayed({ onLoginComplete() }, 350)
+                    }
+                }
+            }
+            polls++
+            if (!loggedIn && polls < maxPolls) handler.postDelayed(poll, 1200)
+        }
+        handler.postDelayed(poll, 1500)
+        onDispose { handler.removeCallbacksAndMessages(null) }
+    }
 
     Column(Modifier.fillMaxSize()) {
         TopAppBar(
@@ -73,50 +121,14 @@ fun DiscordLoginWebView(
                         webViewClient = object : WebViewClient() {
                             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                                 loading = true
-                                dwellRunnable?.let { handler.removeCallbacks(it) }
-                                dwellRunnable = null
-                                pendingRetries.forEach { handler.removeCallbacks(it) }
-                                pendingRetries.clear()
                             }
 
                             override fun onPageFinished(view: WebView?, url: String?) {
                                 loading = false
-                                val u = url ?: ""
-                                dwellRunnable?.let { handler.removeCallbacks(it) }
-                                dwellRunnable = null
-                                pendingRetries.forEach { handler.removeCallbacks(it) }
-                                pendingRetries.clear()
-                                if (!loggedIn && (u.contains("discord.com/channels") || u.contains("discord.com/app"))) {
-                                    val wv = view ?: return
-                                    val jsProbe = "(function(){" +
-                                        "var noLogin = !document.querySelector('input[type=\"password\"], input[type=\"email\"], input[name=\"email\"]');" +
-                                        "var appMounted = (document.getElementById('app-mount')?.childElementCount || 0) > 0;" +
-                                        "return noLogin && appMounted;" +
-                                        "})()"
-                                    var retryCount = 0
-                                    val maxRetries = 4
-                                    fun probe() {
-                                        if (loggedIn) return
-                                        wv.evaluateJavascript(jsProbe) { result ->
-                                            if (result == "true" && !loggedIn) {
-                                                Log.d("DiscordLogin", "Login confirmed: webpack loaded, no login form")
-                                                loggedIn = true
-                                                onLoginComplete()
-                                            } else if (retryCount < maxRetries && !loggedIn) {
-                                                retryCount++
-                                                Log.d("DiscordLogin", "Probe returned $result — retry $retryCount/$maxRetries")
-                                                val retry = Runnable { probe() }
-                                                pendingRetries.add(retry)
-                                                handler.postDelayed(retry, 1500)
-                                            } else {
-                                                Log.d("DiscordLogin", "Probe gave up after $retryCount retries")
-                                            }
-                                        }
-                                    }
-                                    val runnable = Runnable { probe() }
-                                    dwellRunnable = runnable
-                                    handler.postDelayed(runnable, 2000)
-                                }
+                                // Completion detection lives in the continuous poll
+                                // (DisposableEffect above) — not here — so a slow
+                                // Quest SPA redirect that skips onPageFinished can't
+                                // prevent login from being confirmed.
                             }
 
                             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
@@ -156,6 +168,7 @@ fun DiscordLoginWebView(
                         }
 
                         loadUrl("https://discord.com/login")
+                        webViewRef = this
                     }
                 },
                 modifier = Modifier.fillMaxSize()

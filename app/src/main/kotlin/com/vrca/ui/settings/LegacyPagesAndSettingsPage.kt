@@ -285,7 +285,7 @@ private fun HomePage(vm: VrcaViewModel) {
                         done = notifOk,
                         icon = Icons.Filled.MusicNote,
                         primary = "Open"
-                    ) { ctx.startActivity(vm.notificationAccessIntent()) }
+                    ) { vm.launchNotificationAccess(ctx) }
 
                     WizardStep(
                         number = 2,
@@ -782,7 +782,7 @@ private fun NowPlayingPage(vm: VrcaViewModel) {
             ToggleRow("Enable Now Playing block", vm.spotifyEnabled) { vm.setSpotifyEnabledFlag(it) }
 
             OutlinedButton(
-                onClick = { ctx.startActivity(vm.notificationAccessIntent()) },
+                onClick = { vm.launchNotificationAccess(ctx) },
                 modifier = Modifier.fillMaxWidth()
             ) { Text("Open Notification Access settings") }
 
@@ -952,7 +952,7 @@ fun SettingsPage(
                     subtitle = "Permissions that keep OSC + Now Playing stable."
                 ) {
                     Button(
-                        onClick = { ctx.startActivity(vm.notificationAccessIntent()) },
+                        onClick = { vm.launchNotificationAccess(ctx) },
                         modifier = Modifier.fillMaxWidth()
                     ) { Text("Open Notification Access") }
 
@@ -1059,7 +1059,7 @@ Troubleshoot:
                     Divider()
 
                     OutlinedButton(
-                        onClick = { ctx.startActivity(vm.notificationAccessIntent()) },
+                        onClick = { vm.launchNotificationAccess(ctx) },
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Icon(Icons.Filled.Info, contentDescription = null)

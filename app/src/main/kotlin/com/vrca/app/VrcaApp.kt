@@ -169,11 +169,14 @@ fun VrcaApp() {
     // sign in anonymously + cache the auth uid the ban check reads; on any prior-used
     // app the uid persists in prefs, so a swipe-less relaunch can safely skip boot.
     val openedFromSwipe = remember { VrcaApplication.openedFromSwipe }
+    val openedFromBoot = remember { VrcaApplication.openedFromBoot }
     val everBootstrapped = remember {
         ctx.getSharedPreferences("vrca_remote", Context.MODE_PRIVATE)
             .getString("auth_uid", "").orEmpty().isNotBlank()
     }
-    val warmResume = remember { !(openedFromSwipe || !everBootstrapped) }
+    // A boot-launch is a genuine cold start → show the boot screen too (not just
+    // swipe-reopen / first install).
+    val warmResume = remember { !(openedFromSwipe || openedFromBoot || !everBootstrapped) }
 
     var bootOk by remember { mutableStateOf(warmResume) }
     var bootWorking by remember { mutableStateOf(false) }
@@ -424,6 +427,10 @@ fun VrcaApp() {
                         }
                         val url = snap.getString("downloadUrl").orEmpty()
                         if (url.isBlank()) return@addSnapshotListener
+                        // Variant guard: a release APK for a different app package
+                        // (headset vs mobile) must never force-install here.
+                        if (com.vrca.update.releaseTargetsOtherVariant(
+                                snap.getString("packageName").orEmpty())) return@addSnapshotListener
                         val code = snap.getLong("versionCode") ?: return@addSnapshotListener
                         if (code <= BuildConfig.VERSION_CODE) {
                             // The user is already on (or past) this targeted version —
@@ -457,8 +464,11 @@ fun VrcaApp() {
         // closed). Complements the 6h background poll (which still catches an update pushed
         // while backgrounded). Never DOWNGRADES a newer targeted release already shown.
         DisposableEffect(Unit) {
+            // Variant-specific global doc: headset reads releases/latest_headset,
+            // mobile reads releases/latest — so a headset "release to all" never
+            // reaches mobile and vice-versa (Option B).
             val latestRef = FirebaseFirestore.getInstance()
-                .collection("releases").document("latest")
+                .collection("releases").document(com.vrca.update.globalReleaseDocId())
             val reg = latestRef.addSnapshotListener { snap, _ ->
                 if (snap == null || !snap.exists()) {
                     // Admin RETRACTED the global release: if the popup is currently showing
@@ -472,6 +482,10 @@ fun VrcaApp() {
                 }
                 val url = snap.getString("downloadUrl").orEmpty()
                 if (url.isBlank()) return@addSnapshotListener
+                // Variant guard (defense in depth; the doc id already separates the
+                // fleets): never force-install a different-package APK.
+                if (com.vrca.update.releaseTargetsOtherVariant(
+                        snap.getString("packageName").orEmpty())) return@addSnapshotListener
                 val code = snap.getLong("versionCode") ?: return@addSnapshotListener
                 // Cache patch notes for the currently-installed version so Settings →
                 // What's New can show them offline. Zero extra read — this listener
@@ -786,6 +800,30 @@ fun VrcaApp() {
         VrchatAuthManager.loggedInSignal.collect {
             vrcLoginDone = true
             reloginTick++
+        }
+    }
+
+    // Cold-start Keystore race (Quest especially, where every reopen is a fresh
+    // process): on a cold start the Android Keystore is frequently NOT ready when
+    // this composes, so VrchatAuthManager.isLoggedIn() — which reads
+    // EncryptedSharedPreferences — returns FALSE TRANSIENTLY even though the VRChat
+    // session is perfectly valid (documented in VrchatAuthManager.getPrefs). That
+    // left `vrcLoginDone` seeded false with nothing to ever flip it true (only a
+    // fresh loggedInSignal does, and no re-login happens), so
+    // runPhase2AndStartPipeline never ran → the VRChat pipeline never started. The
+    // VM's OSC-gate self-heal waits for a pipeline CONNECTION, so it could never
+    // fire either — the chatbox showed "Sending" but transmitted nothing until a
+    // full reopen (a process whose Keystore happened to be ready). Re-check for a
+    // few seconds and flip `vrcLoginDone` true the moment the session reads back;
+    // that starts the pipeline, which lets the existing gate self-heal clear the
+    // block. A genuinely logged-out user never reads true, so nothing starts.
+    // Not bumped through reloginTick — it's the SAME account, just a delayed read.
+    LaunchedEffect(Unit) {
+        var attempts = 0
+        while (!vrcLoginDone && attempts < 20) {
+            kotlinx.coroutines.delay(750)
+            attempts++
+            if (VrchatAuthManager.isLoggedIn(ctx)) vrcLoginDone = true
         }
     }
 

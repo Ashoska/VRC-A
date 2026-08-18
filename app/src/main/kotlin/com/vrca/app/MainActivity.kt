@@ -52,6 +52,11 @@ class MainActivity : ComponentActivity() {
         VrcaApplication.openedFromSwipe =
             runCatching { AppShutdown.isSwipedAway(applicationContext) }.getOrDefault(false)
 
+        // A launch from the BootReceiver (device turned on) is a genuine cold start —
+        // show the boot screen (and let the feature-session restore run visibly).
+        VrcaApplication.openedFromBoot =
+            runCatching { intent?.getBooleanExtra("vrca_from_boot", false) == true }.getOrDefault(false)
+
         //Ensure device hash exists early (before any screen reads it).
         runCatching { ensureDeviceHash(applicationContext) }
 

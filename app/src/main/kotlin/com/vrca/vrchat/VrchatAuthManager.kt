@@ -73,36 +73,75 @@ object VrchatAuthManager {
     // Encrypted prefs
     // ------------------------------------------------------------------
 
-    private fun getPrefs(context: Context) = try {
+    // In-memory guard so many getPrefs() calls in ONE launch count as a single
+    // failure (the persisted counter must reflect distinct LAUNCHES, not calls).
+    @Volatile private var prefsFailCountedThisLaunch = false
+    // Delete + recreate the encrypted store only after this many CONSECUTIVE failed
+    // launches (real MasterKey corruption). A single transient failure never wipes.
+    private val PREFS_FAIL_DELETE_THRESHOLD = 4
+
+    private fun createEncryptedPrefs(context: Context): android.content.SharedPreferences {
         val masterKey = MasterKey.Builder(context)
             .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
             .build()
-        EncryptedSharedPreferences.create(
-            context,
-            PREFS_FILE,
-            masterKey,
+        return EncryptedSharedPreferences.create(
+            context, PREFS_FILE, masterKey,
             EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
         )
-    } catch (e: Exception) {
-        Log.e(TAG, "EncryptedSharedPreferences init failed — attempting recovery", e)
+    }
+
+    private fun healthPrefs(context: Context) =
+        context.getSharedPreferences("vrca_prefs_health", Context.MODE_PRIVATE)
+
+    /**
+     * Encrypted store for the VRChat session (cookie + saved credentials).
+     *
+     * CRITICAL: a failure here does NOT immediately delete the store. On a headset
+     * REBOOT the Android Keystore is frequently not ready when the app initialises
+     * at boot, so EncryptedSharedPreferences.create() throws TRANSIENTLY — and the
+     * old code wiped the saved session on that first failure, which is exactly the
+     * "VRChat logs the user out after restarting the headset" bug. Now a failure
+     * returns null (session preserved) and increments a per-LAUNCH counter; the
+     * destructive delete+recreate only runs after several consecutive failed
+     * launches (genuine MasterKey corruption). A success resets the counter.
+     */
+    private fun getPrefs(context: Context): android.content.SharedPreferences? {
         try {
-            // Delete corrupted prefs file and its encrypted key file, then retry
+            val p = createEncryptedPrefs(context)
+            // Success → clear the persisted failure count.
+            if (healthPrefs(context).getInt("enc_fail_launches", 0) != 0) {
+                healthPrefs(context).edit().putInt("enc_fail_launches", 0).apply()
+            }
+            return p
+        } catch (e: Exception) {
+            Log.e(TAG, "EncryptedSharedPreferences init failed (transient?)", e)
+        }
+
+        val fails = if (!prefsFailCountedThisLaunch) {
+            prefsFailCountedThisLaunch = true
+            val n = healthPrefs(context).getInt("enc_fail_launches", 0) + 1
+            healthPrefs(context).edit().putInt("enc_fail_launches", n).apply()
+            n
+        } else {
+            healthPrefs(context).getInt("enc_fail_launches", 0)
+        }
+
+        // Transient (Keystore not ready right after a reboot) — DO NOT wipe the saved
+        // session. Retry on the next call / next launch.
+        if (fails < PREFS_FAIL_DELETE_THRESHOLD) return null
+
+        // Persistent across several launches → treat as real corruption: delete +
+        // recreate as a last resort (this is the only path that clears the session).
+        return try {
             val prefsFile = java.io.File(context.applicationInfo.dataDir + "/shared_prefs/" + PREFS_FILE + ".xml")
             val keyFile = java.io.File(context.applicationInfo.dataDir + "/shared_prefs/" + PREFS_FILE + ".xml.__androidx_security_crypto_encrypted_prefs__")
             if (prefsFile.exists()) prefsFile.delete()
             if (keyFile.exists()) keyFile.delete()
-            Log.i(TAG, "Deleted corrupted prefs files, re-creating EncryptedSharedPreferences")
-            val masterKey = MasterKey.Builder(context)
-                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-                .build()
-            EncryptedSharedPreferences.create(
-                context,
-                PREFS_FILE,
-                masterKey,
-                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-            )
+            Log.i(TAG, "Persistent EncryptedSharedPreferences failure — recreating store")
+            val p = createEncryptedPrefs(context)
+            healthPrefs(context).edit().putInt("enc_fail_launches", 0).apply()
+            p
         } catch (e2: Exception) {
             Log.e(TAG, "EncryptedSharedPreferences recovery also failed", e2)
             null
@@ -370,6 +409,34 @@ object VrchatAuthManager {
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "inviteUserToInstance failed", e)
+                InviteResult(false, "Network error")
+            }
+        }
+
+    /**
+     * Wear / clone the avatar with [avatarId] (an `avtr_…` id harvested from the
+     * VRChat log's avatar-load lines — the API hides other users' current avatar
+     * id, so the log is the only source). `PUT /avatars/{id}/select` — VRChat
+     * equips it when this account has access (public / your own) and returns its
+     * OWN error otherwise (a private avatar you can't access can't be pulled).
+     */
+    suspend fun selectAvatar(context: Context, avatarId: String): InviteResult =
+        withContext(Dispatchers.IO) {
+            val id = avatarId.trim()
+            if (!id.startsWith("avtr_")) return@withContext InviteResult(false, "No avatar id yet")
+            val cookieHeader = getCookieHeader(context)
+                ?: return@withContext InviteResult(false, "Not signed in to VRChat")
+            try {
+                val (code, respBody, rawCookies) = put("$BASE/avatars/$id/select", "", cookieHeader)
+                if (code == 200) {
+                    captureRolledCookies(context, rawCookies)
+                    InviteResult(true)
+                } else {
+                    Log.w(TAG, "selectAvatar returned $code for $id body=${respBody.take(200)}")
+                    InviteResult(false, parseVrcError(respBody, code))
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "selectAvatar failed", e)
                 InviteResult(false, "Network error")
             }
         }
@@ -1134,6 +1201,366 @@ object VrchatAuthManager {
         }
     }
 
+    /**
+     * A resolved user's identity + platform, from a single `GET /users/{id}`.
+     * `platform` is the RAW VRChat value (`standalonewindows`/`android`/`ios`/`web`,
+     * or blank when the user is offline / the field is absent); use
+     * [prettyPlatform] to map it to a display label. `trustRank` is the raw
+     * highest `system_trust_*` tag (blank when unavailable).
+     *
+     * This is the per-user platform lookup the instance-roster feature (M2 log
+     * reader) uses: the log reader supplies the `usr_` ids of everyone in the
+     * instance; this call fills in each one's name + PC/Quest/iOS platform.
+     * The endpoint is PUBLIC (works for non-friends), so a roster of strangers
+     * still resolves. Best-effort: returns null on any non-200 / parse failure.
+     */
+    data class VrcUserInfo(
+        val userId: String,
+        val displayName: String,
+        val platform: String,
+        val trustRank: String,
+        val status: String,
+        val statusDescription: String,
+        val location: String,
+        /** VRChat+ profile icon, else the worn avatar's thumbnail. For the roster
+         *  row avatar (rides the SAME /users/{id} call — no extra request). */
+        val profilePicUrl: String = "",
+        /** RAW `currentAvatarThumbnailImageUrl` (an api/1/file/file_… url). Its
+         *  file id is a UNIQUE 1:1 key for the worn avatar — used to CONFIRM an
+         *  avatar-database match exactly (not a fuzzy name guess). */
+        val wornAvatarThumbUrl: String = ""
+    )
+
+    suspend fun fetchUserInfo(context: Context, userId: String): VrcUserInfo? = withContext(Dispatchers.IO) {
+        if (userId.isBlank() || !userId.startsWith("usr_")) return@withContext null
+        val cookieHeader = getCookieHeader(context) ?: return@withContext null
+        try {
+            val (code, body, rawCookies) = get("$BASE/users/$userId", null, cookieHeader)
+            if (code == 200) captureRolledCookies(context, rawCookies)
+            if (code != 200 || !body.startsWith("{")) return@withContext null
+            val j = org.json.JSONObject(body)
+            VrcUserInfo(
+                userId = userId,
+                displayName = j.optString("displayName", ""),
+                // `last_platform` is the user's most-recent client and is the
+                // reliable field — it's present with a real value for EVERYONE
+                // incl. non-friends. The `platform` field is the CURRENT session
+                // and reads "offline" for a non-friend (and offline friends),
+                // which mapped to a blank chip when read first — the "non-friend
+                // platforms never show" bug. Prefer `last_platform` (like NEXUS).
+                platform = j.optString("last_platform", "").ifBlank { j.optString("platform", "") },
+                trustRank = extractTrustRankFromTags(j.optJSONArray("tags")),
+                status = j.optString("status", ""),
+                statusDescription = j.optString("statusDescription", ""),
+                location = j.optString("location", ""),
+                // VRChat+ icon (iconUrl/userIcon) first; fall back to the worn
+                // avatar's thumbnail so everyone has SOMETHING to show.
+                profilePicUrl = j.optString("iconUrl", "")
+                    .ifBlank { j.optString("userIcon", "") }
+                    .ifBlank { j.optString("currentAvatarThumbnailImageUrl", "") },
+                wornAvatarThumbUrl = j.optString("currentAvatarThumbnailImageUrl", "")
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "fetchUserInfo($userId) failed", e)
+            null
+        }
+    }
+
+    /** Extract the stable `file_…` id from a VRChat file url (ignores the version
+     *  segment) — the unique key shared by an avatar's thumbnail across the
+     *  /users/{id} and /avatars/{id} responses. */
+    private fun fileIdOf(url: String): String? =
+        Regex("""file_[0-9a-fA-F-]{36}""").find(url)?.value
+
+    // The author-public-avatars listing (below) is the potential OFFICIAL 100%
+    // path, but VRChat may block enumerating another user's avatars. If it ever
+    // returns 403/401 we set this so we stop attempting it for the session (never
+    // burn rate limit on a blocked endpoint). Reset on process restart.
+    @Volatile private var authorAvatarsListingBlocked = false
+
+    /** The `ownerId` (avatar AUTHOR's usr id) for a file, via `GET /file/{id}`.
+     *  File objects are readable, so this gives the exact author even for another
+     *  player's worn-avatar image (the log only has a display name). */
+    private suspend fun fetchFileOwnerId(context: Context, fileId: String): String? =
+        withContext(Dispatchers.IO) {
+            if (!fileId.startsWith("file_")) return@withContext null
+            val cookie = getCookieHeader(context) ?: return@withContext null
+            try {
+                val (code, body, raw) = get("$BASE/file/$fileId", null, cookie)
+                if (code == 200) captureRolledCookies(context, raw)
+                if (code != 200 || !body.startsWith("{")) return@withContext null
+                org.json.JSONObject(body).optString("ownerId", "").takeIf { it.startsWith("usr_") }
+            } catch (e: Exception) { null }
+        }
+
+    /**
+     * OFFICIAL resolve attempt: a PUBLIC avatar is listed among its author's public
+     * avatars, so — worn image file id → its file's `ownerId` (author) →
+     * `GET /avatars?userId={author}&releaseStatus=public` → the avatar whose
+     * thumbnail file id equals the worn one. When VRChat permits the listing this is
+     * exact and needs NO third-party database. If VRChat blocks enumerating another
+     * user's avatars (403/401) it self-disables for the session. Returns the avtr_ id
+     * or null (blocked / author unknown / not in the author's public list).
+     */
+    private suspend fun resolveViaAuthorAvatars(context: Context, wornFileId: String): String? =
+        withContext(Dispatchers.IO) {
+            if (authorAvatarsListingBlocked) {
+                com.vrca.vrchat.AvatarSearch.Diag.authorListing = "disabled for session (was blocked earlier)"
+                return@withContext null
+            }
+            val cookie = getCookieHeader(context)
+            if (cookie == null) {
+                com.vrca.vrchat.AvatarSearch.Diag.authorListing = "no VRChat cookie"
+                return@withContext null
+            }
+            val authorId = fetchFileOwnerId(context, wornFileId)
+            if (authorId == null) {
+                com.vrca.vrchat.AvatarSearch.Diag.authorListing =
+                    "GET /file/$wornFileId gave no ownerId (file hidden?)"
+                return@withContext null
+            }
+            try {
+                val (code, body, raw) = get(
+                    "$BASE/avatars?userId=$authorId&releaseStatus=public&n=100&sort=updated",
+                    null, cookie
+                )
+                if (code == 200) captureRolledCookies(context, raw)
+                if (code == 401 || code == 403) {
+                    authorAvatarsListingBlocked = true
+                    com.vrca.vrchat.AvatarSearch.Diag.authorListing =
+                        "BLOCKED — HTTP $code listing author's avatars (disabled for session). VRChat forbids it."
+                    Log.i(TAG, "author-avatars listing blocked ($code) — disabling for session")
+                    return@withContext null
+                }
+                if (code != 200 || !body.startsWith("[")) {
+                    com.vrca.vrchat.AvatarSearch.Diag.authorListing = "HTTP $code (unexpected, not a list)"
+                    return@withContext null
+                }
+                val arr = org.json.JSONArray(body)
+                // Did VRChat actually return THIS author's avatars, or silently ignore
+                // our userId and hand back our own? (ownerMatch answers "worked vs asked
+                // wrong".) Also whether any matched the worn image file id.
+                var ownerMatches = 0
+                var fileMatch: String? = null
+                for (i in 0 until arr.length()) {
+                    val a = arr.optJSONObject(i) ?: continue
+                    if (a.optString("authorId", "") == authorId) ownerMatches++
+                    val thumb = a.optString("thumbnailImageUrl", "").ifBlank { a.optString("imageUrl", "") }
+                    if (fileMatch == null && fileIdOf(thumb) == wornFileId) {
+                        val id = a.optString("id", "")
+                        if (id.startsWith("avtr_")) fileMatch = id
+                    }
+                }
+                val n = arr.length()
+                com.vrca.vrchat.AvatarSearch.Diag.authorListing = when {
+                    fileMatch != null ->
+                        "WORKS — HTTP 200, $n avatars, ownerMatch=$ownerMatches, matched $fileMatch ✓"
+                    n == 0 ->
+                        "HTTP 200 but 0 avatars (author has no public avatars, or listing scoped out)"
+                    ownerMatches == 0 ->
+                        "IGNORED — HTTP 200, $n avatars but NONE are the author's (VRChat returned another/own list)"
+                    else ->
+                        "HTTP 200, $n author avatars, ownerMatch=$ownerMatches, but none match worn file (avatar not public-listed)"
+                }
+                fileMatch
+            } catch (e: Exception) {
+                com.vrca.vrchat.AvatarSearch.Diag.authorListing = "error: ${e.javaClass.simpleName}"
+                null
+            }
+        }
+
+    /** The worn-avatar thumbnail file id for a public avatar, via the PUBLIC
+     *  `GET /avatars/{id}`. Returns null on 404 (private/deleted) or error. */
+    private suspend fun fetchAvatarThumbFileId(context: Context, avatarId: String): String? =
+        withContext(Dispatchers.IO) {
+            val cookie = getCookieHeader(context) ?: return@withContext null
+            try {
+                val (code, body, raw) = get("$BASE/avatars/$avatarId", null, cookie)
+                if (code == 200) captureRolledCookies(context, raw)
+                if (code != 200 || !body.startsWith("{")) return@withContext null
+                val j = org.json.JSONObject(body)
+                fileIdOf(j.optString("thumbnailImageUrl", "").ifBlank { j.optString("imageUrl", "") })
+            } catch (e: Exception) { null }
+        }
+
+    /**
+     * Resolve a remote player's EXACT worn avatar id. Quest can't get it from the
+     * log (the avatar id isn't written) or the API (`/users/{id}` hides it), so we:
+     *  0. read the worn avatar's IMAGE file id from `/users/{id}` (a unique key) and
+     *     look it up DIRECTLY by that file id (name-independent — catches renamed/
+     *     odd-named avatars a name search misses),
+     *  1. else search the avatar database (avtrdb) by the log's avatar NAME,
+     *  2. and confirm a name candidate by its image file id,
+     *  3. CONFIRM a candidate by fetching its public `GET /avatars/{id}` and matching
+     *     the image file id — an exact 1:1 check, immune to name collisions.
+     * `author` (from the log's `Unpacking Avatar (… by …)`) ranks candidates first.
+     * Returns the `avtr_` id, or null when no database has the avatar indexed
+     * (the only unavoidable miss — nothing public that people actually wear is
+     * usually absent). Best-effort fallback: a lone name+author match.
+     */
+    suspend fun resolveWornAvatarId(
+        context: Context, userId: String, avatarName: String, author: String
+    ): String? = withContext(Dispatchers.IO) {
+        if (avatarName.isBlank()) return@withContext null
+        val wornFileId = fileIdOf(fetchUserInfo(context, userId)?.wornAvatarThumbUrl.orEmpty())
+        // GLOBAL crowdsourced catalog first — exact, offline, zero network. This is
+        // the extra coverage no public DB has (ids VRC-A users contributed).
+        com.vrca.vrchat.AvatarGlobalDb.lookup(wornFileId)?.let {
+            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog"
+            return@withContext it.avatarId
+        }
+        // 0. EXACT, NAME-INDEPENDENT: look the avatar up by its worn IMAGE FILE ID —
+        //    invariant per upload, so this resolves it even when the log's avatar name
+        //    is renamed/truncated/generic/colliding (the main gap that used to grey the
+        //    button out). A file-id hit whose image file id equals the worn one is a
+        //    guaranteed-correct match with zero VRChat calls.
+        if (wornFileId != null) {
+            val byFile = try { com.vrca.vrchat.AvatarSearch.searchCandidatesByImageFileId(wornFileId) }
+                catch (e: Exception) { emptyList() }
+            byFile.firstOrNull { it.imageFileId == wornFileId }?.let {
+                com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via image file id"
+                com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, it.id, avatarName, author)
+                return@withContext it.id
+            }
+            // 0b. OFFICIAL: the author's public-avatars listing, matched by the worn
+            //     image file id. No third-party DB; exact when VRChat permits it.
+            resolveViaAuthorAvatars(context, wornFileId)?.let {
+                com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via author listing"
+                com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, it, avatarName, author)
+                return@withContext it
+            }
+        }
+        // 1. NAME search across VARIANTS — the log's avatar name often carries a
+        //    descriptor the DB doesn't store ("Ball Python (handpuppet / head puppet)"
+        //    -> "Ball Python"), which makes a single-string search miss. Merge the
+        //    candidates from each variant (deduped by avtr_ id).
+        val variants = avatarNameVariants(avatarName)
+        val merged = LinkedHashMap<String, com.vrca.vrchat.AvatarSearch.Candidate>()
+        for (v in variants) {
+            val found = try { com.vrca.vrchat.AvatarSearch.searchCandidates(v) } catch (e: Exception) { emptyList() }
+            for (c in found) merged.putIfAbsent(c.id, c)
+            if (merged.size >= 30) break
+        }
+        val candidates = merged.values.toList()
+        if (candidates.isEmpty()) {
+            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "0 candidates in any DB (not indexed)"
+            return@withContext null
+        }
+        val authorNorm = author.trim().lowercase()
+        if (wornFileId != null) {
+            // 2. DIRECT match — a DB (VRCX-style) already gave VRChat's raw image
+            //    file id and it equals the worn one. Exact, no extra VRChat call.
+            candidates.firstOrNull { it.imageFileId == wornFileId }?.let {
+                com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name->fileid"
+                com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, it.id, avatarName, author)
+                return@withContext it.id
+            }
+            // 3. CONFIRM proxied-image candidates (avtrdb) via VRChat GET /avatars/{id}.
+            //    Author (from the log) ranks first; capped so we don't spam VRChat.
+            val ranked = candidates.filter { it.imageFileId == null }
+                .sortedByDescending { if (authorNorm.isNotBlank() && it.author.trim().lowercase() == authorNorm) 1 else 0 }
+                .take(6)
+            for (c in ranked) {
+                if (fetchAvatarThumbFileId(context, c.id) == wornFileId) {
+                    com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name confirm"
+                    com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, c.id, avatarName, c.author)
+                    return@withContext c.id
+                }
+                kotlinx.coroutines.delay(250)
+            }
+        }
+        // 4. No image confirmation possible (worn thumb hidden / not on any candidate).
+        //    (a) a single unambiguous name+author match.
+        val authorMatches = candidates.filter {
+            authorNorm.isNotBlank() && it.author.trim().lowercase() == authorNorm
+        }
+        if (authorMatches.size == 1) {
+            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name+author"
+            return@withContext authorMatches[0].id
+        }
+        // (b) a single EXACT-name match (author unknown or agreeing) — catches an
+        //     avatar that IS in a DB but whose worn thumbnail didn't confirm.
+        val wantNames = variants.map { normalizeAvatarName(it) }.filter { it.length >= 2 }.toSet()
+        val nameHits = candidates.filter {
+            normalizeAvatarName(it.name) in wantNames &&
+                (authorNorm.isBlank() || it.author.trim().lowercase() == authorNorm)
+        }.distinctBy { it.id }
+        if (nameHits.size == 1) {
+            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via unique exact-name"
+            return@withContext nameHits[0].id
+        }
+        com.vrca.vrchat.AvatarSearch.Diag.lastReason =
+            "${candidates.size} candidates, none confirmed (worn thumb hidden/mismatch or ambiguous name)"
+        null
+    }
+
+    private fun normalizeAvatarName(s: String): String =
+        s.lowercase().replace(Regex("[^a-z0-9]"), "")
+
+    /** Query variants for a log avatar name: the raw name, the name with any
+     *  (bracketed) descriptor stripped, and the part before a " - " / " | " / " / "
+     *  separator — so a DB that stores the base name still matches. */
+    private fun avatarNameVariants(name: String): List<String> {
+        val out = LinkedHashSet<String>()
+        val n = name.trim()
+        if (n.length >= 2) out += n
+        val noParen = n.replace(Regex("""[\(\[\{][^)\]}]*[)\]}]"""), " ")
+            .replace(Regex("\\s+"), " ").trim()
+        if (noParen.length >= 2) out += noParen
+        n.split(Regex("""\s[-|/]\s""")).firstOrNull()?.trim()
+            ?.takeIf { it.length >= 2 }?.let { out += it }
+        noParen.split(Regex("""\s[-|/]\s""")).firstOrNull()?.trim()
+            ?.takeIf { it.length >= 2 }?.let { out += it }
+        return out.toList().take(4)
+    }
+
+    /** A crowdsource-catalog entry: the avatar's image FILE ID (the key strangers
+     *  can read) plus its id/name/author/platforms. */
+    data class CatalogEntry(
+        val fileId: String,
+        val avatarId: String,
+        val name: String,
+        val author: String,
+        val authorId: String,
+        val platforms: List<String>
+    )
+
+    /** The local user's OWN current avatar as a catalog entry — the id they can
+     *  always read for themselves (from `/auth/user`). This is the coverage the
+     *  public DBs can't have. Returns null when not logged in / no current avatar. */
+    suspend fun currentAvatarCatalogEntry(context: Context): CatalogEntry? = withContext(Dispatchers.IO) {
+        val cookie = getCookieHeader(context) ?: return@withContext null
+        try {
+            val (code, body, raw) = get("$BASE/auth/user", null, cookie)
+            if (code == 200) captureRolledCookies(context, raw)
+            if (code != 200 || !body.startsWith("{")) return@withContext null
+            val avatarId = org.json.JSONObject(body).optString("currentAvatar", "")
+            if (!avatarId.startsWith("avtr_")) return@withContext null
+            avatarCatalogEntry(context, avatarId)
+        } catch (e: Exception) { null }
+    }
+
+    /** Build a catalog entry from the PUBLIC `GET /avatars/{id}` (name/author/
+     *  thumbnail file id/platforms). Used to seed the crowdsource catalog. */
+    suspend fun avatarCatalogEntry(context: Context, avatarId: String): CatalogEntry? = withContext(Dispatchers.IO) {
+        val cookie = getCookieHeader(context) ?: return@withContext null
+        try {
+            val (code, body, raw) = get("$BASE/avatars/$avatarId", null, cookie)
+            if (code == 200) captureRolledCookies(context, raw)
+            if (code != 200 || !body.startsWith("{")) return@withContext null
+            val j = org.json.JSONObject(body)
+            val fileId = fileIdOf(j.optString("thumbnailImageUrl", "").ifBlank { j.optString("imageUrl", "") })
+                ?: return@withContext null
+            val plats = j.optJSONArray("unityPackages")?.let { ups ->
+                (0 until ups.length()).mapNotNull {
+                    ups.optJSONObject(it)?.optString("platform", "")?.takeIf { s -> s.isNotBlank() }
+                }.map { prettyPlatform(it) }.filter { it.isNotBlank() }.distinct()
+            } ?: emptyList()
+            CatalogEntry(fileId, avatarId, j.optString("name", ""),
+                j.optString("authorName", ""), j.optString("authorId", ""), plats)
+        } catch (e: Exception) { null }
+    }
+
     suspend fun fetchGroupName(context: Context, groupId: String): String? = withContext(Dispatchers.IO) {
         if (groupId.isBlank()) return@withContext null
         val cookieHeader = getCookieHeader(context) ?: return@withContext null
@@ -1360,6 +1787,20 @@ object VrchatAuthManager {
     // ------------------------------------------------------------------
     // Private helpers
     // ------------------------------------------------------------------
+
+    /**
+     * Maps VRChat's raw platform value to a short display label for the roster.
+     * `standalonewindows` = PC (Windows), `android` = Quest/Android standalone,
+     * `ios` = iOS, `web` = website. Blank/offline → "" (caller renders nothing).
+     */
+    fun prettyPlatform(raw: String): String = when (raw.lowercase()) {
+        "standalonewindows" -> "PC"
+        "android" -> "Quest"
+        "ios" -> "iOS"
+        "web" -> "Web"
+        "" , "offline" -> ""
+        else -> raw
+    }
 
     private fun extractTrustRankFromTags(tags: org.json.JSONArray?): String {
         if (tags == null) return ""
@@ -1676,6 +2117,31 @@ object VrchatAuthManager {
     ): Triple<Int, String, List<String>> {
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
+            setRequestProperty("User-Agent", USER_AGENT)
+            setRequestProperty("Content-Type", "application/json")
+            setRequestProperty("Accept", "application/json")
+            if (cookieHeader != null) setRequestProperty("Cookie", cookieHeader)
+            doOutput = true
+            connectTimeout = 15_000
+            readTimeout = 15_000
+        }
+        conn.outputStream.use { it.write(body.toByteArray()) }
+        val code = conn.responseCode
+        val responseBody = try {
+            (if (code < 400) conn.inputStream else conn.errorStream)
+                ?.bufferedReader()?.readText() ?: ""
+        } catch (e: IOException) { "" }
+        val cookies = conn.headerFields["Set-Cookie"] ?: emptyList()
+        return Triple(code, responseBody, cookies)
+    }
+
+    private fun put(
+        url: String,
+        body: String,
+        cookieHeader: String?
+    ): Triple<Int, String, List<String>> {
+        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = "PUT"
             setRequestProperty("User-Agent", USER_AGENT)
             setRequestProperty("Content-Type", "application/json")
             setRequestProperty("Accept", "application/json")

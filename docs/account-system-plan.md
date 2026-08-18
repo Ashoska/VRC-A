@@ -382,6 +382,23 @@ These are additive and don't block on the account work:
 2. **Extra chatbox tokens** — `{weather}`/`{date}`/`{uptime}`/`{battery}`.
 3. **OSC-in + OSCQuery prototype** on the (future) headset build → `{mute}`/
    `{afk}`/`{movement}`/`{param:Name}` lines + a real "VRChat OSC live" signal.
+4. **Exact chatbox line-width calibration** (🟡 deferred; makes `wrapToVisualLines`
+   / `visualWidth` EXACT instead of estimated). VRChat renders the chatbox with a
+   proportional Unity TextMeshPro font at a fixed box width, so "exact" = each
+   glyph's advance width ÷ box width. There's no public spec, but it's measurable:
+   send lines of a **single repeated character** and note the max count before it
+   wraps → `advance = box_width / count`. Calibrate a reference set spanning the
+   width spectrum: narrowest (`i l . , ' |`), narrow (`I j f t r`, space —
+   measure separately, trailing spaces may trim), medium (`n o a s e c`, digits),
+   wide (`m w`), widest Latin (`M W @`), and a **full-width CJK / fullwidth-form
+   char** (`Ｗ` U+FF37, `　` U+3000) as a clean **2× anchor** for the CJK weight.
+   The result is a per-glyph relative-width table that REPLACES the guessed
+   `charWidth` weights + the `VISUAL_LINE_UNITS = 28.5` fudge. **Calibrate on the
+   Quest** (the headset is the sender; box width can vary by platform/UI scale).
+   Most-exact alternative if VRChat's chatbox font/size is ever identified: measure
+   with Android `Paint.measureText` using the same font. **Build path:** a dev-only
+   calibration harness that fires the test-line sequence so wrap points can be
+   screenshotted in-game and converted into the width table.
 The log reader + roster + avatar features naturally land **with** the headset
 flavor, since that's where they run.
 

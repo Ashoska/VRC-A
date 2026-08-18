@@ -9,17 +9,44 @@
   tall phone shape. Content stays width-responsive (see VrcaScreen framing) so
   a user resizing the panel toward the 384x500 dp minimum never looks broken.
 
-  Deferred to M2 (log reader): MANAGE_EXTERNAL_STORAGE / SAF for reading
-  VRChat's output logs, and any Horizon-Store submission manifest entries.
-  Not added here — unused permissions would only complicate store review.
+  RESIZABLE — the app must FILL whatever panel size Horizon gives it.
+  Previously this set android:resizeableActivity="false" + min/maxAspectRatio
+  to "lock" the panel, but Horizon OS owns 2D-panel resize and ignores those
+  flags — and worse, a NON-resizable activity gets letterboxed: when the user
+  enlarged the panel, Android rendered the app at its fixed size top-anchored
+  and padded the rest with the grey window background (the "big empty grey area
+  below the nav bar when resized" bug). Horizon also reverts a user's resize to
+  the default panel on its own, so locking bought nothing. So the activity is
+  now RESIZABLE: the responsive Compose layout (VrcaScreen monitor framing + the
+  Home 3/2/1-column thresholds) reflows to fill any size, with NO letterbox.
+  The base MainActivity already declares configChanges for screenSize/
+  screenLayout/smallestScreenSize, so a resize relayouts in place (no Activity
+  recreation / flicker while dragging). screenOrientation stays landscape so it
+  opens in the monitor shape.
+
+  MANAGE_EXTERNAL_STORAGE: the headset build reads VRChat's output log to build
+  the instance roster (InstanceRosterManager). Only the headset flavor requests
+  it — the public/admin builds never touch the log reader.
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <application>
+    <!-- All-files access, headset-only: read VRChat's output log for the roster. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
+    <!-- usesCleartextTraffic: VRChat's OSCQuery service is plain HTTP on the LAN
+         (e.g. http://192.168.0.89:45631). Android blocks cleartext by default, so
+         reading avatar params over OSCQuery needs this. Headset-only (the phone/
+         admin builds keep cleartext BLOCKED); it does NOT downgrade any existing
+         https:// call — it only permits http when we explicitly use it. -->
+    <application
+        android:resizeableActivity="true"
+        android:usesCleartextTraffic="true"
+        tools:node="merge">
         <activity
             android:name=".app.MainActivity"
             android:screenOrientation="sensorLandscape"
+            android:resizeableActivity="true"
             tools:node="merge" />
     </application>
 

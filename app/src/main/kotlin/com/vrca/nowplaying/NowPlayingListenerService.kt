@@ -15,7 +15,10 @@ import android.service.notification.StatusBarNotification
 
 class NowPlayingListenerService : NotificationListenerService() {
 
-    private val allowedPackages = setOf(
+    // Native music apps (exact-matched — deliberately NOT a fuzzy "contains spotify"
+    // substring, which would mislabel YouTube vs YouTube Music and catch unrelated
+    // packages). Ad/pause refinements downstream key on these exact ids.
+    private val musicPackages = setOf(
         "com.spotify.music",
         "com.google.android.youtube",
         "com.google.android.apps.youtube.music",
@@ -26,6 +29,79 @@ class NowPlayingListenerService : NotificationListenerService() {
         "com.bandcamp.android"
     )
 
+    // Media played through a BROWSER (a web player like the Spotify / YouTube Music
+    // web app) publishes its MediaSession under the BROWSER's package, not the music
+    // app's — e.g. on Quest the Spotify web player runs in Chrome, so the session
+    // package is "com.android.chrome" (confirmed on-device). Without these the
+    // browser session is filtered out and nothing shows. Exact-matched to stay
+    // precise; this is a broad sweep of the common Android/Quest browsers so web
+    // playback works on both the phone and headset builds.
+    private val browserPackages = setOf(
+        "com.android.chrome", "com.chrome.beta", "com.chrome.dev", "com.chrome.canary",
+        "com.google.android.apps.chrome", "org.chromium.chrome",
+        "com.oculus.browser",
+        "org.mozilla.firefox", "org.mozilla.firefox_beta", "org.mozilla.fenix",
+        "org.mozilla.focus", "org.mozilla.klar",
+        "com.microsoft.emmx", "com.microsoft.emmx.beta", "com.microsoft.emmx.dev",
+        "com.brave.browser", "com.brave.browser_beta", "com.brave.browser_nightly",
+        "com.opera.browser", "com.opera.browser.beta", "com.opera.mini.native", "com.opera.gx",
+        "com.sec.android.app.sbrowser", "com.sec.android.app.sbrowser.beta",
+        "com.vivaldi.browser", "com.vivaldi.browser.snapshot",
+        "com.kiwibrowser.browser",
+        "com.duckduckgo.mobile.android",
+        "com.UCMobile.intl", "com.UCMobile",
+        "com.yandex.browser", "com.yandex.browser.beta",
+        "com.ecosia.android",
+        "acr.browser.lightning", "com.jamal2367.styx",
+        "com.mi.globalbrowser", "com.mi.globalbrowser.mini",
+        "com.heytap.browser", "com.coloros.browser",
+        "com.qwant.liberty",
+        "org.torproject.torbrowser",
+        "mark.via.gp", "mark.via",
+        "com.cloudmosa.puffinFree", "com.cloudmosa.puffin",
+        "com.naver.whale",
+        "com.aloha.browser",
+        "com.sec.android.app.samsungapps.browser",
+        "com.htc.sense.browser", "com.asus.browser", "com.android.browser"
+    )
+
+    // Browsers detected DYNAMICALLY from the system: any package that handles a
+    // web (ACTION_VIEW https) intent IS a browser. Android 11+ makes web handlers
+    // visible without a <queries> entry, so this needs no manifest changes and
+    // covers EVERY installed browser automatically — no hand-maintained list can.
+    // Merged with the hard-coded set above as a belt-and-suspenders fallback.
+    // Cached; refreshed on each listener (re)connect so a newly-installed browser
+    // is picked up.
+    @Volatile private var cachedBrowserPkgs: Set<String>? = null
+
+    private fun browserPkgs(): Set<String> {
+        cachedBrowserPkgs?.let { return it }
+        val found = mutableSetOf<String>()
+        try {
+            val intent = android.content.Intent(
+                android.content.Intent.ACTION_VIEW,
+                android.net.Uri.parse("https://example.com")
+            )
+            val resolved = packageManager.queryIntentActivities(
+                intent, android.content.pm.PackageManager.MATCH_ALL
+            )
+            for (ri in resolved) ri.activityInfo?.packageName?.let { found.add(it) }
+        } catch (_: Throwable) { }
+        val result = browserPackages + found
+        cachedBrowserPkgs = result
+        return result
+    }
+
+    /** True for any media session we should read: a native music app, or a browser
+     *  (native or dynamically-detected) hosting a web player. Exact-match only. */
+    private fun isTrackedMediaPkg(pkg: String): Boolean =
+        pkg in musicPackages || pkg in browserPkgs()
+
+    // Browser packages currently identified as running the Spotify web player (by
+    // artwork host). Such a session gets the native-Spotify ad filter. Cleared when
+    // the session is torn down or the browser plays a non-Spotify source.
+    private val spotifyBrowserPkgs = mutableSetOf<String>()
+
     // YouTube keeps reporting STATE_PLAYING + speed=1f even while PAUSED, so the
     // only reliable pause signal is that the raw position stops advancing across
     // snapshots. That stall check (in NowPlayingState) needs fresh samples every
@@ -35,6 +111,17 @@ class NowPlayingListenerService : NotificationListenerService() {
         "com.google.android.youtube",
         "com.google.android.apps.youtube.music"
     )
+
+    // Packages that get the continuous 500ms poll for DENSE position/play-state
+    // sampling. YouTube needs it for its stall-based pause detection; the Quest
+    // browser (com.oculus.browser) needs it because its MediaSession pushes only
+    // sparse (~3s) callbacks and momentarily reports isPlaying=false between them —
+    // which, at that sampling rate, froze then snapped the progress bar every few
+    // seconds ("+2s jump" on the headset). Dense sampling keeps the anchor fresh so
+    // the bar tracks real time. IMPORTANT: this set ONLY gates POLLING — the
+    // YouTube-specific stall/ad-detection logic stays keyed on youtubePackages, so
+    // the browser still uses normal motion-based play detection, not the YT hacks.
+    private val continuouslyPolledPackages = youtubePackages + "com.oculus.browser"
 
     // YouTube ads are short (5–60s, rarely up to 3 min). Anything non-seekable
     // beyond this threshold is a live stream, not an ad.
@@ -126,6 +213,10 @@ class NowPlayingListenerService : NotificationListenerService() {
         super.onListenerConnected()
         NowPlayingState.setConnected(true)
 
+        // Recompute the installed-browser set on every (re)connect so a browser
+        // installed since the last scan is picked up.
+        cachedBrowserPkgs = null
+
         try {
             activeNotifications?.forEach { sbn -> onNotificationPosted(sbn) }
         } catch (_: Throwable) { }
@@ -143,7 +234,7 @@ class NowPlayingListenerService : NotificationListenerService() {
             val l = android.media.session.MediaSessionManager.OnActiveSessionsChangedListener { controllers ->
                 controllers?.forEach { controller ->
                     val pkg = controller.packageName ?: return@forEach
-                    if (allowedPackages.isNotEmpty() && pkg !in allowedPackages) return@forEach
+                    if (!isTrackedMediaPkg(pkg)) return@forEach
                     val token = controller.sessionToken ?: return@forEach
                     ensureControllerForPackage(pkg, token)
                 }
@@ -171,7 +262,7 @@ class NowPlayingListenerService : NotificationListenerService() {
             ) ?: return
             for (controller in controllers) {
                 val pkg = controller.packageName ?: continue
-                if (allowedPackages.isNotEmpty() && pkg !in allowedPackages) continue
+                if (!isTrackedMediaPkg(pkg)) continue
                 val token = controller.sessionToken ?: continue
                 ensureControllerForPackage(pkg, token)
             }
@@ -193,7 +284,7 @@ class NowPlayingListenerService : NotificationListenerService() {
         val notif = sbn.notification ?: return
         val extras = notif.extras ?: return
 
-        if (allowedPackages.isNotEmpty() && pkg !in allowedPackages) return
+        if (!isTrackedMediaPkg(pkg)) return
 
         val token = getMediaSessionToken(extras) ?: return
 
@@ -253,7 +344,7 @@ class NowPlayingListenerService : NotificationListenerService() {
             // YouTube lies about play-state while paused; run a continuous 500ms
             // poll so the stall detector gets the consecutive position samples it
             // needs to flip to paused (and freeze the progress bar) within ~1s.
-            if (pkg in youtubePackages) startPollForRealTrack(pkg, controller)
+            if (pkg in continuouslyPolledPackages) startPollForRealTrack(pkg, controller)
         } catch (_: Throwable) {
         }
     }
@@ -265,6 +356,7 @@ class NowPlayingListenerService : NotificationListenerService() {
         } catch (_: Throwable) {
         }
         lastPlayingStateByPackage.remove(pkg)
+        spotifyBrowserPkgs.remove(pkg)
     }
 
     private fun teardownAllControllers() {
@@ -285,7 +377,12 @@ class NowPlayingListenerService : NotificationListenerService() {
      * Only classifies based on explicit metadata strings from Spotify.
      * No stall-based heuristics — those caused false positives on song skips.
      */
-    private fun classifySpecial(pkg: String, title: String, artist: String): SpecialKind? {
+    private fun classifySpecial(
+        pkg: String,
+        title: String,
+        artist: String,
+        spotifyLike: Boolean
+    ): SpecialKind? {
         val t = title.trim().lowercase()
         val a = artist.trim().lowercase()
 
@@ -299,8 +396,11 @@ class NowPlayingListenerService : NotificationListenerService() {
         if (t.startsWith("advertisement") || a.startsWith("advertisement")) return SpecialKind.AD
 
         // Beyond that universal case, only Spotify gets the looser keyword matching —
-        // other players legitimately use these words in real song titles.
-        if (pkg != "com.spotify.music") return null
+        // other players legitimately use these words in real song titles. spotifyLike
+        // is true for the native app AND for a browser session identified as the
+        // Spotify web player (via its artwork host), so browser Spotify gets the same
+        // ad filter as the native app.
+        if (!spotifyLike) return null
 
         val looksLikeAd =
             t == "ad" ||
@@ -456,7 +556,28 @@ class NowPlayingListenerService : NotificationListenerService() {
             lastMetaChangeElapsedByPackage[pkg] = SystemClock.elapsedRealtime()
         }
 
-        val special = if (ytAdDetected) SpecialKind.AD else classifySpecial(pkg, title, artist)
+        // Identify a browser session that is actually the Spotify web player, so it
+        // gets the SAME ad filter as the native app. Spotify artwork is served from
+        // *.scdn.co / *.spotifycdn.com — if a browser session shows that art we mark
+        // the browser package as "Spotify mode" (latched, since an ad may drop the
+        // artwork mid-break), and clear it if the browser later plays a non-Spotify
+        // source. The native app is always Spotify.
+        run {
+            if (pkg != "com.spotify.music") {
+                val artUri = (metadata?.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI)
+                    ?: metadata?.getString(MediaMetadata.METADATA_KEY_ART_URI)
+                    ?: metadata?.getString(MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI)
+                    ?: "").lowercase()
+                if (artUri.isNotBlank()) {
+                    if (artUri.contains("scdn.co") || artUri.contains("spotifycdn") ||
+                        artUri.contains("spotify")
+                    ) spotifyBrowserPkgs.add(pkg) else spotifyBrowserPkgs.remove(pkg)
+                }
+            }
+        }
+        val spotifyLike = pkg == "com.spotify.music" || pkg in spotifyBrowserPkgs
+
+        val special = if (ytAdDetected) SpecialKind.AD else classifySpecial(pkg, title, artist, spotifyLike)
         var adInfo = ""
         if (special != null) {
             when (special) {
@@ -508,10 +629,12 @@ class NowPlayingListenerService : NotificationListenerService() {
             } else if (pkg == "com.spotify.music" && controller != null) {
                 startPollForRealTrack(pkg, controller)
             }
-        } else if (pkg !in youtubePackages) {
+        } else if (pkg !in continuouslyPolledPackages) {
             // Normal track — stop polling if we were.
-            // EXCEPT YouTube: its continuous pause-detection poll must keep running
-            // (it pushes normal tracks every cycle and would otherwise stop itself here).
+            // EXCEPT the continuously-polled set (YouTube + the Quest browser): their
+            // poll must keep running on normal tracks too (they push every cycle and
+            // would otherwise stop themselves here, re-introducing the sparse-sampling
+            // freeze/snap for the browser).
             stopPoll(pkg)
         }
 
@@ -577,8 +700,15 @@ class NowPlayingListenerService : NotificationListenerService() {
 
                 // YouTube: push EVERY cycle so the position-stall pause detector
                 // (NowPlayingState) gets consecutive samples. Other players only
-                // push on a real change / every 4s to stay quiet.
-                if (changed || stateChanged || sincePush >= 4000L || pkg in youtubePackages) {
+                // push on a real change / every 4s to stay quiet. EXCEPTION: during
+                // an ad/DJ special window (esp. a BROWSER web player, which — like
+                // the YouTube app — keeps reporting STATE_PLAYING with a frozen
+                // position when paused) also push every cycle, so a pause DURING an
+                // ad is detected in ~1.5s instead of waiting the ~4s until the next
+                // periodic push (the "ad only pauses after ~5s" bug).
+                if (changed || stateChanged || sincePush >= 4000L ||
+                    pkg in continuouslyPolledPackages || isSpecialWindowActive(pkg)
+                ) {
                     pushSnapshot(pkg, md, pb, controller)
                 }
                 lastPlayingStateByPackage[pkg] = nowPlaying
@@ -586,7 +716,7 @@ class NowPlayingListenerService : NotificationListenerService() {
                 // The Spotify ad/DJ poll is a short transient window; YouTube's pause
                 // poll must live as long as the session does (it self-stops when the
                 // controller changes above, or on teardown/destroy/notif-removed).
-                if (pkg !in youtubePackages && SystemClock.elapsedRealtime() - startAt >= maxMs) {
+                if (pkg !in continuouslyPolledPackages && SystemClock.elapsedRealtime() - startAt >= maxMs) {
                     stopPoll(pkg)
                     return
                 }

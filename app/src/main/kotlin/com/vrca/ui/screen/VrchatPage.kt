@@ -71,6 +71,8 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.PeopleAlt
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -486,6 +488,10 @@ internal fun VrchatStatusPage(vm: VrcaViewModel) {
         }
       } // end identity item
 
+      // Avatar tools (TEMPORARY home on the VRChat tab): avtrdb search + OSC
+      // avatar-size control. Headset shows the size slider (OSC-out is loopback).
+      item { AvatarToolsCard(vm) }
+
       item { VrchatStatusBanner() }
 
       // In-app alerts: a real stickyHeader so the "Notifications (N)" header,
@@ -742,6 +748,213 @@ private fun alertMatchesFilter(groupId: String, filter: String): Boolean = when 
  *
  * State (expanded/filter/nowMs/dismiss-all) is hoisted into VrchatStatusPage.
  */
+/** Temporary Avatar tools card on the VRChat tab: avatar-database search
+ *  (avtrdb) + avatar-size control (OSC /avatar/eyeheight). */
+@Composable
+private fun AvatarToolsCard(vm: VrcaViewModel) {
+    val ctx = LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var query by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf("") }
+    var results by remember { mutableStateOf<List<com.vrca.vrchat.AvatarSearch.Result>>(emptyList()) }
+    var searching by remember { mutableStateOf(false) }
+    var searched by remember { mutableStateOf(false) }
+
+    fun runSearch() {
+        if (query.isBlank()) return
+        searching = true; searched = true
+        scope.launch {
+            results = com.vrca.vrchat.AvatarSearch.searchAll(ctx, query)
+            searching = false
+        }
+    }
+
+    ElevatedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Avatar tools", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Temporary — search the avatar database, and set your avatar size.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            // --- avatar search (avtrdb) ---
+            androidx.compose.material3.OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Search avatars") },
+                singleLine = true,
+                trailingIcon = {
+                    androidx.compose.material3.IconButton(onClick = { runSearch() }) {
+                        Icon(Icons.Filled.Search, contentDescription = "Search")
+                    }
+                },
+                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                    imeAction = androidx.compose.ui.text.input.ImeAction.Search
+                ),
+                keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSearch = { runSearch() })
+            )
+            when {
+                searching -> androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth())
+                searched && results.isEmpty() -> Text(
+                    "No results.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            results.take(12).forEach { r -> AvatarResultRow(ctx, r) }
+
+            androidx.compose.material3.Divider()
+
+            // --- avatar size (OSC /avatar/eyeheight, live read via OSCQuery) ---
+            Text("Avatar size (eye height)", style = MaterialTheme.typography.titleSmall)
+
+            // Live IN-GAME height from VRChat (OSCQuery pull); the slider mirrors it.
+            val liveHeight by com.vrca.osc.VrcaOscState.eyeHeightFlow.collectAsState()
+            val defaultHeight = com.vrca.osc.VrcaOscState.defaultEyeHeightMeters
+
+            var sliderVal by remember { mutableStateOf(liveHeight ?: 1.6f) }
+            var dragging by remember { mutableStateOf(false) }
+            // Sync the slider to the in-game height whenever we're not dragging it.
+            androidx.compose.runtime.LaunchedEffect(liveHeight) {
+                if (!dragging) liveHeight?.let { sliderVal = it.coerceIn(0.1f, 10f) }
+            }
+
+            Text(
+                "In-game: " + (liveHeight?.let { "%.2f m".format(it) } ?: "—"),
+                style = MaterialTheme.typography.bodyMedium
+            )
+
+            androidx.compose.material3.Slider(
+                value = sliderVal.coerceIn(0.1f, 10f),
+                onValueChange = { dragging = true; sliderVal = it },
+                valueRange = 0.1f..10f,
+                onValueChangeFinished = { dragging = false; vm.setAvatarEyeHeight(sliderVal) }
+            )
+
+            // Type ANY value (no app-imposed min/max — VRChat clamps to its own range).
+            var heightText by remember { mutableStateOf("") }
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                androidx.compose.material3.OutlinedTextField(
+                    value = heightText,
+                    onValueChange = { heightText = it },
+                    modifier = Modifier.weight(1f),
+                    label = { Text("Height (m)") },
+                    singleLine = true,
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Decimal
+                    )
+                )
+                Spacer(Modifier.width(8.dp))
+                androidx.compose.material3.Button(
+                    onClick = {
+                        heightText.trim().toFloatOrNull()?.let {
+                            vm.setAvatarEyeHeight(it); sliderVal = it.coerceIn(0.1f, 10f)
+                        }
+                    },
+                    enabled = heightText.trim().toFloatOrNull() != null
+                ) { Text("Set") }
+            }
+
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Default: " + (defaultHeight?.let { "%.2f m".format(it) } ?: "—"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.weight(1f))
+                androidx.compose.material3.TextButton(
+                    onClick = { vm.resetAvatarHeightToDefault()?.let { sliderVal = it.coerceIn(0.1f, 10f) } },
+                    enabled = defaultHeight != null
+                ) { Text("Reset to default") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AvatarResultRow(ctx: android.content.Context, r: com.vrca.vrchat.AvatarSearch.Result) {
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var cloning by remember { mutableStateOf(false) }
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        coil.compose.AsyncImage(
+            model = r.imageUrl,
+            imageLoader = com.vrca.admin.VrchatImageLoader.get(ctx),
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .size(width = 56.dp, height = 42.dp)
+                .clip(androidx.compose.foundation.shape.RoundedCornerShape(6.dp))
+        )
+        Column(Modifier.weight(1f)) {
+            Text(
+                r.name.ifBlank { "(unnamed)" },
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+            )
+            Text(
+                "by ${r.author.ifBlank { "unknown" }}" +
+                    if (r.platforms.isNotEmpty()) "  ·  ${r.platforms.joinToString("/")}" else "",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+            )
+        }
+        // Clone/wear this avatar directly (we have its id). Also contributes it to
+        // the global catalog (fetching its file id if the search source lacked one).
+        androidx.compose.material3.IconButton(
+            enabled = !cloning,
+            onClick = {
+                if (cloning) return@IconButton
+                cloning = true
+                scope.launch {
+                    val res = com.vrca.vrchat.VrchatAuthManager.selectAvatar(ctx, r.id)
+                    // Contribute to our catalog: use the search file id if present,
+                    // else resolve it once via GET /avatars/{id}.
+                    val fid = r.imageFileId ?: com.vrca.vrchat.VrchatAuthManager.avatarCatalogEntry(ctx, r.id)?.fileId
+                    if (fid != null) com.vrca.vrchat.AvatarGlobalDb.contribute(
+                        ctx, fid, r.id, r.name, r.author, r.authorId, r.platforms
+                    )
+                    android.widget.Toast.makeText(
+                        ctx,
+                        if (res.ok) "Cloned ${r.name.ifBlank { "avatar" }} — shows on your next avatar reload"
+                        else (res.error ?: "Couldn't wear this avatar"),
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                    cloning = false
+                }
+            }
+        ) {
+            if (cloning) {
+                androidx.compose.material3.CircularProgressIndicator(
+                    strokeWidth = 2.dp, modifier = Modifier.size(18.dp)
+                )
+            } else {
+                Icon(Icons.Filled.PeopleAlt, contentDescription = "Clone avatar",
+                    tint = MaterialTheme.colorScheme.primary)
+            }
+        }
+        androidx.compose.material3.IconButton(onClick = {
+            runCatching {
+                ctx.startActivity(
+                    android.content.Intent(
+                        android.content.Intent.ACTION_VIEW,
+                        android.net.Uri.parse("https://vrchat.com/home/avatar/${r.id}")
+                    ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+            }
+        }) {
+            Icon(Icons.Filled.OpenInNew, contentDescription = "Open in VRChat")
+        }
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 private fun LazyListScope.inAppAlertSection(
     ctx: android.content.Context,

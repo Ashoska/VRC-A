@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.NewReleases
 import androidx.compose.material.icons.filled.Notifications
@@ -100,6 +101,10 @@ internal fun SettingsPage(
     val overlayAllowed = remember(permRefreshTick) {
         android.provider.Settings.canDrawOverlays(ctx)
     }
+    // Headset only: All-files access lets the log reader find VRChat's output log.
+    val filesAccessGranted = remember(permRefreshTick) {
+        com.vrca.vrchat.InstanceRosterManager.hasStoragePermission()
+    }
 
     // Inline VRChat re-login (Accounts → Sign in). Full-screen takeover; on
     // success VrchatAuthManager.loggedInSignal lifts the OSC gate and VrcaApp
@@ -169,28 +174,27 @@ internal fun SettingsPage(
         // -- Permissions (every permission the app uses lives here, each with
         //    its live granted status) --
         SectionCard(title = "Permissions") {
-            SettingsRow(
-                icon = Icons.Filled.Notifications,
-                title = "Notifications",
-                subtitle = "Friend activity, invites and group alerts.",
-                primary = "Open",
-                granted = notifGranted
-            ) {
-                runCatching {
-                    ctx.startActivity(
-                        android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                            .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, ctx.packageName)
-                    )
+            // POST_NOTIFICATIONS — not prompted on the headset (Quest doesn't surface
+            // the app notifications the way a phone does).
+            if (!BuildConfig.IS_HEADSET_BUILD) {
+                SettingsRow(
+                    icon = Icons.Filled.Notifications,
+                    title = "Notifications",
+                    subtitle = "Friend activity, invites and group alerts.",
+                    primary = "Open",
+                    granted = notifGranted
+                ) {
+                    runCatching {
+                        ctx.startActivity(
+                            android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, ctx.packageName)
+                        )
+                    }
                 }
             }
 
-            SettingsRow(
-                icon = Icons.Filled.MusicNote,
-                title = "Notification Access",
-                subtitle = "Required for Now Playing detection.",
-                primary = "Open",
-                granted = listenerGranted
-            ) { ctx.startActivity(vm.notificationAccessIntent()) }
+            // (Notification Access / Now Playing removed — media detection is moving
+            // to Spotify auth, so it's no longer required/prompted on any build.)
 
             SettingsRow(
                 icon = Icons.Filled.Power,
@@ -200,18 +204,65 @@ internal fun SettingsPage(
                 granted = batteryExempt
             ) { ctx.startActivity(vm.batteryOptimizationIntent()) }
 
+            // Notification access — required for Now Playing (Spotify/YouTube/YT Music)
+            // on EVERY build.
             SettingsRow(
-                icon = Icons.Filled.SystemUpdate,
-                title = "Install updates",
-                subtitle = "Lets VRC-A install its own update APKs when a new version is pushed.",
+                icon = Icons.Filled.MusicNote,
+                title = "Notification access",
+                subtitle = if (BuildConfig.IS_HEADSET_BUILD)
+                    "Lets VRC-A read Now Playing. Opens Android's settings — tap VRC-A in the list, then turn on Allow notification access."
+                else
+                    "Lets VRC-A read Now Playing. Turn it on in the list that opens.",
                 primary = "Open",
-                granted = installAllowed
-            ) {
-                runCatching {
-                    ctx.startActivity(
-                        android.content.Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
-                            .setData(android.net.Uri.parse("package:${ctx.packageName}"))
-                    )
+                granted = listenerGranted
+            ) { vm.launchNotificationAccess(ctx) }
+
+            // Quest-only: the "Allow restricted settings" step. Android 13+ GREYS
+            // OUT the notification-access toggle for SIDELOADED apps until the user
+            // opens App Info -> 3-dot menu -> "Allow restricted settings". Shown
+            // only while access is still missing.
+            if (BuildConfig.IS_HEADSET_BUILD && !listenerGranted) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = MaterialTheme.shapes.medium,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Toggle greyed out? Allow restricted settings", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "On a sideloaded app, Android hides the notification toggle until you allow restricted settings. Do this once, then turn on notification access above.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            "1. Tap \"Open App info\" below.\n" +
+                            "2. Tap the 3-dot menu (top right).\n" +
+                            "3. Tap \"Allow restricted settings\" (enter your headset PIN if asked).\n" +
+                            "4. Go back and turn on Allow notification access.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        TextButton(onClick = { vm.launchAppInfo(ctx) }) { Text("Open App info") }
+                    }
+                }
+            }
+
+            // Install-updates (unknown sources) — not on the headset: it's
+            // distributed through the Meta store, so no in-app APK install.
+            if (!BuildConfig.IS_HEADSET_BUILD) {
+                SettingsRow(
+                    icon = Icons.Filled.SystemUpdate,
+                    title = "Install updates",
+                    subtitle = "Lets VRC-A install its own update APKs when a new version is pushed.",
+                    primary = "Open",
+                    granted = installAllowed
+                ) {
+                    runCatching {
+                        ctx.startActivity(
+                            android.content.Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
+                                .setData(android.net.Uri.parse("package:${ctx.packageName}"))
+                        )
+                    }
                 }
             }
 
@@ -222,6 +273,26 @@ internal fun SettingsPage(
                 primary = "Open",
                 granted = overlayAllowed
             ) { ctx.startActivity(vm.overlayPermissionIntent()) }
+
+            // Headset only: read VRChat's log to build the instance roster. The
+            // rest of the roster setup (pick log folder, VRChat Logging = FULL)
+            // lives on the Home "In your instance" panel.
+            if (BuildConfig.IS_HEADSET_BUILD) {
+                SettingsRow(
+                    icon = Icons.Filled.Folder,
+                    title = "All files access",
+                    subtitle = "Lets VRC-A read VRChat's log to show who's in your instance.",
+                    primary = "Open",
+                    granted = filesAccessGranted
+                ) {
+                    runCatching {
+                        ctx.startActivity(
+                            com.vrca.vrchat.InstanceRosterManager.allFilesAccessIntent(ctx)
+                                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    }
+                }
+            }
         }
 
         // -- About --
@@ -313,6 +384,150 @@ internal fun SettingsPage(
                         Text("Title: ${vm.lastNowPlayingTitle}", style = MaterialTheme.typography.bodySmall)
                         Text("Artist: ${vm.lastNowPlayingArtist}", style = MaterialTheme.typography.bodySmall)
 
+                        // Chatbox send health — the whole send path at a glance. If
+                        // sending ever stops, this reveals exactly why (master gate,
+                        // loop alive, OSC block + which flag, target resolvable,
+                        // pipeline connected, manual hold, last-send age). Shown on all
+                        // builds so a "stopped sending" report is read, not guessed.
+                        Text("Chatbox send health", style = MaterialTheme.typography.labelMedium)
+                        var sendHealth by remember { mutableStateOf(vm.sendHealthDiag()) }
+                        androidx.compose.runtime.LaunchedEffect(Unit) {
+                            while (true) {
+                                sendHealth = vm.sendHealthDiag()
+                                kotlinx.coroutines.delay(1000)
+                            }
+                        }
+                        SelectionContainer {
+                            Text(
+                                sendHealth,
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+
+                        if (BuildConfig.IS_HEADSET_BUILD) {
+                            Text("OSC-in (VRChat → VRC-A :9001)", style = MaterialTheme.typography.labelMedium)
+                            var oscInDiag by remember { mutableStateOf(com.vrca.osc.VrcaOscState.diagString()) }
+                            androidx.compose.runtime.LaunchedEffect(Unit) {
+                                while (true) {
+                                    oscInDiag = com.vrca.osc.VrcaOscState.diagString()
+                                    kotlinx.coroutines.delay(1000)
+                                }
+                            }
+                            SelectionContainer {
+                                Text(
+                                    oscInDiag,
+                                    fontFamily = FontFamily.Monospace,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+
+                            // OSCQuery probe: VRChat won't PUSH params on Quest, but
+                            // its wiki says Android VRChat SERVES param values over
+                            // OSCQuery HTTP. This scans for VRChat's _oscjson._tcp
+                            // service + reads MuteSelf to prove we can PULL params.
+                            Text("OSCQuery probe (pull params)", style = MaterialTheme.typography.labelMedium)
+                            var oscQ by remember { mutableStateOf(com.vrca.osc.VrcaOscState.oscQueryDiag) }
+                            androidx.compose.runtime.LaunchedEffect(Unit) {
+                                while (true) {
+                                    oscQ = com.vrca.osc.VrcaOscState.oscQueryDiag
+                                    kotlinx.coroutines.delay(1000)
+                                }
+                            }
+                            TextButton(onClick = { com.vrca.osc.VrcaOscQuery.start(ctx) }) {
+                                Text("Start / rescan OSCQuery")
+                            }
+                            SelectionContainer {
+                                Text(
+                                    oscQ,
+                                    fontFamily = FontFamily.Monospace,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+
+                            // Instance roster: shows the log file + parsed
+                            // location/world/roster + the last log lines with what the
+                            // parser made of each — so a "not in a world" with a
+                            // readable log reveals which lines didn't match.
+                            Text("Instance roster (log parse)", style = MaterialTheme.typography.labelMedium)
+                            var rosterDiag by remember { mutableStateOf("") }
+                            androidx.compose.runtime.LaunchedEffect(Unit) {
+                                while (true) {
+                                    rosterDiag = runCatching {
+                                        com.vrca.vrchat.InstanceRosterManager.diagString(ctx)
+                                    }.getOrDefault("(err)")
+                                    kotlinx.coroutines.delay(1500)
+                                }
+                            }
+                            SelectionContainer {
+                                Text(
+                                    rosterDiag,
+                                    fontFamily = FontFamily.Monospace,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+
+                            // Avatar-id resolve: shows whether each clone id resolved
+                            // and — the key line — whether VRChat's official
+                            // author-avatars listing WORKS, is BLOCKED (403), or is
+                            // IGNORED (returns a list that isn't the author's).
+                            Text("Avatar id resolve (clone)", style = MaterialTheme.typography.labelMedium)
+                            var avaDiag by remember { mutableStateOf(com.vrca.vrchat.AvatarSearch.Diag.dump()) }
+                            androidx.compose.runtime.LaunchedEffect(Unit) {
+                                while (true) {
+                                    avaDiag = com.vrca.vrchat.AvatarSearch.Diag.dump()
+                                    kotlinx.coroutines.delay(1500)
+                                }
+                            }
+                            SelectionContainer {
+                                Text(
+                                    avaDiag,
+                                    fontFamily = FontFamily.Monospace,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                        }
+
+                        // Crowdsourced avatar catalog (all builds): entries loaded
+                        // from the global file, last pull (fresh vs 304), local
+                        // contribution queue size, and the last POST result.
+                        Text("Avatar catalog (global)", style = MaterialTheme.typography.labelMedium)
+                        var gdbDiag by remember { mutableStateOf(com.vrca.vrchat.AvatarGlobalDb.diag(ctx)) }
+                        androidx.compose.runtime.LaunchedEffect(Unit) {
+                            while (true) {
+                                gdbDiag = com.vrca.vrchat.AvatarGlobalDb.diag(ctx)
+                                kotlinx.coroutines.delay(1500)
+                            }
+                        }
+                        SelectionContainer {
+                            Text(
+                                gdbDiag,
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+
+                        // Per-DB health: probe each avatar source individually so a
+                        // misconfigured/blocked source is visible (tap to run).
+                        Text("Avatar DBs (tap to test)", style = MaterialTheme.typography.labelMedium)
+                        var dbHealth by remember { mutableStateOf("(not run)") }
+                        var dbTrigger by remember { mutableStateOf(0) }
+                        if (dbTrigger > 0) {
+                            androidx.compose.runtime.LaunchedEffect(dbTrigger) {
+                                dbHealth = "checking…"
+                                dbHealth = runCatching { com.vrca.vrchat.AvatarSearch.dbHealthCheck() }
+                                    .getOrElse { "error: ${it.javaClass.simpleName}" }
+                            }
+                        }
+                        TextButton(onClick = { dbTrigger++ }) { Text("Test all avatar databases") }
+                        SelectionContainer {
+                            Text(
+                                dbHealth,
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+
                         Text("OSC Output Preview", style = MaterialTheme.typography.labelMedium)
                         SelectionContainer {
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -325,6 +540,9 @@ internal fun SettingsPage(
 
                         Text("Last sent to VRChat (ms): ${vm.lastSentToVrchatAtMs}",
                             style = MaterialTheme.typography.bodySmall)
+
+                        androidx.compose.material3.Divider(Modifier.padding(vertical = 4.dp))
+                        ChatboxWidthCalibrationTool(vm)
                     }
                 }
             }
@@ -632,6 +850,40 @@ private fun AccountsSection(vm: VrcaViewModel, onSignInVrchat: () -> Unit) {
                 TextButton(onClick = { showDiscordLogin = true }) { Text("Sign in to Discord again") }
             }
         }
+
+        // Spotify row — official-API media detection (replaces the notification
+        // listener). Connect once via OAuth; we then poll currently-playing.
+        val spotifyConnected by com.vrca.spotify.SpotifyAuthManager.connectedFlow.collectAsState()
+        androidx.compose.runtime.LaunchedEffect(Unit) {
+            com.vrca.spotify.SpotifyAuthManager.refreshConnectedState(ctx)
+        }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Spotify", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    when {
+                        !com.vrca.spotify.SpotifyAuthManager.isConfigured() -> "Not set up yet"
+                        spotifyConnected -> "Connected — Now Playing from Spotify"
+                        else -> "Not connected"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (spotifyConnected) {
+                TextButton(onClick = { com.vrca.spotify.SpotifyAuthManager.logout(ctx) }) { Text("Disconnect") }
+            } else if (com.vrca.spotify.SpotifyAuthManager.isConfigured()) {
+                TextButton(onClick = {
+                    runCatching {
+                        val url = com.vrca.spotify.SpotifyAuthManager.buildAuthUrl(ctx)
+                        ctx.startActivity(
+                            android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
+                                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    }
+                }) { Text("Connect") }
+            }
+        }
     }
 
     // Discord risk consent (moved with the card; consent persists once).
@@ -828,6 +1080,139 @@ private fun StorageRow() {
                 android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
                     .setData(android.net.Uri.parse("package:${ctx.packageName}"))
             )
+        }
+    }
+}
+
+/** Dev-only EXACT chatbox line-width calibration harness (plan §8.4). Send a line
+ *  of one repeated char, read the wrap point in-headset, record the max count per
+ *  char, Save → TitleCleaner wraps by measured widths instead of estimates. */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun ChatboxWidthCalibrationTool(vm: VrcaViewModel) {
+    val ctx = LocalContext.current
+    val measured = remember {
+        androidx.compose.runtime.mutableStateMapOf<Char, String>().apply {
+            com.vrca.nowplaying.ChatboxCalibration.measuredChars().forEach { (c, n) -> put(c, n.toString()) }
+        }
+    }
+    var calibrated by remember { mutableStateOf(com.vrca.nowplaying.ChatboxCalibration.calibrated) }
+    var testChar by remember { mutableStateOf('M') }
+    var count by remember { mutableStateOf(20) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Chatbox width calibration", style = MaterialTheme.typography.labelMedium)
+        Text(
+            "Send a line of one repeated character, watch where it wraps in VRChat, and enter " +
+                "the highest count that stays on ONE line. Repeat per char, then Save.  " +
+                if (calibrated) "Status: CALIBRATED." else "Status: using estimates.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        Text("Test: '$testChar' × $count", style = MaterialTheme.typography.bodySmall)
+        androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            com.vrca.nowplaying.ChatboxCalibration.REFERENCE_CHARS.forEach { c ->
+                androidx.compose.material3.FilterChip(
+                    selected = testChar == c,
+                    onClick = { testChar = c },
+                    label = { Text(if (c == ' ') "␣" else c.toString()) }
+                )
+            }
+        }
+        androidx.compose.material3.Slider(
+            value = count.toFloat(),
+            onValueChange = { count = it.toInt().coerceIn(1, 80) },
+            valueRange = 1f..80f
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            androidx.compose.material3.Button(onClick = {
+                vm.sendCalibrationLine(testChar.toString().repeat(count))
+            }) { Text("Send × $count") }
+            androidx.compose.material3.OutlinedButton(onClick = { vm.sendCalibrationLine("") }) {
+                Text("Clear chatbox")
+            }
+        }
+
+        // --- AUTO sequence: fire each reference char (over-long so it wraps) one
+        // at a time; screenshot each in VRChat and send the shots to the dev, who
+        // reads the wrap points and fills the exact table. ---
+        var seqIndex by remember { mutableStateOf(-1) }
+        fun roughUnits(c: Char): Float = when {
+            c == 'm' || c == 'w' || c == 'M' || c == 'W' -> 1.4f
+            c.isUpperCase() || c.isDigit() -> 1.2f
+            c in " ijltfr.,':;!|()[]-" -> 0.6f
+            c.code in 0xFF00..0xFF60 || c.code in 0x2E80..0x9FFF ||
+                c.code in 0xAC00..0xD7AF || c.code in 0x3000..0x303F -> 2.0f
+            else -> 1.0f
+        }
+        fun seqSend(i: Int) {
+            val c = com.vrca.nowplaying.ChatboxCalibration.REFERENCE_CHARS[i]
+            val n = (40f / roughUnits(c)).toInt().coerceIn(8, 140)
+            vm.sendCalibrationLine(c.toString().repeat(n))
+        }
+        androidx.compose.material3.Divider(Modifier.padding(vertical = 2.dp))
+        Text("Auto sequence — screenshot each line in VRChat and send the shots to the dev:",
+            style = MaterialTheme.typography.bodySmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            androidx.compose.material3.Button(onClick = { seqIndex = 0; seqSend(0) }) {
+                Text(if (seqIndex < 0) "Start sequence" else "Restart")
+            }
+            if (seqIndex >= 0) {
+                androidx.compose.material3.OutlinedButton(
+                    onClick = { if (seqIndex > 0) { seqIndex--; seqSend(seqIndex) } },
+                    enabled = seqIndex > 0
+                ) { Text("Prev") }
+                androidx.compose.material3.Button(onClick = {
+                    if (seqIndex < com.vrca.nowplaying.ChatboxCalibration.REFERENCE_CHARS.size - 1) {
+                        seqIndex++; seqSend(seqIndex)
+                    }
+                }) { Text("Next") }
+            }
+        }
+        if (seqIndex >= 0) {
+            val c = com.vrca.nowplaying.ChatboxCalibration.REFERENCE_CHARS[seqIndex]
+            Text(
+                "Showing ${seqIndex + 1}/${com.vrca.nowplaying.ChatboxCalibration.REFERENCE_CHARS.size}: " +
+                    "'${if (c == ' ') "␣ (space)" else c.toString()}' — screenshot the chatbox, then Next.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+        androidx.compose.material3.Divider(Modifier.padding(vertical = 2.dp))
+
+        Text("Measured max count per char (auto-filled from your screenshots, or type them):",
+            style = MaterialTheme.typography.bodySmall)
+        androidx.compose.foundation.layout.FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            com.vrca.nowplaying.ChatboxCalibration.REFERENCE_CHARS.forEach { c ->
+                androidx.compose.material3.OutlinedTextField(
+                    value = measured[c] ?: "",
+                    onValueChange = { measured[c] = it.filter { ch -> ch.isDigit() }.take(3) },
+                    modifier = Modifier.width(78.dp),
+                    label = { Text(if (c == ' ') "␣" else c.toString()) },
+                    singleLine = true,
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Number
+                    )
+                )
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            androidx.compose.material3.Button(onClick = {
+                val counts = measured.mapNotNull { (c, s) ->
+                    s.toIntOrNull()?.takeIf { it > 0 }?.let { c to it }
+                }.toMap()
+                com.vrca.nowplaying.ChatboxCalibration.save(ctx, counts)
+                calibrated = com.vrca.nowplaying.ChatboxCalibration.calibrated
+            }) { Text("Save calibration") }
+            androidx.compose.material3.OutlinedButton(onClick = {
+                com.vrca.nowplaying.ChatboxCalibration.clear(ctx)
+                measured.clear()
+                calibrated = false
+            }) { Text("Clear") }
         }
     }
 }

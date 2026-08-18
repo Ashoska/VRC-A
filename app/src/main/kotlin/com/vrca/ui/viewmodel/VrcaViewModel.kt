@@ -39,6 +39,7 @@ import com.vrca.ui.common.resolveTimeZone
 import com.vrca.vrchat.VrchatPipelineState
 import com.vrca.ui.conversation.ConversationUiState
 import com.vrca.ui.conversation.Message
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
@@ -103,6 +104,29 @@ class VrcaViewModel(
         const val PKG_YTMUSIC = "com.google.android.apps.youtube.music"
 
         private const val SEND_FLOOR_MS = 500L
+
+        // NowPlaying send RESAMPLE cadence. The sender loop must sample the progress
+        // more often than the value changes (once/sec) so a tick the SEND_FLOOR gate
+        // drops (it lands <500ms after the last actual send) is retried well within
+        // the SAME second — otherwise the retry waited a full 500ms and, if that
+        // delay ran long under load, landed in the NEXT second's window, so the
+        // in-between second was never sent and VRChat jumped 2s while the in-app
+        // preview (a 60ms ticker) stayed smooth. Actual OSC traffic is unchanged:
+        // rebuildAndMaybeSendCombined still floors real sends to SEND_FLOOR_MS and
+        // dedups identical text, so sends stay ≤1 per 500ms (≈1/sec on change).
+        private const val NOWPLAYING_RESAMPLE_MS = 250L
+
+        // NowPlaying position-anchor smoothing. Media players (browser MediaSessions
+        // especially) report position rounded/jittered and re-sample on their own
+        // cadence (~every 3s for a browser), so blindly re-anchoring on every snapshot
+        // made the displayed second STUTTER — smooth for a few seconds, then a hard
+        // ~2s snap when a jittery push disagreed with our extrapolation, repeating.
+        // We treat our own 1x extrapolation as the smooth source of truth and only
+        // re-anchor (accept a hard jump) on a genuine LARGE seek (> this), a track
+        // change, or a real pause. 3s comfortably absorbs a browser's ~2s report
+        // jitter; a constant small offset from reality is imperceptible on a progress
+        // bar, whereas the repeated snap was very visible.
+        private const val POSITION_RESYNC_TOLERANCE_MS = 3_000L
 
         // Manual Send takeover: a manual message pauses the automated chatbox
         // (Pinned/Cycle/Music/Time) for this long so people can read it. Extended
@@ -348,7 +372,7 @@ class VrcaViewModel(
         "vrchatUserId", "vrchatDisplayName", "vrchatState", "vrchatStatus",
         "vrchatStatusDescription", "vrchatWorld", "vrchatLocation",
         "vrchatInstancePlayerCount", "vrchatInstanceCapacity",
-        "vrchatPlatform", "vrchatIsOnline"
+        "vrchatPlatform", "vrchatIsOnline", "instanceRoster"
     )
 
     private fun readLastSelfSyncMs(): Long = prefs().getLong(PREF_LAST_SELF_SYNC_MS, 0L)
@@ -544,11 +568,42 @@ class VrcaViewModel(
         // existing write — 0 extra cost).
         "versionName" to BuildConfig.VERSION_NAME,
         "versionCode" to BuildConfig.VERSION_CODE,
-        "lastReportedTime" to if (timeEnabled) currentTimeString() else "",
+        // Guarded: a throw here (malformed timeMode) must NOT nuke the whole watched
+        // write. See buildInstanceRosterJson note below.
+        "lastReportedTime" to runCatching { if (timeEnabled) currentTimeString() else "" }.getOrDefault(""),
+        // Headset log-derived instance roster (who's in the user's world), so the
+        // admin can see it remotely. JSON string; empty off the headset / not in a
+        // world. Rides this existing watched write — zero extra Firestore cost.
+        // CRITICAL: guarded with runCatching. This is the ONLY headset-specific field
+        // in the live payload, and performLiveSync evaluates buildLivePayload() INSIDE
+        // its own runCatching — so if this threw, the ENTIRE watched write (preview,
+        // roster, liveness) was silently swallowed while the pipeline service's
+        // separate presence loop kept lastSeenAt fresh. That produced the exact
+        // "last-seen updates while watching but the preview + instance roster never
+        // do" bug. Never let a single derived field abort the map construction.
+        "instanceRoster" to runCatching { buildInstanceRosterJson() }.getOrDefault(""),
         "lastTimeUpdateAt" to FieldValue.serverTimestamp(),
         "lastActiveAt" to FieldValue.serverTimestamp(),
         "lastSeenAt" to FieldValue.serverTimestamp()
     )
+
+    /** Compact JSON of the current instance roster (headset only, when in a world).
+     *  Read by the admin detail view. Capped so a huge instance can't bloat the doc. */
+    private fun buildInstanceRosterJson(): String {
+        if (!BuildConfig.IS_HEADSET_BUILD) return ""
+        val ui = com.vrca.vrchat.InstanceRosterManager.flow.value
+        if (ui.status != com.vrca.vrchat.InstanceRosterManager.Status.LIVE || ui.members.isEmpty()) return ""
+        val arr = org.json.JSONArray()
+        ui.members.take(80).forEach { m ->
+            arr.put(org.json.JSONObject().apply {
+                put("name", m.displayName)
+                if (m.platform.isNotBlank()) put("platform", m.platform)
+                if (m.isFriend) put("friend", true)
+                if (m.isSelf) put("self", true)
+            })
+        }
+        return arr.toString()
+    }
 
     /**
      * \u2705 UID mapping per YOUR RULES:
@@ -628,9 +683,15 @@ class VrcaViewModel(
         if (!initialDataLoaded) return
         val deviceHash = readDeviceHashFromPrefs()
         if (!isValidDeviceHash(deviceHash)) return
+        // Build the payload OUTSIDE the write's runCatching. buildLivePayload is now
+        // throw-proof (its derived fields are guarded), but constructing it here keeps
+        // a hypothetical build failure from ever being conflated with a write attempt —
+        // a build that returns null skips the cycle cleanly rather than silently
+        // swallowing preview/roster/liveness for the whole watched session.
+        val payload = runCatching { buildLivePayload() }.getOrNull() ?: return
         runCatching {
             db.collection(COL_USERS).document(deviceHash)
-                .set(buildLivePayload(), SetOptions.merge())
+                .set(payload, SetOptions.merge())
                 .await()
         }
     }
@@ -706,6 +767,13 @@ class VrcaViewModel(
         put("nowPlayingTitle", lastNowPlayingTitle.takeIf { it != "(blank)" }?.trim().orEmpty())
         put("nowPlayingArtist", lastNowPlayingArtist.takeIf { it != "(blank)" }?.trim().orEmpty())
         put("activePackage", activePackage)
+        // Headset log-derived instance roster on the hourly delta too (guarded), so an
+        // UNWATCHED headset user's roster refreshes via the hourly catch-up — not only
+        // while an admin is actively watching. Empty off the headset / not in a world.
+        // Delta-compared like every other field, so it costs zero extra writes (rides
+        // the write that already fires). This is why the admin detail previously showed
+        // a stale/empty roster unless the user happened to be watched at the time.
+        put("instanceRoster", runCatching { buildInstanceRosterJson() }.getOrDefault(""))
         VrchatPipelineState.presence?.let { p ->
             put("vrchatUserId", p.userId)
             put("vrchatDisplayName", p.displayName)
@@ -1832,7 +1900,12 @@ class VrcaViewModel(
     )
 
     private val remoteVrcaOsc = VrcaOsc(
-        ipAddress = runBlocking { userPreferencesRepository.ipAddress.first() },
+        // Headset build: VRChat runs on the SAME Quest, so OSC always targets
+        // localhost — no manual IP needed. Phone build: the saved LAN IP of the
+        // headset/PC running VRChat (still entered manually until a device-link
+        // exists). See the ipAddress collector + ConnectionCard for the same gate.
+        ipAddress = if (BuildConfig.IS_HEADSET_BUILD) "127.0.0.1"
+                    else runBlocking { userPreferencesRepository.ipAddress.first() },
         port = 9000
     )
 
@@ -1948,6 +2021,60 @@ class VrcaViewModel(
                 refreshOscBlockGate()
             }
         }
+        // Headset self-heal (the "chatbox won't send on open / randomly stops,
+        // only a reopen fixes it" fix — headset-only in practice).
+        //
+        // The app-scoped VM is RE-CONSTRUCTED on every headless revival
+        // (KeepAliveService -> ensureRuntimeViewModel after an OS/OEM kill, which
+        // is routine on Quest), and each construction seeds `vrchatLoggedOut`
+        // from VrchatAuthManager.isLoggedIn(), which reads EncryptedSharedPrefs.
+        // On Quest that can read FALSE TRANSIENTLY at cold boot / revival (the
+        // Keystore/MasterKey isn't ready yet) even though the VRChat session is
+        // perfectly valid -> the OSC gate seeds BLOCKED and never clears, because
+        // nothing re-logs-in (so no loggedInSignal ever fires). The sender loop
+        // runs (restoreFeatureSession set oscSending=true) but every send is
+        // dropped at the chokepoint, so the chatbox is silently dead until the
+        // user reopens (a fresh VM whose Keystore is now ready seeds it false).
+        //
+        // A CONNECTED pipeline is definitive proof the VRChat session is valid —
+        // the WebSocket handshake REQUIRES a valid auth cookie, so a live
+        // connection means the session is good regardless of what the local
+        // Keystore says. Clear the gate the moment it connects.
+        //
+        // CRITICAL: do NOT also re-check isLoggedIn() here. On Quest the Keystore
+        // can still be not-ready WHEN the pipeline connects (the pipeline used a
+        // cookie it read earlier), so isLoggedIn() reads false and an isLoggedIn
+        // guard BAILS — leaving the gate stuck true forever. That was the exact
+        // reported bug: the UI still shows "Sending" (oscSending stayed true from
+        // restoreFeatureSession) but every send is dropped at the blocked gate,
+        // and Stop/Start can't fix it because neither touches `blocked` — only a
+        // full reopen did. A genuine sign-out clears the cookie so the pipeline
+        // can't be connected here, so clearing on connect is always safe.
+        viewModelScope.launch {
+            com.vrca.vrchat.VrchatPipelineState.isConnectedFlow.collect { connected ->
+                if (!connected) return@collect
+                val wasGated = vrchatLoggedOut || vrchatAuthDead
+                if (wasGated) {
+                    vrchatLoggedOut = false
+                    vrchatAuthDead = false
+                    com.vrca.vrchat.VrchatPipelineState.authDead = false
+                    refreshOscBlockGate()
+                    if (oscSending) {
+                        // Loop is already running (seed scenario) but was gated —
+                        // force an immediate resend so the chatbox comes back at
+                        // once instead of waiting for the ~3s keepalive tick.
+                        rebuildAndMaybeSendCombined(forceSend = true)
+                    } else if (!isBanned) {
+                        // A transient block had torn down sending (a spurious
+                        // authDead calls stopSending) — resume now that the session
+                        // is proven alive and the user had sending armed. Safe: a
+                        // real sign-out disarms restore and won't reconnect.
+                        val pending = com.vrca.app.FeatureSessionStore.pendingRestore(app.applicationContext)
+                        if (pending?.sending == true && pending.anyEnabled) startSending()
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -2048,15 +2175,21 @@ class VrcaViewModel(
         userInputIpState.value = ip
     }
 
+    // On the headset VRChat is on THIS device, so the OSC target is ALWAYS
+    // 127.0.0.1 — a custom IP (from an old build / stray entry) must never override
+    // it (that would send the chatbox to the wrong place). Phone/admin unaffected.
+    private fun oscTargetFor(address: String): String =
+        if (BuildConfig.IS_HEADSET_BUILD) "127.0.0.1" else address
+
     fun ipAddressApply(address: String) {
-        remoteVrcaOsc.ipAddress = address
+        remoteVrcaOsc.ipAddress = oscTargetFor(address)
         viewModelScope.launch { userPreferencesRepository.saveIpAddress(address) }
         startSelfSyncLoopIfNeeded()
         attachModerationListenersLoopOnce()
     }
 
     fun ipAddressApplyRuntimeOnly(address: String) {
-        remoteVrcaOsc.ipAddress = address
+        remoteVrcaOsc.ipAddress = oscTargetFor(address)
         startSelfSyncLoopIfNeeded()
         attachModerationListenersLoopOnce()
     }
@@ -2290,12 +2423,23 @@ class VrcaViewModel(
     var minSendIntervalSeconds by mutableStateOf(2)
         private set
 
-    private var lastCombinedSendMs = 0L
+    // @Volatile: the send loops now run OFF the main thread (Dispatchers.Default) so a
+    // main-thread stall can't freeze them (that stall was skipping a whole second of
+    // music progress → the "VRChat jumps 2s while the preview is fine" bug). These
+    // send-bookkeeping fields are therefore read/written from both the send thread and
+    // main-thread callers; @Volatile gives clean visibility. Any residual race is
+    // benign (at worst one duplicate or one skipped-dedup send, which VRChat renders
+    // identically).
+    @Volatile private var lastCombinedSendMs = 0L
 
     // Content-change dedup: skip redundant OSC sends when the text hasn't changed.
     // Re-sends every 10s even if unchanged so VRChat doesn't clear the chatbox.
-    private var lastSentCombinedText = ""
-    private var lastSentMs = 0L
+    @Volatile private var lastSentCombinedText = ""
+    @Volatile private var lastSentMs = 0L
+    // Serialises the floor/dedup/claim decision in rebuildAndMaybeSendCombined so the
+    // now-off-main send loops can't both fire within one 0.5s window (VRChat would
+    // coalesce/drop one, reading as a skipped second).
+    private val sendGateLock = Any()
 
     // =========================
     // OSC send gate (master switch)
@@ -2320,6 +2464,14 @@ class VrcaViewModel(
     var sendingSinceMs by mutableStateOf(savedState["sendingSinceMs"] ?: 0L)
         private set
     private var uptimeHeartbeatJob: Job? = null
+
+    // "In VRChat" uptime — the epoch (ms) since the user came online in VRChat,
+    // mirrored from VrchatUptime (presence-driven, grace + crash-restore, matches
+    // the Discord RPC counter regardless of whether the RPC is enabled). 0 when not
+    // in VRChat. This is what the Home uptime label shows (how long IN VRChat, not
+    // how long the chatbox has been sending).
+    var vrchatOnlineSinceMs by mutableStateOf(0L)
+        private set
 
     // Epoch ms of the cycle sender's next line advance — drives the Home
     // "Next cycle in 12s" ticker. 0 when the cycle loop isn't running.
@@ -2477,6 +2629,7 @@ class VrcaViewModel(
 
     private var nowPlayingJob: Job? = null
     private var keepaliveJob: Job? = null
+    private var unifiedSendJob: Job? = null
 
     private var inferredIsPlaying = false
     private var lastTrackKeyForInference: String = ""
@@ -2606,9 +2759,32 @@ class VrcaViewModel(
         // collector makes any saved/equipped/synced IP the runtime target
         // automatically. Manual Apply also writes the same value to DataStore, so
         // this re-emits the identical value (no conflict).
-        viewModelScope.launch {
-            userPreferencesRepository.ipAddress.collect { ip ->
-                if (ip.isNotBlank()) remoteVrcaOsc.ipAddress = ip
+        // Headset build sends to localhost (VRChat is on the same Quest) and never
+        // follows the saved IP pref; only the phone build tracks the manual IP.
+        if (!BuildConfig.IS_HEADSET_BUILD) {
+            viewModelScope.launch {
+                userPreferencesRepository.ipAddress.collect { ip ->
+                    if (ip.isNotBlank()) remoteVrcaOsc.ipAddress = ip
+                }
+            }
+        } else {
+            // Headset: VRChat runs on the SAME Quest, but sending to hardcoded
+            // 127.0.0.1:9000 was PROVEN undelivered on-device — the eyeheight
+            // delivery canary read NOT DELIVERED for minutes (`udp ok` but the
+            // EyeHeightAsMeters readback never moved) while OSCQuery to VRChat's
+            // discovered host stayed live the whole time. So outbound UDP to
+            // loopback is what dies; the reachable host isn't. Follow the SAME
+            // endpoint our OSCQuery polls reach VRChat at (its mDNS host = the
+            // device LAN IP) + VRChat's advertised OSC-in port. Falls back to
+            // loopback:9000 until discovery resolves; only re-points on a genuine
+            // host/port change (rare), so no socket thrash.
+            viewModelScope.launch {
+                com.vrca.osc.VrcaOscQuery.oscSendTargetFlow.collect { target ->
+                    val ip = target?.first ?: "127.0.0.1"
+                    val p = target?.second ?: 9000
+                    if (remoteVrcaOsc.port != p) remoteVrcaOsc.port = p
+                    if (remoteVrcaOsc.ipAddress != ip) remoteVrcaOsc.ipAddress = ip
+                }
             }
         }
 
@@ -2618,6 +2794,25 @@ class VrcaViewModel(
 
         // VRChat sign-out hard-blocks OSC until re-login (Settings Accounts).
         startVrchatAuthGateWatcher()
+
+        // Crowdsourced avatar-id catalog: pull the global file (on open + every
+        // 30 min), drain any queued contributions, seed our own current avatar.
+        com.vrca.vrchat.AvatarGlobalDb.start(app)
+
+        // Drive the "in VRChat" uptime timer from live presence (regardless of the
+        // Discord RPC), and mirror its start epoch into observable VM state.
+        viewModelScope.launch {
+            com.vrca.vrchat.VrchatPipelineState.presenceFlow.collect { p ->
+                com.vrca.vrchat.VrchatUptime.update(
+                    app.applicationContext,
+                    inVrchat = p?.isOnlineInVRChat == true,
+                    now = System.currentTimeMillis()
+                )
+            }
+        }
+        viewModelScope.launch {
+            com.vrca.vrchat.VrchatUptime.startFlow.collect { vrchatOnlineSinceMs = it }
+        }
 
         // Live-mode loop: idle until an admin starts watching.
         startLiveSyncWatcher()
@@ -2841,7 +3036,9 @@ class VrcaViewModel(
             while (true) {
                 tickNowPlayingMovement()
                 tickCyclePreviewOnly()
-                nowPlayingIsPlaying = computeDisplayedPlaying()
+                val displayedPlaying = computeDisplayedPlaying()
+                maybeFreezeNowPlayingAnchor(displayedPlaying)
+                nowPlayingIsPlaying = displayedPlaying
                 rebuildCombinedPreviewOnly()
                 delay(UI_TICK_MS)
             }
@@ -2854,14 +3051,39 @@ class VrcaViewModel(
                 nowPlayingDetected = s.detected
 
                 nowPlayingDurationMs = s.durationMs
-                nowPlayingPositionMs = s.positionMs
-                nowPlayingPositionUpdateTimeMs = s.positionUpdateTimeMs
-                nowPlayingSpeed = s.playbackSpeed
-                nowPlayingReportedIsPlaying = s.isPlaying
 
                 val key = "${s.title.trim()}|${s.artist.trim()}|${s.durationMs}"
                 val trackChanged =
                     key != lastTrackKeyForInference && (s.title.isNotBlank() || s.artist.isNotBlank())
+
+                // Position-anchor smoothing (see POSITION_RESYNC_TOLERANCE_MS): keep the
+                // existing smooth anchor while the same track is playing and the new
+                // sample only jitters within tolerance of what the anchor predicts.
+                // Re-anchor on a track change, a real pause, or a genuine large seek.
+                // Computed BEFORE overwriting speed/reported-playing so it reads the
+                // PREVIOUS anchor. Deliberately tolerant of a browser flickering
+                // speed=0 / isPlaying=false on a single push: we keep the anchor as long
+                // as EITHER side reports playing (a sustained pause flips both false
+                // within a snapshot, which then re-anchors), and use a 1x speed fallback
+                // in the prediction so a reported speed of 0 doesn't zero out the drift
+                // math. Requiring BOTH sides to report speed>0/playing was what let a
+                // single jittery push break the anchor and snap.
+                val playingish = s.isPlaying || nowPlayingReportedIsPlaying
+                val keepAnchor = !trackChanged && playingish &&
+                    nowPlayingPositionUpdateTimeMs > 0L &&
+                    run {
+                        val spd = if (nowPlayingSpeed > 0f) nowPlayingSpeed else 1f
+                        val dtMs = s.positionUpdateTimeMs - nowPlayingPositionUpdateTimeMs
+                        val predicted = nowPlayingPositionMs +
+                            max(0L, (dtMs.toFloat() * spd).toLong())
+                        abs(s.positionMs - predicted) <= POSITION_RESYNC_TOLERANCE_MS
+                    }
+                if (!keepAnchor) {
+                    nowPlayingPositionMs = s.positionMs
+                    nowPlayingPositionUpdateTimeMs = s.positionUpdateTimeMs
+                }
+                nowPlayingSpeed = s.playbackSpeed
+                nowPlayingReportedIsPlaying = s.isPlaying
                 if (trackChanged) {
                     lastTrackKeyForInference = key
                     lastMovementAtMs = System.currentTimeMillis()
@@ -2988,6 +3210,43 @@ class VrcaViewModel(
         }
     }
 
+    /**
+     * Kill the "+2s jump" that appears when playback resumes after a (often
+     * spurious) pause. The progress bar extrapolates from an anchor
+     * (nowPlayingPositionMs, nowPlayingPositionUpdateTimeMs). While NOT
+     * displaying-playing, buildNowPlayingLines shows the frozen posSnapshot — but
+     * the anchor TIME keeps advancing, so the instant play resumes it computes
+     * `posSnapshot + (now - anchorTime)` and SNAPS forward by the whole paused gap.
+     * A dense/accurate source (mobile Spotify/YouTube) self-corrects in a frame so
+     * it's invisible; a SPARSE, flickery source shows a stark skip. On the Quest the
+     * only media source is the browser MediaSession (com.oculus.browser), which
+     * pushes ~every few seconds and momentarily reports isPlaying=false — so its
+     * flicker freezes then snaps the bar every few seconds (the reported "+2s jump").
+     *
+     * Fix (source-agnostic, also correct for a genuine pause): while not
+     * displaying-playing, hold the bar in place AND keep the anchor time current, so
+     * resuming continues from where the bar visually stopped instead of snapping
+     * forward. On the play→pause edge, capture the currently-shown (extrapolated)
+     * position as the frozen value so pausing doesn't lurch the bar BACKWARD to a
+     * stale snapshot either. A real seek during pause still re-anchors via the next
+     * snapshot's keepAnchor drift check, so seeks aren't lost.
+     */
+    private fun maybeFreezeNowPlayingAnchor(displayedPlaying: Boolean) {
+        if (displayedPlaying) return
+        if (nowPlayingIsPlaying) {
+            // play→pause edge: freeze at exactly what buildNowPlayingLines was
+            // showing (same 1x-speed fallback), so the bar doesn't jump backward.
+            val spd = if (nowPlayingSpeed > 0f) nowPlayingSpeed else 1f
+            val elapsed = SystemClock.elapsedRealtime() - nowPlayingPositionUpdateTimeMs
+            val shown = nowPlayingPositionMs + max(0L, (elapsed * spd).toLong())
+            nowPlayingPositionMs =
+                (if (nowPlayingDurationMs > 0L) shown.coerceAtMost(nowPlayingDurationMs) else shown)
+                    .coerceAtLeast(0L)
+        }
+        // Keep the anchor time current every paused tick so resume doesn't count the gap.
+        nowPlayingPositionUpdateTimeMs = SystemClock.elapsedRealtime()
+    }
+
     private fun computeDisplayedPlaying(): Boolean {
         val now = System.currentTimeMillis()
         val noMoveForMs = now - lastMovementAtMs
@@ -3034,9 +3293,95 @@ class VrcaViewModel(
     // =========================
     // System intents
     // =========================
-    fun notificationAccessIntent(): Intent =
-        Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+
+    /**
+     * Open VRC-A's notification-listener settings, trying each mechanism in turn
+     * (startActivity in a try/catch — NOT gated on resolveActivity(), which returns
+     * null for Settings targets under API 30+ package visibility even when the
+     * launch would succeed).
+     *
+     * On Quest, Horizon's skinned settings (com.oculus.vrshell) intercept
+     * ACTION_NOTIFICATION_LISTENER_SETTINGS and dump the user on "General". The
+     * underlying AOSP Settings app (com.android.settings) still has the genuine
+     * "Device & app notifications" screen that lists VRC-A and lets the user turn
+     * on notification access with NO ADB — so we target it directly first (this is
+     * how QGO reaches Android's real hidden settings on Quest), then fall back to
+     * the plain action for phones/tablets. (The per-listener DETAIL action also
+     * lands on Horizon's "General" page, so it is deliberately not used.)
+     */
+    fun launchNotificationAccess(ctx: android.content.Context) {
+        val component = notificationListenerComponent()
+
+        fun attempt(intent: Intent): Boolean = try {
+            ctx.startActivity(intent); true
+        } catch (_: Throwable) { false }
+
+        // Deep-link the list to OUR entry (harmless if the target ignores it).
+        fun Intent.withFragmentArgs(): Intent = this
+            .putExtra(":settings:fragment_args_key", component)
+            .putExtra(
+                ":settings:show_fragment_args",
+                android.os.Bundle().apply { putString(":settings:fragment_args_key", component) }
+            )
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+        // 1. The REAL AOSP Settings app, by explicit activity alias then by package.
+        //    Activity names differ across AOSP versions, so try each.
+        val aosp = "com.android.settings"
+        val aospActivities = listOf(
+            "com.android.settings.Settings\$NotificationAccessSettingsActivity",
+            "com.android.settings.Settings\$ManageNotificationAccessSettingsActivity",
+            "com.android.settings.notification.NotificationAccessSettings"
+        )
+        for (act in aospActivities) {
+            if (attempt(
+                    Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                        .setClassName(aosp, act).withFragmentArgs()
+                )
+            ) return
+        }
+        if (attempt(
+                Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                    .setPackage(aosp).withFragmentArgs()
+            )
+        ) return
+
+        // 2. Plain action (correct on phones/tablets; Horizon "General" on Quest).
+        if (attempt(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).withFragmentArgs())) return
+        attempt(
+            Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    }
+
+    /** The flattened notification-listener component for THIS build/flavor, e.g.
+     *  `com.gremlin.inc.headset/com.vrca.nowplaying.NowPlayingListenerService`. */
+    fun notificationListenerComponent(): String =
+        android.content.ComponentName(
+            app, com.vrca.nowplaying.NowPlayingListenerService::class.java
+        ).flattenToString()
+
+    /**
+     * Open VRC-A's App Info page, targeting the REAL AOSP Settings app on Quest.
+     * Needed for the "Allow restricted settings" step: Android 13+ GREYS OUT the
+     * notification-access toggle for SIDELOADED apps until the user opens App Info
+     * -> 3-dot menu -> "Allow restricted settings". Horizon's skinned App Info
+     * doesn't expose that overflow, so target com.android.settings directly and
+     * fall back to the normal action.
+     */
+    fun launchAppInfo(ctx: android.content.Context) {
+        val uri = Uri.parse("package:${app.packageName}")
+        fun attempt(intent: Intent): Boolean = try {
+            ctx.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); true
+        } catch (_: Throwable) { false }
+
+        if (attempt(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, uri)
+                    .setPackage("com.android.settings")
+            )
+        ) return
+        attempt(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, uri))
+    }
 
     fun overlayPermissionIntent(): Intent =
         Intent(
@@ -3074,8 +3419,102 @@ class VrcaViewModel(
         startCycle(local)
         startNowPlayingSender(local)
         manageKeepaliveLoop(local)
+        // Change-driven sender: catches ANY component change within 0.5s regardless
+        // of which feature loops are running.
+        startUnifiedSendLoop(local)
         rebuildAndMaybeSendCombined(forceSend = true, local = local)
         startSelfSyncLoopIfNeeded()
+    }
+
+    /**
+     * The authoritative change-driven sender. While [oscSending], it rebuilds the
+     * combined chatbox text every 0.5s (VRChat's rate-limit floor) and transmits
+     * ONLY when the text changed since the last send (dedup lives in
+     * [rebuildAndMaybeSendCombined], which also re-sends after 3s to keep the box
+     * alive). So ANY update to ANY component — a resolved token
+     * ({mute}/{song}/{time}/{world}/…), the current cycle line, now-playing, an
+     * edited line — appears in VRChat within 0.5s, instead of waiting for a
+     * feature-specific loop (the old model only flushed non-music changes on the
+     * 3s keepalive or the cycle interval). The per-feature loops still run (cycle
+     * for rotation timing; the dedup makes their sends harmless overlap).
+     * Self-restarting: if the coroutine ever dies it's re-launched by
+     * [ensureSendLoopAlive] (the send watchdog).
+     */
+    private fun startUnifiedSendLoop(local: Boolean = false) {
+        unifiedSendJob?.cancel()
+        // Dispatchers.Default (NOT the main thread): a main-thread stall — GC, a heavy
+        // recomposition, a VRChat frame hitch on the Quest — used to freeze this loop
+        // along with everything else on Main. If the freeze spanned a full second, the
+        // in-between music second was never sent and VRChat jumped 2s, even though the
+        // position (extrapolated from elapsedRealtime, which keeps ticking) was correct.
+        // Off Main, the loop keeps its 0.5s cadence regardless of UI-thread load, so
+        // every second is transmitted. buildCombinedText reads SnapshotState (thread-safe)
+        // and the actual UDP send is already off-thread (VrcaOsc send thread).
+        unifiedSendJob = viewModelScope.launch(Dispatchers.Default) {
+            while (oscSending && !isBanned) {
+                try {
+                    rebuildAndMaybeSendCombined(forceSend = true, local = local)
+                } catch (_: Throwable) { /* never let one bad tick kill the loop */ }
+                delay(SEND_FLOOR_MS)
+            }
+        }
+    }
+
+    /** Headset Debug: a one-line snapshot of the ENTIRE chatbox send path so a
+     *  "stopped sending" report can be read off-device instead of guessed at. If
+     *  sending ever stops again, this says exactly why — is the master gate on,
+     *  is the loop alive, is the OSC gate blocking (and which flag), is the target
+     *  resolvable, is the pipeline connected, is a manual hold stuck, how long
+     *  since the last actual send. */
+    fun sendHealthDiag(): String {
+        val now = System.currentTimeMillis()
+        val loopAlive = unifiedSendJob?.isActive == true
+        val lastSendAgo = if (lastCombinedSendMs > 0) "${(now - lastCombinedSendMs) / 1000}s ago" else "never"
+        val connected = com.vrca.vrchat.VrchatPipelineState.isConnected
+        return buildString {
+            append("sending=").append(oscSending)
+            append("   loop=").append(if (loopAlive) "alive" else "DEAD")
+            append('\n')
+            append("blocked=").append(remoteVrcaOsc.blocked)
+            append("  [update=").append(forceUpdatePending)
+            append(" loggedOut=").append(vrchatLoggedOut)
+            append(" authDead=").append(vrchatAuthDead).append(']')
+            append('\n')
+            append("target=").append(remoteVrcaOsc.ipAddress)
+            append(if (remoteVrcaOsc.addressResolvable) " (ok)" else " (UNRESOLVED)")
+            append('\n')
+            append("pipeline=").append(if (connected) "connected" else "DISCONNECTED")
+            append("   manualHold=").append(manualHoldActive())
+            append('\n')
+            append("last send=").append(lastSendAgo)
+            // Real UDP-send telemetry (distinct from the "called sendMessage" time
+            // above): tells apart a throwing send, a never-run (starved) coroutine,
+            // and a landed-but-not-received packet. See VrcaOscState send telemetry.
+            val okAgo = if (com.vrca.osc.VrcaOscState.sendOkMs > 0)
+                "${(now - com.vrca.osc.VrcaOscState.sendOkMs) / 1000}s ago" else "never"
+            val dispAgo = if (com.vrca.osc.VrcaOscState.sendDispatchedMs > 0)
+                "${(now - com.vrca.osc.VrcaOscState.sendDispatchedMs) / 1000}s ago" else "never"
+            append('\n')
+            append("udp ok=").append(okAgo)
+            append("  dispatched=").append(dispAgo)
+            append("  failStreak=").append(com.vrca.osc.VrcaOscState.sendFailStreak)
+            if (com.vrca.osc.VrcaOscState.sendError.isNotBlank()) {
+                append("\nsendErr=").append(com.vrca.osc.VrcaOscState.sendError)
+            }
+            // REAL delivery proof (not "udp ok", which is a lie for UDP): the
+            // eyeheight round-trip. DELIVERED = VRChat actually received our send.
+            append('\n').append(com.vrca.osc.VrcaOscState.deliveryDiag())
+        }
+    }
+
+    /** Send-loop watchdog: if we're supposed to be sending but the unified loop
+     *  isn't alive (killed by an exception / coroutine cancellation), restart it.
+     *  This is the resilience for "the chatbox randomly stops" — a dead send loop
+     *  now self-heals instead of needing an app/headset restart. Called from the
+     *  hourly heartbeat + the OSCQuery poll's liveness tick cadence is separate. */
+    fun ensureSendLoopAlive(local: Boolean = false) {
+        if (!oscSending || isBanned) return
+        if (unifiedSendJob?.isActive != true) startUnifiedSendLoop(local)
     }
 
     /** STOP: stop transmitting over OSC and clear the VRChat chatbox. Does NOT
@@ -3137,9 +3576,37 @@ class VrcaViewModel(
     private fun startUptimeHeartbeat() {
         uptimeHeartbeatJob?.cancel()
         uptimeHeartbeatJob = viewModelScope.launch {
+            var sinceHeartbeat = 0L
             while (oscSending) {
-                FeatureSessionStore.heartbeatSending(app.applicationContext)
-                delay(60_000L)
+                // Send-loop watchdog every ~15s: if we should be sending but the
+                // unified loop isn't alive, restart it (resilience for "the chatbox
+                // randomly stops" — a dead loop self-heals instead of needing a
+                // restart). Cheap no-op when the loop is healthy.
+                ensureSendLoopAlive()
+                // Gate re-assert (headset): if we're sending and the pipeline is
+                // CONNECTED (proof the VRChat session is valid) but a transient
+                // block flag is somehow still set, clear it + force a resend. This
+                // self-heals the "UI says Sending but nothing transmits, and
+                // Stop/Start won't fix it, only a reopen does" state within ~15s no
+                // matter what set the gate — a headless-revival Keystore-not-ready
+                // seed, a reconnect authDead, or a tab-out/in that left it
+                // half-broken — even when isConnectedFlow never re-emits (the app
+                // stayed running). Safe: only clears while genuinely connected, and
+                // refreshOscBlockGate preserves a real forced-update block.
+                if (com.vrca.vrchat.VrchatPipelineState.isConnected &&
+                    (vrchatLoggedOut || vrchatAuthDead)) {
+                    vrchatLoggedOut = false
+                    vrchatAuthDead = false
+                    com.vrca.vrchat.VrchatPipelineState.authDead = false
+                    refreshOscBlockGate()
+                    rebuildAndMaybeSendCombined(forceSend = true)
+                }
+                delay(15_000L)
+                sinceHeartbeat += 15_000L
+                if (sinceHeartbeat >= 60_000L) {
+                    FeatureSessionStore.heartbeatSending(app.applicationContext)
+                    sinceHeartbeat = 0L
+                }
             }
         }
     }
@@ -3276,10 +3743,26 @@ class VrcaViewModel(
 
     /** Auto-save the live Pinned text into the currently-selected preset slot —
      *  the selected slot mirrors the editor, so switching slots is the only save.
-     *  No-op when nothing is selected (slot 0) so existing presets aren't clobbered. */
+     *
+     *  When NOTHING is selected (slot 0 — a fresh install, whose default message is
+     *  empty so [migrateLiveContentIntoPresetSlot] parked nothing), the typed text
+     *  would otherwise live only in [afkMessage] and be DESTROYED the first time the
+     *  user taps a chip (which loads the empty slot over the editor). So the moment
+     *  there's real content we ADOPT a slot: prefer one already holding this exact
+     *  text, else the first EMPTY slot, then select it so subsequent edits track it.
+     *  If all slots are full with distinct content we stay at 0 (never clobber a
+     *  deliberate save — the same invariant the migration uses). */
     private fun autoSaveSelectedAfkPreset(text: String) {
-        if (selectedAfkPreset !in 1..3) return
-        val idx = selectedAfkPreset - 1
+        var slot = selectedAfkPreset
+        if (slot !in 1..3) {
+            val live = text.trim()
+            if (live.isEmpty()) return
+            val match = (1..3).firstOrNull { afkPresetTexts[it - 1].trim() == live }
+            slot = match ?: (1..3).firstOrNull { afkPresetTexts[it - 1].isBlank() } ?: return
+            selectedAfkPreset = slot
+            viewModelScope.launch { userPreferencesRepository.saveSelectedAfkPreset(slot) }
+        }
+        val idx = slot - 1
         afkPresetTexts[idx] = text
         viewModelScope.launch {
             when (idx + 1) {
@@ -3426,12 +3909,23 @@ class VrcaViewModel(
 
     /** Auto-save the live cycle lines into the selected cycle preset slot — the
      *  selected slot mirrors the editor, so switching slots is the only save.
-     *  No-op when nothing is selected (slot 0) so existing presets aren't clobbered. */
+     *
+     *  When NOTHING is selected (slot 0) we ADOPT a slot the moment there are real
+     *  cycle lines — prefer one already holding these exact lines, else the first
+     *  EMPTY slot — so a fresh user's lines can't be destroyed by the first chip tap
+     *  (see [autoSaveSelectedAfkPreset]). All slots full with distinct content → stay
+     *  at 0 (never clobber a deliberate save). */
     private fun autoSaveSelectedCyclePreset() {
-        if (selectedCyclePreset !in 1..5) return
-        val s = selectedCyclePreset
-        val idx = s - 1
         val messages = cycleLines.map { it.trim() }.filter { it.isNotEmpty() }.take(MAX_CYCLE_LINES).joinToString("\n")
+        var s = selectedCyclePreset
+        if (s !in 1..5) {
+            if (messages.isEmpty()) return
+            val match = (1..5).firstOrNull { cyclePresetMessages[it - 1].trim() == messages }
+            s = match ?: (1..5).firstOrNull { cyclePresetMessages[it - 1].isBlank() } ?: return
+            selectedCyclePreset = s
+            viewModelScope.launch { userPreferencesRepository.saveSelectedCyclePreset(s) }
+        }
+        val idx = s - 1
         // Mute CSV aligned to the SAME non-empty lines the preset saves (empty
         // lines are dropped from `messages`, so the flags must skip them too) —
         // otherwise the indices wouldn't line up when the preset reloads.
@@ -3866,8 +4360,73 @@ class VrcaViewModel(
             } else ""
             out = out.replace(Regex("\\{players\\}", RegexOption.IGNORE_CASE), players)
         }
+        // OSC-in tokens (headset — VrcaOscState is fed by VrcaOscReceiver). Empty
+        // when we haven't received that param (mobile / OSC off).
+        if (out.contains("{mute}", ignoreCase = true))
+            out = out.replace(Regex("\\{mute\\}", RegexOption.IGNORE_CASE),
+                if (com.vrca.osc.VrcaOscState.muteSelf) "Muted" else "")
+        if (out.contains("{afk}", ignoreCase = true))
+            out = out.replace(Regex("\\{afk\\}", RegexOption.IGNORE_CASE),
+                if (com.vrca.osc.VrcaOscState.afk) "AFK" else "")
+        if (out.contains("{movement}", ignoreCase = true))
+            out = out.replace(Regex("\\{movement\\}", RegexOption.IGNORE_CASE),
+                if (com.vrca.osc.VrcaOscState.moving) "Moving" else "Still")
+        if (out.contains("{scale}", ignoreCase = true))
+            out = out.replace(Regex("\\{scale\\}", RegexOption.IGNORE_CASE),
+                com.vrca.osc.VrcaOscState.scaleLabel)
+        if (out.contains("{param:", ignoreCase = true))
+            out = Regex("\\{param:([^}]+)\\}", RegexOption.IGNORE_CASE).replace(out) { m ->
+                com.vrca.osc.VrcaOscState.rawString(m.groupValues[1].trim())
+            }
+        // Device / info tokens.
+        if (out.contains("{date}", ignoreCase = true))
+            out = out.replace(Regex("\\{date\\}", RegexOption.IGNORE_CASE), currentDateString())
+        if (out.contains("{uptime}", ignoreCase = true)) {
+            val up = if (sendingSinceMs > 0L) formatUptimeToken(System.currentTimeMillis() - sendingSinceMs) else ""
+            out = out.replace(Regex("\\{uptime\\}", RegexOption.IGNORE_CASE), up)
+        }
+        if (out.contains("{battery}", ignoreCase = true)) {
+            val b = batteryPercentToken()
+            out = out.replace(Regex("\\{battery\\}", RegexOption.IGNORE_CASE), if (b in 0..100) "$b%" else "")
+        }
+        if (out.contains("{weather}", ignoreCase = true))
+            out = out.replace(Regex("\\{weather\\}", RegexOption.IGNORE_CASE), com.vrca.app.WeatherProvider.current)
         return out
     }
+
+    private fun currentDateString(): String =
+        java.time.LocalDate.now().format(
+            java.time.format.DateTimeFormatter.ofPattern("MMM d", java.util.Locale.US)
+        )
+
+    private fun formatUptimeToken(ms: Long): String {
+        val totalMin = (ms / 60000L).coerceAtLeast(0)
+        val h = totalMin / 60; val m = totalMin % 60
+        return if (h > 0) "${h}h ${m}m" else "${m}m"
+    }
+
+    private fun batteryPercentToken(): Int = try {
+        val bm = app.getSystemService(android.content.Context.BATTERY_SERVICE) as? android.os.BatteryManager
+        bm?.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
+    } catch (e: Exception) { -1 }
+
+    /** Set the avatar's size (eye height in meters, VRChat clamps 0.2–5.0) by
+     *  sending `/avatar/eyeheight` OSC to VRChat (the configured target — loopback
+     *  on the headset). "Changing avi size" from the app. */
+    fun setAvatarEyeHeight(meters: Float) = remoteVrcaOsc.sendEyeHeight(meters)
+
+    /** Reset avatar size to the AVATAR'S default (creator) eye height — derived from
+     *  VRChat's live params (current / ScaleFactor), NOT whatever we last set. No-op
+     *  if the default isn't known yet (ScaleFactor not published). Returns the height
+     *  sent, or null. */
+    fun resetAvatarHeightToDefault(): Float? {
+        val def = com.vrca.osc.VrcaOscState.defaultEyeHeightMeters ?: return null
+        remoteVrcaOsc.sendEyeHeight(def)
+        return def
+    }
+
+    /** Send a raw line to the chatbox for the width-calibration harness. */
+    fun sendCalibrationLine(text: String) = remoteVrcaOsc.sendRaw(text)
 
     /**
      * No-repeat window for shuffle: how many recently-played positions to avoid,
@@ -4049,6 +4608,20 @@ class VrcaViewModel(
                     userPreferencesRepository.saveSelectedCyclePreset(target)
                 }
             }
+        }
+        // Force preset 1 for a genuinely-NEW install (default message is empty, so the
+        // parking above did nothing and nothing is selected). Guarded to ALL slots
+        // being blank so an existing user who never made presets is the only other
+        // case affected — and there slot 1 is empty too, so selecting it loads nothing
+        // over their editor. This is what makes a brand-new user see preset 1 selected
+        // immediately (so the first thing they type has a home slot), per design.
+        if (selectedAfkPreset == 0 && (1..3).all { afkPresetTexts[it - 1].isBlank() }) {
+            selectedAfkPreset = 1
+            userPreferencesRepository.saveSelectedAfkPreset(1)
+        }
+        if (selectedCyclePreset == 0 && (1..5).all { cyclePresetMessages[it - 1].isBlank() }) {
+            selectedCyclePreset = 1
+            userPreferencesRepository.saveSelectedCyclePreset(1)
         }
         userPreferencesRepository.savePresetSeedMigrated(true)
     }
@@ -4233,11 +4806,17 @@ class VrcaViewModel(
         keepaliveJob?.cancel()
         keepaliveJob = null
         nowPlayingJob?.cancel()
-        nowPlayingJob = viewModelScope.launch {
+        // Off the main thread (see startUnifiedSendLoop) so a UI-thread stall can't
+        // freeze the resample and skip a music second.
+        nowPlayingJob = viewModelScope.launch(Dispatchers.Default) {
             while (spotifyEnabled && oscSending && !isBanned) {
-                // run on a 0.5s cadence so OSC updates match VRChat's chatbox rate limit
+                // Resample every 250ms (NOT 500ms): the actual OSC send is still floored
+                // to SEND_FLOOR_MS + deduped inside rebuildAndMaybeSendCombined, so real
+                // traffic stays ≈1/sec — but the faster resample means a floor-dropped
+                // value-change is retried within the same second instead of risking a
+                // 2s jump in the SENT stream (see NOWPLAYING_RESAMPLE_MS).
                 rebuildAndMaybeSendCombined(forceSend = true, local = local)
-                delay(SEND_FLOOR_MS)
+                delay(NOWPLAYING_RESAMPLE_MS)
             }
         }
         startSelfSyncLoopIfNeeded()
@@ -4263,6 +4842,8 @@ class VrcaViewModel(
         stopAfkSender(clearFromChatbox = false)
         keepaliveJob?.cancel()
         keepaliveJob = null
+        unifiedSendJob?.cancel()
+        unifiedSendJob = null
         if (clearFromChatbox && !isBanned) clearChatbox()
         startSelfSyncLoopIfNeeded()
     }
@@ -4347,20 +4928,32 @@ class VrcaViewModel(
         if (!forceSend) return
         if (combined.isBlank()) return
 
+        // ATOMIC send gate. The send loops now run on Dispatchers.Default (multi-
+        // threaded), so two ticks can evaluate the floor/dedup concurrently; without a
+        // lock both could pass and fire within <500ms, and VRChat coalesces/drops one
+        // of those — which would itself look like a skipped second. Claim the send slot
+        // under a lock so exactly one caller per 500ms window proceeds. The floor also
+        // strictly enforces VRChat's 0.5s chatbox rate limit. sendToVrchatRaw only
+        // DISPATCHES to the off-thread OSC sender, so holding this briefly is cheap.
         val nowMs = System.currentTimeMillis()
-        if (nowMs - lastCombinedSendMs < SEND_FLOOR_MS) return
-
-        // Content-change dedup: skip the OSC send if the text is identical to
-        // what we last sent AND it's been less than 10s. This avoids wasteful
-        // repeated sends from the NowPlaying 500ms loop and keepalive loop
-        // when nothing has actually changed. The 10s ceiling ensures VRChat
-        // doesn't clear the chatbox (~15s inactivity timeout).
-        if (combined == lastSentCombinedText && nowMs - lastSentMs < 3_000L) return
-        lastSentCombinedText = combined
-        lastSentMs = nowMs
+        val allowed = synchronized(sendGateLock) {
+            when {
+                // Floor: never send faster than VRChat's 0.5s rate limit.
+                nowMs - lastCombinedSendMs < SEND_FLOOR_MS -> false
+                // Content-change dedup: skip an identical resend within 3s (the ceiling
+                // keeps VRChat from clearing the box after ~15s of silence).
+                combined == lastSentCombinedText && nowMs - lastSentMs < 3_000L -> false
+                else -> {
+                    lastSentCombinedText = combined
+                    lastSentMs = nowMs
+                    lastCombinedSendMs = nowMs
+                    true
+                }
+            }
+        }
+        if (!allowed) return
 
         sendToVrchatRaw(combined, local, addToConversation = false)
-        lastCombinedSendMs = nowMs
     }
 
     private fun buildCombinedText(cycleLineOverride: String?): String {
@@ -4473,8 +5066,8 @@ class VrcaViewModel(
         // title with a progress bar instead of "Ad 1 of 1". Check the explicit ad
         // flag FIRST and return early so ads always show their index.
         if (nowPlayingIsAd) {
-            // The ad index ("Ad 1 of 1") was unreliable, so just show a bare "Ad".
-            val label = "Ad"
+            // The ad index ("Ad 1 of 1") was unreliable, so just show a bare label.
+            val label = "Advertisement"
             if (!musicShowProgress) return listOf(label)
             // Keep the progress bar during ads — it must NEVER vanish. Ads always
             // play, so force playing and render the ad's OWN position/duration
@@ -4484,15 +5077,24 @@ class VrcaViewModel(
             // the neutral "Ad" label + the bar — so nothing leaks.
             val adDur = nowPlayingDurationMs
             if (adDur > 0L) {
-                val spd = if (nowPlayingSpeed > 0f) nowPlayingSpeed else 1f
-                val elapsed = SystemClock.elapsedRealtime() - nowPlayingPositionUpdateTimeMs
-                val adj = (elapsed * spd).toLong()
-                val pos = (nowPlayingPositionMs + max(0L, adj)).coerceAtMost(adDur)
-                val bar = renderProgressBar(spotifyPreset, pos, max(1L, adDur), true, true)
+                // Honor a PAUSE during the ad: only extrapolate the countdown while
+                // actually playing; otherwise freeze at the last reported position.
+                // (The bug forced speed to 1 unconditionally — nowPlayingSpeed is 0
+                // when paused — so the ad timer kept advancing while the user had it
+                // paused.) The bar's dot stays forced-"playing" (last two args) to
+                // avoid flicker at the ad/song boundary; only the POSITION freezes.
+                val pos = if (nowPlayingIsPlaying) {
+                    val spd = if (nowPlayingSpeed > 0f) nowPlayingSpeed else 1f
+                    val elapsed = SystemClock.elapsedRealtime() - nowPlayingPositionUpdateTimeMs
+                    (nowPlayingPositionMs + max(0L, (elapsed * spd).toLong())).coerceAtMost(adDur)
+                } else nowPlayingPositionMs.coerceAtMost(adDur)
+                // dotIsPlaying reflects the REAL play state so the pause symbol shows
+                // when the user pauses the ad (was forced true, hiding the pause).
+                val bar = renderProgressBar(spotifyPreset, pos, max(1L, adDur), nowPlayingIsPlaying, true)
                 val time = "${fmtTime(pos)}/${fmtTime(adDur)}"
                 return listOfNotNull(label, (bar + time).takeIf { it.isNotBlank() })
             }
-            val bar = renderProgressBar(spotifyPreset, 0L, 1L, true, true)
+            val bar = renderProgressBar(spotifyPreset, 0L, 1L, nowPlayingIsPlaying, true)
             return listOfNotNull(label, bar.takeIf { it.isNotBlank() })
         }
 
@@ -4521,7 +5123,11 @@ class VrcaViewModel(
 
         val pos = if (effectiveIsPlaying && dur > 0L) {
             val elapsed = SystemClock.elapsedRealtime() - nowPlayingPositionUpdateTimeMs
-            val adj = (elapsed * nowPlayingSpeed).toLong()
+            // Some sources (notably browser MediaSessions) report playbackSpeed=0 while
+            // actually playing; multiplying by 0 would freeze the bar between the
+            // source's ~3s pushes. Fall back to 1x once we've decided it's playing.
+            val spd = if (nowPlayingSpeed > 0f) nowPlayingSpeed else 1f
+            val adj = (elapsed * spd).toLong()
             (posSnapshot + max(0L, adj)).coerceAtMost(dur)
         } else posSnapshot
 

@@ -272,6 +272,24 @@ internal fun parseApkInfo(ctx: Context, apkPath: String): Pair<Long, String>? {
     } catch (_: Throwable) { null }
 }
 
+/** The applicationId of a picked APK, used to ROUTE a global publish to the right
+ *  fleet doc + stamp `packageName` so cross-variant releases are ignored. */
+internal fun parseApkPackage(ctx: Context, apkPath: String): String? {
+    return try {
+        val pm = ctx.packageManager
+        val pi = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            pm.getPackageArchiveInfo(apkPath, android.content.pm.PackageManager.PackageInfoFlags.of(0))
+        } else {
+            pm.getPackageArchiveInfo(apkPath, 0)
+        }
+        pi?.packageName
+    } catch (_: Throwable) { null }
+}
+
+/** Headset APK applicationId — a global publish of this package routes to the
+ *  headset-only doc so it can never reach mobile. */
+internal const val HEADSET_APP_ID = "com.gremlin.inc.headset"
+
 internal suspend fun copyUriToCache(ctx: Context, uri: android.net.Uri): File? {
     return try {
         val tmp = File(ctx.cacheDir, "upload_tmp.apk")
@@ -310,6 +328,117 @@ internal fun formatTimestampForRelease(ts: Timestamp?): String {
     return "$abs ($rel)"
 }
 
+/**
+ * One "Current Live Release" card for a single fleet doc (releases/latest for
+ * Mobile, releases/latest_headset for Headset). Self-contained: loads [docId],
+ * shows it, and retracts ONLY that doc — so the two fleets are managed
+ * independently. Reloads when [reloadTick] changes (bumped after a publish/retract).
+ */
+@Composable
+private fun LiveReleasePanel(
+    db: FirebaseFirestore,
+    docId: String,
+    fleetName: String,
+    reloadTick: Int,
+    setError: (String?) -> Unit,
+    onChanged: () -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    var code by rememberSaveable(docId) { mutableLongStateOf(0L) }
+    var name by rememberSaveable(docId) { mutableStateOf("") }
+    var url by rememberSaveable(docId) { mutableStateOf("") }
+    var reqMin by rememberSaveable(docId) { mutableLongStateOf(0L) }
+    var notes by rememberSaveable(docId) { mutableStateOf("") }
+    var publishedAt by remember(docId) { mutableStateOf<Timestamp?>(null) }
+    var loaded by remember(docId) { mutableStateOf(false) }
+
+    suspend fun load() {
+        runCatching {
+            val snap = db.collection("releases").document(docId).get().await()
+            if (snap.exists()) {
+                code = snap.getLong("versionCode") ?: 0L
+                name = snap.getString("versionName").orEmpty()
+                url = snap.getString("downloadUrl").orEmpty()
+                reqMin = snap.getLong("requiredMinCode") ?: 0L
+                notes = snap.getString("notes").orEmpty()
+                publishedAt = snap.getTimestamp("publishedAt")
+            } else {
+                code = 0L; name = ""; url = ""; reqMin = 0L; notes = ""; publishedAt = null
+            }
+            loaded = true
+        }.onFailure { e -> setError(e.message ?: "Failed to load release") }
+    }
+    LaunchedEffect(docId, reloadTick) { load() }
+
+    ElevatedCard {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Current Live Release · $fleetName", style = MaterialTheme.typography.titleMedium)
+                IconButton(onClick = { scope.launch { load() } }) {
+                    Icon(Icons.Filled.Refresh, contentDescription = "Reload")
+                }
+            }
+            if (!loaded) {
+                CircularProgressIndicator()
+            } else if (code == 0L && url.isBlank()) {
+                Text("No $fleetName release published.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                Text("versionCode=$code  name=${name.ifBlank { "(blank)" }}",
+                    fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                Text("requiredMinCode=$reqMin",
+                    fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                Text("publishedAt=${formatTimestampForRelease(publishedAt)}",
+                    fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (url.isNotBlank()) {
+                    Text("url=${url.take(72)}${if (url.length > 72) "..." else ""}",
+                        fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                if (notes.isNotBlank()) {
+                    Text(notes.lines().firstOrNull().orEmpty().take(100),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+
+                var showRetractConfirm by remember { mutableStateOf(false) }
+                OutlinedButton(
+                    onClick = { showRetractConfirm = true },
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Filled.Delete, null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Retract $fleetName Release")
+                }
+                if (showRetractConfirm) {
+                    com.vrca.ui.common.VrcaConfirmDialog(
+                        title = "Retract $fleetName release?",
+                        body = "This removes the update prompt for all $fleetName users. Existing installs are not affected. The other fleet is untouched.",
+                        confirmLabel = "Retract",
+                        destructive = true,
+                        onConfirm = {
+                            showRetractConfirm = false
+                            scope.launch {
+                                runCatching {
+                                    db.collection("releases").document(docId).delete().await()
+                                    code = 0L; name = ""; url = ""; reqMin = 0L; notes = ""; publishedAt = null
+                                    onChanged()
+                                }.onFailure { setError(it.message) }
+                            }
+                        },
+                        onDismiss = { showRetractConfirm = false }
+                    )
+                }
+            }
+        }
+    }
+}
+
 @Composable
 internal fun ReleasesTab(
     db: FirebaseFirestore,
@@ -324,19 +453,18 @@ internal fun ReleasesTab(
     val githubRepo  = BuildConfig.GITHUB_REPO
     val credsMissing = githubPat.isBlank() || githubOwner.isBlank() || githubRepo.isBlank()
 
-    // ---- current live release ----
-    var liveVersionCode by rememberSaveable { mutableLongStateOf(0L) }
-    var liveVersionName by rememberSaveable { mutableStateOf("") }
-    var liveDownloadUrl by rememberSaveable { mutableStateOf("") }
-    var liveRequiredMin by rememberSaveable { mutableLongStateOf(0L) }
-    var liveNotes       by rememberSaveable { mutableStateOf("") }
-    var livePublishedAt by remember { mutableStateOf<Timestamp?>(null) }
-    var loaded          by remember { mutableStateOf(false) }
+    // Bumped after a publish/retract so the per-fleet live-release panels reload.
+    var reloadTick by remember { mutableStateOf(0) }
 
     // ---- picked APK ----
     var pickedFileName  by rememberSaveable { mutableStateOf("") }
     var parsedCode      by rememberSaveable { mutableLongStateOf(0L) }
     var parsedName      by rememberSaveable { mutableStateOf("") }
+    // The picked APK's applicationId — routes the publish to the right fleet:
+    // com.gremlin.inc.headset -> releases/latest_headset (headset only),
+    // anything else -> releases/latest (mobile). Also written as the doc's
+    // packageName so clients ignore a release for a different variant.
+    var parsedPackage   by rememberSaveable { mutableStateOf("") }
     var parseError      by rememberSaveable { mutableStateOf("") }
     var cachedApkPath   by remember { mutableStateOf("") }
 
@@ -359,39 +487,38 @@ internal fun ReleasesTab(
     // EDITS the live content instead of starting blank. The "seeded" flag lives in
     // AdminRuntime (process lifetime) so the LaunchedEffect(Unit) re-run on an
     // Activity recreation (media picker) never re-seeds over in-progress edits.
-    suspend fun loadCurrent() {
-        setGlobalLoading(true)
+    // The global doc this tab reads/retracts follows the picked APK's fleet, so
+    // picking a headset APK shows + retracts the HEADSET release; otherwise mobile.
+    val currentGlobalDoc = if (parsedPackage == HEADSET_APP_ID) "latest_headset" else "latest"
+
+    // Seed the rich editor ONCE from the fleet doc the publish will hit (follows the
+    // picked APK: headset APK -> latest_headset, else latest). Display + retract of
+    // BOTH fleets live in the per-fleet LiveReleasePanel cards below, independent of
+    // what's picked — so both a mobile and a headset global release can be managed.
+    suspend fun seedEditor() {
+        if (AdminRuntime.isEditorSeeded("release")) return
         runCatching {
-            val snap = db.collection("releases").document("latest").get().await()
+            val snap = db.collection("releases").document(currentGlobalDoc).get().await()
             if (snap.exists()) {
-                liveVersionCode = snap.getLong("versionCode") ?: 0L
-                liveVersionName = snap.getString("versionName").orEmpty()
-                liveDownloadUrl = snap.getString("downloadUrl").orEmpty()
-                liveRequiredMin = snap.getLong("requiredMinCode") ?: 0L
-                liveNotes       = snap.getString("notes").orEmpty()
-                livePublishedAt = snap.getTimestamp("publishedAt")
-                if (!AdminRuntime.isEditorSeeded("release")) {
-                    if (editNotes.isBlank()) editNotes = liveNotes
-                    if (releaseBlocks.isEmpty()) {
-                        resolveRichDoc(snap.getString("bodyDoc"), liveNotes)?.blocks?.let {
-                            releaseBlocks.clear(); releaseBlocks.addAll(it)
-                        }
+                val n = snap.getString("notes").orEmpty()
+                if (editNotes.isBlank()) editNotes = n
+                if (releaseBlocks.isEmpty()) {
+                    resolveRichDoc(snap.getString("bodyDoc"), n)?.blocks?.let {
+                        releaseBlocks.clear(); releaseBlocks.addAll(it)
                     }
                 }
             }
             AdminRuntime.markEditorSeeded("release")
-            loaded = true
         }.onFailure { e -> setError(e.message ?: "Failed to load release") }
-        setGlobalLoading(false)
     }
 
-    LaunchedEffect(Unit) { loadCurrent() }
+    LaunchedEffect(currentGlobalDoc) { seedEditor() }
 
     val filePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri: android.net.Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
-        parseError = ""; parsedCode = 0L; parsedName = ""
+        parseError = ""; parsedCode = 0L; parsedName = ""; parsedPackage = ""
         pickedFileName = ""; cachedApkPath = ""; uploadDone = false
 
         scope.launch {
@@ -413,6 +540,7 @@ internal fun ReleasesTab(
             }
             parsedCode = info.first
             parsedName = info.second
+            parsedPackage = parseApkPackage(ctx, tmp.absolutePath).orEmpty()
         }
     }
 
@@ -457,8 +585,14 @@ internal fun ReleasesTab(
                     onProgress = { uploadProgress = it }
                 )
 
-                // Step 3: write Firestore releases/latest
-                uploadPhase = "Publishing release info..."
+                // Step 3: write the GLOBAL release doc. Route by the APK's OWN
+                // package: a headset APK goes to releases/latest_headset (headset
+                // fleet only), anything else to releases/latest (mobile). The
+                // packageName is stamped so clients ignore a release for the other
+                // variant — a headset global release can never reach mobile.
+                val isHeadsetApk = parsedPackage == HEADSET_APP_ID
+                val targetDoc = if (isHeadsetApk) "latest_headset" else "latest"
+                uploadPhase = "Publishing ${if (isHeadsetApk) "HEADSET" else "mobile"} release..."
                 val data = hashMapOf<String, Any>(
                     "versionCode"       to parsedCode,
                     "versionName"       to parsedName,
@@ -466,20 +600,21 @@ internal fun ReleasesTab(
                     "requiredMinCode"   to (editRequiredMin.toLongOrNull() ?: 0L),
                     "notes"             to notesPlain,
                     "bodyDoc"           to bodyDocJson,
+                    "packageName"       to parsedPackage,
                     "publishedAt"       to FieldValue.serverTimestamp(),
                     "publishedByDevice" to BuildConfig.APPLICATION_ID
                 )
-                db.collection("releases").document("latest")
+                db.collection("releases").document(targetDoc)
                     .set(data, SetOptions.merge())
                     .await()
 
-                loadCurrent()
+                reloadTick++   // refresh both per-fleet live-release panels
                 uploadDone = true
                 uploadPhase = ""
 
                 // clean up temp file
                 runCatching { apkFile.delete() }
-                cachedApkPath = ""; pickedFileName = ""; parsedCode = 0L; parsedName = ""
+                cachedApkPath = ""; pickedFileName = ""; parsedCode = 0L; parsedName = ""; parsedPackage = ""
                 AdminRuntime.clearEditor("release")  // blocks + notes + seeded flag
 
             }.onFailure { e ->
@@ -523,74 +658,12 @@ internal fun ReleasesTab(
             }
         }
 
-        // ---- Current live release ----
-        ElevatedCard {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Current Live Release", style = MaterialTheme.typography.titleMedium)
-                    IconButton(onClick = { scope.launch { loadCurrent() } }) {
-                        Icon(Icons.Filled.Refresh, contentDescription = "Reload")
-                    }
-                }
-                if (!loaded) {
-                    CircularProgressIndicator()
-                } else if (liveVersionCode == 0L && liveDownloadUrl.isBlank()) {
-                    Text("No release published yet.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                } else {
-                    Text("versionCode=$liveVersionCode  name=${liveVersionName.ifBlank { "(blank)" }}",
-                        fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
-                    Text("requiredMinCode=$liveRequiredMin",
-                        fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
-                    Text("publishedAt=${formatTimestampForRelease(livePublishedAt)}",
-                        fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (liveDownloadUrl.isNotBlank()) {
-                        Text("url=${liveDownloadUrl.take(72)}${if (liveDownloadUrl.length > 72) "..." else ""}",
-                            fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    if (liveNotes.isNotBlank()) {
-                        Text(liveNotes.lines().firstOrNull().orEmpty().take(100),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-
-                    var showRetractConfirm by remember { mutableStateOf(false) }
-                    OutlinedButton(
-                        onClick = { showRetractConfirm = true },
-                        colors = ButtonDefaults.outlinedButtonColors(
-                            contentColor = MaterialTheme.colorScheme.error
-                        ),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Icon(Icons.Filled.Delete, null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Retract Release")
-                    }
-                    if (showRetractConfirm) {
-                        com.vrca.ui.common.VrcaConfirmDialog(
-                            title = "Retract live release?",
-                            body = "This removes the update prompt for all users. Existing installs are not affected.",
-                            confirmLabel = "Retract",
-                            destructive = true,
-                            onConfirm = {
-                                showRetractConfirm = false
-                                scope.launch {
-                                    runCatching {
-                                        db.collection("releases").document("latest").delete().await()
-                                        liveVersionCode = 0L; liveVersionName = ""; liveDownloadUrl = ""
-                                        liveRequiredMin = 0L; liveNotes = ""; livePublishedAt = null
-                                    }.onFailure { setError(it.message) }
-                                }
-                            },
-                            onDismiss = { showRetractConfirm = false }
-                        )
-                    }
-                }
-            }
-        }
+        // ---- Current live releases (per fleet, independently retractable) ----
+        // A mobile global release lives at releases/latest and a headset one at
+        // releases/latest_headset — separate docs, so each fleet gets its OWN panel
+        // and Retract button. Publishing both no longer collapses them into one.
+        LiveReleasePanel(db, "latest", "Mobile", reloadTick, setError) { reloadTick++ }
+        LiveReleasePanel(db, "latest_headset", "Headset", reloadTick, setError) { reloadTick++ }
 
         // ---- Publish new release ----
         ElevatedCard {
@@ -630,6 +703,17 @@ internal fun ReleasesTab(
                                 fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
                             Text("versionName = ${parsedName.ifBlank { "(blank)" }}",
                                 fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
+                            Text("package = ${parsedPackage.ifBlank { "(unknown)" }}",
+                                fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodyMedium)
+                            // Make the publish target unmistakable — routed by package.
+                            val headsetApk = parsedPackage == HEADSET_APP_ID
+                            Text(
+                                if (headsetApk) "→ Publishes to the HEADSET fleet (releases/latest_headset). Mobile is NOT affected."
+                                else "→ Publishes to the MOBILE fleet (releases/latest). Headset is NOT affected.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (headsetApk) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                     }
 

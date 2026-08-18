@@ -198,7 +198,14 @@ internal suspend fun fetchVrchatStatusWarning(): VrchatStatusWarning? = withCont
    Flow
    ------------------------------------------------------------------------- */
 
-private const val STEP_COUNT = 8
+// Logical steps in order. The IP-entry step is absent on the headset build
+// (Quest forces the OSC target to 127.0.0.1, so there's nothing to enter).
+private enum class OnbStep { WELCOME_TOS, VRCHAT_LOGIN, PERMISSIONS, IP_ENTRY, ENABLE_OSC, NOTIF_TYPES, DISCORD, TEST }
+
+private val ONBOARDING_STEPS: List<OnbStep> =
+    OnbStep.values().toList().let { all ->
+        if (com.vrca.BuildConfig.IS_HEADSET_BUILD) all.filter { it != OnbStep.IP_ENTRY } else all
+    }
 
 @Composable
 fun OnboardingFlow(
@@ -213,8 +220,10 @@ fun OnboardingFlow(
     onFinish: () -> Unit
 ) {
     val ctx = LocalContext.current
+    val steps = ONBOARDING_STEPS
+    val stepCount = steps.size
     var step by rememberSaveable {
-        mutableStateOf(if (replay) 0 else OnboardingPrefs.savedStep(ctx).coerceIn(0, STEP_COUNT - 1))
+        mutableStateOf(if (replay) 0 else OnboardingPrefs.savedStep(ctx).coerceIn(0, stepCount - 1))
     }
 
     // Persist resume point (not in replay — replay always starts clean).
@@ -230,9 +239,11 @@ fun OnboardingFlow(
     // Idempotent: cached images are skipped. Cleanup happens in VrcaApp onFinish.
     LaunchedEffect(Unit) { TutorialImageStore.ensureDownloaded(ctx) }
 
-    fun advance() { if (step < STEP_COUNT - 1) step++ else { OnboardingPrefs.markComplete(ctx); onFinish() } }
+    fun advance() { if (step < stepCount - 1) step++ else { OnboardingPrefs.markComplete(ctx); onFinish() } }
     fun back() { if (step > 0) step-- }
     fun finishNow() { OnboardingPrefs.markComplete(ctx); onFinish() }
+    // Jump to the IP step if this build has one (phone); no-op on headset.
+    fun goToIpStep() { steps.indexOf(OnbStep.IP_ENTRY).let { if (it >= 0) step = it } }
 
     // Hard gates completed state (replay shows them as checkmarks)
     val tosDone = tosAlreadyAccepted
@@ -258,22 +269,22 @@ fun OnboardingFlow(
             // before). The footer below keeps full panel width as the window chrome.
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
               Box(Modifier.fillMaxHeight().widthIn(max = 640.dp)) {
-                when (step) {
-                    0 -> StepWelcomeTos(tosVersion, tosText, tosUrl, tosDone, onAccept = {
+                when (steps[step]) {
+                    OnbStep.WELCOME_TOS -> StepWelcomeTos(tosVersion, tosText, tosUrl, tosDone, onAccept = {
                         onTosAccepted(); advance()
                     }, onNext = { advance() })
-                    1 -> StepVrchatLogin(loginDone.value, phase1BanId, onLoggedIn = {
+                    OnbStep.VRCHAT_LOGIN -> StepVrchatLogin(loginDone.value, phase1BanId, onLoggedIn = {
                         loginDone.value = true; advance()
                     }, onNext = { advance() })
-                    2 -> StepPermissions()
-                    3 -> StepIpEntry()
-                    4 -> StepEnableOsc()
-                    5 -> StepNotificationTypes(vm)
-                    6 -> StepDiscord()
-                    7 -> StepTestMessage(
+                    OnbStep.PERMISSIONS -> StepPermissions()
+                    OnbStep.IP_ENTRY -> StepIpEntry()
+                    OnbStep.ENABLE_OSC -> StepEnableOsc()
+                    OnbStep.NOTIF_TYPES -> StepNotificationTypes(vm)
+                    OnbStep.DISCORD -> StepDiscord()
+                    OnbStep.TEST -> StepTestMessage(
                         passed = testDone.value,
                         onPassed = { testDone.value = true },
-                        onGoToIpStep = { step = 3 }
+                        onGoToIpStep = { goToIpStep() }
                     )
                 }
               }
@@ -281,13 +292,13 @@ fun OnboardingFlow(
 
             // Footer: step label + progress pills + nav. Hard gates hide
             // "Next"/"Finish" until done.
-            val hardGateBlocked = (step == 0 && !tosDone) ||
-                (step == 1 && !loginDone.value) ||
-                (step == STEP_COUNT - 1 && !testDone.value && !replay)
+            val hardGateBlocked = (steps[step] == OnbStep.WELCOME_TOS && !tosDone) ||
+                (steps[step] == OnbStep.VRCHAT_LOGIN && !loginDone.value) ||
+                (steps[step] == OnbStep.TEST && !testDone.value && !replay)
             Surface(tonalElevation = 3.dp) {
                 Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
                     Text(
-                        "Step ${step + 1} of $STEP_COUNT",
+                        "Step ${step + 1} of $stepCount",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = TextAlign.Center,
@@ -299,7 +310,7 @@ fun OnboardingFlow(
                         horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        repeat(STEP_COUNT) { i ->
+                        repeat(stepCount) { i ->
                             // Current step is an elongated pill; visited steps are
                             // filled and tappable to jump back; future steps muted.
                             val w by animateDpAsState(
@@ -336,7 +347,7 @@ fun OnboardingFlow(
                             }
                             if (!hardGateBlocked) {
                                 Button(onClick = { advance() }) {
-                                    Text(if (step == STEP_COUNT - 1) "Finish" else "Next")
+                                    Text(if (step == stepCount - 1) "Finish" else "Next")
                                 }
                             }
                         }
@@ -560,24 +571,21 @@ private fun StepPermissions() {
                 )
             }
         }
-        PermissionRow(
-            title = "Notifications",
-            why = "So friend activity, invites and group alerts can reach you.",
-            granted = notifGranted
-        ) {
-            if (Build.VERSION.SDK_INT >= 33) {
-                permLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+        // POST_NOTIFICATIONS — not prompted on the headset (Quest doesn't surface
+        // the app notifications the way a phone does).
+        if (!com.vrca.BuildConfig.IS_HEADSET_BUILD) {
+            PermissionRow(
+                title = "Notifications",
+                why = "So friend activity, invites and group alerts can reach you.",
+                granted = notifGranted
+            ) {
+                if (Build.VERSION.SDK_INT >= 33) {
+                    permLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+                }
             }
         }
-        PermissionRow(
-            title = "Notification Access",
-            why = "Reads your music player's notification to show Now Playing in the chatbox. Nothing else is read.",
-            granted = listenerEnabled
-        ) {
-            runCatching {
-                ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
-            }
-        }
+        // (Notification Access / Now Playing removed from the tutorial — media
+        // detection is moving to Spotify auth, so it's no longer required/prompted.)
         PermissionRow(
             title = "Battery optimization exemption",
             why = "Stops Android pausing VRC-A when the screen is off. Strongly recommended.",
@@ -590,16 +598,20 @@ private fun StepPermissions() {
                 )
             }
         }
-        PermissionRow(
-            title = "Install updates",
-            why = "Lets VRC-A install its own update APKs when a new version is pushed.",
-            granted = installAllowed
-        ) {
-            runCatching {
-                ctx.startActivity(
-                    Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
-                        .setData(Uri.parse("package:${ctx.packageName}"))
-                )
+        // Install-updates (unknown sources) — not on the headset: distributed via
+        // the Meta store, so no in-app APK install.
+        if (!com.vrca.BuildConfig.IS_HEADSET_BUILD) {
+            PermissionRow(
+                title = "Install updates",
+                why = "Lets VRC-A install its own update APKs when a new version is pushed.",
+                granted = installAllowed
+            ) {
+                runCatching {
+                    ctx.startActivity(
+                        Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
+                            .setData(Uri.parse("package:${ctx.packageName}"))
+                    )
+                }
             }
         }
         PermissionRow(
@@ -678,6 +690,30 @@ private fun PermissionRow(
 
 @Composable
 private fun StepIpEntry() {
+    // Headset: VRChat runs on THIS device, so OSC always targets 127.0.0.1 — there
+    // is no IP to enter (that's a phone-only concept, where you point VRC-A at the
+    // headset over the LAN). Show a short note instead of the IP form + warnings.
+    if (com.vrca.BuildConfig.IS_HEADSET_BUILD) {
+        StepContainer(
+            title = "Connection",
+            subtitle = "You're on a Quest, so there's no IP address to set up."
+        ) {
+            ElevatedCard {
+                Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Nothing to enter here", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "On a phone you'd type your headset's IP so VRC-A can reach VRChat over your network. " +
+                            "On the headset itself, VRChat is right here — VRC-A talks to it directly on this device, " +
+                            "automatically. Just tap Next.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+        return
+    }
+
     val ctx = LocalContext.current
     val repo = (ctx.applicationContext as VrcaApplication).userPreferencesRepository
     val scope = rememberCoroutineScope()
@@ -943,7 +979,10 @@ private fun StepTestMessage(
     var targetPort by remember { mutableStateOf(9000) }
 
     LaunchedEffect(Unit) {
-        targetIp = repo.ip1Address.first()
+        // Headset: VRChat is on this device, so the test targets 127.0.0.1 (a stale
+        // saved IP would make the loopback ping fail and block Finish).
+        targetIp = if (com.vrca.BuildConfig.IS_HEADSET_BUILD) "127.0.0.1"
+                   else repo.ip1Address.first()
         targetPort = repo.port.first()
     }
 

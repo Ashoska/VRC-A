@@ -210,6 +210,11 @@ class VrchatPipelineService : Service() {
     private var announcementsListener: ListenerRegistration? = null
     private var seenAnnouncementIds = mutableSetOf<String>()
     private var announcementsInitialSnapshotDone = false
+    // Wall-clock ms of app install / first connect. Group announcements created
+    // BEFORE this are ignored forever (so a later fetch-window growth can't flood
+    // old ones), while post-install ones still fire even if missed. 0 = not loaded
+    // yet -> no filtering. Loaded via ensureInstallTime().
+    @Volatile private var installTimeMs: Long = 0L
 
     // VRChat status page polling
     private var statusPageJob: Job? = null
@@ -2346,6 +2351,8 @@ class VrchatPipelineService : Service() {
             else "https://vrchat.com/home/notifications"
         when {
             v2Type.contains("announcement", true) || v2Type.contains("post", true) -> {
+                // Ignore announcements made before install (pre-install ones never fire).
+                if (isPreInstallAnnouncement(v2CreatedMs)) return
                 if (groupId.isNotBlank() && isContentFingerprintSeen(groupId, v2Title, message)) {
                     Log.d(TAG, "V2 announcement skipped (REST already fired): group=$groupId title=$v2Title")
                     return
@@ -2514,6 +2521,7 @@ class VrchatPipelineService : Service() {
 
     private suspend fun backfillOfflineNotifications() {
         try {
+            ensureInstallTime()
             // First-run guard: if this is the very first pipeline connect ever
             // (no prior backfill has run), seed the per-group announcement
             // timestamps silently and skip firing any V1/V2 notifications.
@@ -2526,6 +2534,10 @@ class VrchatPipelineService : Service() {
                 val repo = com.vrca.data.UserPreferencesRepository(this@VrchatPipelineService)
                 repo.saveNotifBackfillInitialized(true)
                 repo.savePostsEventsBaselineV2(true)
+                // Anchor the install-time cutoff (fresh install) so only group
+                // announcements created AFTER now ever fire — pre-install ones
+                // are ignored forever, no matter how the fetch window later grows.
+                repo.saveNotifInstallTimeMs(System.currentTimeMillis())
                 // Pre-seed V1/V2 notification IDs so they don't fire on first backfill
                 try {
                     val v1 = VrchatAuthManager.fetchPendingNotifications(this@VrchatPipelineService)
@@ -2764,6 +2776,13 @@ class VrchatPipelineService : Service() {
                                 val postCreatedMs = parseVrcTimestampMs(postCreatedAt)
                                 val postSeenKey = "${groupId}_post_$postId"
                                 val postLastSeen = seenMap.optString(postSeenKey, "")
+                                // Ignore announcements made BEFORE install (record
+                                // as seen, never fire) — a later fetch-window growth
+                                // can't flood old posts; post-install ones still fire.
+                                if (isPreInstallAnnouncement(postCreatedMs)) {
+                                    updatedMap.put(postSeenKey, postCreatedAt)
+                                    continue
+                                }
                                 // Fire when there's ANY content (text or title) — a
                                 // title-only announcement was previously skipped.
                                 if (postCreatedAt.isNotBlank() && postCreatedAt != postLastSeen &&
@@ -2898,6 +2917,26 @@ class VrchatPipelineService : Service() {
             Log.w(TAG, "seedGroupBaselineSilently: group $groupId failed", e)
         }
     }
+
+    /** Load the install-time cutoff once. For an existing user with none recorded
+     *  (pre-fix), anchor NOW so their current backlog is ignored once and only new
+     *  announcements fire thereafter. */
+    private suspend fun ensureInstallTime() {
+        if (installTimeMs > 0L) return
+        val stored = dataStore.data.first()[
+            androidx.datastore.preferences.core.longPreferencesKey("notif_install_time_ms")
+        ] ?: 0L
+        installTimeMs = if (stored > 0L) stored else {
+            val now = System.currentTimeMillis()
+            com.vrca.data.UserPreferencesRepository(this@VrchatPipelineService).saveNotifInstallTimeMs(now)
+            now
+        }
+    }
+
+    /** Group announcement created before install -> ignore forever. A 0/unknown
+     *  timestamp (or unloaded cutoff) fires as before. */
+    private fun isPreInstallAnnouncement(createdMs: Long): Boolean =
+        createdMs in 1 until installTimeMs
 
     private suspend fun seedBackfillBaseline() {
         try {
@@ -3500,6 +3539,7 @@ class VrchatPipelineService : Service() {
 
     private suspend fun pollGroupAnnouncements() {
         if (!VrchatAuthManager.isLoggedIn(this)) return
+        ensureInstallTime()
 
         // Retry sweep of pending notification-v2 (events, announcements, role
         // changes). The one-shot connect backfill can miss these on a transient
@@ -3568,6 +3608,12 @@ class VrchatPipelineService : Service() {
                         val postCreatedMs = parseVrcTimestampMs(postCreatedAt)
                         val postSeenKey = "${groupId}_post_$postId"
                         val postLastSeen = seenMap.optString(postSeenKey, "")
+                        // Ignore pre-install announcements (record seen, never fire).
+                        if (isPreInstallAnnouncement(postCreatedMs)) {
+                            updatedMap.put(postSeenKey, postCreatedAt)
+                            changed = true
+                            continue
+                        }
                         if (postCreatedAt.isNotBlank() && postCreatedAt != postLastSeen &&
                             (postText.isNotBlank() || rawPostTitle.isNotBlank())) {
                             // Cross-path dedup (same as the backfill site): if the live
@@ -4523,7 +4569,122 @@ object VrchatPipelineState {
     val presenceFlow: StateFlow<VrchatAuthManager.VrcUserPresence?> = _presence.asStateFlow()
     var presence: VrchatAuthManager.VrcUserPresence?
         get() = _presence.value
-        set(value) { _presence.value = value }
+        // HEADSET (plan §9): the local user's location / world / instance / player
+        // count come from VRChat's LOG (InstanceRosterManager), not the REST API —
+        // the headset runs on the same device as VRChat, so the log is instant and
+        // more accurate (its count matches the in-game panel; instance HOPS are seen
+        // the moment the log writes `Joining wrld_…`). So on the headset every
+        // presence write (REST poll, WS event, seed) is patched here: the log values
+        // WIN for those four fields while profile fields (status/rank/pic) pass
+        // through untouched. Mobile (public/admin) is unchanged — no log there, REST
+        // drives presence as always. Passthrough when the log isn't active yet (no
+        // file access), so REST still works on the headset until the log takes over.
+        set(value) {
+            _presence.value = when {
+                value == null || !BuildConfig.IS_HEADSET_BUILD -> value
+                // VRChat is known-CLOSED via the log (roster cleared instantly). Keep
+                // forcing offline on EVERY write so a STALE REST poll — VRChat's API
+                // lags the actual close by a while and still returns the old instance —
+                // can't re-populate the VRChat-tab location / RPC. Without this the
+                // location flapped back to the old world until REST finally caught up,
+                // while the roster (pure log) had already vanished. Cleared when the log
+                // goes active again (VRChat reopened) or log access is lost (REST drives).
+                headsetLogForceOffline -> value.copy(
+                    location = "offline", worldName = "", instancePlayerCount = 0,
+                    isOnlineInVRChat = false, state = "offline"
+                )
+                headsetLogActive -> applyHeadsetLogOverride(value)
+                else -> value
+            }
+        }
+
+    // --- headset log-derived self-presence (plan §9) ---
+    /** The headset has a working VRChat log driving self-presence. */
+    @Volatile var headsetLogActive = false
+    /** The log has confirmed VRChat is CLOSED — force presence offline on every write
+     *  (incl. stale REST) until the log goes active again or log access is lost. */
+    @Volatile var headsetLogForceOffline = false
+    @Volatile var headsetLogInWorld = false
+    @Volatile var headsetLogLocation: String? = null
+    @Volatile var headsetLogWorldName: String? = null
+    @Volatile var headsetLogPlayerCount = 0
+
+    private fun applyHeadsetLogOverride(
+        p: VrchatAuthManager.VrcUserPresence
+    ): VrchatAuthManager.VrcUserPresence =
+        if (headsetLogInWorld)
+            p.copy(
+                location = headsetLogLocation ?: p.location,
+                worldName = headsetLogWorldName ?: p.worldName,
+                instancePlayerCount = headsetLogPlayerCount,
+                isOnlineInVRChat = true,
+                state = "online"
+            )
+        else
+            // Log works but we're between instances -> online, no instance.
+            p.copy(location = "offline", worldName = "", instancePlayerCount = 0)
+
+    /** Called by InstanceRosterManager on every log fold (headset only): updates
+     *  the log override fields and re-applies them to the current presence, seeding
+     *  a minimal presence from the log if REST hasn't produced one yet so the RPC
+     *  works from the log alone. `active=false` (no log access) makes presence a
+     *  passthrough so REST drives it. */
+    fun applyLogPresence(
+        active: Boolean, inWorld: Boolean,
+        location: String?, worldName: String?, playerCount: Int,
+        seedUserId: String, seedDisplayName: String,
+        // True only when VRChat is CONFIDENTLY closed (OSCQuery HTTP down, or the log's
+        // "good night server" goodbye). A mere log-mtime staleness fallback (OSC
+        // disabled + user AFK, log quiet for >5min) passes false: we must NOT latch
+        // offline then, or an AFK-but-still-present user gets forced offline and the
+        // REST poll (which correctly shows them in-world) can't rescue it. OSCQuery is
+        // immune to AFK, so a real VRC-A user (OSC on) is unaffected either way.
+        confirmedClosed: Boolean = true
+    ) {
+        // "Was the log controlling presence" = it was active OR already force-offline.
+        val wasControlling = headsetLogActive || headsetLogForceOffline
+        headsetLogActive = active
+        headsetLogInWorld = inWorld
+        headsetLogLocation = location
+        headsetLogWorldName = worldName
+        headsetLogPlayerCount = playerCount
+        // Clear the latch when VRChat is back (active) OR when we're NOT confident it's
+        // closed (let REST drive an AFK/idle user). Only a confident close keeps it.
+        if (active || !confirmedClosed) headsetLogForceOffline = false
+        val cur = _presence.value
+        when {
+            cur == null -> {
+                if (active && inWorld && seedUserId.isNotBlank()) {
+                    _presence.value = applyHeadsetLogOverride(
+                        VrchatAuthManager.VrcUserPresence(
+                            userId = seedUserId, displayName = seedDisplayName,
+                            state = "online", status = "", statusDescription = "",
+                            location = location ?: "", platform = "", worldName = worldName ?: "",
+                            instancePlayerCount = playerCount, instanceCapacity = 0,
+                            currentAvatarThumbnailUrl = "", isOnlineInVRChat = true
+                        )
+                    )
+                }
+            }
+            // Log confirmed VRChat CLOSED (VRChat quit / headset shutting down). The log
+            // was driving presence and there's no "left" event, so force offline NOW
+            // instead of showing the last instance (and running the uptime/RPC timer)
+            // forever — AND latch headsetLogForceOffline so the next stale REST poll
+            // can't flap the old location back (the "roster clears instantly but the
+            // location/RPC lag" bug). Cleared when VRChat reopens (active=true above).
+            !active && wasControlling && confirmedClosed -> {
+                headsetLogForceOffline = true
+                _presence.value = cur.copy(
+                    location = "offline", worldName = "", instancePlayerCount = 0,
+                    isOnlineInVRChat = false, state = "offline"
+                )
+            }
+            // Not confident (log-staleness fallback / AFK): headsetLogActive is now false
+            // and the latch is cleared, so this re-run of the setter is a PASSTHROUGH —
+            // REST drives presence and correctly keeps an AFK-but-present user in-world.
+            else -> presence = cur // re-run the setter so the updated override is applied
+        }
+    }
 
     private val _statusPageState = MutableStateFlow<VrchatStatusPageData?>(null)
     val statusPageFlow: StateFlow<VrchatStatusPageData?> = _statusPageState.asStateFlow()

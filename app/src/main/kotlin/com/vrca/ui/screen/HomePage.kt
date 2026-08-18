@@ -9,9 +9,14 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -37,6 +42,8 @@ import androidx.compose.material.icons.filled.Loop
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Stop
@@ -79,11 +86,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.vrca.BuildConfig
 import com.vrca.ui.common.CompactSectionCard
 import com.vrca.ui.common.KitStatusChip
 import com.vrca.ui.common.KitTone
@@ -102,7 +110,7 @@ import kotlinx.coroutines.withContext
  * expanded; priority > 0 auto-expands. Media served from the ann/ cache.
  */
 @Composable
-private fun AnnouncementCard(a: AnnouncementUi) {
+internal fun AnnouncementCard(a: AnnouncementUi) {
     val ctx = LocalContext.current
     val doc = remember(a.bodyDoc, a.body) {
         com.vrca.richcontent.resolveRichDoc(a.bodyDoc, a.body)
@@ -171,6 +179,34 @@ private fun AnnouncementCard(a: AnnouncementUi) {
     }
 }
 
+// Fixed preview-bubble size (all builds): 9 chatbox lines at the compact preview
+// font (PREVIEW_LINE_SP) + padding, so the preview never grows/pushes the UI as
+// lines are added — like the in-game chatbox's fixed size.
+private val PREVIEW_LINE_SP = 14
+private val PREVIEW_FONT_SP = 11
+private val PREVIEW_BUBBLE_HEIGHT = (PREVIEW_LINE_SP * 9 + 24).dp  // 9 lines + 12dp top/bottom padding
+
+// Headset Home goes two-column at/above this width; below it (a shrunk Quest
+// panel) it falls back to the single column.
+private val HOME_TWO_COL_THRESHOLD = 560.dp
+// Full Quest panel (1024dp) clears this → three columns; a resized-narrower
+// panel drops to two, then one.
+private val HOME_THREE_COL_THRESHOLD = 820.dp
+
+/** A column-scroll modifier that only grabs vertical drags when the content
+ *  ACTUALLY overflows the column. Compose's `verticalScroll` otherwise consumes
+ *  drag gestures even when everything fits, so a fixed-height column (the preview
+ *  bubble, or the toggles list while Manual Send is collapsed) could be
+ *  rubber-band "scrolled" to nowhere. `state.maxValue` is 0 while content fits
+ *  and becomes > 0 once it overflows (e.g. Manual Send expands, or the roster
+ *  fills up), so scrolling switches on exactly when there's somewhere to go.
+ *  Each call site gets its own remembered ScrollState (keyed by call position). */
+@Composable
+private fun scrollWhenOverflowing(): Modifier {
+    val state = rememberScrollState()
+    return Modifier.verticalScroll(state, enabled = state.maxValue > 0)
+}
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 internal fun HomePage(
@@ -186,10 +222,6 @@ internal fun HomePage(
     val scope = rememberCoroutineScope()
 
     val connectionBring = remember { BringIntoViewRequester() }
-    // Keeps the Manual Send field visible while typing — the live preview above it
-    // grows as you type and would otherwise push the input line out of view.
-    val manualBring = remember { BringIntoViewRequester() }
-    var manualFieldFocused by remember { mutableStateOf(false) }
 
     val pm = remember(ctx) { ctx.getSystemService(Context.POWER_SERVICE) as PowerManager }
     var batteryOk by remember { mutableStateOf(pm.isIgnoringBatteryOptimizations(ctx.packageName)) }
@@ -211,6 +243,9 @@ internal fun HomePage(
     }
     var ipOk by remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(Unit) {
+        // Headset: OSC is automatic (localhost), so the connection is always "set" —
+        // never flag "IP not set" in setup health.
+        if (BuildConfig.IS_HEADSET_BUILD) { ipOk = true; return@LaunchedEffect }
         vm.userPreferencesRepository.ipAddress.collect { ip ->
             ipOk = ip.isNotBlank() && ip != "127.0.0.1"
         }
@@ -245,19 +280,13 @@ internal fun HomePage(
         }
     }
 
-    // Shared Edit mode: reorders the chatbox COMPONENT order (Quick Toggles)
-    // AND the page-level card order — one mode, every card participates.
+    // Edit mode now ONLY reorders the chatbox COMPONENT order (Quick Toggles).
+    // The page-level card reordering (Preview / Connection / Manual Send) was
+    // removed — the Home cards render in a fixed order.
     var cardReorderMode by remember { mutableStateOf(false) }
-    var homeOrder by remember { mutableStateOf(UiPrefs.readHomeCardOrder(ctx)) }
-    fun moveHomeCard(key: String, delta: Int) {
-        val order = homeOrder.toMutableList()
-        val idx = order.indexOf(key)
-        val to = idx + delta
-        if (idx < 0 || to < 0 || to >= order.size) return
-        order[idx] = order[to]; order[to] = key
-        homeOrder = order
-        UiPrefs.writeHomeCardOrder(ctx, order)
-    }
+    // Connection moved out of Home into the top-bar connection button (next to
+    // Settings). Home is just Preview + Manual Send now.
+    val homeOrder = listOf("Preview", "ManualSend")
 
     val sortedAnnouncements = remember(announcements) {
         announcements.sortedWith(
@@ -265,30 +294,51 @@ internal fun HomePage(
         )
     }
 
-    PageContainer {
+    // Setup health items — shown in the phone's Home alert block (the HEADSET moves
+    // all alerts to the top-bar notification button instead).
+    val healthItems = buildList {
+        if (!vrcLinked) add(
+            HealthItem(
+                "VRChat account not linked",
+                "OSC sending is blocked until you sign in."
+            ) { onNavigate(AppPage.VrchatStatus) }
+        )
+        if (ipOk == false) add(
+            HealthItem(
+                "Headset IP not set",
+                "Tap the connection icon (top right) to set your Quest/PC IP."
+            ) { }
+        )
+        if (!batteryOk) add(
+            HealthItem(
+                "Battery optimization is on",
+                "Android may pause VRC-A when the screen is off."
+            ) {
+                ctx.startActivity(vm.batteryOptimizationIntent())
+                batteryOk = pm.isIgnoringBatteryOptimizations(ctx.packageName)
+            }
+        )
+    }
+
+    // Alert / info cards — PHONE ONLY (top of Home, as always). On the headset the
+    // top-bar NotificationButton (VrcaScreen) shows these instead.
+    val alertCards: @Composable ColumnScope.() -> Unit = {
         if (sortedAnnouncements.isNotEmpty()) {
             SectionCard(
                 title = "Announcements",
                 subtitle = "Latest updates from the app team."
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    sortedAnnouncements.forEach { a ->
-                        key(a.id) { AnnouncementCard(a) }
-                    }
+                    sortedAnnouncements.forEach { a -> key(a.id) { AnnouncementCard(a) } }
                 }
             }
         }
-
-        // VRChat server status warning
         VrchatStatusBanner()
-
-        // Confirmed-dead VRChat session: OSC is gated, so explain why + offer sign-in.
         if (vm.vrchatAuthDead) {
             com.vrca.ui.common.VrchatSessionExpiredBanner(
                 onSignIn = { onNavigate(AppPage.VrchatStatus) }
             )
         }
-
         if (moderation.warned && !(moderation.banned || moderation.deviceBanned)) {
             SectionCard(
                 title = "Account warning",
@@ -305,190 +355,233 @@ internal fun HomePage(
                 }
             }
         }
+        if (healthItems.isNotEmpty()) SetupHealthCard(healthItems)
+    }
 
-        // Setup health checklist — Home-only replacement for the old every-tab
-        // "Setup incomplete" banner. Shows ONLY the red rows; disappears
-        // entirely when everything is green. Each row deep-links to its fix.
-        val healthItems = buildList {
-            if (!vrcLinked) add(
-                HealthItem(
-                    "VRChat account not linked",
-                    "OSC sending is blocked until you sign in."
-                ) { onNavigate(AppPage.VrchatStatus) }
-            )
-            if (ipOk == false) add(
-                HealthItem(
-                    "Headset IP not set",
-                    "Set your Quest/PC IP in the Connection card."
-                ) { scope.launch { connectionBring.bringIntoView() } }
-            )
-            if (!batteryOk) add(
-                HealthItem(
-                    "Battery optimization is on",
-                    "Android may pause VRC-A when the screen is off."
-                ) {
-                    ctx.startActivity(vm.batteryOptimizationIntent())
-                    batteryOk = pm.isIgnoringBatteryOptimizations(ctx.packageName)
-                }
-            )
-            if (vm.spotifyEnabled && !notifOk) add(
-                HealthItem(
-                    "Notification Access missing",
-                    "Now Playing is on but can't detect media without it."
-                ) { ctx.startActivity(vm.notificationAccessIntent()) }
-            )
-        }
-        if (healthItems.isNotEmpty()) {
-            SetupHealthCard(healthItems)
-        }
+    val preview: @Composable (Boolean) -> Unit = { showToggles ->
+        PreviewAndTogglesCard(
+            vm = vm,
+            isBanned = isBanned,
+            nowTickMs = nowTickMs,
+            cardReorderMode = cardReorderMode,
+            onToggleReorderMode = { cardReorderMode = it },
+            onResetOrder = { vm.resetCardOrder() },
+            onNavigate = onNavigate,
+            showToggles = showToggles
+        )
+    }
 
-        // Reorder mode exit — unmissable full-width button at the top of the
-        // page (the small Done in the Quick Toggles header can be off-screen
-        // while the user is moving the upper cards around).
-        if (cardReorderMode) {
-            Button(
-                onClick = { cardReorderMode = false },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Done reordering")
-            }
-        }
-
-        homeOrder.forEach { cardKey ->
-            HomeCardSlot(
-                label = when (cardKey) {
-                    "Preview" -> "Preview & toggles"
-                    "Connection" -> "Connection"
-                    else -> "Manual Send"
-                },
-                reorderMode = cardReorderMode,
-                canMoveUp = homeOrder.indexOf(cardKey) > 0,
-                canMoveDown = homeOrder.indexOf(cardKey) < homeOrder.size - 1,
-                onMove = { delta -> moveHomeCard(cardKey, delta) }
-            ) {
-                when (cardKey) {
-                    "Preview" -> PreviewAndTogglesCard(
-                        vm = vm,
-                        isBanned = isBanned,
-                        nowTickMs = nowTickMs,
-                        cardReorderMode = cardReorderMode,
-                        onToggleReorderMode = { cardReorderMode = it },
-                        onResetOrder = {
-                            vm.resetCardOrder()
-                            homeOrder = UiPrefs.HOME_CARDS_DEFAULT
-                            UiPrefs.writeHomeCardOrder(ctx, UiPrefs.HOME_CARDS_DEFAULT)
-                        },
-                        onNavigate = onNavigate
-                    )
-
-                    "Connection" -> Column(Modifier.bringIntoViewRequester(connectionBring)) {
-                        ConnectionCard(vm = vm, ipAddress = uiState.ipAddress, ipOk = ipOk ?: true)
-                    }
-
-                    "ManualSend" -> CompactSectionCard(
-                        title = "Manual Send",
-                        icon = Icons.Filled.Send,
-                        summary = if (vm.manualLiveMode) "Live typing" else "Type a manual message"
+    if (BuildConfig.IS_HEADSET_BUILD) {
+        // Headset: FILL the panel (bottom nav stays pinned) and never scroll the whole
+        // page. Wide → two columns (Preview + alerts LEFT, Quick Toggles + Manual Send
+        // RIGHT), each column scrolls internally so alert cards can't push the layout.
+        // Narrow/shrunk → a single scrollable column that still fills the panel.
+        BoxWithConstraints(Modifier.fillMaxSize().padding(10.dp)) {
+            when {
+                // Full Quest panel (1024dp): THREE columns.
+                //   left  = skinny preview
+                //   middle = Line Toggles + Manual Send (they fit perfectly together)
+                //   right = instance roster, pinned far right
+                maxWidth >= HOME_THREE_COL_THRESHOLD -> {
+                    Row(
+                        Modifier.fillMaxSize(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        val budget = vm.manualCharBudget()
-                        val msgLen = vm.messageText.value.text.length
-                        val over = msgLen > budget
-
-                        // Instant / Live segmented toggle (compact, on-vibe).
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        Column(
+                            Modifier.weight(1f).fillMaxHeight().then(scrollWhenOverflowing()),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            listOf(false, true).forEach { live ->
-                                val selected = vm.manualLiveMode == live
-                                Surface(
-                                    shape = MaterialTheme.shapes.small,
-                                    color = if (selected) MaterialTheme.colorScheme.primary
-                                            else MaterialTheme.colorScheme.surfaceVariant,
-                                    contentColor = if (selected) MaterialTheme.colorScheme.onPrimary
-                                            else MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .clickable(enabled = !isBanned) { vm.setManualLiveModeFlag(live) }
-                                ) {
-                                    Text(
-                                        if (live) "Live" else "Instant",
-                                        textAlign = TextAlign.Center,
-                                        style = MaterialTheme.typography.labelLarge,
-                                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
-                                    )
-                                }
-                            }
+                            preview(false)
                         }
-
-                        // Scroll style is Live-only.
-                        if (vm.manualLiveMode) {
-                            ToggleRow(
-                                label = "Scroll",
-                                description = "Scroll to the 4 newest lines.",
-                                checked = vm.manualScroll,
-                                enabled = !isBanned
-                            ) { vm.setManualScrollFlag(it) }
-                        }
-
-                        // Bring the input back into view as the live preview above
-                        // grows/shifts while typing (a small delay lets it relayout
-                        // first, then we scroll the field into view).
-                        LaunchedEffect(vm.messageText.value.text, manualFieldFocused) {
-                            if (manualFieldFocused) {
-                                kotlinx.coroutines.delay(60)
-                                runCatching { manualBring.bringIntoView() }
-                            }
-                        }
-                        OutlinedTextField(
-                            value = vm.messageText.value,
-                            onValueChange = { v: TextFieldValue -> vm.onMessageTextChange(v) },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .bringIntoViewRequester(manualBring)
-                                .onFocusChanged { manualFieldFocused = it.isFocused },
-                            minLines = 2,
-                            label = { Text("Message") },
-                            isError = over && !vm.manualLiveMode,
-                            enabled = !isBanned,
-                            supportingText = {
-                                Text(
-                                    "$msgLen / $budget" +
-                                        if (vm.manualLiveMode) "  ·  newest lines shown live" else "",
-                                    // In Live mode going over budget is expected —
-                                    // Scroll rolls older lines off — so don't alarm.
-                                    color = if (over && !vm.manualLiveMode) MaterialTheme.colorScheme.error
-                                            else MaterialTheme.colorScheme.onSurfaceVariant,
-                                    style = MaterialTheme.typography.labelSmall
-                                )
-                            }
-                        )
-
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        Column(
+                            Modifier.weight(1f).fillMaxHeight().then(scrollWhenOverflowing()),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            if (!vm.manualLiveMode) {
-                                Button(
-                                    onClick = { vm.sendMessage() },
-                                    modifier = Modifier.weight(1f),
-                                    enabled = !isBanned && msgLen > 0 && !over
-                                ) { Text("Send") }
-                            }
-                            OutlinedButton(
-                                onClick = { vm.clearManual() },
-                                modifier = Modifier.weight(1f),
-                                enabled = !isBanned
-                            ) { Text("Clear") }
+                            QuickTogglesSection(
+                                vm = vm,
+                                isBanned = isBanned,
+                                cardReorderMode = cardReorderMode,
+                                onToggleReorderMode = { cardReorderMode = it },
+                                onResetOrder = { vm.resetCardOrder() },
+                                onNavigate = onNavigate
+                            )
+                            ManualSendCard(vm = vm, isBanned = isBanned)
+                        }
+                        Column(
+                            Modifier.weight(1f).fillMaxHeight().then(scrollWhenOverflowing()),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            InstanceRosterPanel()
                         }
                     }
                 }
+                // Resized-narrower panel: two columns (preview + roster left,
+                // toggles + manual right).
+                maxWidth >= HOME_TWO_COL_THRESHOLD -> {
+                    Row(
+                        Modifier.fillMaxSize(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Column(
+                            Modifier.weight(1f).fillMaxHeight().then(scrollWhenOverflowing()),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            preview(false)
+                            InstanceRosterPanel()
+                        }
+                        Column(
+                            Modifier.weight(1f).fillMaxHeight().then(scrollWhenOverflowing()),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            QuickTogglesSection(
+                                vm = vm,
+                                isBanned = isBanned,
+                                cardReorderMode = cardReorderMode,
+                                onToggleReorderMode = { cardReorderMode = it },
+                                onResetOrder = { vm.resetCardOrder() },
+                                onNavigate = onNavigate
+                            )
+                            ManualSendCard(vm = vm, isBanned = isBanned)
+                        }
+                    }
+                }
+                // Small/shrunk panel: single scrolling column.
+                else -> {
+                    Column(
+                        Modifier.fillMaxSize().then(scrollWhenOverflowing()),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        preview(true)
+                        InstanceRosterPanel()
+                        ManualSendCard(vm = vm, isBanned = isBanned)
+                    }
+                }
             }
+        }
+    } else {
+        // Phone/admin: alerts at the top of Home, as always.
+        PageContainer {
+            alertCards()
+            preview(true)
+            ManualSendCard(vm = vm, isBanned = isBanned)
         }
     }
 }
+
+/** Manual Send card (extracted so the headset two-column layout can place it in
+ *  the right column under the Quick Toggles). */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ManualSendCard(vm: VrcaViewModel, isBanned: Boolean) {
+    val manualBring = remember { BringIntoViewRequester() }
+    var manualFieldFocused by remember { mutableStateOf(false) }
+    // Expanding the card should scroll the column down so the whole editor shows.
+    val cardBring = remember { BringIntoViewRequester() }
+    val manualExpanded = remember { mutableStateOf(false) }
+    LaunchedEffect(manualExpanded.value) {
+        if (manualExpanded.value) {
+            kotlinx.coroutines.delay(120) // let the expand animation lay out first
+            runCatching { cardBring.bringIntoView() }
+        }
+    }
+    CompactSectionCard(
+        title = "Manual Send",
+        icon = Icons.Filled.Send,
+        summary = if (vm.manualLiveMode) "Live typing" else "Type a manual message",
+        expandedState = manualExpanded,
+        modifier = Modifier.bringIntoViewRequester(cardBring)
+    ) {
+        val budget = vm.manualCharBudget()
+        val msgLen = vm.messageText.value.text.length
+        val over = msgLen > budget
+
+        // Instant / Live segmented toggle (compact, on-vibe).
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            listOf(false, true).forEach { live ->
+                val selected = vm.manualLiveMode == live
+                Surface(
+                    shape = MaterialTheme.shapes.small,
+                    color = if (selected) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.surfaceVariant,
+                    contentColor = if (selected) MaterialTheme.colorScheme.onPrimary
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable(enabled = !isBanned) { vm.setManualLiveModeFlag(live) }
+                ) {
+                    Text(
+                        if (live) "Live" else "Instant",
+                        textAlign = TextAlign.Center,
+                        style = MaterialTheme.typography.labelLarge,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+                    )
+                }
+            }
+        }
+
+        // Scroll style is Live-only.
+        if (vm.manualLiveMode) {
+            ToggleRow(
+                label = "Scroll",
+                description = "Scroll to the 4 newest lines.",
+                checked = vm.manualScroll,
+                enabled = !isBanned
+            ) { vm.setManualScrollFlag(it) }
+        }
+
+        // Bring the input back into view as the live preview above grows/shifts
+        // while typing (a small delay lets it relayout first).
+        LaunchedEffect(vm.messageText.value.text, manualFieldFocused) {
+            if (manualFieldFocused) {
+                kotlinx.coroutines.delay(60)
+                runCatching { manualBring.bringIntoView() }
+            }
+        }
+        OutlinedTextField(
+            value = vm.messageText.value,
+            onValueChange = { v: TextFieldValue -> vm.onMessageTextChange(v) },
+            modifier = Modifier
+                .fillMaxWidth()
+                .bringIntoViewRequester(manualBring)
+                .onFocusChanged { manualFieldFocused = it.isFocused },
+            minLines = 2,
+            label = { Text("Message") },
+            isError = over && !vm.manualLiveMode,
+            enabled = !isBanned,
+            supportingText = {
+                Text(
+                    "$msgLen / $budget" +
+                        if (vm.manualLiveMode) "  ·  newest lines shown live" else "",
+                    color = if (over && !vm.manualLiveMode) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
+        )
+
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            if (!vm.manualLiveMode) {
+                Button(
+                    onClick = { vm.sendMessage() },
+                    modifier = Modifier.weight(1f),
+                    enabled = !isBanned && msgLen > 0 && !over
+                ) { Text("Send") }
+            }
+            OutlinedButton(
+                onClick = { vm.clearManual() },
+                modifier = Modifier.weight(1f),
+                enabled = !isBanned
+            ) { Text("Clear") }
+        }
+    }
+}
+
 
 /* =========================
    Setup health checklist
@@ -605,10 +698,19 @@ private fun PreviewAndTogglesCard(
     cardReorderMode: Boolean,
     onToggleReorderMode: (Boolean) -> Unit,
     onResetOrder: () -> Unit,
-    onNavigate: (AppPage) -> Unit
+    onNavigate: (AppPage) -> Unit,
+    // When false the Quick Toggles are rendered SEPARATELY (headset two-column
+    // layout puts them in the right column); the card is then just the preview.
+    showToggles: Boolean = true
 ) {
     val ctx = LocalContext.current
     var previewExpanded by remember { mutableStateOf(UiPrefs.readPreviewExpanded(ctx)) }
+
+    // Fixed compact preview ONLY on the headset (the two-column space is tight).
+    // Mobile/admin keep the original growing, full-size preview.
+    val isHeadset = BuildConfig.IS_HEADSET_BUILD
+    val previewFontSize = if (isHeadset) PREVIEW_FONT_SP.sp else androidx.compose.ui.unit.TextUnit.Unspecified
+    val previewLineHeight = if (isHeadset) PREVIEW_LINE_SP.sp else androidx.compose.ui.unit.TextUnit.Unspecified
 
     SectionCard(
         title = "VRChat Preview",
@@ -656,9 +758,16 @@ private fun PreviewAndTogglesCard(
             ) {
                 Box(
                     Modifier
-                        .widthIn(max = 420.dp)
-                        .fillMaxWidth(0.92f)
-                        .heightIn(min = 96.dp)
+                        // Headset: skinnier bubble (matches the real chatbox shape and
+                        // frees side space for the instance roster). Mobile: as before.
+                        .widthIn(max = if (isHeadset) 300.dp else 420.dp)
+                        .fillMaxWidth(if (isHeadset) 1f else 0.92f)
+                        // Headset: FIXED 9-line height (compact, so the two-column
+                        // stays put). Mobile: the original growing bubble (min 96dp).
+                        .then(
+                            if (isHeadset) Modifier.height(PREVIEW_BUBBLE_HEIGHT)
+                            else Modifier.heightIn(min = 96.dp)
+                        )
                 ) {
                     if (vm.minimalChatboxBg) {
                         // Invisible Chatbox Border simulation: in-game the bubble
@@ -694,8 +803,16 @@ private fun PreviewAndTogglesCard(
                                     Text(
                                         text = previewText,
                                         modifier = Modifier.fillMaxWidth(),
-                                        fontFamily = FontFamily.Monospace,
+                                        // App default (proportional) font: the
+                                        // old FontFamily.Monospace mapped to the
+                                        // SYSTEM monospace, which Horizon OS renders
+                                        // as a distinct typewriter face — so the
+                                        // preview looked wrong only on the headset.
+                                        // Proportional also matches VRChat's real
+                                        // chatbox font (see TitleCleaner width calib).
                                         style = MaterialTheme.typography.bodyMedium,
+                                        fontSize = previewFontSize,
+                                        lineHeight = previewLineHeight,
                                         textAlign = TextAlign.Center,
                                         softWrap = true,
                                         maxLines = 9,
@@ -706,24 +823,36 @@ private fun PreviewAndTogglesCard(
                         }
                     } else {
                         Surface(
-                            modifier = Modifier.fillMaxWidth(),
+                            // Headset: fill the fixed box. Mobile: wrap content width
+                            // (the outer box grows with content as before).
+                            modifier = if (isHeadset) Modifier.fillMaxSize() else Modifier.fillMaxWidth(),
                             tonalElevation = 3.dp,
                             shape = MaterialTheme.shapes.large,
                             color = MaterialTheme.colorScheme.surfaceVariant
                         ) {
                             Box(
                                 Modifier
-                                    .heightIn(min = 96.dp)
-                                    .padding(12.dp)
-                                    .fillMaxWidth(),
+                                    .then(
+                                        if (isHeadset) Modifier.fillMaxSize()
+                                        else Modifier.heightIn(min = 96.dp).fillMaxWidth()
+                                    )
+                                    .padding(12.dp),
                                 contentAlignment = Alignment.Center
                             ) {
                                 SelectionContainer {
                                     Text(
                                         text = previewText,
                                         modifier = Modifier.fillMaxWidth(),
-                                        fontFamily = FontFamily.Monospace,
+                                        // App default (proportional) font: the
+                                        // old FontFamily.Monospace mapped to the
+                                        // SYSTEM monospace, which Horizon OS renders
+                                        // as a distinct typewriter face — so the
+                                        // preview looked wrong only on the headset.
+                                        // Proportional also matches VRChat's real
+                                        // chatbox font (see TitleCleaner width calib).
                                         style = MaterialTheme.typography.bodyMedium,
+                                        fontSize = previewFontSize,
+                                        lineHeight = previewLineHeight,
                                         // Explicit bright color: Surface(surfaceVariant)
                                         // switches LocalContentColor to the muted
                                         // onSurfaceVariant, which dimmed the preview
@@ -743,7 +872,10 @@ private fun PreviewAndTogglesCard(
 
                 Canvas(
                     modifier = Modifier
-                        .padding(top = 8.dp)
+                        // Headset: trim the empty gap above the silhouette (not the
+                        // silhouette itself) to clear the last few dp of overflow in
+                        // the preview column so it no longer slightly scrolls.
+                        .padding(top = if (isHeadset) 4.dp else 8.dp)
                         .height(120.dp)
                         .width(120.dp)
                 ) {
@@ -799,7 +931,7 @@ private fun PreviewAndTogglesCard(
                     Text(
                         text = previewText,
                         modifier = Modifier.fillMaxWidth(),
-                        fontFamily = FontFamily.Monospace,
+                        // App default (proportional) font — see note above.
                         style = MaterialTheme.typography.bodySmall,
                         textAlign = TextAlign.Center,
                         softWrap = true,
@@ -829,7 +961,7 @@ private fun PreviewAndTogglesCard(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(12.dp),
-                    fontFamily = FontFamily.Monospace,
+                    // App default (proportional) font — see note above.
                     style = MaterialTheme.typography.bodySmall,
                     // Same explicit bright color as the expanded bubble — the
                     // surfaceVariant Surface otherwise dims text to onSurfaceVariant.
@@ -910,8 +1042,10 @@ private fun PreviewAndTogglesCard(
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    "Stop sending" + if (vm.sendingSinceMs > 0L)
-                        " · ${formatUptime(nowTickMs - vm.sendingSinceMs)}" else "",
+                    // Uptime = time IN VRChat (presence-driven, matches the Discord
+                    // RPC counter), not how long the chatbox has been sending.
+                    "Stop sending" + if (vm.vrchatOnlineSinceMs > 0L)
+                        " · ${formatUptime(nowTickMs - vm.vrchatOnlineSinceMs)}" else "",
                     color = MaterialTheme.colorScheme.onError
                 )
             }
@@ -946,51 +1080,71 @@ private fun PreviewAndTogglesCard(
             }
         }
 
-        ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        if (showToggles) {
+            QuickTogglesSection(
+                vm = vm,
+                isBanned = isBanned,
+                cardReorderMode = cardReorderMode,
+                onToggleReorderMode = onToggleReorderMode,
+                onResetOrder = onResetOrder,
+                onNavigate = onNavigate
+            )
+        }
+    }
+}
 
-                // Quick Toggles title row with Edit/Done toggle and Reset button
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column {
-                        Text("Quick Toggles", style = MaterialTheme.typography.titleSmall)
+/** The Quick Toggles card (extracted so the headset two-column layout can render
+ *  it in the right column, separate from the preview). */
+@Composable
+private fun QuickTogglesSection(
+    vm: VrcaViewModel,
+    isBanned: Boolean,
+    cardReorderMode: Boolean,
+    onToggleReorderMode: (Boolean) -> Unit,
+    onResetOrder: () -> Unit,
+    onNavigate: (AppPage) -> Unit
+) {
+    ElevatedCard(colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+        // Tighter padding (8dp) + spacing so the card is shorter and scrolls less.
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+
+            // Title row with Edit/Done toggle and Reset button (no subtitle — keeps
+            // the card compact).
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // weight(1f) so the title can't push the Reset/Done buttons off the
+                // right edge on a narrow phone.
+                Text(
+                    "Line Toggles",
+                    style = MaterialTheme.typography.titleSmall,
+                    modifier = Modifier.weight(1f)
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (cardReorderMode) {
+                        TextButton(
+                            onClick = onResetOrder,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                        ) { Text("Reset", style = MaterialTheme.typography.labelSmall) }
+                    }
+                    TextButton(
+                        onClick = { onToggleReorderMode(!cardReorderMode) },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
                         Text(
-                            (if (vm.oscSending) "Edits show live" else "Press Start when ready") +
-                                " · hold a pill to edit",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            if (cardReorderMode) "Done" else "Edit",
+                            style = MaterialTheme.typography.labelSmall
                         )
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        if (cardReorderMode) {
-                            TextButton(
-                                onClick = onResetOrder,
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                            ) { Text("Reset", style = MaterialTheme.typography.labelSmall) }
-                        }
-                        TextButton(
-                            onClick = { onToggleReorderMode(!cardReorderMode) },
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                        ) {
-                            Text(
-                                if (cardReorderMode) "Done" else "Edit",
-                                style = MaterialTheme.typography.labelSmall
-                            )
-                        }
-                    }
                 }
+            }
 
-                if (cardReorderMode) {
-                    // Edit mode: vertical rows with up/down arrows — order =
-                    // top-to-bottom in the chatbox output.
-                    QuickTogglesReorderList(vm = vm, isBanned = isBanned)
-                } else {
-                    // Normal mode: compact 2×2 pill grid in chatbox-output order.
-                    QuickTogglesGrid(vm = vm, isBanned = isBanned, onNavigate = onNavigate)
-                }
+            if (cardReorderMode) {
+                QuickTogglesReorderList(vm = vm, isBanned = isBanned)
+            } else {
+                QuickTogglesGrid(vm = vm, isBanned = isBanned, onNavigate = onNavigate)
             }
         }
     }
@@ -1006,7 +1160,7 @@ private fun QuickTogglesGrid(
 ) {
     var timeMenuOpen by remember { mutableStateOf(false) }
 
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         vm.cardOrder.forEach { component ->
             when (component) {
                 "Pinned" -> TogglePill(
@@ -1064,6 +1218,18 @@ private fun QuickTogglesGrid(
                     }
                 }
             }
+        }
+
+        // Placeholder pills — preview the FUTURE expanded toggle system (9 total)
+        // so we can see how they fit in the column. Disabled + do nothing yet.
+        List(5) { "Testing ${it + 1}" }.forEach { label ->
+            TogglePill(
+                label = label,
+                icon = Icons.Filled.Lock,
+                checked = false,
+                enabled = false,
+                modifier = Modifier.fillMaxWidth()
+            ) { }
         }
     }
 }
@@ -1129,6 +1295,11 @@ private fun ConnectionCard(
     ipAddress: String,
     ipOk: Boolean
 ) {
+    // Headset build: VRChat runs on THIS Quest, so OSC targets localhost
+    // automatically — no IP to enter. The phone build keeps the manual IP field
+    // (it must point at the headset/PC over the LAN until a device-link exists).
+    val isHeadset = BuildConfig.IS_HEADSET_BUILD
+
     val repo = vm.userPreferencesRepository
     val activeSlot by repo.activeIpSlot.collectAsState(initial = 1)
     val n1 by repo.ip1Name.collectAsState(initial = "Home")
@@ -1140,10 +1311,10 @@ private fun ConnectionCard(
     // UDP fire-and-forget, so "no reply" is a WARNING (many devices simply
     // don't answer pings), not proof the target is dead — but a green check
     // catches "started sending into a dead IP" before the user wonders why
-    // nothing shows in VRChat.
+    // nothing shows in VRChat. Skipped on the headset (localhost is always up).
     var reachable by remember(ipAddress) { mutableStateOf<Boolean?>(null) }
-    LaunchedEffect(ipAddress) {
-        if (!ipOk) return@LaunchedEffect
+    LaunchedEffect(ipAddress, isHeadset) {
+        if (isHeadset || !ipOk) return@LaunchedEffect
         while (true) {
             // Robust ping (isReachable + system ping fallback) — the bare
             // InetAddress.isReachable misses devices that ICMP-reply fine
@@ -1158,9 +1329,14 @@ private fun ConnectionCard(
         icon = Icons.Filled.Wifi,
         // Two lines while collapsed: the IP with the slot's device name under
         // it (the summary Text allows 2 lines).
-        summary = if (ipOk) "$ipAddress\n$slotName" else "No headset IP set",
+        summary = when {
+            isHeadset -> "This headset · 127.0.0.1"
+            ipOk -> "$ipAddress\n$slotName"
+            else -> "No headset IP set"
+        },
         trailing = {
             when {
+                isHeadset -> KitStatusChip("Automatic", KitTone.Success)
                 !ipOk -> KitStatusChip("Not set", KitTone.Error)
                 reachable == null -> KitStatusChip("Checking", KitTone.Neutral)
                 reachable == true -> KitStatusChip("Reachable", KitTone.Success)
@@ -1168,10 +1344,18 @@ private fun ConnectionCard(
             }
         }
     ) {
-        com.vrca.ui.conversation.IpField(
-            chatboxViewModel = vm,
-            modifier = Modifier.fillMaxWidth()
-        )
+        if (isHeadset) {
+            Text(
+                "VRChat runs on this headset, so VRC-A sends to it automatically at 127.0.0.1 — no IP to set. Just make sure OSC is enabled in VRChat.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        } else {
+            com.vrca.ui.conversation.IpField(
+                chatboxViewModel = vm,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
     }
 }
 

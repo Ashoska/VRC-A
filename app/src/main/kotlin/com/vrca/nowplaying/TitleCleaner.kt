@@ -187,7 +187,12 @@ object TitleCleaner {
     }
 
     private fun fitsOneLine(s: String, maxLine: Int): Boolean =
-        s.length <= maxLine && visualWidth(s) <= VISUAL_LINE_UNITS
+        s.length <= maxLine && visualWidth(s) <= lineBudget()
+
+    /** One line's width budget: 1.0 (a full line) when calibrated (measured
+     *  in-headset via [ChatboxCalibration]), else the estimated 28.5 units. */
+    private fun lineBudget(): Float =
+        if (ChatboxCalibration.calibrated) 1.0f else VISUAL_LINE_UNITS
 
     /**
      * Crude proportional-width estimate in "average character" units, tuned against
@@ -200,7 +205,30 @@ object TitleCleaner {
         return w
     }
 
-    private fun charWidth(c: Char): Float = when {
+    private fun charWidth(c: Char): Float {
+        if (!ChatboxCalibration.calibrated) return estimatedCharWidth(c)
+        // Measured chars use their exact fraction; the rest use the estimate
+        // scaled into the same fraction system.
+        ChatboxCalibration.measuredUnit(c)?.let { return it }
+        return estimatedCharWidth(c) * calibScale()
+    }
+
+    // Maps estimated widths into the calibrated fraction system: average of
+    // (measured fraction / estimated width) over the measured chars. Cached.
+    @Volatile private var scaleCache = 1f
+    @Volatile private var scaleGen = -1
+    private fun calibScale(): Float {
+        if (scaleGen == ChatboxCalibration.generation) return scaleCache
+        val measured = ChatboxCalibration.measuredChars()
+        scaleCache = if (measured.isEmpty()) 1f
+            else measured.entries
+                .map { (c, n) -> (1f / n) / estimatedCharWidth(c) }
+                .average().toFloat()
+        scaleGen = ChatboxCalibration.generation
+        return scaleCache
+    }
+
+    private fun estimatedCharWidth(c: Char): Float = when {
         // The ellipsis is three dots on ONE char — ~2 average chars wide. Counting
         // it as 1.0 made truncate() emit a "shortened to fit" title that STILL
         // wrapped: the appended … itself pushed the line over ("Theodore Roosevelt
@@ -232,7 +260,7 @@ object TitleCleaner {
         val cap = (maxLine - 1).coerceAtLeast(1).coerceAtMost(text.length)
         while (n < cap) {
             val cw = charWidth(text[n])
-            if (w + cw > VISUAL_LINE_UNITS) break
+            if (w + cw > lineBudget()) break
             w += cw
             n++
         }

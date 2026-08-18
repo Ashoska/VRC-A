@@ -22,6 +22,9 @@ if (keystorePropertiesFile.exists()) {
 def githubPat   = keystoreProperties['githubPat']   ?: ""
 def githubOwner = keystoreProperties['githubOwner'] ?: ""
 def githubRepo  = keystoreProperties['githubRepo']  ?: ""
+// Spotify OAuth public client id (NOT a secret — PKCE public client). Set in
+// keystore.properties as: spotifyClientId=xxxxxxxx  (needed on all flavors).
+def spotifyClientId = keystoreProperties['spotifyClientId'] ?: ""
 
 // =========================
 // Ã¢Å“â€¦ Auto versioning (GitHub Actions)
@@ -90,6 +93,7 @@ android {
             buildConfigField "String", "GITHUB_PAT",   '""'
             buildConfigField "String", "GITHUB_OWNER", '""'
             buildConfigField "String", "GITHUB_REPO",  '""'
+            buildConfigField "String", "SPOTIFY_CLIENT_ID", "\"${spotifyClientId}\""
             resValue "string", "app_name", "VRC-A"
         }
         adminApp {
@@ -100,6 +104,7 @@ android {
             buildConfigField "String", "GITHUB_PAT",   "\"${githubPat}\""
             buildConfigField "String", "GITHUB_OWNER", "\"${githubOwner}\""
             buildConfigField "String", "GITHUB_REPO",  "\"${githubRepo}\""
+            buildConfigField "String", "SPOTIFY_CLIENT_ID", "\"${spotifyClientId}\""
             resValue "string", "app_name", "VRC-A Admin"
         }
         // Meta Quest / Horizon OS headset build. Its own applicationId (distinct
@@ -119,6 +124,7 @@ android {
             buildConfigField "String", "GITHUB_PAT",   '""'
             buildConfigField "String", "GITHUB_OWNER", '""'
             buildConfigField "String", "GITHUB_REPO",  '""'
+            buildConfigField "String", "SPOTIFY_CLIENT_ID", "\"${spotifyClientId}\""
             resValue "string", "app_name", "VRC-A"
         }
     }

@@ -153,6 +153,12 @@ class UserPreferencesRepository(private val context: Context) {
         val POSTS_EVENTS_BASELINE_V2     = booleanPreferencesKey("posts_events_baseline_v2")
         val CALENDAR_BASELINE_V3         = booleanPreferencesKey("calendar_baseline_v3")
         val POSTS_EVENTS_BASELINE_V4     = booleanPreferencesKey("posts_events_baseline_v4")
+        // Wall-clock ms of (roughly) app install / first connect. Group
+        // announcements created BEFORE this are ignored forever — only ones made
+        // after install fire, so a later fetch-window change can never flood old
+        // announcements. Set once on first-run (fresh install) or the first
+        // backfill after this fix (existing users).
+        val NOTIF_INSTALL_TIME_MS        = androidx.datastore.preferences.core.longPreferencesKey("notif_install_time_ms")
 
         val TOS_ACCEPTED_VERSION  = intPreferencesKey("tos_accepted_version")
         val TOS_ACCEPTED_AT_EPOCH = longPreferencesKey("tos_accepted_at_epoch")
@@ -432,6 +438,7 @@ class UserPreferencesRepository(private val context: Context) {
     suspend fun savePostsEventsBaselineV2(v: Boolean)    = context.dataStore.edit { it[Keys.POSTS_EVENTS_BASELINE_V2]  = v }
     suspend fun saveCalendarBaselineV3(v: Boolean)       = context.dataStore.edit { it[Keys.CALENDAR_BASELINE_V3]      = v }
     suspend fun savePostsEventsBaselineV4(v: Boolean)    = context.dataStore.edit { it[Keys.POSTS_EVENTS_BASELINE_V4]  = v }
+    suspend fun saveNotifInstallTimeMs(v: Long)          = context.dataStore.edit { it[Keys.NOTIF_INSTALL_TIME_MS] = v }
 
     suspend fun saveSetupVrchatDone(v: Boolean) = context.dataStore.edit { it[Keys.SETUP_VRCHAT_DONE] = v }
     suspend fun saveSetupIpDone(v: Boolean)     = context.dataStore.edit { it[Keys.SETUP_IP_DONE]     = v }

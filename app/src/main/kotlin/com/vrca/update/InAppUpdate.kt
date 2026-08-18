@@ -32,6 +32,21 @@ data class ReleaseInfo(
     val bodyDoc: String = ""
 )
 
+/** The GLOBAL ("release to all") doc id for THIS build variant. The headset
+ *  fleet has its own doc so a headset global release can't reach mobile and
+ *  vice-versa (Option B). Mobile/public keeps the original "latest" doc, so the
+ *  existing mobile global release is untouched. */
+fun globalReleaseDocId(): String =
+    if (com.vrca.BuildConfig.IS_HEADSET_BUILD) "latest_headset" else "latest"
+
+/** True when a release doc's `packageName` (if set) targets a DIFFERENT app
+ *  variant than this build — in which case the release must be ignored so a
+ *  headset APK can never be force-installed on a mobile app (different
+ *  applicationId) or vice-versa. Blank/absent packageName = legacy doc → applies
+ *  (backward compatible: the existing mobile release has no packageName). */
+fun releaseTargetsOtherVariant(packageName: String): Boolean =
+    packageName.isNotBlank() && packageName != com.vrca.BuildConfig.APPLICATION_ID
+
 sealed class ReleaseCheckResult {
     object UpToDate : ReleaseCheckResult()
     data class UpdateAvailable(val info: ReleaseInfo, val forced: Boolean) : ReleaseCheckResult()
@@ -43,6 +58,11 @@ private fun parseReleaseSnap(
     currentVersionCode: Int
 ): ReleaseCheckResult? {
     if (!snap.exists()) return null
+
+    // Variant guard: ignore a release whose packageName targets a different app
+    // (a headset APK on a mobile app or vice-versa can't install and would just
+    // soft-brick the user on the forced-update wall).
+    if (releaseTargetsOtherVariant(snap.getString("packageName").orEmpty())) return null
 
     val latestCode  = snap.getLong("versionCode") ?: return null
     val versionName = snap.getString("versionName").orEmpty()
@@ -82,8 +102,9 @@ suspend fun checkFirestoreRelease(
             if (deviceResult != null) return deviceResult
         }
 
-        // Fall back to global release
-        val globalSnap = db.collection("releases").document("latest").get().await()
+        // Fall back to the GLOBAL release for this variant (headset reads its own
+        // doc so a headset global release never reaches mobile, and vice-versa).
+        val globalSnap = db.collection("releases").document(globalReleaseDocId()).get().await()
         parseReleaseSnap(globalSnap, currentVersionCode) ?: ReleaseCheckResult.UpToDate
 
     } catch (e: Exception) {

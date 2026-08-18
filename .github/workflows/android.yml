@@ -2,7 +2,11 @@ name: Android CI
 
 on:
   push:
-    branches: [ "main", "VRC-A-Official" ]
+    # claude/** so every commit pushed to a claude working branch builds + uploads
+    # the release APK artifacts (public/admin/headset) — testable straight from the
+    # Actions run, no PR needed. Debug APKs are intentionally NOT built (they only
+    # doubled build time; we install the signed release APKs).
+    branches: [ "main", "VRC-A-Official", "claude/**" ]
   pull_request:
     branches: [ "main", "VRC-A-Official" ]
   workflow_dispatch:
@@ -26,6 +30,24 @@ jobs:
 
       - name: Make gradlew executable
         run: chmod +x ./gradlew
+
+      - name: Pre-provision Gradle distribution (retry transient 503s)
+        # The Gradle wrapper downloads its distribution from services.gradle.org,
+        # which redirects to github.com/gradle/gradle-distributions. That host can
+        # return a transient 503, and the wrapper has NO retry — so the very first
+        # ./gradlew call fails and kills the whole run. Do a cheap `--version` up
+        # front with retries + backoff: a blip is ridden out, and once it succeeds
+        # the distribution is cached so the (longer) build steps never re-download.
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if ./gradlew --version --no-daemon; then
+              exit 0
+            fi
+            echo "Gradle distribution download attempt $attempt failed; retrying in $((attempt * 15))s..."
+            sleep $((attempt * 15))
+          done
+          echo "Gradle distribution could not be downloaded after 5 attempts."
+          exit 1
 
       - name: Create keystore.properties
         shell: bash
@@ -57,30 +79,14 @@ jobs:
 
           echo "Signing files created."
 
-      - name: Build Public Debug APK
-        run: ./gradlew :app:assemblePublicAppDebug
-
       - name: Build Public Release APK
         run: ./gradlew :app:assemblePublicAppRelease
-
-      - name: Build Admin Debug APK
-        run: ./gradlew :app:assembleAdminAppDebug
 
       - name: Build Admin Release APK
         run: ./gradlew :app:assembleAdminAppRelease
 
-      - name: Build Headset Debug APK
-        run: ./gradlew :app:assembleHeadsetAppDebug
-
       - name: Build Headset Release APK
         run: ./gradlew :app:assembleHeadsetAppRelease
-
-      - name: Upload Public Debug APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: public-debug
-          path: app/build/outputs/apk/publicApp/debug/*.apk
-          retention-days: 3
 
       - name: Upload Public Release APK
         uses: actions/upload-artifact@v4
@@ -89,25 +95,11 @@ jobs:
           path: app/build/outputs/apk/publicApp/release/*.apk
           retention-days: 3
 
-      - name: Upload Admin Debug APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: admin-debug
-          path: app/build/outputs/apk/adminApp/debug/*.apk
-          retention-days: 3
-
       - name: Upload Admin Release APK
         uses: actions/upload-artifact@v4
         with:
           name: admin-release
           path: app/build/outputs/apk/adminApp/release/*.apk
-          retention-days: 3
-
-      - name: Upload Headset Debug APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: headset-debug
-          path: app/build/outputs/apk/headsetApp/debug/*.apk
           retention-days: 3
 
       - name: Upload Headset Release APK

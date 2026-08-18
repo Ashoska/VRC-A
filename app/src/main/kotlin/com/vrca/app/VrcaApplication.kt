@@ -53,6 +53,12 @@ class VrcaApplication : Application(), ViewModelStoreOwner {
         // Toggles decide whether to restore vs start clean.
         @Volatile
         var openedFromSwipe: Boolean = false
+
+        // True when this launch came from the BootReceiver (device turned on) — the
+        // headset opens the app on boot, and a reboot is a genuine cold start the
+        // user should see the boot screen for (same treatment as a swipe-reopen).
+        @Volatile
+        var openedFromBoot: Boolean = false
     }
 
     // Process-lifetime ViewModelStore. Cleared only by AppShutdown on swipe.
@@ -79,6 +85,34 @@ class VrcaApplication : Application(), ViewModelStoreOwner {
 
         // Lifetime chatbox-send counter (boot screen stat).
         ChatboxStats.attach(applicationContext)
+
+        // "In VRChat" uptime timer (Home uptime label) — restore across a kill
+        // within the grace window, like the Discord RPC counter.
+        com.vrca.vrchat.VrchatUptime.attach(applicationContext)
+
+        // Best-effort weather for the {weather} chatbox token (IP-geo + open-meteo).
+        WeatherProvider.start()
+
+        // Load the exact chatbox line-width calibration (if measured), so
+        // TitleCleaner wraps by real per-glyph widths instead of estimates.
+        com.vrca.nowplaying.ChatboxCalibration.attach(applicationContext)
+
+        // Headset: listen for VRChat's OSC output (avatar params) so the chatbox
+        // can use {mute}/{afk}/{movement}/{scale}/{param:Name}. OSC-out is loopback,
+        // so this only receives on the same device as VRChat (the Quest).
+        if (com.vrca.BuildConfig.IS_HEADSET_BUILD) {
+            com.vrca.osc.VrcaOscReceiver.start()
+            // OSC-in on Quest: VRChat won't push params over UDP, but it SERVES their
+            // live values over OSCQuery HTTP. Discover VRChat's service + poll params
+            // so {mute}/{afk}/{movement}/{scale}/{param:Name} resolve.
+            com.vrca.osc.VrcaOscQuery.start(applicationContext)
+            // Start the instance-roster / log reader in the BACKGROUND at launch,
+            // not just when the Home roster panel is visible. It owns the "VRChat
+            // closed -> force presence offline" detection (applyLogPresence), which
+            // must run whenever VRC-A is alive so the Discord RPC doesn't stay
+            // frozen in-world after the headset is shut down / asleep. Idempotent.
+            com.vrca.vrchat.InstanceRosterManager.start(applicationContext)
+        }
 
         // Cap Firestore offline cache (default is 100 MB — far more than needed).
         FirebaseFirestore.getInstance().firestoreSettings =

@@ -129,7 +129,10 @@ object AdminRuntime {
         val versionCode: Long,
         val versionName: String,
         val error: String,
-        val parsing: Boolean
+        val parsing: Boolean,
+        /** The APK's applicationId — stamped on the targeted release so a client
+         *  of a different variant ignores a mistargeted APK. */
+        val packageName: String = ""
     )
 
     private val pickedApk = MutableStateFlow<PickedApk?>(null)
@@ -167,7 +170,8 @@ object AdminRuntime {
                 return@launch
             }
             pickedApk.value = PickedApk(
-                clean, tmp.absolutePath, name, info.first, info.second, "", parsing = false
+                clean, tmp.absolutePath, name, info.first, info.second, "", parsing = false,
+                packageName = parseApkPackage(appContext, tmp.absolutePath).orEmpty()
             )
         }
     }

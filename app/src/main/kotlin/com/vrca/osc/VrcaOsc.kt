@@ -6,15 +6,25 @@ import com.illposed.osc.transport.udp.OSCPortOut
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.net.InetAddress
 import java.net.UnknownHostException
+import java.util.concurrent.Executors
 
 class VrcaOsc(
     ipAddress: String,
     var port: Int
 ) {
+
+    companion object {
+        // Send-stall self-heal cadence. STALL_MS is comfortably above the sender's
+        // ~3s content-dedup ceiling, so only a REAL stall (actively dispatching but
+        // nothing succeeding) trips it — never a paused/idle app.
+        private const val SEND_WATCHDOG_MS = 4_000L
+        private const val SEND_STALL_MS = 8_000L
+    }
 
     val TAG: String
         get() = "OSC@$ipAddress:$port"
@@ -53,8 +63,9 @@ class VrcaOsc(
     }
 
     // Default to loopback so sendOscMessage never crashes on uninitialized
-    // inetAddress when the user supplies an unresolvable host.
-    private var inetAddress: InetAddress = InetAddress.getLoopbackAddress()
+    // inetAddress when the user supplies an unresolvable host. @Volatile: written by
+    // the ipAddress setter's async resolve (an IO thread), read by the send thread.
+    @Volatile private var inetAddress: InetAddress = InetAddress.getLoopbackAddress()
 
     // Hard transmission gate. When true, EVERY outgoing OSC message is dropped
     // at this single chokepoint (typing, input, realtime all route through
@@ -96,6 +107,65 @@ class VrcaOsc(
             sendOscMessage("/chatbox/typing", listOf(effective))
         }
 
+    // ---- FRESH socket per send on ONE dedicated send thread ------------------
+    // A FRESH OSCPortOut is opened+closed for every send (like VRC-NEXUS and VRC-A's
+    // original code) — NOT a long-lived reused socket. A reused socket was tried and
+    // reverted: a device capture during the "chatbox stops" fault showed our send
+    // SUCCEEDING (udp ok / failStreak=0) while VRChat received nothing, and only
+    // REOPENING VRC-A fixed it. Reopening VRC-A can't change VRChat's port, so the bad
+    // state was in OUR socket — a persistent socket that reports success but stops
+    // delivering (stale after VRChat re-inits its OSC on the same 127.0.0.1:9000). A
+    // fresh socket per send reconnects to the live VRChat every time, so it can't get
+    // stuck. The dedicated SINGLE thread is kept (not the shared Dispatchers.IO pool),
+    // so sends can't starve that pool; open+close per send on one thread is ~1/sec
+    // (deduped) and always closed in finally, so no fd churn/leak.
+    private val sendDispatcher =
+        Executors.newSingleThreadExecutor { r -> Thread(r, "vrca-osc-send").apply { isDaemon = true } }
+            .asCoroutineDispatcher()
+    private val sendScope = CoroutineScope(sendDispatcher)
+
+    /** Serialised send on the dedicated thread with a FRESH socket each time.
+     *  `recordSendDispatch` is stamped SYNCHRONOUSLY (caller thread) so the diag can
+     *  tell a wedged/never-run send (dispatch fresh, ok stale) from a throwing one. */
+    private fun dispatchSend(message: OSCMessage, delay: Long = 0) {
+        VrcaOscState.recordSendDispatch()
+        sendScope.launch {
+            if (delay > 0) delay(delay)
+            var sender: OSCPortOut? = null
+            try {
+                sender = OSCPortOut(inetAddress, port)
+                sender.send(message)
+                VrcaOscState.recordSendOk()
+                Log.d(TAG, "Message: ${message.address}  ${message.arguments}")
+            } catch (e: Exception) {
+                VrcaOscState.recordSendFail(e)
+                Log.e(TAG, "Failed send Message: $message", e)
+            } finally {
+                runCatching { sender?.close() }
+            }
+        }
+    }
+
+    // Light self-heal: if we're actively DISPATCHING but nothing has SUCCEEDED for a
+    // while, re-resolve the target address (a fresh socket already reconnects each
+    // send, so there's nothing to "unstick" — this only covers a stale DNS/address).
+    // Fires only while genuinely trying, so an idle/paused app never triggers it.
+    init {
+        sendScope.launch {
+            while (true) {
+                delay(SEND_WATCHDOG_MS)
+                val now = System.currentTimeMillis()
+                val tryingNow = now - VrcaOscState.sendDispatchedMs < SEND_STALL_MS
+                val notLanding = now - VrcaOscState.sendOkMs > SEND_STALL_MS
+                if (tryingNow && notLanding) {
+                    Log.w(TAG, "send stall (>${SEND_STALL_MS}ms dispatching with no ok) → re-resolve target")
+                    runCatching { InetAddress.getByName(ipAddress) }
+                        .onSuccess { inetAddress = it; addressResolvable = true }
+                }
+            }
+        }
+    }
+
     private fun sendOscMessage(address: String, arguments: List<Any?>, delay: Long = 0) {
         if (blocked) return
         // Lifetime "chatbox updates sent" counter (boot screen stat). Counts
@@ -103,19 +173,29 @@ class VrcaOsc(
         if (address == "/chatbox/input" && (arguments.firstOrNull() as? String)?.isNotBlank() == true) {
             com.vrca.app.ChatboxStats.increment()
         }
-        CoroutineScope(Dispatchers.IO).launch {
+        dispatchSend(OSCMessage(address, arguments), delay)
+    }
 
-            val message = OSCMessage(address, arguments)
-            val sender = OSCPortOut(inetAddress, port)
-            delay(delay)
-            try {
-                sender.send(message)
-                Log.d(TAG, "Message: ${message.address}  ${message.arguments}")
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed send Message: $message")
-            }
-            sender.close()
-        }
+    /** Set the local player's avatar size via VRChat's `/avatar/eyeheight` OSC
+     *  input (meters). We DON'T impose an app-side min/max — the user can type any
+     *  value; only VRChat's own absolute safety bounds (0.01–10000 m per its OSC
+     *  docs) are applied so we never send garbage. VRChat further clamps to what the
+     *  avatar/world actually permit. A deliberate one-shot control, so it bypasses
+     *  the chatbox `blocked` gate (routes straight to dispatchSend). */
+    fun sendEyeHeight(meters: Float) {
+        val clamped = meters.coerceIn(0.01f, 10000f)
+        // Arm the delivery canary BEFORE dispatch: if VRChat receives this, the
+        // EyeHeightAsMeters readback (OSCQuery) moves and the send is confirmed
+        // DELIVERED — the one positive proof of receipt on the headset (udp ok is
+        // meaningless for UDP). If the readback never moves, outbound OSC is dead.
+        VrcaOscState.recordEyeHeightSend(clamped)
+        dispatchSend(OSCMessage("/avatar/eyeheight", listOf(clamped)))
+    }
+
+    /** Send text to the chatbox VERBATIM (no minimal-background suffix, no manual
+     *  hold) — for the width-calibration harness, where the exact glyph run matters. */
+    fun sendRaw(text: String) {
+        sendOscMessage("/chatbox/input", listOf(text, true, false))
     }
 
     fun sendMessage(text: String, sendImmediately: Boolean, triggerSFX: Boolean) {
