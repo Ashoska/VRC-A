@@ -115,8 +115,32 @@ export default {
           branch: branch,
           rawUrl: `https://raw.githubusercontent.com/${env.GH_REPO || "?"}/${branch}/${env.DB_PATH || "?"}`,
           lastCommit: meta.lastCommit || "none",
-          version: 3,
+          adminKeySet: !!env.ADMIN_KEY,
+          version: 4,
         });
+      }
+
+      if (req.method === "POST" && url.pathname === "/admin") {
+        // Authoritative admin ops from the recheck sweep (bot VRChat session).
+        // Requires the ADMIN_KEY secret. upserts OVERWRITE entries (refresh
+        // name/author/authorId/platforms); removes delete dead avatars outright.
+        const body = await req.json().catch(() => null);
+        if (!body || !env.ADMIN_KEY || body.key !== env.ADMIN_KEY) {
+          return json({ ok: false, error: "unauthorized" }, 401);
+        }
+        const upserts = Array.isArray(body.upserts) ? body.upserts.filter(validEntry).slice(0, 200) : [];
+        const removes = Array.isArray(body.removes)
+          ? body.removes.filter((f) => typeof f === "string" && f.startsWith("file_")).slice(0, 200)
+          : [];
+        if (upserts.length) {
+          const payload = {};
+          for (const e of upserts) payload[e.fileId] = cleanEntry(e);
+          await env.AVATAR_KV.put("admu:" + crypto.randomUUID(), JSON.stringify(payload), { expirationTtl: 7 * 86400 });
+        }
+        if (removes.length) {
+          await env.AVATAR_KV.put("admr:" + crypto.randomUUID(), JSON.stringify(removes), { expirationTtl: 7 * 86400 });
+        }
+        return json({ ok: true, upserts: upserts.length, removes: removes.length });
       }
 
       if (req.method === "GET" && url.pathname === "/flush") {
@@ -299,11 +323,35 @@ async function flush(env) {
     // Not enough "dead" reports yet -> leave the report in place.
   }
 
+  // 3b. Apply authoritative admin ops (overwrite refreshes + hard removes).
+  const admuKeys = [], admrKeys = [];
+  let adminChanged = false;
+  const admu = await env.AVATAR_KV.list({ prefix: "admu:" });
+  for (const k of admu.keys) {
+    admuKeys.push(k.name);
+    const val = await env.AVATAR_KV.get(k.name);
+    if (!val) continue;
+    try {
+      const batch = JSON.parse(val);
+      for (const fid of Object.keys(batch)) { db.avatars[fid] = batch[fid]; adminChanged = true; }
+    } catch (_) {}
+  }
+  const admr = await env.AVATAR_KV.list({ prefix: "admr:" });
+  for (const k of admr.keys) {
+    admrKeys.push(k.name);
+    const val = await env.AVATAR_KV.get(k.name);
+    if (!val) continue;
+    try {
+      const arr = JSON.parse(val);
+      for (const fid of arr) { if (db.avatars[fid]) { delete db.avatars[fid]; removed++; adminChanged = true; } }
+    } catch (_) {}
+  }
+
   const entries = Object.keys(db.avatars).length;
 
   // 4. Commit when something changed OR we're migrating the legacy "undefined" file.
   let lastCommit = "no change";
-  if (added > 0 || removed > 0 || repClear.length > 0 || legacySha) {
+  if (added > 0 || removed > 0 || repClear.length > 0 || legacySha || adminChanged) {
     const putBody = {
       message: `avatar-db: +${added} -${removed} (${entries} total)`,
       content: b64encode(serializeDb(db)),
@@ -329,6 +377,8 @@ async function flush(env) {
     // Only clear KV after a successful commit, so nothing is lost on failure.
     for (const name of pendKeys) await env.AVATAR_KV.delete(name);
     for (const name of repClear) await env.AVATAR_KV.delete(name);
+    for (const name of admuKeys) await env.AVATAR_KV.delete(name);
+    for (const name of admrKeys) await env.AVATAR_KV.delete(name);
     // Migration done -> delete the stray "undefined" file.
     if (legacySha) {
       await fetch(`https://api.github.com/repos/${repo}/contents/undefined`, {
