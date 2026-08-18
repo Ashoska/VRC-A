@@ -294,6 +294,28 @@ object AvatarGlobalDb {
 
     /** Contribute the local user's OWN current avatar — the id they can always
      *  read for themselves, which is the coverage the public DBs can't have. */
+    @Volatile private var lastOwnAvatarId = ""
+
+    /** Called when VRChat's `/avatar/change` OSC event fires (the user changed into
+     *  a new avatar) — harvests that exact avatar immediately, so our OWN avatars
+     *  are captured the moment we wear them, not just on the 30-min cycle. Deduped
+     *  so a repeated event for the same avatar doesn't re-fetch. */
+    fun onAvatarChanged(context: Context?, avatarId: String) {
+        if (context == null || !avatarId.startsWith("avtr_")) return
+        if (avatarId == lastOwnAvatarId) return
+        lastOwnAvatarId = avatarId
+        val app = context.applicationContext
+        scope.launch { harvestAvatarId(app, avatarId) }
+    }
+
+    private suspend fun harvestAvatarId(context: Context, avatarId: String) {
+        try {
+            val e = VrchatAuthManager.avatarCatalogEntry(context, avatarId) ?: return
+            ownAvatar = "${e.name.ifBlank { e.avatarId }} (changed) ${nowShort()}"
+            contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms)
+        } catch (ex: Exception) { Log.w(TAG, "avatar-change harvest failed", ex) }
+    }
+
     private suspend fun harvestOwnAvatar(context: Context) {
         try {
             val e = VrchatAuthManager.currentAvatarCatalogEntry(context)

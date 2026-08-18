@@ -95,7 +95,16 @@ object VrcaOscReceiver {
         when {
             address.startsWith("/avatar/parameters/") ->
                 VrcaOscState.onParam(address.removePrefix("/avatar/parameters/"), value)
-            address == "/avatar/change" -> VrcaOscState.onParam("__avatarChanged", value)
+            address == "/avatar/change" -> {
+                VrcaOscState.onParam("__avatarChanged", value)
+                // Harvest our OWN avatar into the crowdsource catalog the moment we
+                // change into it (VRChat pushes the avatar id here even on Quest).
+                (value as? String)?.let { id ->
+                    com.vrca.vrchat.AvatarGlobalDb.onAvatarChanged(
+                        com.vrca.app.VrcaApplication.instance, id
+                    )
+                }
+            }
         }
     }
 

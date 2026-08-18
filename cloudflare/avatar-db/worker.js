@@ -51,6 +51,7 @@ function cleanEntry(e) {
     id: e.avatarId,
     name: typeof e.name === "string" ? e.name.slice(0, 100) : "",
     author: typeof e.author === "string" ? e.author.slice(0, 100) : "",
+    authorId: typeof e.authorId === "string" ? e.authorId : "",
     platforms: Array.isArray(e.platforms)
       ? e.platforms.filter((p) => typeof p === "string").slice(0, 4)
       : [],
@@ -171,10 +172,12 @@ function b64decode(b64) {
 }
 
 // One avatar per line, so the file is readable/diffable on GitHub as it grows.
+// Labeled + version stamped at the top; each avatar on its own line.
 function serializeDb(db) {
   const keys = Object.keys(db.avatars);
   const lines = keys.map((k) => JSON.stringify(k) + ":" + JSON.stringify(db.avatars[k]));
-  return '{"version":' + (db.version || 1) + ',"avatars":{\n' + lines.join(",\n") + "\n}}";
+  return '{"name":"VRC-A Avatar Store","version":' + (db.version || 1) +
+    ',"count":' + keys.length + ',"avatars":{\n' + lines.join(",\n") + "\n}}";
 }
 
 async function flush(env) {
