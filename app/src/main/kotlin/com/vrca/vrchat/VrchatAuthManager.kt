@@ -1561,6 +1561,43 @@ object VrchatAuthManager {
         } catch (e: Exception) { null }
     }
 
+    /** The user's OWN avatar LIBRARY — uploaded avatars + favourites — as catalog
+     *  entries. All readable with ids (they're yours), so they're a big free seed
+     *  for the crowdsource catalog. Best-effort; empty on failure / not logged in. */
+    suspend fun ownAvatarLibrary(context: Context): List<CatalogEntry> = withContext(Dispatchers.IO) {
+        val cookie = getCookieHeader(context) ?: return@withContext emptyList()
+        val out = LinkedHashMap<String, CatalogEntry>()
+        val urls = listOf(
+            "$BASE/avatars?user=me&releaseStatus=all&n=100",
+            "$BASE/avatars/favorites?n=100"
+        )
+        for (url in urls) {
+            try {
+                val (code, body, raw) = get(url, null, cookie)
+                if (code == 200) captureRolledCookies(context, raw)
+                if (code != 200 || !body.trimStart().startsWith("[")) continue
+                val arr = org.json.JSONArray(body)
+                for (i in 0 until arr.length()) {
+                    val j = arr.optJSONObject(i) ?: continue
+                    val id = j.optString("id", "")
+                    if (!id.startsWith("avtr_")) continue
+                    val fileId = fileIdOf(
+                        j.optString("thumbnailImageUrl", "").ifBlank { j.optString("imageUrl", "") }
+                    ) ?: continue
+                    val plats = j.optJSONArray("unityPackages")?.let { ups ->
+                        (0 until ups.length()).mapNotNull {
+                            ups.optJSONObject(it)?.optString("platform", "")?.takeIf { s -> s.isNotBlank() }
+                        }.map { prettyPlatform(it) }.filter { it.isNotBlank() }.distinct()
+                    } ?: emptyList()
+                    out[fileId] = CatalogEntry(fileId, id, j.optString("name", ""),
+                        j.optString("authorName", ""), j.optString("authorId", ""), plats)
+                }
+                kotlinx.coroutines.delay(300)
+            } catch (e: Exception) { /* best-effort */ }
+        }
+        out.values.toList()
+    }
+
     suspend fun fetchGroupName(context: Context, groupId: String): String? = withContext(Dispatchers.IO) {
         if (groupId.isBlank()) return@withContext null
         val cookieHeader = getCookieHeader(context) ?: return@withContext null

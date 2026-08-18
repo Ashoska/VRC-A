@@ -91,6 +91,7 @@ object AvatarGlobalDb {
             refresh(app)
             flushQueue(app)
             harvestOwnAvatar(app)
+            harvestLibrary(app)
             while (isActive) {
                 delay(REFRESH_MS)
                 refresh(app)
@@ -345,6 +346,16 @@ object AvatarGlobalDb {
             ownAvatar = "${e.name.ifBlank { e.avatarId }} (changed) ${nowShort()}"
             contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms)
         } catch (ex: Exception) { Log.w(TAG, "avatar-change harvest failed", ex) }
+    }
+
+    /** Seed the catalog from the user's OWN uploaded + favourited avatars (all
+     *  readable with ids). Once per app open — a big free coverage boost. */
+    private suspend fun harvestLibrary(context: Context) {
+        try {
+            val lib = VrchatAuthManager.ownAvatarLibrary(context)
+            for (e in lib) contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms)
+            if (lib.isNotEmpty()) ownAvatar = "library +${lib.size} ${nowShort()}"
+        } catch (ex: Exception) { Log.w(TAG, "library harvest failed", ex) }
     }
 
     private suspend fun harvestOwnAvatar(context: Context) {
