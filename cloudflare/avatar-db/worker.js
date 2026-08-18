@@ -115,7 +115,7 @@ export default {
           branch: branch,
           rawUrl: `https://raw.githubusercontent.com/${env.GH_REPO || "?"}/${branch}/${env.DB_PATH || "?"}`,
           lastCommit: meta.lastCommit || "none",
-          version: 2,
+          version: 3,
         });
       }
 
