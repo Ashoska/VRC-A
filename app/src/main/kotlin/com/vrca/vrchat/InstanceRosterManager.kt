@@ -746,11 +746,27 @@ object InstanceRosterManager {
                 platformCache[id] = plat
                 pfpCache[id] = info.profilePicUrl
                 enrichAttempts.remove(id)
+                // INSTANT clone id for catalog-backed avatars: the worn file id is in
+                // the SAME /users/{id} response as the pic, so a catalog hit resolves
+                // the clone id offline right when the pfp loads (no separate DB search).
+                val wornFid = Regex("file_[0-9a-fA-F-]{36}").find(info.wornAvatarThumbUrl)?.value
+                val avaName = _flow.value.members.firstOrNull { it.userId == id }?.avatarName
+                var catalogAvatarId: String? = null
+                if (wornFid != null && !avaName.isNullOrBlank()) {
+                    com.vrca.vrchat.AvatarGlobalDb.lookup(wornFid)?.let { hit ->
+                        avatarIdCache[id] = hit.avatarId
+                        avatarIdResolvedFor[id] = avaName
+                        catalogAvatarId = hit.avatarId
+                    }
+                }
                 _flow.value.let { cur ->
                     if (cur.members.any { it.userId == id }) {
                         _flow.value = cur.copy(
                             members = cur.members.map { m ->
-                                if (m.userId == id) m.copy(platform = plat, profilePicUrl = info.profilePicUrl) else m
+                                if (m.userId == id) m.copy(
+                                    platform = plat, profilePicUrl = info.profilePicUrl,
+                                    avatarId = catalogAvatarId ?: m.avatarId
+                                ) else m
                             }
                         )
                     }

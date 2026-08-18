@@ -673,8 +673,14 @@ private fun AvatarSweepCard() {
             OutlinedTextField(
                 value = adminKey,
                 onValueChange = { adminKey = it; prefs.edit().putString("avatar_admin_key", it).apply() },
-                label = { Text("Admin key (matches Worker ADMIN_KEY)") },
+                label = { Text("Admin key") },
                 singleLine = true, modifier = Modifier.fillMaxWidth()
+            )
+            Text(
+                "Any random password you invent. Set the SAME value as a secret named " +
+                    "ADMIN_KEY in the Cloudflare Worker (Settings → Variables → add Secret).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
@@ -683,6 +689,11 @@ private fun AvatarSweepCard() {
                 ) { Text("Start sweep") }
                 OutlinedButton(onClick = { AvatarCatalogSweep.stop() }) { Text("Stop") }
             }
+            // One-time full-catalog rescan (cleanup of pre-existing dead/private).
+            TextButton(
+                enabled = AvatarCatalogSweep.running,
+                onClick = { AvatarCatalogSweep.requestFullRescan() }
+            ) { Text("Queue full rescan (one-time cleanup)") }
             Text(sweepProgress, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
             if (msg.isNotBlank()) {
                 Text(msg, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
