@@ -674,11 +674,19 @@ private fun AvatarSweepCard() {
                 value = adminKey,
                 onValueChange = { adminKey = it; prefs.edit().putString("avatar_admin_key", it).apply() },
                 label = { Text("Admin key") },
-                singleLine = true, modifier = Modifier.fillMaxWidth()
+                singleLine = true, modifier = Modifier.fillMaxWidth(),
+                trailingIcon = {
+                    TextButton(onClick = {
+                        val chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789"
+                        val gen = "vrca-" + (1..24).map { chars.random() }.joinToString("")
+                        adminKey = gen; prefs.edit().putString("avatar_admin_key", gen).apply()
+                    }) { Text("Generate") }
+                }
             )
             Text(
-                "Any random password you invent. Set the SAME value as a secret named " +
-                    "ADMIN_KEY in the Cloudflare Worker (Settings → Variables → add Secret).",
+                "Tap Generate to make one, then copy it into a Cloudflare Worker secret " +
+                    "named ADMIN_KEY (Settings → Variables → add → Secret). The two must match — " +
+                    "it's the password that lets ONLY your app remove/refresh catalog entries.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

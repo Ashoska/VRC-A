@@ -199,8 +199,13 @@ object AvatarSearch {
             async { vrcxResults("https://avtr.just-h.party/vrcx_search.php?search=$q") }
         ).awaitAll().flatten()
         val ours = catalogResults(query)
+        // Dedup by a NORMALIZED avatar id (trim + lowercase) so a casing/whitespace
+        // difference between sources can't slip a duplicate through. Our catalog wins.
         val merged = LinkedHashMap<String, Result>()
-        for (r in ours + remote) if (r.id.startsWith("avtr_")) merged.putIfAbsent(r.id, r)
+        for (r in ours + remote) {
+            val key = r.id.trim().lowercase()
+            if (key.startsWith("avtr_")) merged.putIfAbsent(key, r)
+        }
         val list = merged.values.toList()
         // Fill our DB from the file-id-bearing results (free — no VRChat call).
         for (r in list) {

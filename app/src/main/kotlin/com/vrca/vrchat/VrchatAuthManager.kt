@@ -1564,6 +1564,36 @@ object VrchatAuthManager {
         } catch (e: Exception) { null }
     }
 
+    /** The avatar ids the user has FAVOURITED, via the reliable `GET /favorites?
+     *  type=avatar` (each record's `favoriteId` is the `avtr_` id). Paginated — most
+     *  people have >100 favourites. Details are resolved per-id by the caller. */
+    suspend fun favouriteAvatarIds(context: Context): List<String> = withContext(Dispatchers.IO) {
+        val cookie = getCookieHeader(context) ?: return@withContext emptyList()
+        val ids = LinkedHashSet<String>()
+        var offset = 0
+        var page = 0
+        while (page < 40) {  // cap 4000 favourites (safety bound)
+            val url = "$BASE/favorites?type=avatar&n=100&offset=$offset"
+            val body = try {
+                val (code, b, raw) = get(url, null, cookie)
+                if (code == 200) captureRolledCookies(context, raw)
+                if (code != 200 || !b.trimStart().startsWith("[")) break
+                b
+            } catch (e: Exception) { break }
+            val arr = try { org.json.JSONArray(body) } catch (e: Exception) { break }
+            if (arr.length() == 0) break
+            for (i in 0 until arr.length()) {
+                val fav = arr.optJSONObject(i) ?: continue
+                val id = fav.optString("favoriteId", "")
+                if (id.startsWith("avtr_")) ids.add(id)
+            }
+            if (arr.length() < 100) break
+            offset += 100; page++
+            kotlinx.coroutines.delay(400)
+        }
+        ids.toList()
+    }
+
     /** Does this avatar still exist? 200 -> true, 404/410 -> false (deleted),
      *  anything else (rate limit / network) -> null (unknown, don't act). Used to
      *  confirm a dead avatar before reporting it, so a transient clone failure never
@@ -1589,17 +1619,23 @@ object VrchatAuthManager {
     suspend fun ownAvatarLibrary(context: Context): List<OwnAvatar> = withContext(Dispatchers.IO) {
         val cookie = getCookieHeader(context) ?: return@withContext emptyList()
         val out = LinkedHashMap<String, OwnAvatar>()
-        // (url, ownUpload) — own uploads carry the real releaseStatus; favourites are public.
-        val sources = listOf(
-            "$BASE/avatars?user=me&releaseStatus=all&n=100&sort=updated" to true,
-            "$BASE/avatars/favorites?n=100" to false
-        )
-        for ((url, ownUpload) in sources) {
-            try {
-                val (code, body, raw) = get(url, null, cookie)
-                if (code == 200) captureRolledCookies(context, raw)
-                if (code != 200 || !body.trimStart().startsWith("[")) continue
-                val arr = org.json.JSONArray(body)
+        // Own UPLOADS only (paginated) — full objects with the real releaseStatus.
+        // Favourites are handled separately via /favorites?type=avatar (reliable).
+        val sources = listOf("$BASE/avatars?user=me&releaseStatus=all&sort=updated" to true)
+        for ((base, ownUpload) in sources) {
+            var offset = 0
+            var page = 0
+            while (page < 40) {  // cap 40 pages = 4000 avatars per source (safety bound)
+                val sep = if (base.contains("?")) "&" else "?"
+                val url = "$base${sep}n=100&offset=$offset"
+                val body = try {
+                    val (code, b, raw) = get(url, null, cookie)
+                    if (code == 200) captureRolledCookies(context, raw)
+                    if (code != 200 || !b.trimStart().startsWith("[")) break
+                    b
+                } catch (e: Exception) { break }
+                val arr = try { org.json.JSONArray(body) } catch (e: Exception) { break }
+                if (arr.length() == 0) break
                 for (i in 0 until arr.length()) {
                     val j = arr.optJSONObject(i) ?: continue
                     val id = j.optString("id", "")
@@ -1613,14 +1649,16 @@ object VrchatAuthManager {
                             ups.optJSONObject(it)?.optString("platform", "")?.takeIf { s -> s.isNotBlank() }
                         }.map { prettyPlatform(it) }.filter { it.isNotBlank() }.distinct()
                     } ?: emptyList()
-                    out[fileId] = OwnAvatar(
+                    out.putIfAbsent(fileId, OwnAvatar(
                         CatalogEntry(fileId, id, j.optString("name", ""),
                             j.optString("authorName", ""), j.optString("authorId", ""), plats),
                         isPublic, ownUpload
-                    )
+                    ))
                 }
-                kotlinx.coroutines.delay(300)
-            } catch (e: Exception) { /* best-effort */ }
+                if (arr.length() < 100) break  // last page
+                offset += 100; page++
+                kotlinx.coroutines.delay(400)  // pace VRChat REST between pages
+            }
         }
         out.values.toList()
     }

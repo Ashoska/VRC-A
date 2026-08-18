@@ -389,22 +389,27 @@ object AvatarGlobalDb {
         scope.launch {
             var n = 0
             for (r in results) {
-                if (n >= 8) break
-                if (r.imageFileId != null) continue          // already contributed in searchAll
+                if (n >= 60) break                            // safety bound for a huge search
+                if (r.imageFileId != null) continue           // already contributed in searchAll
                 val fid = try { VrchatAuthManager.avatarCatalogEntry(app, r.id)?.fileId }
-                    catch (e: Exception) { null } ?: continue
+                    catch (e: Exception) { null } ?: continue // null also = private/dead (skipped)
                 if (map.containsKey(fid)) continue
                 contribute(app, fid, r.id, r.name, r.author, r.authorId, r.platforms)
                 n++
-                delay(600)
+                delay(600)  // pace VRChat REST
             }
         }
     }
 
     /** Seed the catalog from the user's OWN uploaded + favourited avatars (all
      *  readable with ids). Once per app open — a big free coverage boost. */
+    // Favourite avatar ids we've already resolved this session (avoids re-resolving
+    // the whole favourites list every 30-min cycle). Resets on restart.
+    private val resolvedFavourites = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+
     private suspend fun harvestLibrary(context: Context) {
         try {
+            // 1. Own UPLOADS (with local public<->private detection).
             val lib = VrchatAuthManager.ownAvatarLibrary(context)
             var added = 0; var privateRemoved = 0
             for (a in lib) {
@@ -413,14 +418,25 @@ object AvatarGlobalDb {
                     contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms)
                     added++
                 } else if (a.ownUpload && map.containsKey(e.fileId)) {
-                    // LOCAL public->private detection: the user made their own PUBLIC
-                    // avatar private -> it must leave the shared catalog. Report it so
-                    // the admin bot confirms + removes (the bot 404s a now-private one).
+                    // The user made their own PUBLIC avatar private -> report removal
+                    // (the admin bot confirms via a 404 on the now-private avatar).
                     report(context, e.fileId, e.avatarId, "dead")
                     privateRemoved++
                 }
             }
-            if (lib.isNotEmpty()) ownAvatar = "library +$added, ${privateRemoved} now-private ${nowShort()}"
+            // 2. FAVOURITES — resolve each new one (public-only via avatarCatalogEntry).
+            val favs = VrchatAuthManager.favouriteAvatarIds(context)
+            var favAdded = 0
+            for (id in favs) {
+                if (resolvedFavourites.contains(id)) continue
+                resolvedFavourites.add(id) // mark attempted (retries on next app launch)
+                val e = try { VrchatAuthManager.avatarCatalogEntry(context, id) } catch (ex: Exception) { null }
+                    ?: continue // null = private/dead/transient — skipped
+                contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms)
+                favAdded++
+                delay(400) // pace VRChat REST
+            }
+            ownAvatar = "lib +$added, fav +$favAdded/${favs.size}, ${privateRemoved} now-private ${nowShort()}"
         } catch (ex: Exception) { Log.w(TAG, "library harvest failed", ex) }
     }
 
