@@ -59,7 +59,10 @@ object AvatarGlobalDb {
         val name: String,
         val author: String,
         val authorId: String,
-        val platforms: List<String>
+        val platforms: List<String>,
+        /** Last time the bot verified this avatar is alive (epoch ms; 0 = never).
+         *  The passive sweep picks the OLDEST-checked first. */
+        val checked: Long = 0L
     )
 
     private val map = ConcurrentHashMap<String, Entry>()   // fileId -> entry
@@ -91,10 +94,12 @@ object AvatarGlobalDb {
             refresh(app)
             flushQueue(app)
             harvestOwnAvatar(app)
+            harvestLibrary(app)
             while (isActive) {
                 delay(REFRESH_MS)
                 refresh(app)
                 harvestOwnAvatar(app)
+                harvestLibrary(app)
                 flushQueue(app)
             }
         }
@@ -107,6 +112,87 @@ object AvatarGlobalDb {
 
     /** Number of catalog entries currently loaded (for the debug panels). */
     fun entryCount(): Int = map.size
+
+    /** A snapshot of every catalog entry — for the admin dead-check/refresh sweep. */
+    fun snapshot(): List<Entry> = map.values.toList()
+
+    /** Force a fresh pull of the catalog file (used by the admin sweep before it
+     *  walks entries, so it works on the latest data). */
+    fun forceRefresh(context: Context) { scope.launch { refresh(context.applicationContext) } }
+
+    /** POST authoritative admin ops (upserts/removes) to the Worker /admin endpoint.
+     *  `upserts` = entries to overwrite (refreshed fields), `removeFileIds` = dead.
+     *  Returns true on a 2xx. Admin build only (needs the ADMIN_KEY). */
+    suspend fun adminPush(
+        context: Context, adminKey: String,
+        upserts: List<Entry>, removeFileIds: List<String>,
+        clearReports: List<String> = emptyList(), checkedFileIds: List<String> = emptyList()
+    ): Boolean {
+        if (adminKey.isBlank()) return false
+        val body = JSONObject().apply {
+            put("key", adminKey)
+            put("upserts", JSONArray().apply {
+                upserts.forEach { e ->
+                    put(JSONObject().apply {
+                        put("fileId", e.fileId); put("avatarId", e.avatarId)
+                        put("name", e.name); put("author", e.author); put("authorId", e.authorId)
+                        put("platforms", JSONArray(e.platforms))
+                    })
+                }
+            })
+            put("removes", JSONArray(removeFileIds))
+            put("clearReports", JSONArray(clearReports))
+            put("checked", JSONArray(checkedFileIds))
+        }.toString()
+        return kotlinx.coroutines.withContext(Dispatchers.IO) { post("$WORKER_URL/admin", body) }
+    }
+
+    /** Optimistically bump the local `checked` time so the passive sweep advances
+     *  through the catalog without waiting for the repo round-trip. */
+    fun markCheckedLocally(fileIds: Collection<String>) {
+        val now = System.currentTimeMillis()
+        for (fid in fileIds) map[fid]?.let { map[fid] = it.copy(checked = now) }
+    }
+
+    /** Cheap pending-report count from /health (a single KV read on the Worker, no
+     *  list op) — the sweep checks this first and only does the heavier /admin/reports
+     *  list when there's actually something to verify. */
+    suspend fun pendingReportCount(): Int = kotlinx.coroutines.withContext(Dispatchers.IO) {
+        var conn: HttpURLConnection? = null
+        try {
+            conn = (URL("$WORKER_URL/health").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                connectTimeout = 10_000; readTimeout = 10_000
+            }
+            if (conn.responseCode != 200) return@withContext 0
+            JSONObject(conn.inputStream.bufferedReader().readText()).optInt("reports", 0)
+        } catch (e: Exception) { 0 } finally { runCatching { conn?.disconnect() } }
+    }
+
+    /** A pending dead/rename report the admin bot should verify. */
+    data class Report(val fileId: String, val avatarId: String, val status: String)
+
+    /** Fetch the PENDING reports from the Worker so the bot verifies only those
+     *  (not the whole catalog). Admin build only (needs ADMIN_KEY). */
+    suspend fun fetchReports(adminKey: String): List<Report> = kotlinx.coroutines.withContext(Dispatchers.IO) {
+        if (adminKey.isBlank()) return@withContext emptyList()
+        var conn: HttpURLConnection? = null
+        try {
+            conn = (URL("$WORKER_URL/admin/reports?key=${java.net.URLEncoder.encode(adminKey, "UTF-8")}")
+                .openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                connectTimeout = 12_000; readTimeout = 12_000
+            }
+            if (conn.responseCode != 200) return@withContext emptyList()
+            val arr = JSONObject(conn.inputStream.bufferedReader().readText()).optJSONArray("reports")
+                ?: return@withContext emptyList()
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val f = o.optString("fileId", ""); if (!f.startsWith("file_")) return@mapNotNull null
+                Report(f, o.optString("avatarId", ""), o.optString("status", "dead"))
+            }
+        } catch (e: Exception) { emptyList() } finally { runCatching { conn?.disconnect() } }
+    }
 
     /** Name search over the catalog (for the in-app avatar search). */
     fun searchByName(query: String, limit: Int = 30): List<Entry> {
@@ -151,15 +237,21 @@ object AvatarGlobalDb {
         }
     }
 
-    /** Report an entry as dead (404/private) or renamed so the file self-heals. */
-    fun report(context: Context, fileId: String, status: String, name: String? = null) {
+    /** Report an entry as dead (404/private) or renamed so the file self-heals. The
+     *  avatarId lets the admin bot verify it WITHOUT a catalog lookup, so the bot only
+     *  ever checks REPORTED avatars (scales to a huge catalog). */
+    fun report(context: Context, fileId: String, avatarId: String, status: String, name: String? = null) {
         if (!fileId.startsWith("file_")) return
         val app = context.applicationContext
         scope.launch {
             val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             val arr = JSONArray(prefs.getString(KEY_REPORTS, "[]"))
+            // Dedup within the local queue by file id.
+            for (i in 0 until arr.length()) {
+                if (arr.optJSONObject(i)?.optString("fileId") == fileId) return@launch
+            }
             arr.put(JSONObject().apply {
-                put("fileId", fileId); put("status", status)
+                put("fileId", fileId); put("avatarId", avatarId); put("status", status)
                 if (name != null) put("name", name)
             })
             prefs.edit().putString(KEY_REPORTS, arr.toString()).apply()
@@ -283,7 +375,8 @@ object AvatarGlobalDb {
                 } ?: emptyList()
                 fresh[fileId] = Entry(
                     fileId, id, o.optString("name", ""),
-                    o.optString("author", ""), o.optString("authorId", ""), plats
+                    o.optString("author", ""), o.optString("authorId", ""), plats,
+                    o.optLong("checked", o.optLong("added", 0L))
                 )
             }
             map.clear(); map.putAll(fresh)
@@ -314,6 +407,65 @@ object AvatarGlobalDb {
             ownAvatar = "${e.name.ifBlank { e.avatarId }} (changed) ${nowShort()}"
             contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms)
         } catch (ex: Exception) { Log.w(TAG, "avatar-change harvest failed", ex) }
+    }
+
+    /** Fill the catalog from SEARCH results that lacked a file id (avtrdb proxies its
+     *  images). Resolves each via GET /avatars/{id} (public-only, also fills platforms)
+     *  paced + capped, so searching slowly absorbs avtrdb too. Fire-and-forget. */
+    fun harvestSearchResults(context: Context, results: List<AvatarSearch.Result>) {
+        val app = context.applicationContext
+        scope.launch {
+            var n = 0
+            for (r in results) {
+                if (n >= 60) break                            // safety bound for a huge search
+                if (r.imageFileId != null) continue           // already contributed in searchAll
+                val fid = try { VrchatAuthManager.avatarCatalogEntry(app, r.id)?.fileId }
+                    catch (e: Exception) { null } ?: continue // null also = private/dead (skipped)
+                if (map.containsKey(fid)) continue
+                contribute(app, fid, r.id, r.name, r.author, r.authorId, r.platforms)
+                n++
+                delay(600)  // pace VRChat REST
+            }
+        }
+    }
+
+    /** Seed the catalog from the user's OWN uploaded + favourited avatars (all
+     *  readable with ids). Once per app open — a big free coverage boost. */
+    // Favourite avatar ids we've already resolved this session (avoids re-resolving
+    // the whole favourites list every 30-min cycle). Resets on restart.
+    private val resolvedFavourites = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+
+    private suspend fun harvestLibrary(context: Context) {
+        try {
+            // 1. Own UPLOADS (with local public<->private detection).
+            val lib = VrchatAuthManager.ownAvatarLibrary(context)
+            var added = 0; var privateRemoved = 0
+            for (a in lib) {
+                val e = a.entry
+                if (a.isPublic) {
+                    contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms)
+                    added++
+                } else if (a.ownUpload && map.containsKey(e.fileId)) {
+                    // The user made their own PUBLIC avatar private -> report removal
+                    // (the admin bot confirms via a 404 on the now-private avatar).
+                    report(context, e.fileId, e.avatarId, "dead")
+                    privateRemoved++
+                }
+            }
+            // 2. FAVOURITES — resolve each new one (public-only via avatarCatalogEntry).
+            val favs = VrchatAuthManager.favouriteAvatarIds(context)
+            var favAdded = 0
+            for (id in favs) {
+                if (resolvedFavourites.contains(id)) continue
+                resolvedFavourites.add(id) // mark attempted (retries on next app launch)
+                val e = try { VrchatAuthManager.avatarCatalogEntry(context, id) } catch (ex: Exception) { null }
+                    ?: continue // null = private/dead/transient — skipped
+                contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms)
+                favAdded++
+                delay(400) // pace VRChat REST
+            }
+            ownAvatar = "lib +$added, fav +$favAdded/${favs.size}, ${privateRemoved} now-private ${nowShort()}"
+        } catch (ex: Exception) { Log.w(TAG, "library harvest failed", ex) }
     }
 
     private suspend fun harvestOwnAvatar(context: Context) {

@@ -1401,8 +1401,11 @@ object VrchatAuthManager {
     suspend fun resolveWornAvatarId(
         context: Context, userId: String, avatarName: String, author: String
     ): String? = withContext(Dispatchers.IO) {
-        if (avatarName.isBlank()) return@withContext null
         val wornFileId = fileIdOf(fetchUserInfo(context, userId)?.wornAvatarThumbUrl.orEmpty())
+        // NAME-OPTIONAL: resolve purely from the worn image file id (catalog /
+        // author-listing / image-file-id) — so an impostor'd player in a big instance
+        // (no Unpacking line, so no log avatar name) is still resolvable by their id.
+        if (avatarName.isBlank() && wornFileId == null) return@withContext null
         // GLOBAL crowdsourced catalog first — exact, offline, zero network. This is
         // the extra coverage no public DB has (ids VRC-A users contributed).
         com.vrca.vrchat.AvatarGlobalDb.lookup(wornFileId)?.let {
@@ -1429,6 +1432,12 @@ object VrchatAuthManager {
                 com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, it, avatarName, author)
                 return@withContext it
             }
+        }
+        // No log name (impostor'd player) — the file-id/catalog/author paths above were
+        // our only shot; a name search is impossible, so stop here.
+        if (avatarName.isBlank()) {
+            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "no name; not in catalog/author list"
+            return@withContext null
         }
         // 1. NAME search across VARIANTS — the log's avatar name often carries a
         //    descriptor the DB doesn't store ("Ball Python (handpuppet / head puppet)"
@@ -1549,6 +1558,9 @@ object VrchatAuthManager {
             if (code == 200) captureRolledCookies(context, raw)
             if (code != 200 || !body.startsWith("{")) return@withContext null
             val j = org.json.JSONObject(body)
+            // PRIVACY: never contribute a non-public avatar (the owner can see their
+            // own private avatars via the API — those must NOT enter the shared catalog).
+            if (j.optString("releaseStatus", "public") != "public") return@withContext null
             val fileId = fileIdOf(j.optString("thumbnailImageUrl", "").ifBlank { j.optString("imageUrl", "") })
                 ?: return@withContext null
             val plats = j.optJSONArray("unityPackages")?.let { ups ->
@@ -1559,6 +1571,105 @@ object VrchatAuthManager {
             CatalogEntry(fileId, avatarId, j.optString("name", ""),
                 j.optString("authorName", ""), j.optString("authorId", ""), plats)
         } catch (e: Exception) { null }
+    }
+
+    /** The avatar ids the user has FAVOURITED, via the reliable `GET /favorites?
+     *  type=avatar` (each record's `favoriteId` is the `avtr_` id). Paginated — most
+     *  people have >100 favourites. Details are resolved per-id by the caller. */
+    suspend fun favouriteAvatarIds(context: Context): List<String> = withContext(Dispatchers.IO) {
+        val cookie = getCookieHeader(context) ?: return@withContext emptyList()
+        val ids = LinkedHashSet<String>()
+        var offset = 0
+        var page = 0
+        while (page < 40) {  // cap 4000 favourites (safety bound)
+            val url = "$BASE/favorites?type=avatar&n=100&offset=$offset"
+            val body = try {
+                val (code, b, raw) = get(url, null, cookie)
+                if (code == 200) captureRolledCookies(context, raw)
+                if (code != 200 || !b.trimStart().startsWith("[")) break
+                b
+            } catch (e: Exception) { break }
+            val arr = try { org.json.JSONArray(body) } catch (e: Exception) { break }
+            if (arr.length() == 0) break
+            for (i in 0 until arr.length()) {
+                val fav = arr.optJSONObject(i) ?: continue
+                val id = fav.optString("favoriteId", "")
+                if (id.startsWith("avtr_")) ids.add(id)
+            }
+            if (arr.length() < 100) break
+            offset += 100; page++
+            kotlinx.coroutines.delay(400)
+        }
+        ids.toList()
+    }
+
+    /** Does this avatar still exist? 200 -> true, 404/410 -> false (deleted),
+     *  anything else (rate limit / network) -> null (unknown, don't act). Used to
+     *  confirm a dead avatar before reporting it, so a transient clone failure never
+     *  wrongly culls a valid avatar. */
+    suspend fun avatarExists(context: Context, avatarId: String): Boolean? = withContext(Dispatchers.IO) {
+        val cookie = getCookieHeader(context) ?: return@withContext null
+        try {
+            val (code, _, raw) = get("$BASE/avatars/$avatarId", null, cookie)
+            if (code == 200) captureRolledCookies(context, raw)
+            when (code) { 200 -> true; 404, 410 -> false; else -> null }
+        } catch (e: Exception) { null }
+    }
+
+    /** One avatar from the user's own library, WITH its public/private state so the
+     *  caller can detect a local public↔private flip. `ownUpload` = the user created
+     *  it (so its releaseStatus is authoritative & they can flip it); favourites are
+     *  others' public avatars. */
+    data class OwnAvatar(val entry: CatalogEntry, val isPublic: Boolean, val ownUpload: Boolean)
+
+    /** The user's OWN avatar LIBRARY — their uploads (with real releaseStatus) +
+     *  favourites. All readable (they're yours), so a big free seed AND the source of
+     *  local private↔public detection. Best-effort; empty on failure / not logged in. */
+    suspend fun ownAvatarLibrary(context: Context): List<OwnAvatar> = withContext(Dispatchers.IO) {
+        val cookie = getCookieHeader(context) ?: return@withContext emptyList()
+        val out = LinkedHashMap<String, OwnAvatar>()
+        // Own UPLOADS only (paginated) — full objects with the real releaseStatus.
+        // Favourites are handled separately via /favorites?type=avatar (reliable).
+        val sources = listOf("$BASE/avatars?user=me&releaseStatus=all&sort=updated" to true)
+        for ((base, ownUpload) in sources) {
+            var offset = 0
+            var page = 0
+            while (page < 40) {  // cap 40 pages = 4000 avatars per source (safety bound)
+                val sep = if (base.contains("?")) "&" else "?"
+                val url = "$base${sep}n=100&offset=$offset"
+                val body = try {
+                    val (code, b, raw) = get(url, null, cookie)
+                    if (code == 200) captureRolledCookies(context, raw)
+                    if (code != 200 || !b.trimStart().startsWith("[")) break
+                    b
+                } catch (e: Exception) { break }
+                val arr = try { org.json.JSONArray(body) } catch (e: Exception) { break }
+                if (arr.length() == 0) break
+                for (i in 0 until arr.length()) {
+                    val j = arr.optJSONObject(i) ?: continue
+                    val id = j.optString("id", "")
+                    if (!id.startsWith("avtr_")) continue
+                    val fileId = fileIdOf(
+                        j.optString("thumbnailImageUrl", "").ifBlank { j.optString("imageUrl", "") }
+                    ) ?: continue
+                    val isPublic = j.optString("releaseStatus", "public") == "public"
+                    val plats = j.optJSONArray("unityPackages")?.let { ups ->
+                        (0 until ups.length()).mapNotNull {
+                            ups.optJSONObject(it)?.optString("platform", "")?.takeIf { s -> s.isNotBlank() }
+                        }.map { prettyPlatform(it) }.filter { it.isNotBlank() }.distinct()
+                    } ?: emptyList()
+                    out.putIfAbsent(fileId, OwnAvatar(
+                        CatalogEntry(fileId, id, j.optString("name", ""),
+                            j.optString("authorName", ""), j.optString("authorId", ""), plats),
+                        isPublic, ownUpload
+                    ))
+                }
+                if (arr.length() < 100) break  // last page
+                offset += 100; page++
+                kotlinx.coroutines.delay(400)  // pace VRChat REST between pages
+            }
+        }
+        out.values.toList()
     }
 
     suspend fun fetchGroupName(context: Context, groupId: String): String? = withContext(Dispatchers.IO) {

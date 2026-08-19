@@ -24,6 +24,13 @@ object AvatarSearch {
     private const val TAG = "AvatarSearch"
     private const val BASE = "https://api.avtrdb.com/v2/avatar/search"
 
+    /** VRCX-style `vrcx_search.php` mirrors (expose VRChat's RAW image url, so a
+     *  candidate carries the worn file id). The community ones (avtr.just-h.party,
+     *  requi.dev) are currently DEAD (DNS gone / connection refused), so this is
+     *  EMPTY — avtrdb + our own growing catalog are the live sources. Add a working
+     *  mirror base url here (e.g. "https://host/vrcx_search.php") to re-enable one. */
+    private val VRCX_MIRRORS: List<String> = emptyList()
+
     data class Result(
         val id: String,
         val name: String,
@@ -118,11 +125,9 @@ object AvatarSearch {
     suspend fun searchCandidates(query: String): List<Candidate> = coroutineScope {
         if (query.isBlank()) return@coroutineScope emptyList()
         val q = URLEncoder.encode(query.trim(), "UTF-8")
-        listOf(
-            async { avtrdbCandidates(q) },
-            async { vrcxCandidates("https://requi.dev/vrcx_search.php?search=$q") },
-            async { vrcxCandidates("https://avtr.just-h.party/vrcx_search.php?search=$q") }
-        ).awaitAll().flatten().filter { it.id.startsWith("avtr_") }.distinctBy { it.id }
+        (listOf(async { avtrdbCandidates(q) }) +
+            VRCX_MIRRORS.map { m -> async { vrcxCandidates("$m?search=$q") } })
+            .awaitAll().flatten().filter { it.id.startsWith("avtr_") }.distinctBy { it.id }
     }
 
     /**
@@ -136,11 +141,10 @@ object AvatarSearch {
      */
     suspend fun searchCandidatesByImageFileId(fileId: String): List<Candidate> = coroutineScope {
         if (!fileId.startsWith("file_")) return@coroutineScope emptyList()
+        if (VRCX_MIRRORS.isEmpty()) return@coroutineScope emptyList()
         val q = URLEncoder.encode(fileId, "UTF-8")
-        listOf(
-            async { vrcxCandidates("https://requi.dev/vrcx_search.php?search=$q") },
-            async { vrcxCandidates("https://avtr.just-h.party/vrcx_search.php?search=$q") }
-        ).awaitAll().flatten().filter { it.id.startsWith("avtr_") }.distinctBy { it.id }
+        VRCX_MIRRORS.map { m -> async { vrcxCandidates("$m?search=$q") } }
+            .awaitAll().flatten().filter { it.id.startsWith("avtr_") }.distinctBy { it.id }
     }
 
     private suspend fun avtrdbCandidates(encodedQuery: String): List<Candidate> = withContext(Dispatchers.IO) {
@@ -193,14 +197,17 @@ object AvatarSearch {
     suspend fun searchAll(context: Context, query: String): List<Result> = coroutineScope {
         if (query.isBlank()) return@coroutineScope emptyList()
         val q = URLEncoder.encode(query.trim(), "UTF-8")
-        val remote = listOf(
-            async { runCatching { search(query) }.getOrDefault(emptyList()) },
-            async { vrcxResults("https://requi.dev/vrcx_search.php?search=$q") },
-            async { vrcxResults("https://avtr.just-h.party/vrcx_search.php?search=$q") }
-        ).awaitAll().flatten()
+        val remote = (listOf(async { runCatching { search(query) }.getOrDefault(emptyList()) }) +
+            VRCX_MIRRORS.map { m -> async { vrcxResults("$m?search=$q") } })
+            .awaitAll().flatten()
         val ours = catalogResults(query)
+        // Dedup by a NORMALIZED avatar id (trim + lowercase) so a casing/whitespace
+        // difference between sources can't slip a duplicate through. Our catalog wins.
         val merged = LinkedHashMap<String, Result>()
-        for (r in ours + remote) if (r.id.startsWith("avtr_")) merged.putIfAbsent(r.id, r)
+        for (r in ours + remote) {
+            val key = r.id.trim().lowercase()
+            if (key.startsWith("avtr_")) merged.putIfAbsent(key, r)
+        }
         val list = merged.values.toList()
         // Fill our DB from the file-id-bearing results (free — no VRChat call).
         for (r in list) {
@@ -251,12 +258,15 @@ object AvatarSearch {
      *  visible on-device. Uses a fixed common query. */
     suspend fun dbHealthCheck(): String = coroutineScope {
         val q = URLEncoder.encode("cat", "UTF-8")
-        val probes = listOf(
+        val targets = mutableListOf(
             "avtrdb" to "$BASE?query=$q&page=0",
-            "requi.dev" to "https://requi.dev/vrcx_search.php?search=$q",
-            "just-h.party" to "https://avtr.just-h.party/vrcx_search.php?search=$q",
             "worker" to "${AvatarGlobalDb.WORKER_URL}/health"
-        ).map { (name, url) ->
+        )
+        VRCX_MIRRORS.forEach { m ->
+            val host = runCatching { URL(m).host }.getOrNull() ?: "mirror"
+            targets.add(host to "$m?search=$q")
+        }
+        val probes = targets.map { (name, url) ->
             async { val (ok, info) = httpProbe(url); "$name: ${if (ok) "OK" else "FAIL"} $info" }
         }
         (probes.awaitAll() + "catalog(local): ${AvatarGlobalDb.entryCount()} entries").joinToString("\n")

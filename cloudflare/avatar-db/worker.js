@@ -47,6 +47,7 @@ function validEntry(e) {
 }
 
 function cleanEntry(e) {
+  const now = Date.now();
   return {
     id: e.avatarId,
     name: typeof e.name === "string" ? e.name.slice(0, 100) : "",
@@ -55,7 +56,8 @@ function cleanEntry(e) {
     platforms: Array.isArray(e.platforms)
       ? e.platforms.filter((p) => typeof p === "string").slice(0, 4)
       : [],
-    added: Date.now(),
+    added: now,
+    checked: now, // last time the bot verified this avatar is alive (= added at first)
   };
 }
 
@@ -90,22 +92,25 @@ export default {
         if (body.status === "renamed" && typeof body.name === "string") {
           cur.name = body.name.slice(0, 100);
         }
+        // Store the avatar id so the bot can VERIFY without a catalog lookup.
+        if (typeof body.avatarId === "string" && body.avatarId.startsWith("avtr_")) {
+          cur.avatarId = body.avatarId;
+        }
         cur.count = (cur.count || 0) + 1;
         await env.AVATAR_KV.put(key, JSON.stringify(cur), { expirationTtl: 30 * 86400 });
         return json({ ok: true });
       }
 
       if (req.method === "GET" && (url.pathname === "/health" || url.pathname === "/")) {
-        // Cheap: KV only, no GitHub call — safe to poll from the admin panel.
+        // ONE cheap KV read (no list ops — those have a tight 1k/day free limit and
+        // this is polled every 15s). Pending counts come from meta (set at flush).
         const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
-        const pend = await env.AVATAR_KV.list({ prefix: "pend:" });
-        const rep = await env.AVATAR_KV.list({ prefix: "rep:" });
         const branch = env.GH_BRANCH || "main";
         return json({
           ok: true,
           entries: meta.entries || 0,
-          pendingBatches: pend.keys.length,
-          reports: rep.keys.length,
+          pendingBatches: meta.pendingBatches || 0,
+          reports: meta.reports || 0,
           lastFlush: meta.lastFlush || null,
           lastAdded: meta.lastAdded || 0,
           lastRemoved: meta.lastRemoved || 0,
@@ -115,8 +120,66 @@ export default {
           branch: branch,
           rawUrl: `https://raw.githubusercontent.com/${env.GH_REPO || "?"}/${branch}/${env.DB_PATH || "?"}`,
           lastCommit: meta.lastCommit || "none",
-          version: 2,
+          adminKeySet: !!env.ADMIN_KEY,
+          version: 4,
         });
+      }
+
+      if (req.method === "GET" && url.pathname === "/admin/reports") {
+        // The bot fetches the PENDING dead/rename reports to verify — so it only
+        // ever checks REPORTED avatars, not the whole catalog (scales to millions).
+        if (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY) {
+          return json({ ok: false, error: "unauthorized" }, 401);
+        }
+        const rep = await env.AVATAR_KV.list({ prefix: "rep:" });
+        const out = [];
+        for (const k of rep.keys.slice(0, 200)) {
+          const val = await env.AVATAR_KV.get(k.name);
+          if (!val) continue;
+          try {
+            const r = JSON.parse(val);
+            out.push({ fileId: k.name.slice(4), avatarId: r.avatarId || "", status: r.status || "dead", count: r.count || 0 });
+          } catch (_) {}
+        }
+        return json({ ok: true, reports: out });
+      }
+
+      if (req.method === "POST" && url.pathname === "/admin") {
+        // Authoritative admin ops from the recheck sweep (bot VRChat session).
+        // Requires the ADMIN_KEY secret. upserts OVERWRITE entries (refresh
+        // name/author/authorId/platforms); removes delete dead avatars outright.
+        const body = await req.json().catch(() => null);
+        if (!body || !env.ADMIN_KEY || body.key !== env.ADMIN_KEY) {
+          return json({ ok: false, error: "unauthorized" }, 401);
+        }
+        const upserts = Array.isArray(body.upserts) ? body.upserts.filter(validEntry).slice(0, 200) : [];
+        const removes = Array.isArray(body.removes)
+          ? body.removes.filter((f) => typeof f === "string" && f.startsWith("file_")).slice(0, 200)
+          : [];
+        if (upserts.length) {
+          const payload = {};
+          for (const e of upserts) payload[e.fileId] = cleanEntry(e);
+          await env.AVATAR_KV.put("admu:" + crypto.randomUUID(), JSON.stringify(payload), { expirationTtl: 7 * 86400 });
+        }
+        if (removes.length) {
+          await env.AVATAR_KV.put("admr:" + crypto.randomUUID(), JSON.stringify(removes), { expirationTtl: 7 * 86400 });
+        }
+        // Batched "last checked" bumps from the bot's passive oldest-first sweep —
+        // applied on the next flush (rides the same commit, so it's ~free).
+        const checked = Array.isArray(body.checked)
+          ? body.checked.filter((f) => typeof f === "string" && f.startsWith("file_")).slice(0, 500)
+          : [];
+        if (checked.length) {
+          await env.AVATAR_KV.put("admk:" + crypto.randomUUID(), JSON.stringify(checked), { expirationTtl: 7 * 86400 });
+        }
+        // Verified-ALIVE reports: clear them (the bot confirmed a false positive).
+        const clearReports = Array.isArray(body.clearReports)
+          ? body.clearReports.filter((f) => typeof f === "string" && f.startsWith("file_")).slice(0, 200)
+          : [];
+        for (const fid of clearReports) await env.AVATAR_KV.delete("rep:" + fid);
+        // A confirmed-dead report's rep: key is also cleared once removed.
+        for (const fid of removes) await env.AVATAR_KV.delete("rep:" + fid);
+        return json({ ok: true, upserts: upserts.length, removes: removes.length, cleared: clearReports.length });
       }
 
       if (req.method === "GET" && url.pathname === "/flush") {
@@ -228,13 +291,21 @@ async function flush(env) {
     return; // transient GitHub error — leave KV untouched, retry next cron
   }
 
+  // ONE KV list for the whole flush (list ops have a tight 1k/day free limit), then
+  // partition by prefix in code instead of 5 separate list() calls.
+  const allNames = (await env.AVATAR_KV.list()).keys.map((k) => k.name);
+  const pendNames = allNames.filter((n) => n.startsWith("pend:"));
+  const repNames = allNames.filter((n) => n.startsWith("rep:"));
+  const admuNames = allNames.filter((n) => n.startsWith("admu:"));
+  const admrNames = allNames.filter((n) => n.startsWith("admr:"));
+  const admkNames = allNames.filter((n) => n.startsWith("admk:"));
+
   // 2. Merge pending adds (deduped by file id).
   let added = 0;
   const pendKeys = [];
-  const pend = await env.AVATAR_KV.list({ prefix: "pend:" });
-  for (const k of pend.keys) {
-    const val = await env.AVATAR_KV.get(k.name);
-    pendKeys.push(k.name);
+  for (const kname of pendNames) {
+    const val = await env.AVATAR_KV.get(kname);
+    pendKeys.push(kname);
     if (!val) continue;
     let batch;
     try {
@@ -275,10 +346,9 @@ async function flush(env) {
   // 3. Apply reports: rename immediately, remove on quorum.
   let removed = 0;
   const repClear = [];
-  const rep = await env.AVATAR_KV.list({ prefix: "rep:" });
-  for (const k of rep.keys) {
-    const fileId = k.name.slice(4);
-    const val = await env.AVATAR_KV.get(k.name);
+  for (const kname of repNames) {
+    const fileId = kname.slice(4);
+    const val = await env.AVATAR_KV.get(kname);
     if (!val) continue;
     let r;
     try {
@@ -288,22 +358,56 @@ async function flush(env) {
     }
     if (r.status === "renamed" && db.avatars[fileId] && r.name) {
       db.avatars[fileId].name = r.name;
-      repClear.push(k.name);
+      repClear.push(kname);
     } else if (r.status === "dead" && (r.count || 0) >= REMOVE_QUORUM) {
       if (db.avatars[fileId]) {
         delete db.avatars[fileId];
         removed++;
       }
-      repClear.push(k.name);
+      repClear.push(kname);
     }
     // Not enough "dead" reports yet -> leave the report in place.
+  }
+
+  // 3b. Apply authoritative admin ops (overwrite refreshes + hard removes).
+  const admuKeys = [], admrKeys = [];
+  let adminChanged = false;
+  for (const kname of admuNames) {
+    admuKeys.push(kname);
+    const val = await env.AVATAR_KV.get(kname);
+    if (!val) continue;
+    try {
+      const batch = JSON.parse(val);
+      for (const fid of Object.keys(batch)) { db.avatars[fid] = batch[fid]; adminChanged = true; }
+    } catch (_) {}
+  }
+  for (const kname of admrNames) {
+    admrKeys.push(kname);
+    const val = await env.AVATAR_KV.get(kname);
+    if (!val) continue;
+    try {
+      const arr = JSON.parse(val);
+      for (const fid of arr) { if (db.avatars[fid]) { delete db.avatars[fid]; removed++; adminChanged = true; } }
+    } catch (_) {}
+  }
+  // Last-checked bumps (passive oldest-first sweep) — rides this same commit.
+  const admkKeys = [];
+  const nowChecked = Date.now();
+  for (const kname of admkNames) {
+    admkKeys.push(kname);
+    const val = await env.AVATAR_KV.get(kname);
+    if (!val) continue;
+    try {
+      const arr = JSON.parse(val);
+      for (const fid of arr) { if (db.avatars[fid]) { db.avatars[fid].checked = nowChecked; adminChanged = true; } }
+    } catch (_) {}
   }
 
   const entries = Object.keys(db.avatars).length;
 
   // 4. Commit when something changed OR we're migrating the legacy "undefined" file.
   let lastCommit = "no change";
-  if (added > 0 || removed > 0 || repClear.length > 0 || legacySha) {
+  if (added > 0 || removed > 0 || repClear.length > 0 || legacySha || adminChanged) {
     const putBody = {
       message: `avatar-db: +${added} -${removed} (${entries} total)`,
       content: b64encode(serializeDb(db)),
@@ -329,6 +433,9 @@ async function flush(env) {
     // Only clear KV after a successful commit, so nothing is lost on failure.
     for (const name of pendKeys) await env.AVATAR_KV.delete(name);
     for (const name of repClear) await env.AVATAR_KV.delete(name);
+    for (const name of admuKeys) await env.AVATAR_KV.delete(name);
+    for (const name of admrKeys) await env.AVATAR_KV.delete(name);
+    for (const name of admkKeys) await env.AVATAR_KV.delete(name);
     // Migration done -> delete the stray "undefined" file.
     if (legacySha) {
       await fetch(`https://api.github.com/repos/${repo}/contents/undefined`, {
@@ -348,6 +455,9 @@ async function flush(env) {
       lastRemoved: removed,
       entries,
       lastCommit,
+      // For /health (so it needn't list KV): activity seen at this flush.
+      pendingBatches: pendNames.length,
+      reports: repNames.length,
     })
   );
 }

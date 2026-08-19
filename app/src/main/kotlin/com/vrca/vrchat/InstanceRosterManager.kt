@@ -667,8 +667,8 @@ object InstanceRosterManager {
             // "" = resolved with no cloneable match (gray out), non-blank = ready.
             // Only valid when resolved FOR the current avatar name (an avatar switch
             // invalidates it → null again → the button shows "resolving" and re-runs).
-            val avaId: String? = if (!isSelfMember && e.userId != null && !e.avatarName.isNullOrBlank() &&
-                avatarIdResolvedFor[e.userId] == e.avatarName) avatarIdCache[e.userId] else null
+            val avaId: String? = if (!isSelfMember && e.userId != null &&
+                avatarIdResolvedFor[e.userId] == (e.avatarName ?: "")) avatarIdCache[e.userId] else null
             Member(
                 displayName = e.displayName,
                 userId = e.userId,
@@ -709,8 +709,8 @@ object InstanceRosterManager {
         // current avatar name isn't resolved yet (a switch changes the name → re-run).
         // Single-flight, paced; the next publish re-queues anyone this pass skipped.
         val toResolve = ordered.filter { e ->
-            e.userId != null && e.userId != self && !e.avatarName.isNullOrBlank() &&
-                avatarIdResolvedFor[e.userId] != e.avatarName && avatarResolveInFlight.add(e.userId!!)
+            e.userId != null && e.userId != self &&
+                avatarIdResolvedFor[e.userId] != (e.avatarName ?: "") && avatarResolveInFlight.add(e.userId!!)
         }
         if (toResolve.isNotEmpty() && resolvingAvatars.compareAndSet(false, true)) {
             scope.launch { try { resolveAvatars(context, toResolve) } finally { resolvingAvatars.set(false) } }
@@ -746,11 +746,29 @@ object InstanceRosterManager {
                 platformCache[id] = plat
                 pfpCache[id] = info.profilePicUrl
                 enrichAttempts.remove(id)
+                // INSTANT clone id for catalog-backed avatars: the worn file id is in
+                // the SAME /users/{id} response as the pic, so a catalog hit resolves
+                // the clone id offline right when the pfp loads (no separate DB search).
+                val wornFid = Regex("file_[0-9a-fA-F-]{36}").find(info.wornAvatarThumbUrl)?.value
+                val avaName = _flow.value.members.firstOrNull { it.userId == id }?.avatarName ?: ""
+                var catalogAvatarId: String? = null
+                // Name-optional: resolve from the worn file id whether or not the log
+                // gave an avatar name (impostor'd players have no name but still a file id).
+                if (wornFid != null) {
+                    com.vrca.vrchat.AvatarGlobalDb.lookup(wornFid)?.let { hit ->
+                        avatarIdCache[id] = hit.avatarId
+                        avatarIdResolvedFor[id] = avaName
+                        catalogAvatarId = hit.avatarId
+                    }
+                }
                 _flow.value.let { cur ->
                     if (cur.members.any { it.userId == id }) {
                         _flow.value = cur.copy(
                             members = cur.members.map { m ->
-                                if (m.userId == id) m.copy(platform = plat, profilePicUrl = info.profilePicUrl) else m
+                                if (m.userId == id) m.copy(
+                                    platform = plat, profilePicUrl = info.profilePicUrl,
+                                    avatarId = catalogAvatarId ?: m.avatarId
+                                ) else m
                             }
                         )
                     }
@@ -773,7 +791,7 @@ object InstanceRosterManager {
     private suspend fun resolveAvatars(context: Context, list: List<VrcLogParser.RosterEntry>) {
         for (e in list) {
             val uid = e.userId ?: continue
-            val name = e.avatarName ?: continue
+            val name = e.avatarName ?: ""   // name-optional: resolve by file id if blank
             avatarResolveInFlight.remove(uid)
             val id = try {
                 VrchatAuthManager.resolveWornAvatarId(context, uid, name, e.avatarCreator ?: "")
