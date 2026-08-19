@@ -154,6 +154,21 @@ object AvatarGlobalDb {
         for (fid in fileIds) map[fid]?.let { map[fid] = it.copy(checked = now) }
     }
 
+    /** Cheap pending-report count from /health (a single KV read on the Worker, no
+     *  list op) — the sweep checks this first and only does the heavier /admin/reports
+     *  list when there's actually something to verify. */
+    suspend fun pendingReportCount(): Int = kotlinx.coroutines.withContext(Dispatchers.IO) {
+        var conn: HttpURLConnection? = null
+        try {
+            conn = (URL("$WORKER_URL/health").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                connectTimeout = 10_000; readTimeout = 10_000
+            }
+            if (conn.responseCode != 200) return@withContext 0
+            JSONObject(conn.inputStream.bufferedReader().readText()).optInt("reports", 0)
+        } catch (e: Exception) { 0 } finally { runCatching { conn?.disconnect() } }
+    }
+
     /** A pending dead/rename report the admin bot should verify. */
     data class Report(val fileId: String, val avatarId: String, val status: String)
 

@@ -70,6 +70,10 @@ object AvatarCatalogSweep {
     private const val POLL_MS = 30_000L        // poll for new reports every 30s
     private const val PASSIVE_BATCH = 30       // oldest avatars per idle pass
     private const val PASSIVE_PAUSE_MS = 5_000L
+    // Re-verify each avatar at most this often — once the catalog is fresh the passive
+    // sweep goes SILENT (no Cloudflare writes) until entries age past this.
+    private const val RECHECK_INTERVAL_MS = 7L * 24 * 60 * 60 * 1000  // 7 days
+    private const val IDLE_SLEEP_MS = 10 * 60_000L  // when everything's fresh
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var job: Job? = null
     @Volatile private var fullRescan = false
@@ -94,14 +98,19 @@ object AvatarCatalogSweep {
 
     private suspend fun loop(context: Context, adminKey: String) {
         while (running && scope.isActive) {
-            val hadReports = processReports(context, adminKey)   // PRIMARY: verify reported
+            // Cheap /health read first; only do the heavier /admin/reports LIST when
+            // there are reports to verify (KV list ops have a tight free limit).
+            val hadReports = if (AvatarGlobalDb.pendingReportCount() > 0)
+                processReports(context, adminKey) else false
+            var didPassive = false
             when {
                 fullRescan -> { fullRescan = false; fullCatalogPass(context, adminKey) }
-                // IDLE (no reports): passively verify the OLDEST-checked avatars.
-                !hadReports -> passiveOldestCheck(context, adminKey)
+                // IDLE: passively verify the oldest STALE avatars.
+                !hadReports -> didPassive = passiveOldestCheck(context, adminKey)
             }
             if (!running) break
-            delay(if (hadReports) POLL_MS else PASSIVE_PAUSE_MS)
+            // All fresh + no reports -> long idle sleep (no Cloudflare traffic).
+            delay(if (hadReports) POLL_MS else if (didPassive) PASSIVE_PAUSE_MS else IDLE_SLEEP_MS)
         }
     }
 
@@ -147,9 +156,15 @@ object AvatarCatalogSweep {
      *  from the cached catalog — no Cloudflare call to select), remove dead ones, and
      *  BATCH-bump their last-checked time (rides the Worker's 10-min flush commit, so
      *  it's ~free). Bounded per pass so it stays incremental. */
-    private suspend fun passiveOldestCheck(context: Context, adminKey: String) {
-        val entries = AvatarGlobalDb.snapshot().sortedBy { it.checked }.take(PASSIVE_BATCH)
-        if (entries.isEmpty()) { status = "catalog empty — idle"; return }
+    private suspend fun passiveOldestCheck(context: Context, adminKey: String): Boolean {
+        // Only re-check STALE entries (not verified in RECHECK_INTERVAL_MS). Once the
+        // catalog is fresh this is empty -> the sweep idles with no Cloudflare writes.
+        val cutoff = System.currentTimeMillis() - RECHECK_INTERVAL_MS
+        val entries = AvatarGlobalDb.snapshot()
+            .filter { it.checked < cutoff }
+            .sortedBy { it.checked }
+            .take(PASSIVE_BATCH)
+        if (entries.isEmpty()) { status = "all fresh — idle"; return false }
         status = "passive check: oldest ${entries.size}"
         val upserts = mutableListOf<AvatarGlobalDb.Entry>()
         val removes = mutableListOf<String>()
@@ -179,6 +194,7 @@ object AvatarCatalogSweep {
             pushOps(context, adminKey, upserts.toList(), removes.toList(), emptyList(), okChecked.toList())
         }
         status = "passive: checked=$checked removed=$removed refreshed=$refreshed"
+        return true
     }
 
     /** One-time full-catalog walk (manual) — cleanup of pre-existing dead/private. */

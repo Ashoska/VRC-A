@@ -543,7 +543,7 @@ private fun AvatarCatalogCard() {
                 adminKey = if (j.optBoolean("adminKeySet")) "set" else "NOT set"
                 status = "live"
             }.onFailure { status = "unreachable (${it.javaClass.simpleName})" }
-            delay(15_000)
+            delay(30_000)
         }
     }
     AdminSectionCard(

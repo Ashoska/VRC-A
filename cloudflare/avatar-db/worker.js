@@ -102,16 +102,15 @@ export default {
       }
 
       if (req.method === "GET" && (url.pathname === "/health" || url.pathname === "/")) {
-        // Cheap: KV only, no GitHub call — safe to poll from the admin panel.
+        // ONE cheap KV read (no list ops — those have a tight 1k/day free limit and
+        // this is polled every 15s). Pending counts come from meta (set at flush).
         const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
-        const pend = await env.AVATAR_KV.list({ prefix: "pend:" });
-        const rep = await env.AVATAR_KV.list({ prefix: "rep:" });
         const branch = env.GH_BRANCH || "main";
         return json({
           ok: true,
           entries: meta.entries || 0,
-          pendingBatches: pend.keys.length,
-          reports: rep.keys.length,
+          pendingBatches: meta.pendingBatches || 0,
+          reports: meta.reports || 0,
           lastFlush: meta.lastFlush || null,
           lastAdded: meta.lastAdded || 0,
           lastRemoved: meta.lastRemoved || 0,
@@ -292,13 +291,21 @@ async function flush(env) {
     return; // transient GitHub error — leave KV untouched, retry next cron
   }
 
+  // ONE KV list for the whole flush (list ops have a tight 1k/day free limit), then
+  // partition by prefix in code instead of 5 separate list() calls.
+  const allNames = (await env.AVATAR_KV.list()).keys.map((k) => k.name);
+  const pendNames = allNames.filter((n) => n.startsWith("pend:"));
+  const repNames = allNames.filter((n) => n.startsWith("rep:"));
+  const admuNames = allNames.filter((n) => n.startsWith("admu:"));
+  const admrNames = allNames.filter((n) => n.startsWith("admr:"));
+  const admkNames = allNames.filter((n) => n.startsWith("admk:"));
+
   // 2. Merge pending adds (deduped by file id).
   let added = 0;
   const pendKeys = [];
-  const pend = await env.AVATAR_KV.list({ prefix: "pend:" });
-  for (const k of pend.keys) {
-    const val = await env.AVATAR_KV.get(k.name);
-    pendKeys.push(k.name);
+  for (const kname of pendNames) {
+    const val = await env.AVATAR_KV.get(kname);
+    pendKeys.push(kname);
     if (!val) continue;
     let batch;
     try {
@@ -339,10 +346,9 @@ async function flush(env) {
   // 3. Apply reports: rename immediately, remove on quorum.
   let removed = 0;
   const repClear = [];
-  const rep = await env.AVATAR_KV.list({ prefix: "rep:" });
-  for (const k of rep.keys) {
-    const fileId = k.name.slice(4);
-    const val = await env.AVATAR_KV.get(k.name);
+  for (const kname of repNames) {
+    const fileId = kname.slice(4);
+    const val = await env.AVATAR_KV.get(kname);
     if (!val) continue;
     let r;
     try {
@@ -352,13 +358,13 @@ async function flush(env) {
     }
     if (r.status === "renamed" && db.avatars[fileId] && r.name) {
       db.avatars[fileId].name = r.name;
-      repClear.push(k.name);
+      repClear.push(kname);
     } else if (r.status === "dead" && (r.count || 0) >= REMOVE_QUORUM) {
       if (db.avatars[fileId]) {
         delete db.avatars[fileId];
         removed++;
       }
-      repClear.push(k.name);
+      repClear.push(kname);
     }
     // Not enough "dead" reports yet -> leave the report in place.
   }
@@ -366,20 +372,18 @@ async function flush(env) {
   // 3b. Apply authoritative admin ops (overwrite refreshes + hard removes).
   const admuKeys = [], admrKeys = [];
   let adminChanged = false;
-  const admu = await env.AVATAR_KV.list({ prefix: "admu:" });
-  for (const k of admu.keys) {
-    admuKeys.push(k.name);
-    const val = await env.AVATAR_KV.get(k.name);
+  for (const kname of admuNames) {
+    admuKeys.push(kname);
+    const val = await env.AVATAR_KV.get(kname);
     if (!val) continue;
     try {
       const batch = JSON.parse(val);
       for (const fid of Object.keys(batch)) { db.avatars[fid] = batch[fid]; adminChanged = true; }
     } catch (_) {}
   }
-  const admr = await env.AVATAR_KV.list({ prefix: "admr:" });
-  for (const k of admr.keys) {
-    admrKeys.push(k.name);
-    const val = await env.AVATAR_KV.get(k.name);
+  for (const kname of admrNames) {
+    admrKeys.push(kname);
+    const val = await env.AVATAR_KV.get(kname);
     if (!val) continue;
     try {
       const arr = JSON.parse(val);
@@ -389,10 +393,9 @@ async function flush(env) {
   // Last-checked bumps (passive oldest-first sweep) — rides this same commit.
   const admkKeys = [];
   const nowChecked = Date.now();
-  const admk = await env.AVATAR_KV.list({ prefix: "admk:" });
-  for (const k of admk.keys) {
-    admkKeys.push(k.name);
-    const val = await env.AVATAR_KV.get(k.name);
+  for (const kname of admkNames) {
+    admkKeys.push(kname);
+    const val = await env.AVATAR_KV.get(kname);
     if (!val) continue;
     try {
       const arr = JSON.parse(val);
@@ -452,6 +455,9 @@ async function flush(env) {
       lastRemoved: removed,
       entries,
       lastCommit,
+      // For /health (so it needn't list KV): activity seen at this flush.
+      pendingBatches: pendNames.length,
+      reports: repNames.length,
     })
   );
 }
