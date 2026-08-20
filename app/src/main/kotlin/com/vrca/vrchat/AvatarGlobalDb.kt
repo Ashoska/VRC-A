@@ -52,6 +52,10 @@ object AvatarGlobalDb {
     private const val KEY_REPORTS = "reports"    // pending reports (JSON array)
     private const val CACHE_FILE = "avatar_db.json"
     private const val REFRESH_MS = 30 * 60_000L  // every 30 min (+ once on open)
+    // Flush contributions only after this many have queued (else the 30-min loop / app
+    // open / report paths flush them) — so many contributions become ONE /contribute
+    // POST = one KV write, keeping us under Cloudflare's free write/delete budget.
+    private const val CONTRIBUTE_FLUSH_THRESHOLD = 100
 
     data class Entry(
         val fileId: String,
@@ -242,7 +246,12 @@ object AvatarGlobalDb {
             prefs.edit().putString(KEY_QUEUE, arr.toString()).apply()
             contributedCount++
             lastContributed = "${name.ifBlank { avatarId }} (${nowShort()})"
-            flushQueue(app)
+            // Do NOT flush per contribution. That made ONE /contribute POST (= one KV
+            // write, plus a pend: key the flush later deletes) PER avatar — harvesting
+            // hundreds of candidates blew Cloudflare's tiny free KV write/delete budget.
+            // Queue locally and flush only when a big batch has accumulated, plus on the
+            // 30-min loop / app open / report — so N contributions collapse into ONE POST.
+            if (arr.length() >= CONTRIBUTE_FLUSH_THRESHOLD) flushQueue(app)
         }
     }
 

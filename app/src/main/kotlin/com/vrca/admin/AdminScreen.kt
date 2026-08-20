@@ -315,7 +315,7 @@ fun AdminScreen() {
     // ==========================================
     // MAIN UI
     // ==========================================
-    val tabs = remember { listOf("Dashboard", "Users", "Mod", "Announce", "Releases", "Config", "Log") }
+    val tabs = remember { listOf("Dashboard", "Users", "Mod", "Announce", "Releases", "Config", "Log", "Bots") }
     var tabIndex by rememberSaveable { mutableIntStateOf(0) }
 
     // ModerationTarget is NOT saveable
@@ -835,6 +835,10 @@ fun AdminScreen() {
                         setGlobalLoading = { globalLoading = it },
                         setError = ::setErr
                     )
+
+                    6 -> ModLogTab(db = db, setError = ::setErr)
+
+                    7 -> BotsTab()
 
                     else -> ModLogTab(db = db, setError = ::setErr)
                 }
