@@ -8,6 +8,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -52,10 +54,12 @@ object AvatarGlobalDb {
     private const val KEY_REPORTS = "reports"    // pending reports (JSON array)
     private const val CACHE_FILE = "avatar_db.json"
     private const val REFRESH_MS = 30 * 60_000L  // every 30 min (+ once on open)
-    // Flush contributions only after this many have queued (else the 30-min loop / app
-    // open / report paths flush them) — so many contributions become ONE /contribute
-    // POST = one KV write, keeping us under Cloudflare's free write/delete budget.
-    private const val CONTRIBUTE_FLUSH_THRESHOLD = 100
+    // Push queued contributions to the Worker every 5 min — frequent enough that each
+    // batch lands before the Worker's ~10-min GitHub push (so they don't stagnate),
+    // still batched so it's a small number of writes. Contributions POST in chunks of
+    // this many entries (the Worker caps a single POST) so a big harvest isn't lost.
+    private const val FLUSH_MS = 5 * 60_000L
+    private const val CONTRIBUTE_CHUNK = 200
 
     data class Entry(
         val fileId: String,
@@ -77,6 +81,9 @@ object AvatarGlobalDb {
     private val map = ConcurrentHashMap<String, Entry>()   // fileId -> entry
     private val started = AtomicBoolean(false)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // Serializes all read-modify-write of the persisted contribution queue so a flush
+    // (which drains it) can't race a concurrent contribute (which appends) and lose it.
+    private val queueMutex = Mutex()
 
     private val FILE_RE = Regex("""file_[0-9a-fA-F-]{36}""")
     private val AVTR_RE = Regex("""avtr_[0-9a-fA-F-]{36}""")
@@ -109,6 +116,16 @@ object AvatarGlobalDb {
                 refresh(app)
                 harvestOwnAvatar(app)
                 harvestLibrary(app)
+                flushQueue(app)
+            }
+        }
+        // Dedicated periodic flush so queued contributions reach the Worker REGULARLY
+        // (well within its ~10-min GitHub push window) instead of stagnating until the
+        // 30-min refresh loop. The queue is persisted to SharedPreferences, so it also
+        // survives the app being closed and is drained on the next open / next tick.
+        scope.launch {
+            while (isActive) {
+                delay(FLUSH_MS)
                 flushQueue(app)
             }
         }
@@ -237,27 +254,25 @@ object AvatarGlobalDb {
             System.currentTimeMillis(), description, false)
         val app = context.applicationContext
         scope.launch {
-            val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            val arr = JSONArray(prefs.getString(KEY_QUEUE, "[]"))
-            // Dedup within the queue by file id.
-            for (i in 0 until arr.length()) {
-                if (arr.optJSONObject(i)?.optString("fileId") == fileId) return@launch
+            queueMutex.withLock {
+                val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                val arr = JSONArray(prefs.getString(KEY_QUEUE, "[]"))
+                // Dedup within the queue by file id.
+                for (i in 0 until arr.length()) {
+                    if (arr.optJSONObject(i)?.optString("fileId") == fileId) return@withLock
+                }
+                arr.put(JSONObject().apply {
+                    put("fileId", fileId); put("avatarId", avatarId)
+                    put("name", name); put("author", author); put("authorId", authorId)
+                    put("platforms", JSONArray(platforms))
+                    if (description.isNotBlank()) put("description", description)
+                })
+                // Persist to disk (survives app close; drained on the 5-min flush loop /
+                // next open). Do NOT flush per contribution — the periodic flush batches.
+                prefs.edit().putString(KEY_QUEUE, arr.toString()).apply()
+                contributedCount++
+                lastContributed = "${name.ifBlank { avatarId }} (${nowShort()})"
             }
-            arr.put(JSONObject().apply {
-                put("fileId", fileId); put("avatarId", avatarId)
-                put("name", name); put("author", author); put("authorId", authorId)
-                put("platforms", JSONArray(platforms))
-                if (description.isNotBlank()) put("description", description)
-            })
-            prefs.edit().putString(KEY_QUEUE, arr.toString()).apply()
-            contributedCount++
-            lastContributed = "${name.ifBlank { avatarId }} (${nowShort()})"
-            // Do NOT flush per contribution. That made ONE /contribute POST (= one KV
-            // write, plus a pend: key the flush later deletes) PER avatar — harvesting
-            // hundreds of candidates blew Cloudflare's tiny free KV write/delete budget.
-            // Queue locally and flush only when a big batch has accumulated, plus on the
-            // 30-min loop / app open / report — so N contributions collapse into ONE POST.
-            if (arr.length() >= CONTRIBUTE_FLUSH_THRESHOLD) flushQueue(app)
         }
     }
 
@@ -287,16 +302,37 @@ object AvatarGlobalDb {
 
     private suspend fun flushQueue(context: Context) {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        // Contributions.
-        val queue = JSONArray(prefs.getString(KEY_QUEUE, "[]"))
-        if (queue.length() > 0) {
-            val body = JSONObject().put("entries", queue).toString()
-            val ok = post("$WORKER_URL/contribute", body)
-            if (ok) {
+        // Contributions. DRAIN the queue under the lock (take ownership, clear it) so a
+        // concurrent contribute can only append AFTER we've taken these — nothing is
+        // lost. POST outside the lock (network is slow); on failure, re-queue the unsent
+        // tail merged in FRONT of anything appended meanwhile.
+        val items = queueMutex.withLock {
+            val q = JSONArray(prefs.getString(KEY_QUEUE, "[]"))
+            if (q.length() == 0) emptyList() else {
                 prefs.edit().putString(KEY_QUEUE, "[]").apply()
-                lastPost = "sent ${queue.length()} at ${nowShort()}"
+                (0 until q.length()).mapNotNull { q.optJSONObject(it) }
+            }
+        }
+        if (items.isNotEmpty()) {
+            var sent = 0
+            while (sent < items.size) {
+                val end = minOf(sent + CONTRIBUTE_CHUNK, items.size)
+                val chunk = JSONArray().apply { for (i in sent until end) put(items[i]) }
+                if (!post("$WORKER_URL/contribute", JSONObject().put("entries", chunk).toString())) break
+                sent = end
+            }
+            if (sent >= items.size) {
+                lastPost = "sent ${items.size} at ${nowShort()}"
             } else {
-                lastPost = "FAILED (queued ${queue.length()})"
+                // Re-queue the unsent tail (in front of anything appended during the POST).
+                queueMutex.withLock {
+                    val cur = JSONArray(prefs.getString(KEY_QUEUE, "[]"))
+                    val merged = JSONArray()
+                    for (i in sent until items.size) merged.put(items[i])
+                    for (j in 0 until cur.length()) cur.optJSONObject(j)?.let { merged.put(it) }
+                    prefs.edit().putString(KEY_QUEUE, merged.toString()).apply()
+                }
+                lastPost = "sent $sent/${items.size} at ${nowShort()} (retrying rest)"
             }
         }
         // Reports (one POST each; small volume).
