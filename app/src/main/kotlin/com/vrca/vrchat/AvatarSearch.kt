@@ -47,9 +47,11 @@ object AvatarSearch {
         val source: String = ""
     )
 
-    // avtrdb pages ~20 results each. We PAGINATE (was page 0 only ≈ 20 cap) up to
-    // AVTRDB_MAX_PAGES, stopping early once a page comes back short (= last page).
-    private const val AVTRDB_MAX_PAGES = 4
+    // avtrdb pages ~20 results each. We paginate to EXHAUSTION (no result cap — fetch
+    // every page until one comes back short/empty = the last page). AVTRDB_PAGE_GUARD
+    // is ONLY a runaway backstop for a misbehaving API that never returns a short page;
+    // real avatar-name searches end in a handful of pages.
+    private const val AVTRDB_PAGE_GUARD = 1000
     private const val AVTRDB_PAGE_SIZE = 20
 
     /** Parse one avtrdb page body into display Results. Real avtrdb schema: id =
@@ -88,7 +90,7 @@ object AvatarSearch {
         if (query.isBlank()) return@withContext emptyList()
         val q = URLEncoder.encode(query.trim(), "UTF-8")
         val out = LinkedHashMap<String, Result>()
-        for (page in 0 until AVTRDB_MAX_PAGES) {
+        for (page in 0 until AVTRDB_PAGE_GUARD) {
             val body = httpGet("$BASE?query=$q&page=$page") ?: break
             val parsed = try { parseAvtrdbResults(body) } catch (e: Exception) {
                 Log.w(TAG, "avtrdb search parse failed", e); emptyList()
@@ -151,7 +153,7 @@ object AvatarSearch {
 
     private suspend fun avtrdbCandidates(encodedQuery: String): List<Candidate> = withContext(Dispatchers.IO) {
         val out = LinkedHashMap<String, Candidate>()
-        for (page in 0 until AVTRDB_MAX_PAGES) {
+        for (page in 0 until AVTRDB_PAGE_GUARD) {
             val body = httpGet("$BASE?query=$encodedQuery&page=$page") ?: break
             val parsed = try {
                 val arr = JSONObject(body).optJSONArray("avatars") ?: JSONObject(body).optJSONArray("results")

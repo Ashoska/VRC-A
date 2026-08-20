@@ -62,7 +62,12 @@ object AvatarGlobalDb {
         val platforms: List<String>,
         /** Last time the bot verified this avatar is alive (epoch ms; 0 = never).
          *  The passive sweep picks the OLDEST-checked first. */
-        val checked: Long = 0L
+        val checked: Long = 0L,
+        /** Avatar description/bio (device- or bot-filled; may be genuinely empty). */
+        val description: String = "",
+        /** The bot has done a full first-fill (name/author/platforms/bio). Devices
+         *  contribute filled=false; only the fill bot sets it true. */
+        val filled: Boolean = false
     )
 
     private val map = ConcurrentHashMap<String, Entry>()   // fileId -> entry
@@ -137,6 +142,8 @@ object AvatarGlobalDb {
                         put("fileId", e.fileId); put("avatarId", e.avatarId)
                         put("name", e.name); put("author", e.author); put("authorId", e.authorId)
                         put("platforms", JSONArray(e.platforms))
+                        put("description", e.description)
+                        put("filled", e.filled)
                     })
                 }
             })
@@ -211,7 +218,8 @@ object AvatarGlobalDb {
      *  this file id (locally known = already in the global file or queued). */
     fun contribute(
         context: Context, fileId: String, avatarId: String,
-        name: String, author: String, authorId: String = "", platforms: List<String> = emptyList()
+        name: String, author: String, authorId: String = "", platforms: List<String> = emptyList(),
+        description: String = ""
     ) {
         // Only add entries we ACTUALLY have a valid avatar id + file id for.
         if (!FILE_RE.matches(fileId)) return
@@ -229,6 +237,7 @@ object AvatarGlobalDb {
                 put("fileId", fileId); put("avatarId", avatarId)
                 put("name", name); put("author", author); put("authorId", authorId)
                 put("platforms", JSONArray(platforms))
+                if (description.isNotBlank()) put("description", description)
             })
             prefs.edit().putString(KEY_QUEUE, arr.toString()).apply()
             contributedCount++
@@ -376,7 +385,9 @@ object AvatarGlobalDb {
                 fresh[fileId] = Entry(
                     fileId, id, o.optString("name", ""),
                     o.optString("author", ""), o.optString("authorId", ""), plats,
-                    o.optLong("checked", o.optLong("added", 0L))
+                    o.optLong("checked", o.optLong("added", 0L)),
+                    o.optString("desc", o.optString("description", "")),
+                    o.optBoolean("filled", false)
                 )
             }
             map.clear(); map.putAll(fresh)
@@ -405,7 +416,7 @@ object AvatarGlobalDb {
         try {
             val e = VrchatAuthManager.avatarCatalogEntry(context, avatarId) ?: return
             ownAvatar = "${e.name.ifBlank { e.avatarId }} (changed) ${nowShort()}"
-            contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms)
+            contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
         } catch (ex: Exception) { Log.w(TAG, "avatar-change harvest failed", ex) }
     }
 
@@ -417,7 +428,7 @@ object AvatarGlobalDb {
         scope.launch {
             var n = 0
             for (r in results) {
-                if (n >= 60) break                            // safety bound for a huge search
+                if (n >= 300) break                           // generous bound for a huge search
                 if (r.imageFileId != null) continue           // already contributed in searchAll
                 val fid = try { VrchatAuthManager.avatarCatalogEntry(app, r.id)?.fileId }
                     catch (e: Exception) { null } ?: continue // null also = private/dead (skipped)
@@ -444,13 +455,13 @@ object AvatarGlobalDb {
         scope.launch {
             var n = 0
             for (id in avatarIds) {
-                if (n >= 40) break                            // safety bound per call
+                if (n >= 300) break                           // generous per-call bound (session dedup covers the rest)
                 if (!AVTR_RE.matches(id)) continue
                 if (!harvestedCandidates.add(id)) continue    // already attempted this session
                 val e = try { VrchatAuthManager.avatarCatalogEntry(app, id) } catch (ex: Exception) { null }
                     ?: continue                               // null = private/dead/transient (skipped)
                 if (map.containsKey(e.fileId)) continue
-                contribute(app, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms)
+                contribute(app, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
                 n++
                 delay(700)  // pace VRChat REST (low-priority background)
             }
@@ -471,7 +482,7 @@ object AvatarGlobalDb {
             for (a in lib) {
                 val e = a.entry
                 if (a.isPublic) {
-                    contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms)
+                    contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
                     added++
                 } else if (a.ownUpload && map.containsKey(e.fileId)) {
                     // The user made their own PUBLIC avatar private -> report removal
@@ -488,7 +499,7 @@ object AvatarGlobalDb {
                 resolvedFavourites.add(id) // mark attempted (retries on next app launch)
                 val e = try { VrchatAuthManager.avatarCatalogEntry(context, id) } catch (ex: Exception) { null }
                     ?: continue // null = private/dead/transient — skipped
-                contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms)
+                contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
                 favAdded++
                 delay(400) // pace VRChat REST
             }
@@ -501,7 +512,7 @@ object AvatarGlobalDb {
             val e = VrchatAuthManager.currentAvatarCatalogEntry(context)
             if (e == null) { ownAvatar = "no current avatar (not logged in?) ${nowShort()}"; return }
             ownAvatar = "${e.name.ifBlank { e.avatarId }} ${nowShort()}"
-            contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms)
+            contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
         } catch (ex: Exception) {
             ownAvatar = "error ${ex.javaClass.simpleName}"
             Log.w(TAG, "own-avatar harvest failed", ex)

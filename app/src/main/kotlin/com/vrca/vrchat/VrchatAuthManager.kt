@@ -1471,8 +1471,7 @@ object VrchatAuthManager {
         val merged = LinkedHashMap<String, com.vrca.vrchat.AvatarSearch.Candidate>()
         for (v in variants) {
             val found = try { com.vrca.vrchat.AvatarSearch.searchCandidates(v) } catch (e: Exception) { emptyList() }
-            for (c in found) merged.putIfAbsent(c.id, c)
-            if (merged.size >= 30) break
+            for (c in found) merged.putIfAbsent(c.id, c)   // no cap — collect every candidate (free grabs)
         }
         val candidates = merged.values.toList()
         // FREE GRABS: every candidate is a real avatar — harvest ALL of them into the
@@ -1567,7 +1566,8 @@ object VrchatAuthManager {
         val name: String,
         val author: String,
         val authorId: String,
-        val platforms: List<String>
+        val platforms: List<String>,
+        val description: String = ""
     )
 
     /** The local user's OWN current avatar as a catalog entry — the id they can
@@ -1605,7 +1605,8 @@ object VrchatAuthManager {
                 }.map { prettyPlatform(it) }.filter { it.isNotBlank() }.distinct()
             } ?: emptyList()
             CatalogEntry(fileId, avatarId, j.optString("name", ""),
-                j.optString("authorName", ""), j.optString("authorId", ""), plats)
+                j.optString("authorName", ""), j.optString("authorId", ""), plats,
+                j.optString("description", ""))
         } catch (e: Exception) { null }
     }
 
@@ -1696,7 +1697,8 @@ object VrchatAuthManager {
                     } ?: emptyList()
                     out.putIfAbsent(fileId, OwnAvatar(
                         CatalogEntry(fileId, id, j.optString("name", ""),
-                            j.optString("authorName", ""), j.optString("authorId", ""), plats),
+                            j.optString("authorName", ""), j.optString("authorId", ""), plats,
+                            j.optString("description", "")),
                         isPublic, ownUpload
                     ))
                 }
