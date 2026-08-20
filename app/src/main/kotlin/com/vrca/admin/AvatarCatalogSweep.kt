@@ -67,6 +67,7 @@ object AvatarCatalogSweep {
     private const val BLITZ_WINDOW_MS = 30L * 60 * 1000                // blitz lasts 30 min per press
     private const val IDLE_SLEEP_MS = 5 * 60_000L
     private const val ACTIVE_PAUSE_MS = 2_000L
+    private const val CATALOG_REFRESH_MS = 5 * 60_000L   // keep the admin catalog fresh for FILL
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val jobs = mutableListOf<Job>()
@@ -104,6 +105,15 @@ object AvatarCatalogSweep {
                 finally { roles.forEach { progress.getValue(it).running = false; progress.getValue(it).status = "stopped" } }
             }
         }
+        // Keep the admin's local catalog FRESH so NEW ids contributed by user devices
+        // (which land unfilled) reach the FILL bot promptly, not only on the 30-min
+        // refresh. Cheap ETag pull; a 304 costs ~nothing.
+        jobs += scope.launch {
+            while (running && scope.isActive) {
+                AvatarGlobalDb.forceRefresh(app)
+                delay(CATALOG_REFRESH_MS)
+            }
+        }
     }
 
     fun stop() {
@@ -121,6 +131,45 @@ object AvatarCatalogSweep {
         val p = progress.getValue(role)
         val where = if (p.slot >= 0) "bot ${p.slot + 1}" else "-"
         return "${role.label} ($where): checked=${p.checked} refreshed=${p.refreshed} removed=${p.removed} filled=${p.filled}\n${p.status}"
+    }
+
+    /** A per-role snapshot for the admin UI: how much is QUEUED (backlog) for this
+     *  role right now + what it's processed so far — so the admin can see whether a
+     *  type is falling behind (add another bot) and watch the numbers climb. */
+    data class RoleView(
+        val role: Role, val bot: String, val queued: Int,
+        val checked: Int, val removed: Int, val refreshedOrFilled: Int, val status: String, val running: Boolean
+    )
+
+    /** `pendingReports` = the Worker's live report count (from /health). Fill + liveness
+     *  backlogs are computed LOCALLY from the cached catalog (one cheap pass). */
+    fun roleViews(pendingReports: Int): List<RoleView> {
+        val snap = AvatarGlobalDb.snapshot()
+        val cutoff = System.currentTimeMillis() - (if (blitzActive()) BLITZ_RECHECK_MS else RECHECK_INTERVAL_MS)
+        var fill = 0; var la = 0; var lb = 0
+        for (e in snap) {
+            if (needsFill(e)) fill++
+            if (e.checked < cutoff) { if (partitionOf(e.fileId) == 0) la++ else lb++ }
+        }
+        return Role.values().map { r ->
+            val p = progress.getValue(r)
+            val queued = when (r) {
+                Role.REPORTS -> pendingReports
+                Role.FILL -> fill
+                Role.LIVENESS_A -> la
+                Role.LIVENESS_B -> lb
+            }
+            RoleView(
+                role = r,
+                bot = if (p.slot >= 0) "bot ${p.slot + 1}" else "—",
+                queued = queued,
+                checked = p.checked,
+                removed = p.removed,
+                refreshedOrFilled = if (r == Role.FILL) p.filled else p.refreshed,
+                status = p.status,
+                running = p.running
+            )
+        }
     }
 
     // ---- the per-slot loop ---------------------------------------------------

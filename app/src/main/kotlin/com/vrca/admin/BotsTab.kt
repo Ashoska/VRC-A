@@ -37,6 +37,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
@@ -48,8 +49,9 @@ import org.json.JSONObject
 /**
  * The "Bots" admin tab — everything for the crowdsourced avatar catalog's maintenance
  * bots: the live Worker health, the four bot login slots (each showing its account
- * name + a still-authed indicator), the shared ADMIN_KEY, the per-role live counters
- * (so you can SEE what each bot is doing), and the full-catalog blitz button.
+ * name, a still-authed indicator, AND the queue + processed numbers for the role(s)
+ * that bot is running), the shared ADMIN_KEY, and the full-catalog blitz button with
+ * a global "to process" counter.
  */
 @Composable
 fun BotsTab() {
@@ -67,18 +69,34 @@ fun BotsTab() {
             delay(2000)
         }
     }
-    // (Re)start the sweep when the logged-in set or the key changes (debounced so typing
-    // the key doesn't thrash it).
     LaunchedEffect(liveSig, adminKey) {
         delay(700)
         val key = adminKey.trim()
         if (BotVrchatSession.loggedInCount(ctx) > 0 && key.isNotBlank()) {
-            AvatarCatalogSweep.stop()
-            AvatarCatalogSweep.start(ctx, key)
+            AvatarCatalogSweep.stop(); AvatarCatalogSweep.start(ctx, key)
         } else {
             AvatarCatalogSweep.stop()
         }
     }
+
+    // Central poll of the per-role views (queued backlog + processed counts). The live
+    // report backlog comes from the Worker every ~12s; the fill/liveness backlogs are
+    // computed locally every 2s.
+    var pendingReports by remember { mutableIntStateOf(0) }
+    var views by remember { mutableStateOf(AvatarCatalogSweep.roleViews(0)) }
+    var blitz by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        var i = 0
+        while (true) {
+            if (i % 6 == 0) pendingReports = runCatching {
+                withContext(Dispatchers.IO) { com.vrca.vrchat.AvatarGlobalDb.pendingReportCount() }
+            }.getOrDefault(pendingReports)
+            views = AvatarCatalogSweep.roleViews(pendingReports)
+            blitz = AvatarCatalogSweep.blitzActive()
+            i++; delay(2000)
+        }
+    }
+    val totalQueued = views.sumOf { it.queued }
 
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
@@ -86,20 +104,28 @@ fun BotsTab() {
         contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp)
     ) {
         item { CatalogHealthCard() }
-        item { SweepStatusCard(adminKey = adminKey, onKeyChange = {
-            adminKey = it; prefs.edit().putString("avatar_admin_key", it).apply()
-        }) }
+        item {
+            SweepStatusCard(
+                adminKey = adminKey,
+                onKeyChange = { adminKey = it; prefs.edit().putString("avatar_admin_key", it).apply() },
+                assignment = AvatarCatalogSweep.assignmentLabel,
+                totalQueued = totalQueued,
+                blitz = blitz
+            )
+        }
         item {
             Text(
                 "Log in up to ${BotVrchatSession.SLOTS} dedicated bot accounts. Roles are split " +
                     "across them: reports, filling new avatars, and two liveness sweepers that never " +
-                    "check the same avatar. More bots = faster.",
+                    "check the same avatar. Each bot below shows the queue + progress for its role.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 2.dp)
             )
         }
-        items(BotVrchatSession.SLOTS) { slot -> BotLoginCard(slot) }
+        items(BotVrchatSession.SLOTS) { slot ->
+            BotLoginCard(slot, views.filter { it.bot == "bot ${slot + 1}" })
+        }
         item { Spacer(Modifier.height(12.dp)) }
     }
 }
@@ -158,28 +184,19 @@ private fun CatalogHealthCard() {
     }
 }
 
-// ---- sweep status + admin key + blitz --------------------------------------
+// ---- admin key + blitz + global progress -----------------------------------
 
 @Composable
-private fun SweepStatusCard(adminKey: String, onKeyChange: (String) -> Unit) {
-    var lines by remember { mutableStateOf(sweepLines()) }
-    var assignment by remember { mutableStateOf(AvatarCatalogSweep.assignmentLabel) }
-    var blitz by remember { mutableStateOf(AvatarCatalogSweep.blitzActive()) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            lines = sweepLines()
-            assignment = AvatarCatalogSweep.assignmentLabel
-            blitz = AvatarCatalogSweep.blitzActive()
-            delay(1000)
-        }
-    }
-    AdminSectionCard(title = "Bot roles", icon = Icons.Filled.SportsEsports, tone = AdminTone.Warn) {
+private fun SweepStatusCard(
+    adminKey: String, onKeyChange: (String) -> Unit,
+    assignment: String, totalQueued: Int, blitz: Boolean
+) {
+    AdminSectionCard(title = "Catalog maintenance", icon = Icons.Filled.SportsEsports, tone = AdminTone.Warn) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (assignment.isNotBlank()) {
                 Text(assignment, style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Text(lines, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
             if (AvatarCatalogSweep.pushError.isNotBlank()) {
                 Text(AvatarCatalogSweep.pushError, style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error)
@@ -215,9 +232,20 @@ private fun SweepStatusCard(adminKey: String, onKeyChange: (String) -> Unit) {
                 Spacer(Modifier.size(6.dp))
                 Text(if (blitz) "Blitz running — extend" else "Check entire catalog (blitz)")
             }
+            // Global progress: how much is left across ALL roles right now. During a
+            // blitz you watch this count down as the bots chew through the catalog.
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("To process (all roles)", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                StatusPill("$totalQueued", if (totalQueued == 0) AdminTone.Success else AdminTone.Warn)
+            }
             Text(
-                "Makes all bots catch up the WHOLE catalog for ~30 min (fill every avatar's " +
-                    "info + dead-check). Re-press to extend.",
+                "The blitz makes all bots catch up the WHOLE catalog for ~30 min (fill every " +
+                    "avatar's info + dead-check). Re-press to extend.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -225,13 +253,41 @@ private fun SweepStatusCard(adminKey: String, onKeyChange: (String) -> Unit) {
     }
 }
 
-private fun sweepLines(): String =
-    AvatarCatalogSweep.Role.values().joinToString("\n\n") { AvatarCatalogSweep.progressLine(it) }
+/** One role's queue + progress line (shown inside the bot card that runs it). */
+@Composable
+private fun RoleRow(v: AvatarCatalogSweep.RoleView) {
+    val queuedTone = when {
+        v.queued <= 0 -> AdminTone.Success
+        v.queued > 500 -> AdminTone.Error
+        else -> AdminTone.Warn
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp), modifier = Modifier.fillMaxWidth()) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(v.role.label, style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            StatusPill("queued ${v.queued}", queuedTone)
+        }
+        val processedLabel = if (v.role == AvatarCatalogSweep.Role.FILL) "filled" else "refreshed"
+        Text(
+            "checked ${v.checked} · removed ${v.removed} · $processedLabel ${v.refreshedOrFilled}",
+            style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        if (v.status.isNotBlank()) {
+            Text(v.status, style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
 
 // ---- per-bot login card -----------------------------------------------------
 
 @Composable
-private fun BotLoginCard(slot: Int) {
+private fun BotLoginCard(slot: Int, roleViews: List<AvatarCatalogSweep.RoleView>) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -246,7 +302,6 @@ private fun BotLoginCard(slot: Int) {
     var msg by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
 
-    // Poll logged-in + periodically validate the session so the "authed" chip is real.
     LaunchedEffect(slot) {
         var i = 0
         while (true) {
@@ -313,6 +368,11 @@ private fun BotLoginCard(slot: Int) {
                         Text("Session expired — log out and back in.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error)
+                    }
+                    // This bot's role queue + progress (only the roles it actually runs).
+                    if (roleViews.isNotEmpty()) {
+                        Divider()
+                        roleViews.forEach { RoleRow(it) }
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically) {
