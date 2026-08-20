@@ -205,9 +205,13 @@ object AvatarCatalogSweep {
         return ok
     }
 
-    /** LIVENESS fill-only refresh: fills missing/changed fields from a fresh check but
-     *  NEVER blanks a good value; preserves `filled`. Returns the updated entry if
-     *  anything changed, else null. */
+    /** LIVENESS/REPORTS refresh: on a CONFIRMED-alive check (HTTP 200), pick up the
+     *  owner's edits — a RENAME (name/author/platforms/image re-key) AND a description
+     *  edit, INCLUDING a description the owner CLEARED (the fresh value is authoritative
+     *  since it came from a 200, so an empty description means it's genuinely empty now).
+     *  Name/author/platforms stay fill-preferring (a blank there on a 200 is unexpected,
+     *  so we keep the good value rather than risk blanking it). Preserves `filled`.
+     *  Returns the updated entry if anything changed, else null. */
     private fun liveRefresh(e: AvatarGlobalDb.Entry, chk: BotVrchatSession.AvatarCheck): AvatarGlobalDb.Entry? {
         val upd = e.copy(
             fileId = chk.fileId ?: e.fileId,
@@ -215,7 +219,7 @@ object AvatarCatalogSweep {
             author = chk.author.ifBlank { e.author },
             authorId = chk.authorId.ifBlank { e.authorId },
             platforms = if (chk.platforms.isNotEmpty()) chk.platforms else e.platforms,
-            description = chk.description.ifBlank { e.description }
+            description = chk.description   // authoritative — reflects an edited OR cleared bio
         )
         return if (upd != e) upd else null   // upd preserves checked+filled, so this compares the refreshable fields
     }
