@@ -227,6 +227,8 @@ object InstanceRosterManager {
     // resolves top-to-bottom without bursting the DBs/VRChat.
     private val avatarIdCache = ConcurrentHashMap<String, String>()
     private val avatarIdResolvedFor = ConcurrentHashMap<String, String>()
+    // The resolved avatar's platform compatibility (for the Quest PC-only clone gate).
+    private val avatarPlatformsCache = ConcurrentHashMap<String, List<String>>()
     private val avatarResolveInFlight = ConcurrentHashMap.newKeySet<String>()
     private val resolvingAvatars = java.util.concurrent.atomic.AtomicBoolean(false)
     private const val RESOLVE_PACE_MS = 1_000L
@@ -443,7 +445,7 @@ object InstanceRosterManager {
                     )
                 }
                 stopObserver()
-                platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarResolveInFlight.clear()
+                platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarPlatformsCache.clear(); avatarResolveInFlight.clear()
                 _flow.value = RosterUi(status = Status.IDLE)
                 currentId = null; offset = 0L; state = VrcLogParser.InstanceState()
                 delay(POLL_MS); continue
@@ -565,6 +567,11 @@ object InstanceRosterManager {
         val now = System.currentTimeMillis()
         for (line in complete.split('\n')) {
             val ev = VrcLogParser.parseLine(line) ?: continue
+            // Reliably harvest the local player's OWN avatar on every switch, straight
+            // from the log (the OSC /avatar/change path can drop events). onAvatarChanged
+            // dedups + is public-only, so this is cheap and safe.
+            if (ev is VrcLogParser.LogEvent.OwnAvatar)
+                com.vrca.vrchat.AvatarGlobalDb.onAvatarChanged(context, ev.avatarId)
             s = VrcLogParser.apply(s, ev, now)
         }
         return s to (offset + consumed)
@@ -606,7 +613,7 @@ object InstanceRosterManager {
                     confirmedClosed = confirmedClosed
                 )
             }
-            platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarResolveInFlight.clear()
+            platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarPlatformsCache.clear(); avatarResolveInFlight.clear()
             _flow.value = RosterUi(status = Status.IDLE, worldName = null, location = null, members = emptyList(), logPath = logPath)
             return
         }
@@ -633,7 +640,7 @@ object InstanceRosterManager {
         // in memory across a session (the reader writes NOTHING per-user to disk;
         // this just keeps RAM bounded to the current instance).
         if (!inWorld) {
-            platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarResolveInFlight.clear()
+            platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarPlatformsCache.clear(); avatarResolveInFlight.clear()
             _flow.value = RosterUi(
                 status = Status.IDLE, worldName = state.worldName,
                 location = state.location, members = emptyList(), logPath = logPath
@@ -756,9 +763,11 @@ object InstanceRosterManager {
                 // gave an avatar name (impostor'd players have no name but still a file id).
                 if (wornFid != null) {
                     com.vrca.vrchat.AvatarGlobalDb.lookup(wornFid)?.let { hit ->
-                        avatarIdCache[id] = hit.avatarId
+                        val gated = gateCloneId(hit.avatarId, hit.platforms)  // "" if PC-only on Quest
+                        avatarPlatformsCache[id] = hit.platforms
+                        avatarIdCache[id] = gated
                         avatarIdResolvedFor[id] = avaName
-                        catalogAvatarId = hit.avatarId
+                        catalogAvatarId = gated
                     }
                 }
                 _flow.value.let { cur ->
@@ -786,6 +795,26 @@ object InstanceRosterManager {
         }
     }
 
+    /** Is the LOCAL user on a Quest/Android device? (headset build, or their own
+     *  VRChat presence platform is android) — the case where a PC/iOS-only avatar
+     *  can't actually be worn, so its clone button should be greyed out. */
+    private fun selfIsQuest(): Boolean {
+        if (BuildConfig.IS_HEADSET_BUILD) return true
+        val p = VrchatAuthManager.prettyPlatform(VrchatPipelineState.presence?.platform ?: "")
+        return p.equals("Quest", ignoreCase = true)
+    }
+
+    /** Map a resolved (id, platforms) to the clone-button value: "" = greyed (no
+     *  cloneable match, OR a PC/iOS-only avatar while the local user is on Quest —
+     *  it can't be worn there), non-blank = the avtr_ id to select. The avatar is
+     *  still saved to the catalog regardless (that happens during resolve). */
+    private fun gateCloneId(id: String?, platforms: List<String>): String {
+        if (id.isNullOrBlank()) return ""
+        if (selfIsQuest() && platforms.isNotEmpty() &&
+            platforms.none { it.equals("Quest", true) || it.equals("android", true) }) return ""
+        return id
+    }
+
     /** Resolve each member's exact clone id in the background (paced, single-flight)
      *  and republish the row with it (or "" when nothing cloneable was found). */
     private suspend fun resolveAvatars(context: Context, list: List<VrcLogParser.RosterEntry>) {
@@ -793,20 +822,24 @@ object InstanceRosterManager {
             val uid = e.userId ?: continue
             val name = e.avatarName ?: ""   // name-optional: resolve by file id if blank
             avatarResolveInFlight.remove(uid)
-            val id = try {
+            val res = try {
                 VrchatAuthManager.resolveWornAvatarId(context, uid, name, e.avatarCreator ?: "")
-            } catch (ex: Exception) { null }
+            } catch (ex: Exception) { VrchatAuthManager.WornAvatarResult(null) }
+            avatarPlatformsCache[uid] = res.platforms
+            val id = gateCloneId(res.avatarId, res.platforms)   // "" = greyed (no match or PC-only on Quest)
             val why = AvatarSearch.Diag.lastReason
             AvatarSearch.Diag.record(
-                "${e.displayName}: '$name' -> ${id ?: "no match"}${if (why.isNotBlank()) " [$why]" else ""}"
+                "${e.displayName}: '$name' -> ${res.avatarId ?: "no match"}" +
+                    (if (id.isBlank() && !res.avatarId.isNullOrBlank()) " [PC-only, greyed on Quest]" else "") +
+                    (if (why.isNotBlank()) " [$why]" else "")
             )
-            avatarIdCache[uid] = id ?: ""
+            avatarIdCache[uid] = id
             avatarIdResolvedFor[uid] = name
             _flow.value.let { cur ->
                 if (cur.members.any { it.userId == uid && it.avatarName == name }) {
                     _flow.value = cur.copy(
                         members = cur.members.map { m ->
-                            if (m.userId == uid && m.avatarName == name) m.copy(avatarId = id ?: "") else m
+                            if (m.userId == uid && m.avatarName == name) m.copy(avatarId = id) else m
                         }
                     )
                 }

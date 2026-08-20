@@ -8,6 +8,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -52,6 +54,12 @@ object AvatarGlobalDb {
     private const val KEY_REPORTS = "reports"    // pending reports (JSON array)
     private const val CACHE_FILE = "avatar_db.json"
     private const val REFRESH_MS = 30 * 60_000L  // every 30 min (+ once on open)
+    // Push queued contributions to the Worker every 5 min — frequent enough that each
+    // batch lands before the Worker's ~10-min GitHub push (so they don't stagnate),
+    // still batched so it's a small number of writes. Contributions POST in chunks of
+    // this many entries (the Worker caps a single POST) so a big harvest isn't lost.
+    private const val FLUSH_MS = 5 * 60_000L
+    private const val CONTRIBUTE_CHUNK = 200
 
     data class Entry(
         val fileId: String,
@@ -62,12 +70,20 @@ object AvatarGlobalDb {
         val platforms: List<String>,
         /** Last time the bot verified this avatar is alive (epoch ms; 0 = never).
          *  The passive sweep picks the OLDEST-checked first. */
-        val checked: Long = 0L
+        val checked: Long = 0L,
+        /** Avatar description/bio (device- or bot-filled; may be genuinely empty). */
+        val description: String = "",
+        /** The bot has done a full first-fill (name/author/platforms/bio). Devices
+         *  contribute filled=false; only the fill bot sets it true. */
+        val filled: Boolean = false
     )
 
     private val map = ConcurrentHashMap<String, Entry>()   // fileId -> entry
     private val started = AtomicBoolean(false)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // Serializes all read-modify-write of the persisted contribution queue so a flush
+    // (which drains it) can't race a concurrent contribute (which appends) and lose it.
+    private val queueMutex = Mutex()
 
     private val FILE_RE = Regex("""file_[0-9a-fA-F-]{36}""")
     private val AVTR_RE = Regex("""avtr_[0-9a-fA-F-]{36}""")
@@ -100,6 +116,16 @@ object AvatarGlobalDb {
                 refresh(app)
                 harvestOwnAvatar(app)
                 harvestLibrary(app)
+                flushQueue(app)
+            }
+        }
+        // Dedicated periodic flush so queued contributions reach the Worker REGULARLY
+        // (well within its ~10-min GitHub push window) instead of stagnating until the
+        // 30-min refresh loop. The queue is persisted to SharedPreferences, so it also
+        // survives the app being closed and is drained on the next open / next tick.
+        scope.launch {
+            while (isActive) {
+                delay(FLUSH_MS)
                 flushQueue(app)
             }
         }
@@ -137,6 +163,8 @@ object AvatarGlobalDb {
                         put("fileId", e.fileId); put("avatarId", e.avatarId)
                         put("name", e.name); put("author", e.author); put("authorId", e.authorId)
                         put("platforms", JSONArray(e.platforms))
+                        put("description", e.description)
+                        put("filled", e.filled)
                     })
                 }
             })
@@ -211,29 +239,40 @@ object AvatarGlobalDb {
      *  this file id (locally known = already in the global file or queued). */
     fun contribute(
         context: Context, fileId: String, avatarId: String,
-        name: String, author: String, authorId: String = "", platforms: List<String> = emptyList()
+        name: String, author: String, authorId: String = "", platforms: List<String> = emptyList(),
+        description: String = ""
     ) {
         // Only add entries we ACTUALLY have a valid avatar id + file id for.
         if (!FILE_RE.matches(fileId)) return
         if (!AVTR_RE.matches(avatarId)) return
         if (map.containsKey(fileId)) return
+        // Insert into the LOCAL catalog immediately so the contributing device can see
+        // its own new avatars (own uploads, favourites, resolved strangers) in search /
+        // clone RIGHT AWAY — no waiting for the Worker flush + next 30-min pull. Zero
+        // extra KV cost (this is a purely in-memory local add).
+        map[fileId] = Entry(fileId, avatarId, name, author, authorId, platforms,
+            System.currentTimeMillis(), description, false)
         val app = context.applicationContext
         scope.launch {
-            val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            val arr = JSONArray(prefs.getString(KEY_QUEUE, "[]"))
-            // Dedup within the queue by file id.
-            for (i in 0 until arr.length()) {
-                if (arr.optJSONObject(i)?.optString("fileId") == fileId) return@launch
+            queueMutex.withLock {
+                val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                val arr = JSONArray(prefs.getString(KEY_QUEUE, "[]"))
+                // Dedup within the queue by file id.
+                for (i in 0 until arr.length()) {
+                    if (arr.optJSONObject(i)?.optString("fileId") == fileId) return@withLock
+                }
+                arr.put(JSONObject().apply {
+                    put("fileId", fileId); put("avatarId", avatarId)
+                    put("name", name); put("author", author); put("authorId", authorId)
+                    put("platforms", JSONArray(platforms))
+                    if (description.isNotBlank()) put("description", description)
+                })
+                // Persist to disk (survives app close; drained on the 5-min flush loop /
+                // next open). Do NOT flush per contribution — the periodic flush batches.
+                prefs.edit().putString(KEY_QUEUE, arr.toString()).apply()
+                contributedCount++
+                lastContributed = "${name.ifBlank { avatarId }} (${nowShort()})"
             }
-            arr.put(JSONObject().apply {
-                put("fileId", fileId); put("avatarId", avatarId)
-                put("name", name); put("author", author); put("authorId", authorId)
-                put("platforms", JSONArray(platforms))
-            })
-            prefs.edit().putString(KEY_QUEUE, arr.toString()).apply()
-            contributedCount++
-            lastContributed = "${name.ifBlank { avatarId }} (${nowShort()})"
-            flushQueue(app)
         }
     }
 
@@ -263,16 +302,37 @@ object AvatarGlobalDb {
 
     private suspend fun flushQueue(context: Context) {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        // Contributions.
-        val queue = JSONArray(prefs.getString(KEY_QUEUE, "[]"))
-        if (queue.length() > 0) {
-            val body = JSONObject().put("entries", queue).toString()
-            val ok = post("$WORKER_URL/contribute", body)
-            if (ok) {
+        // Contributions. DRAIN the queue under the lock (take ownership, clear it) so a
+        // concurrent contribute can only append AFTER we've taken these — nothing is
+        // lost. POST outside the lock (network is slow); on failure, re-queue the unsent
+        // tail merged in FRONT of anything appended meanwhile.
+        val items = queueMutex.withLock {
+            val q = JSONArray(prefs.getString(KEY_QUEUE, "[]"))
+            if (q.length() == 0) emptyList() else {
                 prefs.edit().putString(KEY_QUEUE, "[]").apply()
-                lastPost = "sent ${queue.length()} at ${nowShort()}"
+                (0 until q.length()).mapNotNull { q.optJSONObject(it) }
+            }
+        }
+        if (items.isNotEmpty()) {
+            var sent = 0
+            while (sent < items.size) {
+                val end = minOf(sent + CONTRIBUTE_CHUNK, items.size)
+                val chunk = JSONArray().apply { for (i in sent until end) put(items[i]) }
+                if (!post("$WORKER_URL/contribute", JSONObject().put("entries", chunk).toString())) break
+                sent = end
+            }
+            if (sent >= items.size) {
+                lastPost = "sent ${items.size} at ${nowShort()}"
             } else {
-                lastPost = "FAILED (queued ${queue.length()})"
+                // Re-queue the unsent tail (in front of anything appended during the POST).
+                queueMutex.withLock {
+                    val cur = JSONArray(prefs.getString(KEY_QUEUE, "[]"))
+                    val merged = JSONArray()
+                    for (i in sent until items.size) merged.put(items[i])
+                    for (j in 0 until cur.length()) cur.optJSONObject(j)?.let { merged.put(it) }
+                    prefs.edit().putString(KEY_QUEUE, merged.toString()).apply()
+                }
+                lastPost = "sent $sent/${items.size} at ${nowShort()} (retrying rest)"
             }
         }
         // Reports (one POST each; small volume).
@@ -376,7 +436,9 @@ object AvatarGlobalDb {
                 fresh[fileId] = Entry(
                     fileId, id, o.optString("name", ""),
                     o.optString("author", ""), o.optString("authorId", ""), plats,
-                    o.optLong("checked", o.optLong("added", 0L))
+                    o.optLong("checked", o.optLong("added", 0L)),
+                    o.optString("desc", o.optString("description", "")),
+                    o.optBoolean("filled", false)
                 )
             }
             map.clear(); map.putAll(fresh)
@@ -405,7 +467,7 @@ object AvatarGlobalDb {
         try {
             val e = VrchatAuthManager.avatarCatalogEntry(context, avatarId) ?: return
             ownAvatar = "${e.name.ifBlank { e.avatarId }} (changed) ${nowShort()}"
-            contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms)
+            contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
         } catch (ex: Exception) { Log.w(TAG, "avatar-change harvest failed", ex) }
     }
 
@@ -417,7 +479,7 @@ object AvatarGlobalDb {
         scope.launch {
             var n = 0
             for (r in results) {
-                if (n >= 60) break                            // safety bound for a huge search
+                if (n >= 300) break                           // generous bound for a huge search
                 if (r.imageFileId != null) continue           // already contributed in searchAll
                 val fid = try { VrchatAuthManager.avatarCatalogEntry(app, r.id)?.fileId }
                     catch (e: Exception) { null } ?: continue // null also = private/dead (skipped)
@@ -425,6 +487,34 @@ object AvatarGlobalDb {
                 contribute(app, fid, r.id, r.name, r.author, r.authorId, r.platforms)
                 n++
                 delay(600)  // pace VRChat REST
+            }
+        }
+    }
+
+    // Candidate ids we've already attempted to harvest this session (so repeated
+    // roster publishes / searches don't re-fetch the same clone candidates). Resets
+    // on restart.
+    private val harvestedCandidates = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+
+    /** Harvest a batch of avatar ids (e.g. EVERY candidate a clone/name search
+     *  surfaced, not just the one we cloned) into the catalog — each is a real avatar,
+     *  so resolving its own file id + platforms is a free coverage grab. Deduped
+     *  against the catalog + a session set, paced + capped so a big instance can't
+     *  storm VRChat REST. Fire-and-forget. */
+    fun harvestAvatarIds(context: Context, avatarIds: List<String>) {
+        val app = context.applicationContext
+        scope.launch {
+            var n = 0
+            for (id in avatarIds) {
+                if (n >= 300) break                           // generous per-call bound (session dedup covers the rest)
+                if (!AVTR_RE.matches(id)) continue
+                if (!harvestedCandidates.add(id)) continue    // already attempted this session
+                val e = try { VrchatAuthManager.avatarCatalogEntry(app, id) } catch (ex: Exception) { null }
+                    ?: continue                               // null = private/dead/transient (skipped)
+                if (map.containsKey(e.fileId)) continue
+                contribute(app, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
+                n++
+                delay(700)  // pace VRChat REST (low-priority background)
             }
         }
     }
@@ -443,7 +533,7 @@ object AvatarGlobalDb {
             for (a in lib) {
                 val e = a.entry
                 if (a.isPublic) {
-                    contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms)
+                    contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
                     added++
                 } else if (a.ownUpload && map.containsKey(e.fileId)) {
                     // The user made their own PUBLIC avatar private -> report removal
@@ -460,7 +550,7 @@ object AvatarGlobalDb {
                 resolvedFavourites.add(id) // mark attempted (retries on next app launch)
                 val e = try { VrchatAuthManager.avatarCatalogEntry(context, id) } catch (ex: Exception) { null }
                     ?: continue // null = private/dead/transient — skipped
-                contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms)
+                contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
                 favAdded++
                 delay(400) // pace VRChat REST
             }
@@ -473,7 +563,7 @@ object AvatarGlobalDb {
             val e = VrchatAuthManager.currentAvatarCatalogEntry(context)
             if (e == null) { ownAvatar = "no current avatar (not logged in?) ${nowShort()}"; return }
             ownAvatar = "${e.name.ifBlank { e.avatarId }} ${nowShort()}"
-            contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms)
+            contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
         } catch (ex: Exception) {
             ownAvatar = "error ${ex.javaClass.simpleName}"
             Log.w(TAG, "own-avatar harvest failed", ex)

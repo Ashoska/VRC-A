@@ -12,17 +12,20 @@ import java.net.URL
 import java.net.URLEncoder
 
 /**
- * A SEPARATE, isolated VRChat session for the avatar-catalog dead-check/refresh
- * sweep — a dedicated **bot account** so the admin's REAL VRChat account isn't
- * rate-limited by the continuous `/avatars/{id}` checks. Its cookies live in their
- * own encrypted store (`vrca_bot_vrchat`), fully independent of VrchatAuthManager.
+ * SEPARATE, isolated VRChat sessions for the avatar-catalog bots — dedicated **bot
+ * accounts** so the admin's REAL VRChat account isn't rate-limited by the continuous
+ * `/avatars/{id}` checks. There are up to [SLOTS] independent slots so several bots
+ * can run at once (reports / fill / two liveness sweepers), each with its OWN
+ * encrypted cookie store, fully independent of VrchatAuthManager.
  *
- * Deliberately minimal: login (+2FA) and `GET /avatars/{id}`. Admin build only.
+ * Slot 0 keeps the legacy store name (`vrca_bot_vrchat`) so an already-logged-in bot
+ * survives the upgrade. Deliberately minimal: login (+2FA) and `GET /avatars/{id}`.
+ * Admin build only.
  */
 object BotVrchatSession {
+    const val SLOTS = 4
     private const val BASE = "https://api.vrchat.cloud/api/1"
     private const val UA = "VRC-A/1.0 (VRChat companion)"
-    private const val PREFS = "vrca_bot_vrchat"
     private const val KEY_AUTH = "auth_cookie"
     private const val KEY_2FA = "twofa_cookie"
     private const val KEY_NAME = "bot_name"
@@ -33,27 +36,32 @@ object BotVrchatSession {
         data class Error(val message: String) : LoginResult()
     }
 
-    private fun prefs(context: Context): android.content.SharedPreferences? = try {
+    private fun prefsName(slot: Int) = if (slot <= 0) "vrca_bot_vrchat" else "vrca_bot_vrchat_$slot"
+
+    private fun prefs(context: Context, slot: Int): android.content.SharedPreferences? = try {
         val mk = MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build()
         EncryptedSharedPreferences.create(
-            context, PREFS, mk,
+            context, prefsName(slot), mk,
             EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
         )
     } catch (e: Exception) { null }
 
-    fun isLoggedIn(context: Context): Boolean =
-        !(prefs(context)?.getString(KEY_AUTH, null)).isNullOrBlank()
+    fun isLoggedIn(context: Context, slot: Int = 0): Boolean =
+        !(prefs(context, slot)?.getString(KEY_AUTH, null)).isNullOrBlank()
 
-    fun botName(context: Context): String = prefs(context)?.getString(KEY_NAME, "") ?: ""
+    fun botName(context: Context, slot: Int = 0): String = prefs(context, slot)?.getString(KEY_NAME, "") ?: ""
 
-    fun logout(context: Context) { prefs(context)?.edit()?.clear()?.apply() }
+    fun logout(context: Context, slot: Int = 0) { prefs(context, slot)?.edit()?.clear()?.apply() }
+
+    /** How many bot slots are currently logged in (for the UI + sweep gating). */
+    fun loggedInCount(context: Context): Int = (0 until SLOTS).count { isLoggedIn(context, it) }
 
     // VRChat URL-decodes the basic-auth creds, so URI-encode before base64.
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8").replace("+", "%20")
 
-    private fun cookieHeader(context: Context): String? {
-        val p = prefs(context) ?: return null
+    private fun cookieHeader(context: Context, slot: Int): String? {
+        val p = prefs(context, slot) ?: return null
         val auth = p.getString(KEY_AUTH, null)
         val twofa = p.getString(KEY_2FA, null)
         return listOfNotNull(auth, twofa).takeIf { it.isNotEmpty() }?.joinToString("; ")
@@ -67,7 +75,7 @@ object BotVrchatSession {
         return null
     }
 
-    suspend fun login(context: Context, username: String, password: String): LoginResult =
+    suspend fun login(context: Context, slot: Int, username: String, password: String): LoginResult =
         withContext(Dispatchers.IO) {
             var conn: HttpURLConnection? = null
             try {
@@ -85,12 +93,12 @@ object BotVrchatSession {
                     ?.bufferedReader()?.readText() ?: ""
                 val setCookies = conn.headerFields["Set-Cookie"] ?: emptyList()
                 extractCookie(setCookies, "auth")?.let {
-                    prefs(context)?.edit()?.putString(KEY_AUTH, it)?.apply()
+                    prefs(context, slot)?.edit()?.putString(KEY_AUTH, it)?.apply()
                 }
                 if (code != 200) return@withContext LoginResult.Error("HTTP $code")
                 val json = JSONObject(body)
                 json.optString("displayName", "").takeIf { it.isNotBlank() }?.let {
-                    prefs(context)?.edit()?.putString(KEY_NAME, it)?.apply()
+                    prefs(context, slot)?.edit()?.putString(KEY_NAME, it)?.apply()
                 }
                 val requires = json.optJSONArray("requiresTwoFactorAuth")
                 if (requires != null && requires.length() > 0) {
@@ -105,9 +113,9 @@ object BotVrchatSession {
             } finally { runCatching { conn?.disconnect() } }
         }
 
-    suspend fun verify2FA(context: Context, code: String, email: Boolean): LoginResult =
+    suspend fun verify2FA(context: Context, slot: Int, code: String, email: Boolean): LoginResult =
         withContext(Dispatchers.IO) {
-            val auth = prefs(context)?.getString(KEY_AUTH, null)
+            val auth = prefs(context, slot)?.getString(KEY_AUTH, null)
                 ?: return@withContext LoginResult.Error("no auth cookie")
             var conn: HttpURLConnection? = null
             try {
@@ -125,10 +133,10 @@ object BotVrchatSession {
                 val respCode = conn.responseCode
                 val setCookies = conn.headerFields["Set-Cookie"] ?: emptyList()
                 extractCookie(setCookies, "twoFactorAuth")?.let {
-                    prefs(context)?.edit()?.putString(KEY_2FA, it)?.apply()
+                    prefs(context, slot)?.edit()?.putString(KEY_2FA, it)?.apply()
                 }
                 extractCookie(setCookies, "auth")?.let {
-                    prefs(context)?.edit()?.putString(KEY_AUTH, it)?.apply()
+                    prefs(context, slot)?.edit()?.putString(KEY_AUTH, it)?.apply()
                 }
                 if (respCode == 200) LoginResult.Success else LoginResult.Error("2FA HTTP $respCode")
             } catch (e: Exception) {
@@ -136,17 +144,44 @@ object BotVrchatSession {
             } finally { runCatching { conn?.disconnect() } }
         }
 
-    /** One avatar's check result: alive + fresh fields, or dead (404/410). */
+    /** Session validity for a slot's stored cookie. */
+    enum class Auth { AUTHED, EXPIRED, UNKNOWN }
+
+    /** Cheap `GET /auth` check so the UI can show whether a bot is still authed:
+     *  200 = AUTHED, 401 = EXPIRED (needs re-login), anything else / no cookie =
+     *  UNKNOWN (network/transient — don't claim expired). */
+    suspend fun validate(context: Context, slot: Int): Auth = withContext(Dispatchers.IO) {
+        val cookie = cookieHeader(context, slot) ?: return@withContext Auth.UNKNOWN
+        var conn: HttpURLConnection? = null
+        try {
+            conn = (URL("$BASE/auth").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                setRequestProperty("User-Agent", UA)
+                setRequestProperty("Cookie", cookie)
+                connectTimeout = 12000; readTimeout = 12000
+            }
+            when (conn.responseCode) {
+                200 -> Auth.AUTHED
+                401 -> Auth.EXPIRED
+                else -> Auth.UNKNOWN
+            }
+        } catch (e: Exception) { Auth.UNKNOWN }
+        finally { runCatching { conn?.disconnect() } }
+    }
+
+    /** One avatar's check result: alive + fresh fields (incl. bio), or dead (404/410/403). */
     data class AvatarCheck(
         val alive: Boolean, val fileId: String?, val name: String,
-        val author: String, val authorId: String, val platforms: List<String>
+        val author: String, val authorId: String, val platforms: List<String>,
+        val description: String = ""
     )
 
-    /** GET /avatars/{id} with the BOT cookie. 404/410 = dead; a non-200 that isn't
+    /** GET /avatars/{id} with a BOT cookie. 404/410/403 = not publicly accessible
+     *  (deleted/gone/private) → remove from the PUBLIC catalog; a non-200 that isn't
      *  those (rate limit / network) returns null so the sweep leaves it untouched. */
-    suspend fun checkAvatar(context: Context, avatarId: String): AvatarCheck? =
+    suspend fun checkAvatar(context: Context, slot: Int, avatarId: String): AvatarCheck? =
         withContext(Dispatchers.IO) {
-            val cookie = cookieHeader(context) ?: return@withContext null
+            val cookie = cookieHeader(context, slot) ?: return@withContext null
             var conn: HttpURLConnection? = null
             try {
                 conn = (URL("$BASE/avatars/$avatarId").openConnection() as HttpURLConnection).apply {
@@ -156,15 +191,15 @@ object BotVrchatSession {
                     connectTimeout = 15000; readTimeout = 15000
                 }
                 val code = conn.responseCode
-                // Not publicly accessible -> remove from the PUBLIC catalog: 404/410 =
-                // deleted/gone, 403 = private/forbidden (VRChat hides it from non-owners).
-                // A genuinely public avatar always returns 200 to anyone.
                 if (code == 404 || code == 410 || code == 403)
                     return@withContext AvatarCheck(false, null, "", "", "", emptyList())
-                // 401 (bot session dead) / 429 (rate limit) / 5xx / network -> UNKNOWN,
-                // skip (never mass-remove on a transient/auth failure).
-                if (code != 200) return@withContext null
+                if (code != 200) return@withContext null   // transient/auth → skip
                 val j = JSONObject(conn.inputStream.bufferedReader().readText())
+                // PRIVACY: a genuinely public avatar returns 200; a non-public one the
+                // bot can somehow read (its own etc.) must NOT enter/stay in the shared
+                // catalog — treat non-public as "remove".
+                if (j.optString("releaseStatus", "public") != "public")
+                    return@withContext AvatarCheck(false, null, "", "", "", emptyList())
                 val fileId = Regex("file_[0-9a-fA-F-]{36}").find(
                     j.optString("thumbnailImageUrl", "").ifBlank { j.optString("imageUrl", "") }
                 )?.value
@@ -179,7 +214,8 @@ object BotVrchatSession {
                 } ?: emptyList()
                 AvatarCheck(
                     true, fileId, j.optString("name", ""),
-                    j.optString("authorName", ""), j.optString("authorId", ""), plats
+                    j.optString("authorName", ""), j.optString("authorId", ""), plats,
+                    j.optString("description", "")
                 )
             } catch (e: Exception) { null }
             finally { runCatching { conn?.disconnect() } }

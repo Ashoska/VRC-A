@@ -1302,7 +1302,7 @@ object VrchatAuthManager {
      * user's avatars (403/401) it self-disables for the session. Returns the avtr_ id
      * or null (blocked / author unknown / not in the author's public list).
      */
-    private suspend fun resolveViaAuthorAvatars(context: Context, wornFileId: String): String? =
+    private suspend fun resolveViaAuthorAvatars(context: Context, wornFileId: String): Pair<String, List<String>>? =
         withContext(Dispatchers.IO) {
             if (authorAvatarsListingBlocked) {
                 com.vrca.vrchat.AvatarSearch.Diag.authorListing = "disabled for session (was blocked earlier)"
@@ -1342,13 +1342,14 @@ object VrchatAuthManager {
                 // wrong".) Also whether any matched the worn image file id.
                 var ownerMatches = 0
                 var fileMatch: String? = null
+                var fileMatchPlatforms: List<String> = emptyList()
                 for (i in 0 until arr.length()) {
                     val a = arr.optJSONObject(i) ?: continue
                     if (a.optString("authorId", "") == authorId) ownerMatches++
                     val thumb = a.optString("thumbnailImageUrl", "").ifBlank { a.optString("imageUrl", "") }
                     if (fileMatch == null && fileIdOf(thumb) == wornFileId) {
                         val id = a.optString("id", "")
-                        if (id.startsWith("avtr_")) fileMatch = id
+                        if (id.startsWith("avtr_")) { fileMatch = id; fileMatchPlatforms = platformsFromAvatarJson(a) }
                     }
                 }
                 val n = arr.length()
@@ -1362,16 +1363,32 @@ object VrchatAuthManager {
                     else ->
                         "HTTP 200, $n author avatars, ownerMatch=$ownerMatches, but none match worn file (avatar not public-listed)"
                 }
-                fileMatch
+                fileMatch?.let { it to fileMatchPlatforms }
             } catch (e: Exception) {
                 com.vrca.vrchat.AvatarSearch.Diag.authorListing = "error: ${e.javaClass.simpleName}"
                 null
             }
         }
 
-    /** The worn-avatar thumbnail file id for a public avatar, via the PUBLIC
-     *  `GET /avatars/{id}`. Returns null on 404 (private/deleted) or error. */
-    private suspend fun fetchAvatarThumbFileId(context: Context, avatarId: String): String? =
+    /** VRChat avatar-object platform compatibility (`unityPackages[].platform`) mapped
+     *  to our display labels. Empty when the object carries no packages. */
+    private fun platformsFromAvatarJson(j: org.json.JSONObject): List<String> {
+        val ups = j.optJSONArray("unityPackages") ?: return emptyList()
+        val out = LinkedHashSet<String>()
+        for (i in 0 until ups.length()) {
+            when ((ups.optJSONObject(i)?.optString("platform", "") ?: "").lowercase()) {
+                "standalonewindows" -> out.add("PC")
+                "android" -> out.add("Quest")
+                "ios" -> out.add("iOS")
+            }
+        }
+        return out.toList()
+    }
+
+    /** `(thumbFileId, platforms)` for a public avatar via `GET /avatars/{id}`, or null
+     *  on 404/403/error. Used to CONFIRM a name candidate by its image file id AND to
+     *  read the avatar's platform compatibility for the Quest clone gate. */
+    private suspend fun fetchAvatarInfo(context: Context, avatarId: String): Pair<String?, List<String>>? =
         withContext(Dispatchers.IO) {
             val cookie = getCookieHeader(context) ?: return@withContext null
             try {
@@ -1379,128 +1396,146 @@ object VrchatAuthManager {
                 if (code == 200) captureRolledCookies(context, raw)
                 if (code != 200 || !body.startsWith("{")) return@withContext null
                 val j = org.json.JSONObject(body)
-                fileIdOf(j.optString("thumbnailImageUrl", "").ifBlank { j.optString("imageUrl", "") })
+                fileIdOf(j.optString("thumbnailImageUrl", "").ifBlank { j.optString("imageUrl", "") }) to
+                    platformsFromAvatarJson(j)
             } catch (e: Exception) { null }
         }
+
+    /** Just the platform compatibility list for an avatar (empty on any failure). */
+    private suspend fun fetchAvatarPlatforms(context: Context, avatarId: String): List<String> =
+        fetchAvatarInfo(context, avatarId)?.second ?: emptyList()
+
+    /** The result of a worn-avatar resolve: the `avtr_` id (or null when nothing
+     *  could be confirmed) plus the avatar's platform compatibility (for the Quest
+     *  clone gate — empty when unknown). */
+    data class WornAvatarResult(val avatarId: String?, val platforms: List<String> = emptyList())
 
     /**
      * Resolve a remote player's EXACT worn avatar id. Quest can't get it from the
      * log (the avatar id isn't written) or the API (`/users/{id}` hides it), so we:
      *  0. read the worn avatar's IMAGE file id from `/users/{id}` (a unique key) and
-     *     look it up DIRECTLY by that file id (name-independent — catches renamed/
-     *     odd-named avatars a name search misses),
+     *     look it up DIRECTLY by that file id (catalog / image-file-id / author list),
      *  1. else search the avatar database (avtrdb) by the log's avatar NAME,
-     *  2. and confirm a name candidate by its image file id,
-     *  3. CONFIRM a candidate by fetching its public `GET /avatars/{id}` and matching
-     *     the image file id — an exact 1:1 check, immune to name collisions.
-     * `author` (from the log's `Unpacking Avatar (… by …)`) ranks candidates first.
-     * Returns the `avtr_` id, or null when no database has the avatar indexed
-     * (the only unavoidable miss — nothing public that people actually wear is
-     * usually absent). Best-effort fallback: a lone name+author match.
+     *  2. and CONFIRM a name candidate by its image file id (exact, immune to
+     *     name collisions).
+     *
+     * **Names are NOT verifiable on their own.** When we DO know the worn image file
+     * id, an id is returned ONLY if a candidate's image file id matches it; a mere
+     * name/author match is REJECTED (returning it clones a same-named *different*
+     * avatar — the exact bug this guards against). A name-only best-effort is used
+     * ONLY when there's no worn image at all (an impostor'd player whose thumbnail is
+     * hidden), where a guess is the sole option.
+     *
+     * Also returns the resolved avatar's platform list so the caller can grey the
+     * clone button for a PC/iOS-only avatar on a Quest device.
      */
     suspend fun resolveWornAvatarId(
         context: Context, userId: String, avatarName: String, author: String
-    ): String? = withContext(Dispatchers.IO) {
+    ): WornAvatarResult = withContext(Dispatchers.IO) {
         val wornFileId = fileIdOf(fetchUserInfo(context, userId)?.wornAvatarThumbUrl.orEmpty())
-        // NAME-OPTIONAL: resolve purely from the worn image file id (catalog /
-        // author-listing / image-file-id) — so an impostor'd player in a big instance
-        // (no Unpacking line, so no log avatar name) is still resolvable by their id.
-        if (avatarName.isBlank() && wornFileId == null) return@withContext null
-        // GLOBAL crowdsourced catalog first — exact, offline, zero network. This is
-        // the extra coverage no public DB has (ids VRC-A users contributed).
+        // NAME-OPTIONAL: resolve purely from the worn image file id when there's no
+        // log name (impostor'd player in a big instance).
+        if (avatarName.isBlank() && wornFileId == null) return@withContext WornAvatarResult(null)
+        // GLOBAL crowdsourced catalog first — exact, offline, zero network.
         com.vrca.vrchat.AvatarGlobalDb.lookup(wornFileId)?.let {
             com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog"
-            return@withContext it.avatarId
+            return@withContext WornAvatarResult(it.avatarId, it.platforms)
         }
-        // 0. EXACT, NAME-INDEPENDENT: look the avatar up by its worn IMAGE FILE ID —
-        //    invariant per upload, so this resolves it even when the log's avatar name
-        //    is renamed/truncated/generic/colliding (the main gap that used to grey the
-        //    button out). A file-id hit whose image file id equals the worn one is a
-        //    guaranteed-correct match with zero VRChat calls.
+        // 0. EXACT, NAME-INDEPENDENT: look the avatar up by its worn IMAGE FILE ID.
         if (wornFileId != null) {
             val byFile = try { com.vrca.vrchat.AvatarSearch.searchCandidatesByImageFileId(wornFileId) }
                 catch (e: Exception) { emptyList() }
             byFile.firstOrNull { it.imageFileId == wornFileId }?.let {
+                val plats = fetchAvatarPlatforms(context, it.id)
                 com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via image file id"
-                com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, it.id, avatarName, author)
-                return@withContext it.id
+                com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, it.id, avatarName, author, it.authorId, plats)
+                return@withContext WornAvatarResult(it.id, plats)
             }
             // 0b. OFFICIAL: the author's public-avatars listing, matched by the worn
-            //     image file id. No third-party DB; exact when VRChat permits it.
-            resolveViaAuthorAvatars(context, wornFileId)?.let {
+            //     image file id (also yields the avatar's platforms). Exact.
+            resolveViaAuthorAvatars(context, wornFileId)?.let { (id, plats) ->
                 com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via author listing"
-                com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, it, avatarName, author)
-                return@withContext it
+                com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, id, avatarName, author, "", plats)
+                return@withContext WornAvatarResult(id, plats)
             }
         }
         // No log name (impostor'd player) — the file-id/catalog/author paths above were
         // our only shot; a name search is impossible, so stop here.
         if (avatarName.isBlank()) {
             com.vrca.vrchat.AvatarSearch.Diag.lastReason = "no name; not in catalog/author list"
-            return@withContext null
+            return@withContext WornAvatarResult(null)
         }
-        // 1. NAME search across VARIANTS — the log's avatar name often carries a
-        //    descriptor the DB doesn't store ("Ball Python (handpuppet / head puppet)"
-        //    -> "Ball Python"), which makes a single-string search miss. Merge the
-        //    candidates from each variant (deduped by avtr_ id).
+        // 1. NAME search across VARIANTS (the log name often carries a descriptor the
+        //    DB doesn't store). Merge candidates deduped by avtr_ id.
         val variants = avatarNameVariants(avatarName)
         val merged = LinkedHashMap<String, com.vrca.vrchat.AvatarSearch.Candidate>()
         for (v in variants) {
             val found = try { com.vrca.vrchat.AvatarSearch.searchCandidates(v) } catch (e: Exception) { emptyList() }
-            for (c in found) merged.putIfAbsent(c.id, c)
-            if (merged.size >= 30) break
+            for (c in found) merged.putIfAbsent(c.id, c)   // no cap — collect every candidate (free grabs)
         }
         val candidates = merged.values.toList()
+        // FREE GRABS: every candidate is a real avatar — harvest ALL of them into the
+        // catalog in the background (each resolves its own file id + platforms), not
+        // just the one we clone. Fire-and-forget, paced + deduped inside the harvester.
+        if (candidates.isNotEmpty())
+            com.vrca.vrchat.AvatarGlobalDb.harvestAvatarIds(context, candidates.map { it.id })
         if (candidates.isEmpty()) {
             com.vrca.vrchat.AvatarSearch.Diag.lastReason = "0 candidates in any DB (not indexed)"
-            return@withContext null
+            return@withContext WornAvatarResult(null)
         }
         val authorNorm = author.trim().lowercase()
         if (wornFileId != null) {
-            // 2. DIRECT match — a DB (VRCX-style) already gave VRChat's raw image
-            //    file id and it equals the worn one. Exact, no extra VRChat call.
+            // 2. DIRECT match — a DB already gave VRChat's raw image file id and it
+            //    equals the worn one. Exact, no extra VRChat call.
             candidates.firstOrNull { it.imageFileId == wornFileId }?.let {
+                val plats = fetchAvatarPlatforms(context, it.id)
                 com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name->fileid"
-                com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, it.id, avatarName, author)
-                return@withContext it.id
+                com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, it.id, avatarName, author, it.authorId, plats)
+                return@withContext WornAvatarResult(it.id, plats)
             }
-            // 3. CONFIRM proxied-image candidates (avtrdb) via VRChat GET /avatars/{id}.
-            //    Author (from the log) ranks first; capped so we don't spam VRChat.
+            // 3. CONFIRM proxied-image candidates (avtrdb) via VRChat GET /avatars/{id}
+            //    — match on the worn image file id (also reads platforms in one call).
             val ranked = candidates.filter { it.imageFileId == null }
                 .sortedByDescending { if (authorNorm.isNotBlank() && it.author.trim().lowercase() == authorNorm) 1 else 0 }
                 .take(6)
             for (c in ranked) {
-                if (fetchAvatarThumbFileId(context, c.id) == wornFileId) {
+                val info = fetchAvatarInfo(context, c.id)
+                if (info != null && info.first == wornFileId) {
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name confirm"
-                    com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, c.id, avatarName, c.author)
-                    return@withContext c.id
+                    com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, c.id, avatarName, c.author, c.authorId, info.second)
+                    return@withContext WornAvatarResult(c.id, info.second)
                 }
                 kotlinx.coroutines.delay(250)
             }
+            // We KNOW the worn image but no candidate's image matched it. Every
+            // candidate here is therefore a DIFFERENT avatar that merely shares the
+            // name — refuse to name-guess (that was the wrong-clone bug). Grey out.
+            com.vrca.vrchat.AvatarSearch.Diag.lastReason =
+                "${candidates.size} candidates, none matched the worn image (won't name-guess)"
+            return@withContext WornAvatarResult(null)
         }
-        // 4. No image confirmation possible (worn thumb hidden / not on any candidate).
-        //    (a) a single unambiguous name+author match.
+        // wornFileId == null (impostor'd / hidden thumb): a name-only best-effort is
+        // the ONLY option here. (a) a single unambiguous name+author match.
         val authorMatches = candidates.filter {
             authorNorm.isNotBlank() && it.author.trim().lowercase() == authorNorm
         }
         if (authorMatches.size == 1) {
-            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name+author"
-            return@withContext authorMatches[0].id
+            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name+author (no worn image)"
+            return@withContext WornAvatarResult(authorMatches[0].id)
         }
-        // (b) a single EXACT-name match (author unknown or agreeing) — catches an
-        //     avatar that IS in a DB but whose worn thumbnail didn't confirm.
+        // (b) a single EXACT-name match.
         val wantNames = variants.map { normalizeAvatarName(it) }.filter { it.length >= 2 }.toSet()
         val nameHits = candidates.filter {
             normalizeAvatarName(it.name) in wantNames &&
                 (authorNorm.isBlank() || it.author.trim().lowercase() == authorNorm)
         }.distinctBy { it.id }
         if (nameHits.size == 1) {
-            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via unique exact-name"
-            return@withContext nameHits[0].id
+            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via unique exact-name (no worn image)"
+            return@withContext WornAvatarResult(nameHits[0].id)
         }
         com.vrca.vrchat.AvatarSearch.Diag.lastReason =
-            "${candidates.size} candidates, none confirmed (worn thumb hidden/mismatch or ambiguous name)"
-        null
+            "${candidates.size} candidates, ambiguous (no worn image to confirm)"
+        WornAvatarResult(null)
     }
 
     private fun normalizeAvatarName(s: String): String =
@@ -1531,7 +1566,8 @@ object VrchatAuthManager {
         val name: String,
         val author: String,
         val authorId: String,
-        val platforms: List<String>
+        val platforms: List<String>,
+        val description: String = ""
     )
 
     /** The local user's OWN current avatar as a catalog entry — the id they can
@@ -1569,7 +1605,8 @@ object VrchatAuthManager {
                 }.map { prettyPlatform(it) }.filter { it.isNotBlank() }.distinct()
             } ?: emptyList()
             CatalogEntry(fileId, avatarId, j.optString("name", ""),
-                j.optString("authorName", ""), j.optString("authorId", ""), plats)
+                j.optString("authorName", ""), j.optString("authorId", ""), plats,
+                j.optString("description", ""))
         } catch (e: Exception) { null }
     }
 
@@ -1660,7 +1697,8 @@ object VrchatAuthManager {
                     } ?: emptyList()
                     out.putIfAbsent(fileId, OwnAvatar(
                         CatalogEntry(fileId, id, j.optString("name", ""),
-                            j.optString("authorName", ""), j.optString("authorId", ""), plats),
+                            j.optString("authorName", ""), j.optString("authorId", ""), plats,
+                            j.optString("description", "")),
                         isPublic, ownUpload
                     ))
                 }

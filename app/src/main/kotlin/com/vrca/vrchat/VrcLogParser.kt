@@ -70,6 +70,12 @@ object VrcLogParser {
         /** `Unpacking Avatar (<avatarName> by <author>)` — gives the avatar's author,
          *  used (with the avatar name) to resolve the exact avatar id on demand. */
         data class AvatarUnpack(val avatarName: String, val author: String) : LogEvent()
+
+        /** The LOCAL player's own avatar id — the ONLY `avtr_` a Quest log contains
+         *  (its own avatar-data load/save lines). Reliably captures every own-avatar
+         *  switch (the OSC `/avatar/change` path can drop events), so we can harvest
+         *  the user's own avatars into the catalog on each change. */
+        data class OwnAvatar(val avatarId: String) : LogEvent()
     }
 
     // Message-body matchers (prefix already stripped). VRChat prefixes most of
@@ -109,6 +115,9 @@ object VrcLogParser {
     private val RE_AVATAR_UNPACK = Regex(
         """Unpacking Avatar\s+\((.+?)\s+by\s+(.+?)\)\s*$"""
     )
+    // Any `avtr_` id in a Quest log line is the LOCAL player's OWN avatar (remote
+    // players' ids are never logged) — captured from its avatar-data load/save lines.
+    private val RE_OWN_AVATAR = Regex("""(avtr_[0-9a-fA-F-]{36})""")
     // Leading "YYYY.MM.DD HH:MM:SS   Level   -  " prefix (variable spacing).
     private val RE_PREFIX = Regex(
         """^\d{4}\.\d{2}\.\d{2}\s+\d{2}:\d{2}:\d{2}\s+\w+\s+-\s+"""
@@ -160,6 +169,8 @@ object VrcLogParser {
         RE_AVATAR_UNPACK.find(body)?.let { m ->
             return LogEvent.AvatarUnpack(m.groupValues[1].trim(), m.groupValues[2].trim())
         }
+        // Any avtr_ id (own avatar-data load/save) — the local player's own avatar.
+        RE_OWN_AVATAR.find(body)?.let { return LogEvent.OwnAvatar(it.groupValues[1]) }
         return null
     }
 
@@ -277,6 +288,9 @@ object VrcLogParser {
                 roster = state.roster + (entry.key to entry.value.copy(avatarCreator = event.author))
             )
         }
+        // The local player's own avatar id doesn't change roster state — it's consumed
+        // as a side-effect (own-avatar harvest) by the reader, not folded here.
+        is LogEvent.OwnAvatar -> state
     }
 
     /**

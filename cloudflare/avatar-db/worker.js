@@ -48,6 +48,8 @@ function validEntry(e) {
 
 function cleanEntry(e) {
   const now = Date.now();
+  const desc = typeof e.description === "string" ? e.description
+    : (typeof e.desc === "string" ? e.desc : "");
   return {
     id: e.avatarId,
     name: typeof e.name === "string" ? e.name.slice(0, 100) : "",
@@ -56,6 +58,11 @@ function cleanEntry(e) {
     platforms: Array.isArray(e.platforms)
       ? e.platforms.filter((p) => typeof p === "string").slice(0, 4)
       : [],
+    // Avatar description/bio (device- or bot-filled). Kept short.
+    desc: desc.slice(0, 400),
+    // The bot has done a full first-fill of this entry (name/author/platforms/bio).
+    // Devices contribute filled=false; the fill bot sets it true.
+    filled: e.filled === true,
     added: now,
     checked: now, // last time the bot verified this avatar is alive (= added at first)
   };
@@ -87,7 +94,9 @@ export default {
         const body = await req.json().catch(() => null);
         if (!body || !FILE_RE.test(body.fileId || "")) return json({ ok: false }, 400);
         const key = "rep:" + body.fileId;
-        const cur = JSON.parse((await env.AVATAR_KV.get(key)) || "{}");
+        const existing = await env.AVATAR_KV.get(key);
+        const cur = JSON.parse(existing || "{}");
+        const isNewReport = !existing;
         cur.status = body.status === "renamed" ? "renamed" : "dead";
         if (body.status === "renamed" && typeof body.name === "string") {
           cur.name = body.name.slice(0, 100);
@@ -98,6 +107,14 @@ export default {
         }
         cur.count = (cur.count || 0) + 1;
         await env.AVATAR_KV.put(key, JSON.stringify(cur), { expirationTtl: 30 * 86400 });
+        // Wake the bot promptly: bump the live report count in meta so the sweep's
+        // cheap /health poll sees it immediately instead of waiting up to ~10 min for
+        // the next flush to stamp meta.reports. Self-corrects at the next flush.
+        if (isNewReport) {
+          const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+          meta.reports = (meta.reports || 0) + 1;
+          await env.AVATAR_KV.put("meta", JSON.stringify(meta));
+        }
         return json({ ok: true });
       }
 
@@ -114,6 +131,10 @@ export default {
           lastFlush: meta.lastFlush || null,
           lastAdded: meta.lastAdded || 0,
           lastRemoved: meta.lastRemoved || 0,
+          // Cumulative totals (climb over the Worker's lifetime, so bot activity is
+          // visible even between flushes that changed nothing).
+          totalAdded: meta.totalAdded || 0,
+          totalRemoved: meta.totalRemoved || 0,
           // Where this Worker WRITES (so a repo/branch/path mismatch is visible):
           repo: env.GH_REPO || "(unset)",
           path: env.DB_PATH || "(unset)",
@@ -261,12 +282,17 @@ async function flush(env) {
   const path = env.DB_PATH;
   const branch = env.GH_BRANCH || "main";
   const headers = ghHeaders(env);
+  // Prior meta — so we can carry the CUMULATIVE added/removed totals across flushes
+  // (the per-flush lastAdded/lastRemoved reset each time, which read as "nothing
+  // happened"; the running totals are what make bot activity visible).
+  const prevMeta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
 
   // GUARD: never write to an unset/undefined path (that created the "undefined"
   // file). Abort and record the reason so /health shows it.
   if (!path || path === "undefined" || !repo || repo === "undefined") {
     await env.AVATAR_KV.put("meta", JSON.stringify({
       lastFlush: new Date().toISOString(), lastAdded: 0, lastRemoved: 0,
+      totalAdded: prevMeta.totalAdded || 0, totalRemoved: prevMeta.totalRemoved || 0,
       entries: 0, lastCommit: "ERROR: GH_REPO/DB_PATH unset (repo=" + repo + " path=" + path + ")",
     }));
     return;
@@ -425,7 +451,9 @@ async function flush(env) {
       const errText = await putRes.text().catch(() => "");
       await env.AVATAR_KV.put("meta", JSON.stringify({
         lastFlush: new Date().toISOString(),
-        lastAdded: 0, lastRemoved: 0, entries,
+        lastAdded: 0, lastRemoved: 0,
+        totalAdded: prevMeta.totalAdded || 0, totalRemoved: prevMeta.totalRemoved || 0,
+        entries,
         lastCommit: lastCommit + " FAILED: " + errText.slice(0, 200),
       }));
       return;
@@ -453,6 +481,10 @@ async function flush(env) {
       lastFlush: new Date().toISOString(),
       lastAdded: added,
       lastRemoved: removed,
+      // Running totals since the Worker started keeping them (so the admin can SEE
+      // the numbers climb even when a given flush changed nothing).
+      totalAdded: (prevMeta.totalAdded || 0) + added,
+      totalRemoved: (prevMeta.totalRemoved || 0) + removed,
       entries,
       lastCommit,
       // For /health (so it needn't list KV): activity seen at this flush.
