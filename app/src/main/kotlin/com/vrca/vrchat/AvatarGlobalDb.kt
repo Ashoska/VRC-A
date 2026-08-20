@@ -429,6 +429,34 @@ object AvatarGlobalDb {
         }
     }
 
+    // Candidate ids we've already attempted to harvest this session (so repeated
+    // roster publishes / searches don't re-fetch the same clone candidates). Resets
+    // on restart.
+    private val harvestedCandidates = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+
+    /** Harvest a batch of avatar ids (e.g. EVERY candidate a clone/name search
+     *  surfaced, not just the one we cloned) into the catalog — each is a real avatar,
+     *  so resolving its own file id + platforms is a free coverage grab. Deduped
+     *  against the catalog + a session set, paced + capped so a big instance can't
+     *  storm VRChat REST. Fire-and-forget. */
+    fun harvestAvatarIds(context: Context, avatarIds: List<String>) {
+        val app = context.applicationContext
+        scope.launch {
+            var n = 0
+            for (id in avatarIds) {
+                if (n >= 40) break                            // safety bound per call
+                if (!AVTR_RE.matches(id)) continue
+                if (!harvestedCandidates.add(id)) continue    // already attempted this session
+                val e = try { VrchatAuthManager.avatarCatalogEntry(app, id) } catch (ex: Exception) { null }
+                    ?: continue                               // null = private/dead/transient (skipped)
+                if (map.containsKey(e.fileId)) continue
+                contribute(app, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms)
+                n++
+                delay(700)  // pace VRChat REST (low-priority background)
+            }
+        }
+    }
+
     /** Seed the catalog from the user's OWN uploaded + favourited avatars (all
      *  readable with ids). Once per app open — a big free coverage boost. */
     // Favourite avatar ids we've already resolved this session (avoids re-resolving
