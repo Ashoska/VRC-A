@@ -47,55 +47,57 @@ object AvatarSearch {
         val source: String = ""
     )
 
+    // avtrdb pages ~20 results each. We PAGINATE (was page 0 only ≈ 20 cap) up to
+    // AVTRDB_MAX_PAGES, stopping early once a page comes back short (= last page).
+    private const val AVTRDB_MAX_PAGES = 4
+    private const val AVTRDB_PAGE_SIZE = 20
+
+    /** Parse one avtrdb page body into display Results. Real avtrdb schema: id =
+     *  "vrc_id"; author is an OBJECT {name,vrc_id}; thumbnail = "image_url"; platforms
+     *  = "compatibility" (["pc","android","ios"]). */
+    private fun parseAvtrdbResults(body: String): List<Result> {
+        val root = JSONObject(body)
+        val arr = root.optJSONArray("avatars")
+            ?: root.optJSONArray("results")
+            ?: root.optJSONArray("data")
+            ?: return emptyList()
+        return (0 until arr.length()).mapNotNull { i ->
+            val a = arr.optJSONObject(i) ?: return@mapNotNull null
+            val id = a.optString("vrc_id", "").ifBlank { a.optString("id", "") }
+            if (id.isBlank()) return@mapNotNull null
+            val author = a.optJSONObject("author")?.optString("name", "") ?: a.optString("authorName", "")
+            val platforms = a.optJSONArray("compatibility")?.let { comp ->
+                (0 until comp.length()).mapNotNull {
+                    comp.optString(it, "").takeIf { p -> p.isNotBlank() }
+                }.map { prettyAvtrdbPlatform(it) }.filter { it.isNotBlank() }.distinct()
+            } ?: emptyList()
+            Result(
+                id = id,
+                name = a.optString("name", ""),
+                author = author,
+                imageUrl = a.optString("image_url", "").ifBlank { a.optString("thumbnailImageUrl", "") },
+                platforms = platforms,
+                authorId = a.optJSONObject("author")?.optString("vrc_id", "") ?: "",
+                imageFileId = null,
+                source = "avtrdb"
+            )
+        }
+    }
+
     suspend fun search(query: String): List<Result> = withContext(Dispatchers.IO) {
         if (query.isBlank()) return@withContext emptyList()
-        try {
-            val url = "$BASE?query=${URLEncoder.encode(query.trim(), "UTF-8")}&page=0"
-            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                setRequestProperty("User-Agent", "VRC-A/1.0 (VRChat companion)")
-                setRequestProperty("Accept", "application/json")
-                connectTimeout = 15_000; readTimeout = 15_000
+        val q = URLEncoder.encode(query.trim(), "UTF-8")
+        val out = LinkedHashMap<String, Result>()
+        for (page in 0 until AVTRDB_MAX_PAGES) {
+            val body = httpGet("$BASE?query=$q&page=$page") ?: break
+            val parsed = try { parseAvtrdbResults(body) } catch (e: Exception) {
+                Log.w(TAG, "avtrdb search parse failed", e); emptyList()
             }
-            if (conn.responseCode != 200) {
-                Log.w(TAG, "avtrdb search http ${conn.responseCode}")
-                return@withContext emptyList()
-            }
-            val body = conn.inputStream.bufferedReader().readText()
-            val root = JSONObject(body)
-            val arr = root.optJSONArray("avatars")
-                ?: root.optJSONArray("results")
-                ?: root.optJSONArray("data")
-                ?: return@withContext emptyList()
-            (0 until arr.length()).mapNotNull { i ->
-                val a = arr.optJSONObject(i) ?: return@mapNotNull null
-                // Real avtrdb schema: id = "vrc_id"; author is an OBJECT {name,vrc_id};
-                // thumbnail = "image_url"; platforms = "compatibility" (["pc","android",
-                // "ios"]). (The old code guessed id/authorName/thumbnailImageUrl/
-                // unityPackages — all absent — so every result was dropped.)
-                val id = a.optString("vrc_id", "").ifBlank { a.optString("id", "") }
-                if (id.isBlank()) return@mapNotNull null
-                val author = a.optJSONObject("author")?.optString("name", "")
-                    ?: a.optString("authorName", "")
-                val platforms = a.optJSONArray("compatibility")?.let { comp ->
-                    (0 until comp.length()).mapNotNull {
-                        comp.optString(it, "").takeIf { p -> p.isNotBlank() }
-                    }.map { prettyAvtrdbPlatform(it) }.filter { it.isNotBlank() }.distinct()
-                } ?: emptyList()
-                Result(
-                    id = id,
-                    name = a.optString("name", ""),
-                    author = author,
-                    imageUrl = a.optString("image_url", "").ifBlank { a.optString("thumbnailImageUrl", "") },
-                    platforms = platforms,
-                    authorId = a.optJSONObject("author")?.optString("vrc_id", "") ?: "",
-                    imageFileId = null,
-                    source = "avtrdb"
-                )
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "avtrdb search failed", e); emptyList()
+            if (parsed.isEmpty()) break
+            for (r in parsed) out.putIfAbsent(r.id, r)
+            if (parsed.size < AVTRDB_PAGE_SIZE) break   // short page = last page
         }
+        out.values.toList()
     }
 
     // ---- multi-DB candidate resolve (for the roster clone button) ------------
@@ -148,19 +150,26 @@ object AvatarSearch {
     }
 
     private suspend fun avtrdbCandidates(encodedQuery: String): List<Candidate> = withContext(Dispatchers.IO) {
-        val body = httpGet("$BASE?query=$encodedQuery&page=0") ?: return@withContext emptyList()
-        try {
-            val arr = JSONObject(body).optJSONArray("avatars") ?: return@withContext emptyList()
-            (0 until arr.length()).mapNotNull { i ->
-                val a = arr.optJSONObject(i) ?: return@mapNotNull null
-                val id = a.optString("vrc_id", "").ifBlank { a.optString("id", "") }
-                if (id.isBlank()) return@mapNotNull null
-                val author = a.optJSONObject("author")?.optString("name", "") ?: a.optString("authorName", "")
-                val authorId = a.optJSONObject("author")?.optString("vrc_id", "") ?: ""
-                // avtrdb image is proxied (thumb.avtrdb.com/avtr_…) → no VRChat file id.
-                Candidate(id, a.optString("name", ""), author, null, authorId)
-            }
-        } catch (e: Exception) { emptyList() }
+        val out = LinkedHashMap<String, Candidate>()
+        for (page in 0 until AVTRDB_MAX_PAGES) {
+            val body = httpGet("$BASE?query=$encodedQuery&page=$page") ?: break
+            val parsed = try {
+                val arr = JSONObject(body).optJSONArray("avatars") ?: JSONObject(body).optJSONArray("results")
+                if (arr == null) emptyList() else (0 until arr.length()).mapNotNull { i ->
+                    val a = arr.optJSONObject(i) ?: return@mapNotNull null
+                    val id = a.optString("vrc_id", "").ifBlank { a.optString("id", "") }
+                    if (id.isBlank()) return@mapNotNull null
+                    val author = a.optJSONObject("author")?.optString("name", "") ?: a.optString("authorName", "")
+                    val authorId = a.optJSONObject("author")?.optString("vrc_id", "") ?: ""
+                    // avtrdb image is proxied (thumb.avtrdb.com/avtr_…) → no VRChat file id.
+                    Candidate(id, a.optString("name", ""), author, null, authorId)
+                }
+            } catch (e: Exception) { emptyList() }
+            if (parsed.isEmpty()) break
+            for (c in parsed) out.putIfAbsent(c.id, c)
+            if (parsed.size < AVTRDB_PAGE_SIZE) break
+        }
+        out.values.toList()
     }
 
     /** VRCX-style `vrcx_search.php` sources: a JSON array (or {results:[…]}) whose
