@@ -567,6 +567,11 @@ object InstanceRosterManager {
         val now = System.currentTimeMillis()
         for (line in complete.split('\n')) {
             val ev = VrcLogParser.parseLine(line) ?: continue
+            // Reliably harvest the local player's OWN avatar on every switch, straight
+            // from the log (the OSC /avatar/change path can drop events). onAvatarChanged
+            // dedups + is public-only, so this is cheap and safe.
+            if (ev is VrcLogParser.LogEvent.OwnAvatar)
+                com.vrca.vrchat.AvatarGlobalDb.onAvatarChanged(context, ev.avatarId)
             s = VrcLogParser.apply(s, ev, now)
         }
         return s to (offset + consumed)
