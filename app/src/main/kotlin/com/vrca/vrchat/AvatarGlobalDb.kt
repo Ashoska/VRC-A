@@ -229,6 +229,12 @@ object AvatarGlobalDb {
         if (!FILE_RE.matches(fileId)) return
         if (!AVTR_RE.matches(avatarId)) return
         if (map.containsKey(fileId)) return
+        // Insert into the LOCAL catalog immediately so the contributing device can see
+        // its own new avatars (own uploads, favourites, resolved strangers) in search /
+        // clone RIGHT AWAY — no waiting for the Worker flush + next 30-min pull. Zero
+        // extra KV cost (this is a purely in-memory local add).
+        map[fileId] = Entry(fileId, avatarId, name, author, authorId, platforms,
+            System.currentTimeMillis(), description, false)
         val app = context.applicationContext
         scope.launch {
             val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
