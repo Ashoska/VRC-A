@@ -128,7 +128,9 @@ object BotController {
                 val vs = withContext(Dispatchers.Default) { AvatarCatalogSweep.roleViews(pendingReports) }
                 val bv = withContext(Dispatchers.Default) { AvatarCatalogSweep.blitzViews() }
                 _views.value = vs
-                _totalQueued.value = vs.sumOf { it.queued }
+                // The per-bot queued numbers are SPLIT shares; use the true total backlog for
+                // the "To process" pill so splitting the display doesn't distort the grand total.
+                _totalQueued.value = AvatarCatalogSweep.lastTotalBacklog
                 _blitz.value = AvatarCatalogSweep.blitzActive()
                 _blitzViews.value = bv
                 _bots.value = _bots.value.map { b ->
@@ -152,9 +154,14 @@ object BotController {
         scope.launch {
             var first = true
             while (true) {
-                if (silenced(app)) { delay(3000); continue }
+                // Gate ONLY on an in-progress manual login (chilling), NOT on the pause.
+                // Validating a stored cookie is a plain GET /auth/user — not the rate-limited
+                // endpoint — so it's safe while PAUSED, and it's exactly what lets a paused bot
+                // show "Authed" (so you can log every bot in, confirm they're all authed, THEN
+                // resume). Before, a paused app left logged-in bots stuck on "Checking…".
+                if (chilling()) { delay(3000); continue }
                 for (slot in 0 until BotVrchatSession.SLOTS) {
-                    if (silenced(app)) break
+                    if (chilling()) break
                     if (BotVrchatSession.isLoggedIn(app, slot)) {
                         var a = BotVrchatSession.validate(app, slot)
                         if (a == BotVrchatSession.Auth.EXPIRED) a = BotVrchatSession.autoRelogin(app, slot)

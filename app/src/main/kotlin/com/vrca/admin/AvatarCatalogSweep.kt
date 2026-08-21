@@ -55,6 +55,10 @@ object AvatarCatalogSweep {
 
     @Volatile var running = false; private set
     @Volatile var pushError = ""; private set
+    /** The TRUE total backlog (fill + liveness + reports), set on each roleViews() pass.
+     *  The per-bot queued numbers are SPLIT shares of a backlog; this is the real total for
+     *  the "To process" pill (so splitting the display never distorts the grand total). */
+    @Volatile var lastTotalBacklog = 0; private set
     @Volatile private var runningSig = ""
     @Volatile private var blitzUntilMs = 0L
     fun blitzActive(): Boolean = System.currentTimeMillis() < blitzUntilMs
@@ -246,18 +250,30 @@ object AvatarCatalogSweep {
             if (needsFill(e)) fill++
             if (e.checked < cutoff) { if (partitionOf(e.fileId) == 0) la++ else lb++ }
         }
+        val liveness = la + lb
+        lastTotalBacklog = fill + liveness + pendingReports
+
+        // Which backlog each role is consuming RIGHT NOW — its own role, or the one it's
+        // loaning to. Then split that backlog EVENLY across all the bots on it, so the UI shows
+        // "6181 split 4 ways = ~1546 each" and re-splits the instant a bot returns to its own
+        // field (e.g. reports arrive → 3 bots left on fill → each share jumps).
+        fun targetOf(r: Role): String = when (progress.getValue(r).helping) {
+            "Fill" -> "Fill"
+            "Liveness" -> "Liveness"
+            else -> when (r) { Role.REPORTS -> "Reports"; Role.FILL -> "Fill"; else -> "Liveness" }
+        }
+        val workers = Role.values().groupingBy { targetOf(it) }.eachCount()
+        fun backlogOf(t: String) = when (t) { "Fill" -> fill; "Liveness" -> liveness; "Reports" -> pendingReports; else -> 0 }
+
         return Role.values().map { r ->
             val p = progress.getValue(r)
-            val queued = when (r) {
-                Role.REPORTS -> pendingReports
-                Role.FILL -> fill
-                Role.LIVENESS_A -> la
-                Role.LIVENESS_B -> lb
-            }
+            val t = targetOf(r)
+            val n = (workers[t] ?: 1).coerceAtLeast(1)
+            val share = (backlogOf(t) + n - 1) / n   // ceil-split among the bots on this backlog
             RoleView(
                 role = r,
                 bot = if (p.slot >= 0) "bot ${p.slot + 1}" else "—",
-                queued = queued,
+                queued = share,
                 checked = p.checked,
                 removed = p.removed,
                 // While loaning to Fill, show the filled count (not this role's refreshed 0).
