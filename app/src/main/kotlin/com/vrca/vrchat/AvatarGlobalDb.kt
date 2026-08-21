@@ -58,7 +58,7 @@ object AvatarGlobalDb {
     // batch lands before the Worker's ~10-min GitHub push (so they don't stagnate),
     // still batched so it's a small number of writes. Contributions POST in chunks of
     // this many entries (the Worker caps a single POST) so a big harvest isn't lost.
-    private const val FLUSH_MS = 5 * 60_000L
+    private const val FLUSH_MS = 2 * 60_000L
     private const val CONTRIBUTE_CHUNK = 200
 
     data class Entry(
@@ -73,6 +73,11 @@ object AvatarGlobalDb {
         val checked: Long = 0L,
         /** Avatar description/bio (device- or bot-filled; may be genuinely empty). */
         val description: String = "",
+        /** Per-platform performance/optimisation rank (bot-filled from unityPackages):
+         *  0=Excellent 1=Good 2=Medium 3=Poor 4=VeryPoor 5=None/unknown. */
+        val perfPc: Int = 5,
+        val perfQuest: Int = 5,
+        val perfIos: Int = 5,
         /** The bot has done a full first-fill (name/author/platforms/bio). Devices
          *  contribute filled=false; only the fill bot sets it true. */
         val filled: Boolean = false
@@ -142,9 +147,27 @@ object AvatarGlobalDb {
     /** A snapshot of every catalog entry — for the admin dead-check/refresh sweep. */
     fun snapshot(): List<Entry> = map.values.toList()
 
-    /** Force a fresh pull of the catalog file (used by the admin sweep before it
-     *  walks entries, so it works on the latest data). */
-    fun forceRefresh(context: Context) { scope.launch { refresh(context.applicationContext) } }
+    /** Force a fresh pull of the catalog file. `cacheBust` (e.g. the Worker's lastFlush
+     *  timestamp) appends a query param so GitHub's CDN can't serve a STALE cached copy —
+     *  used the moment the Worker reports a new flush so new avatars land immediately. */
+    fun forceRefresh(context: Context, cacheBust: String? = null) {
+        scope.launch { refresh(context.applicationContext, cacheBust) }
+    }
+
+    /** The Worker's last-flush timestamp (cheap /health read) — changes each time the
+     *  file is rewritten, so the admin can pull the new file the instant it updates. */
+    fun workerLastFlush(): String? {
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL("$WORKER_URL/health").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                connectTimeout = 10_000; readTimeout = 10_000
+            }
+            if (conn.responseCode != 200) return null
+            JSONObject(conn.inputStream.bufferedReader().readText()).optString("lastFlush", "")
+                .takeIf { it.isNotBlank() }
+        } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
+    }
 
     /** POST authoritative admin ops (upserts/removes) to the Worker /admin endpoint.
      *  `upserts` = entries to overwrite (refreshed fields), `removeFileIds` = dead.
@@ -164,6 +187,7 @@ object AvatarGlobalDb {
                         put("name", e.name); put("author", e.author); put("authorId", e.authorId)
                         put("platforms", JSONArray(e.platforms))
                         put("description", e.description)
+                        put("perfPc", e.perfPc); put("perfQuest", e.perfQuest); put("perfIos", e.perfIos)
                         put("filled", e.filled)
                     })
                 }
@@ -180,6 +204,16 @@ object AvatarGlobalDb {
     fun markCheckedLocally(fileIds: Collection<String>) {
         val now = System.currentTimeMillis()
         for (fid in fileIds) map[fid]?.let { map[fid] = it.copy(checked = now) }
+    }
+
+    /** Apply admin bot ops to the LOCAL in-memory catalog IMMEDIATELY (upserts set
+     *  filled/refreshed fields + bump checked; removes drop the entry) so the admin's
+     *  backlog counts drop live as the bots work, instead of waiting ~15 min for the
+     *  Worker flush + re-pull. The authoritative copy is still the Worker's. */
+    fun applyAdminLocal(upserts: List<Entry>, removes: Collection<String>) {
+        val now = System.currentTimeMillis()
+        for (fid in removes) map.remove(fid)
+        for (e in upserts) map[e.fileId] = e.copy(checked = now)
     }
 
     /** Cheap pending-report count from /health (a single KV read on the Worker, no
@@ -222,15 +256,37 @@ object AvatarGlobalDb {
         } catch (e: Exception) { emptyList() } finally { runCatching { conn?.disconnect() } }
     }
 
-    /** Name search over the catalog (for the in-app avatar search). */
-    fun searchByName(query: String, limit: Int = 30): List<Entry> {
-        val q = query.trim().lowercase()
-        if (q.length < 2) return emptyList()
-        return map.values.asSequence()
-            .filter { it.name.lowercase().contains(q) }
-            .distinctBy { it.avatarId }
-            .take(limit)
-            .toList()
+    /**
+     * Search the catalog for the in-app avatar search. TOKEN-based across the avatar's
+     * NAME + AUTHOR + **DESCRIPTION** (bio) — so an avatar is findable by words in its
+     * description, not just its name (e.g. "cute fox" finds one whose bio says "a cute
+     * fox avatar" even if it's named "Foxxo"). Every query word must appear SOMEWHERE
+     * (AND), and results are ranked: a name hit weighs most, then author, then bio, with
+     * an exact/prefix name boost. This is the richer coverage the public name-only DBs
+     * can't offer — it grows as the fill bot backfills descriptions.
+     */
+    fun searchByName(query: String, limit: Int = 60): List<Entry> {
+        val ql = query.trim().lowercase()
+        val tokens = ql.split(Regex("\\s+")).filter { it.length >= 2 }
+        if (tokens.isEmpty()) return emptyList()
+        val scored = ArrayList<Pair<Entry, Int>>()
+        for (e in map.values) {
+            val name = e.name.lowercase()
+            val author = e.author.lowercase()
+            val desc = e.description.lowercase()
+            val hay = "$name $author $desc"
+            if (!tokens.all { hay.contains(it) }) continue   // AND — every word must match
+            var score = 0
+            for (t in tokens) score += when {
+                name.contains(t) -> 5
+                author.contains(t) -> 2
+                else -> 1                                     // description-only hit
+            }
+            if (name == ql) score += 20 else if (name.startsWith(tokens.first())) score += 3
+            scored.add(e to score)
+        }
+        return scored.sortedByDescending { it.second }
+            .map { it.first }.distinctBy { it.avatarId }.take(limit)
     }
 
     // ---- contribute / report -------------------------------------------------
@@ -251,7 +307,7 @@ object AvatarGlobalDb {
         // clone RIGHT AWAY — no waiting for the Worker flush + next 30-min pull. Zero
         // extra KV cost (this is a purely in-memory local add).
         map[fileId] = Entry(fileId, avatarId, name, author, authorId, platforms,
-            System.currentTimeMillis(), description, false)
+            System.currentTimeMillis(), description, filled = false)
         val app = context.applicationContext
         scope.launch {
             queueMutex.withLock {
@@ -373,15 +429,20 @@ object AvatarGlobalDb {
         } catch (e: Exception) { Log.w(TAG, "cache load failed", e) }
     }
 
-    private fun refresh(context: Context) {
+    private fun refresh(context: Context, cacheBust: String? = null) {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         // Read the file from EXACTLY where the Worker writes it — learn the URL from
         // /health (echoes rawUrl), so no repo/branch/path mismatch is possible.
-        val rawUrl = fetchWorkerRawUrl()
+        val baseUrl = fetchWorkerRawUrl()
             ?: prefs.getString(KEY_RAWURL, null)
             ?: "https://raw.githubusercontent.com/$REPO/main/$DB_PATH"
-        prefs.edit().putString(KEY_RAWURL, rawUrl).apply()
-        val etag = prefs.getString(KEY_ETAG, null)
+        prefs.edit().putString(KEY_RAWURL, baseUrl).apply()
+        // For a fresh pull (cacheBust set), read STRAIGHT FROM THE WORKER (/db, served
+        // from KV) — GitHub's raw CDN caches ~5 min and ignores cache-busting query
+        // params, which delayed the admin bots seeing new avatars. The normal (public)
+        // refresh still uses the CDN with an ETag (free, fine at 30-min cadence).
+        val rawUrl = if (cacheBust != null) "$WORKER_URL/db" else baseUrl
+        val etag = if (cacheBust == null) prefs.getString(KEY_ETAG, null) else null
         var conn: HttpURLConnection? = null
         try {
             conn = (URL(rawUrl).openConnection() as HttpURLConnection).apply {
@@ -423,6 +484,9 @@ object AvatarGlobalDb {
     private fun parseInto(text: String) {
         try {
             val avatars = JSONObject(text).optJSONObject("avatars") ?: return
+            // SAFETY: never replace a populated local catalog with an empty one (a blank
+            // /db before the first flush, a truncated read, etc.) — that would wipe it.
+            if (avatars.length() == 0 && map.isNotEmpty()) return
             val fresh = HashMap<String, Entry>(avatars.length())
             val keys = avatars.keys()
             while (keys.hasNext()) {
@@ -433,16 +497,41 @@ object AvatarGlobalDb {
                 val plats = o.optJSONArray("platforms")?.let { pa ->
                     (0 until pa.length()).mapNotNull { pa.optString(it, "").takeIf { s -> s.isNotBlank() } }
                 } ?: emptyList()
-                fresh[fileId] = Entry(
+                val fileEntry = Entry(
                     fileId, id, o.optString("name", ""),
                     o.optString("author", ""), o.optString("authorId", ""), plats,
                     o.optLong("checked", o.optLong("added", 0L)),
                     o.optString("desc", o.optString("description", "")),
+                    o.optInt("perfPc", 5), o.optInt("perfQuest", 5), o.optInt("perfIos", 5),
                     o.optBoolean("filled", false)
                 )
+                fresh[fileId] = mergeWithLocal(fileEntry, map[fileId])
             }
             map.clear(); map.putAll(fresh)
         } catch (e: Exception) { Log.w(TAG, "parse failed", e) }
+    }
+
+    /** When re-pulling the file, PRESERVE local progress that's ahead of it — the bot
+     *  filled/checked an avatar but the Worker file hasn't flushed that yet. `filled` and
+     *  `checked` only ever advance (monotonic), and while local is ahead we keep the
+     *  locally-filled fields too — so the fill/liveness bots never RE-DO an avatar they've
+     *  already done just because a stale file pull momentarily reset it. Once the file
+     *  catches up (has filled=true) it takes over. */
+    private fun mergeWithLocal(file: Entry, local: Entry?): Entry {
+        if (local == null) return file
+        val keepFill = local.filled && !file.filled
+        return file.copy(
+            filled = local.filled || file.filled,
+            checked = maxOf(local.checked, file.checked),
+            name = if (keepFill) local.name.ifBlank { file.name } else file.name.ifBlank { local.name },
+            author = if (keepFill) local.author.ifBlank { file.author } else file.author.ifBlank { local.author },
+            authorId = if (keepFill) local.authorId.ifBlank { file.authorId } else file.authorId.ifBlank { local.authorId },
+            platforms = if (keepFill && file.platforms.isEmpty()) local.platforms else file.platforms.ifEmpty { local.platforms },
+            description = if (keepFill && file.description.isBlank()) local.description else file.description,
+            perfPc = if (keepFill && file.perfPc == 5) local.perfPc else file.perfPc,
+            perfQuest = if (keepFill && file.perfQuest == 5) local.perfQuest else file.perfQuest,
+            perfIos = if (keepFill && file.perfIos == 5) local.perfIos else file.perfIos
+        )
     }
 
     // ---- own-avatar seed -----------------------------------------------------

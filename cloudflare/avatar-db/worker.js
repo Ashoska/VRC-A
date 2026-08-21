@@ -46,18 +46,26 @@ function validEntry(e) {
     typeof e.avatarId === "string" && AVTR_RE.test(e.avatarId);
 }
 
+// VRChat avatar performance/optimisation rank per platform:
+// 0=Excellent 1=Good 2=Medium 3=Poor 4=VeryPoor 5=None/unknown. Clamp + default 5.
+function clampPerf(v) {
+  const n = Number.isInteger(v) ? v : 5;
+  return n >= 0 && n <= 5 ? n : 5;
+}
+
 function cleanEntry(e) {
   const now = Date.now();
   const desc = typeof e.description === "string" ? e.description
     : (typeof e.desc === "string" ? e.desc : "");
-  return {
+  const plats = Array.isArray(e.platforms)
+    ? e.platforms.filter((p) => typeof p === "string").slice(0, 4)
+    : [];
+  const out = {
     id: e.avatarId,
     name: typeof e.name === "string" ? e.name.slice(0, 100) : "",
     author: typeof e.author === "string" ? e.author.slice(0, 100) : "",
     authorId: typeof e.authorId === "string" ? e.authorId : "",
-    platforms: Array.isArray(e.platforms)
-      ? e.platforms.filter((p) => typeof p === "string").slice(0, 4)
-      : [],
+    platforms: plats,
     // Avatar description/bio (device- or bot-filled). Kept short.
     desc: desc.slice(0, 400),
     // The bot has done a full first-fill of this entry (name/author/platforms/bio).
@@ -66,6 +74,13 @@ function cleanEntry(e) {
     added: now,
     checked: now, // last time the bot verified this avatar is alive (= added at first)
   };
+  // Per-platform performance/optimisation rank — ONLY store it for platforms the avatar
+  // actually has a build for (it's in `platforms`). A PC-only avatar shouldn't carry a
+  // Quest/iOS rating; perf for an unsupported platform is meaningless noise.
+  if (plats.includes("PC")) out.perfPc = clampPerf(e.perfPc);
+  if (plats.includes("Quest")) out.perfQuest = clampPerf(e.perfQuest);
+  if (plats.includes("iOS")) out.perfIos = clampPerf(e.perfIos);
+  return out;
 }
 
 export default {
@@ -116,6 +131,82 @@ export default {
           await env.AVATAR_KV.put("meta", JSON.stringify(meta));
         }
         return json({ ok: true });
+      }
+
+      if (req.method === "GET" && url.pathname === "/admin/restore") {
+        // ONE-TIME recovery: restore db.json from a known-good commit sha. Guarded by
+        // ADMIN_KEY. Usage: /admin/restore?key=ADMIN_KEY&sha=<goodCommitSha>
+        const key = url.searchParams.get("key");
+        if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) return json({ ok: false, error: "bad admin key" }, 403);
+        const ref = url.searchParams.get("sha");
+        if (!ref) return json({ ok: false, error: "need ?sha=<good commit>" }, 400);
+        const repo = env.GH_REPO, path = env.DB_PATH, branch = env.GH_BRANCH || "main";
+        const gh = ghHeaders(env);
+        const apiUrl = `https://api.github.com/repos/${repo}/contents/${path}`;
+        // Read the file AT the good commit (blob API handles the >1MB file).
+        const oldRes = await fetch(apiUrl + "?ref=" + encodeURIComponent(ref), { headers: gh });
+        if (oldRes.status !== 200) return json({ ok: false, error: "read old http " + oldRes.status }, 500);
+        const oldJson = await oldRes.json();
+        let b64 = oldJson.content || "";
+        if (b64.replace(/\s/g, "").length === 0 && oldJson.sha) {
+          const blobRes = await fetch(`https://api.github.com/repos/${repo}/git/blobs/${oldJson.sha}`, { headers: gh });
+          if (blobRes.status !== 200) return json({ ok: false, error: "blob http " + blobRes.status }, 500);
+          b64 = ((await blobRes.json()).content) || "";
+        }
+        b64 = b64.replace(/\s/g, "");
+        let restored;
+        try { restored = JSON.parse(b64decode(b64)); } catch (e) { return json({ ok: false, error: "old file unparseable" }, 500); }
+        const count = Object.keys(restored.avatars || {}).length;
+        if (count < 1) return json({ ok: false, error: "old file has 0 avatars" }, 500);
+        // SAFETY (anti-footgun): a restore that would SHRINK the catalog is almost always an
+        // accident (e.g. reverting the grown catalog back to an old snapshot). Recovering MORE
+        // avatars than we currently have is always allowed; a REDUCING restore is refused
+        // unless &force=1 is explicitly added. This is what stops an accidental re-click of an
+        // old restore link from wiping the current data.
+        const force = url.searchParams.get("force") === "1";
+        const metaNow = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+        const curCount = metaNow.entries || 0;
+        if (!force && curCount > 200 && count < curCount * 0.7) {
+          return json({
+            ok: false,
+            error: `REFUSED: restore from ${ref} has ${count} avatars but the catalog currently has ${curCount}. This would DELETE ${curCount - count} avatars. If you REALLY mean to shrink it, add &force=1.`,
+            current: curCount, restore: count,
+          }, 409);
+        }
+        // Overwrite current main with it. RETRY on a 409: the cron flush commits every ~2
+        // min and can move the file's sha BETWEEN our read-sha and our write, which GitHub
+        // rejects as a conflict ("is at X but expected Y"). Re-read the fresh sha and retry a
+        // few times so a concurrent flush can't make the recovery fail.
+        let putOk = false, putErr = "";
+        for (let attempt = 0; attempt < 6; attempt++) {
+          const curRes = await fetch(apiUrl + "?ref=" + encodeURIComponent(branch), { headers: gh });
+          const curSha = curRes.status === 200 ? (await curRes.json()).sha : undefined;
+          const putBody = { message: `avatar-db: RESTORE ${count} avatars from ${ref}`, content: b64, branch };
+          if (curSha) putBody.sha = curSha;
+          const putRes = await fetch(apiUrl, { method: "PUT", headers: gh, body: JSON.stringify(putBody) });
+          if (putRes.status === 200 || putRes.status === 201) { putOk = true; break; }
+          putErr = "http " + putRes.status + " " + (await putRes.text()).slice(0, 160);
+          if (putRes.status !== 409) break;                  // non-conflict = real failure, stop
+          await new Promise((r) => setTimeout(r, 700));       // brief backoff, then re-read sha
+        }
+        if (!putOk) return json({ ok: false, error: "put failed after retries: " + putErr }, 500);
+        await env.AVATAR_KV.put("dbcache", serializeDb(restored));
+        const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+        await env.AVATAR_KV.put("meta", JSON.stringify({
+          ...meta, entries: count, lastFlush: new Date().toISOString(), lastCommit: `RESTORED ${count} from ${ref}`,
+        }));
+        return json({ ok: true, restored: count, from: ref });
+      }
+
+      if (req.method === "GET" && url.pathname === "/db") {
+        // The current serialized catalog, served FRESH from KV (no GitHub CDN lag) so
+        // the admin bots notice new avatars immediately. Empty until the first flush.
+        const cached = await env.AVATAR_KV.get("dbcache");
+        return new Response(cached || '{"avatars":{}}', {
+          status: 200,
+          headers: { "content-type": "application/json", "cache-control": "no-store",
+            "access-control-allow-origin": "*" },
+        });
       }
 
       if (req.method === "GET" && (url.pathname === "/health" || url.pathname === "/")) {
@@ -303,14 +394,39 @@ async function flush(env) {
   let db = { version: 1, avatars: {} };
   let sha;
   let legacySha; // sha of a stray "undefined" file to migrate + delete
+  let hadExistingFile = false;
   const getRes = await fetch(apiUrl + "?ref=" + encodeURIComponent(branch), { headers });
   if (getRes.status === 200) {
     const j = await getRes.json();
     sha = j.sha;
+    hadExistingFile = true;
+    // The Contents API returns EMPTY content for files >1MB — fetch the blob instead
+    // (handles up to 100MB). THIS 1MB LIMIT, plus the old reset-to-empty on failure, is
+    // what wiped the catalog once it grew past ~1MB.
+    let contentB64 = j.content || "";
+    if (contentB64.replace(/\s/g, "").length === 0 && j.sha) {
+      const blobRes = await fetch(`https://api.github.com/repos/${repo}/git/blobs/${j.sha}`, { headers });
+      if (blobRes.status === 200) {
+        contentB64 = ((await blobRes.json()).content) || "";
+      } else {
+        // Couldn't read the big file — ABORT, do NOT wipe. Retry next cron.
+        await env.AVATAR_KV.put("meta", JSON.stringify({
+          ...prevMeta, lastFlush: new Date().toISOString(),
+          lastCommit: "ABORTED: blob read http " + blobRes.status + " (kept everything)",
+        }));
+        return;
+      }
+    }
     try {
-      db = JSON.parse(b64decode(j.content));
-    } catch (_) {
-      db = { version: 1, avatars: {} };
+      db = JSON.parse(b64decode(contentB64.replace(/\s/g, "")));
+    } catch (e) {
+      // CRITICAL: never reset to empty. If we can't parse the current file we must NOT
+      // write a smaller one — abort and keep all pending for the next cron.
+      await env.AVATAR_KV.put("meta", JSON.stringify({
+        ...prevMeta, lastFlush: new Date().toISOString(),
+        lastCommit: "ABORTED: could not parse current db.json (kept everything)",
+      }));
+      return;
     }
     if (!db.avatars) db.avatars = {};
   } else if (getRes.status !== 404) {
@@ -431,6 +547,18 @@ async function flush(env) {
 
   const entries = Object.keys(db.avatars).length;
 
+  // SAFETY GUARD: never commit a catalog that suddenly lost most of its entries — a
+  // drop far bigger than our explicit removes means the base read was corrupt. Abort
+  // and keep everything (pending is preserved), so a read glitch can't wipe the DB.
+  const prevEntries = prevMeta.entries || 0;
+  if (hadExistingFile && prevEntries > 200 && entries < (prevEntries - removed) * 0.7) {
+    await env.AVATAR_KV.put("meta", JSON.stringify({
+      ...prevMeta, lastFlush: new Date().toISOString(),
+      lastCommit: `ABORTED: entries ${prevEntries}->${entries} (safety guard, kept everything)`,
+    }));
+    return;
+  }
+
   // 4. Commit when something changed OR we're migrating the legacy "undefined" file.
   let lastCommit = "no change";
   if (added > 0 || removed > 0 || repClear.length > 0 || legacySha || adminChanged) {
@@ -474,6 +602,11 @@ async function flush(env) {
       lastCommit += " (migrated from undefined)";
     }
   }
+
+  // Cache the CURRENT serialized DB in KV so the app can read it FRESH from the Worker
+  // (GET /db) with zero GitHub CDN lag — the CDN caches raw files ~5 min, which delayed
+  // the admin bots noticing new avatars. Updated every flush (the committed state).
+  await env.AVATAR_KV.put("dbcache", serializeDb(db));
 
   await env.AVATAR_KV.put(
     "meta",

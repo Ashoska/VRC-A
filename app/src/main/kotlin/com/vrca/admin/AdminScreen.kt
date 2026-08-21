@@ -609,6 +609,9 @@ fun AdminScreen() {
     // registers intent (which tab is active) and pushes the latest user list for the
     // sweep. AdminRuntime is started once below.
     LaunchedEffect(Unit) { AdminRuntime.start(deviceHash) }
+    // Start the catalog bots at APP LAUNCH (not only when the Bots tab is opened) so they
+    // re-validate + resume sweeping in the background on every reopen.
+    LaunchedEffect(Unit) { BotController.start(ctx) }
     LaunchedEffect(needsUsers) { AdminRuntime.setBrowsing(needsUsers) }
     // Clear the watch/browse intent when the admin LEAVES the panel (page
     // navigation disposes AdminScreen). Without this, AdminRuntime — which is
