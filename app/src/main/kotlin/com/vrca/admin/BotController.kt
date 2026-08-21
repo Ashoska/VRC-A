@@ -94,6 +94,27 @@ object BotController {
         val app = context.applicationContext
         if (!started.compareAndSet(false, true)) return
 
+        // Load + keep the avatar catalog fresh ALWAYS — even when the bots are stopped/paused —
+        // so the admin can see the REAL backlog counts and decide whether to run them. (Before,
+        // the catalog only loaded while the sweep ran, so the queues sat at 0 until you started
+        // the bots — you couldn't tell if there was work.) AvatarGlobalDb.start is idempotent
+        // (disk cache + 30-min CDN refresh); the loop pulls the freshest count from the Worker
+        // the moment it flushes. All Worker reads, no VRChat — safe during a login/pause.
+        AvatarGlobalDb.start(app)
+        scope.launch {
+            var seenFlush = ""
+            while (true) {
+                try {
+                    val flush = AvatarGlobalDb.workerLastFlush()
+                    if (flush != null && flush != seenFlush) {
+                        seenFlush = flush
+                        AvatarGlobalDb.forceRefresh(app, cacheBust = flush)
+                    }
+                } catch (_: Throwable) { /* transient — retry next tick */ }
+                delay(45_000)
+            }
+        }
+
         // Loop 1: cheap local state (loggedIn/name from prefs) + backlog/progress views
         // computed off the main thread. No network here, so it's smooth at 2s.
         scope.launch {

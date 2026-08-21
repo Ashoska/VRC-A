@@ -418,11 +418,14 @@ private fun RoleRow(v: AvatarCatalogSweep.RoleView) {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(v.role.label, style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            Text(
+                if (v.helping.isNotBlank()) "${v.role.label}  →  helping ${v.helping}" else v.role.label,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f)
+            )
             StatusPill("queued ${v.queued}", queuedTone)
         }
-        val processedLabel = if (v.role == AvatarCatalogSweep.Role.FILL) "filled" else "refreshed"
+        val processedLabel = if (v.role == AvatarCatalogSweep.Role.FILL || v.helping == "Fill") "filled" else "refreshed"
         Text(
             "checked ${v.checked} · removed ${v.removed} · $processedLabel ${v.refreshedOrFilled}",
             style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace,
