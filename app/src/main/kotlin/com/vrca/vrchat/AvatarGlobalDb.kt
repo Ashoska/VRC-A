@@ -142,9 +142,27 @@ object AvatarGlobalDb {
     /** A snapshot of every catalog entry — for the admin dead-check/refresh sweep. */
     fun snapshot(): List<Entry> = map.values.toList()
 
-    /** Force a fresh pull of the catalog file (used by the admin sweep before it
-     *  walks entries, so it works on the latest data). */
-    fun forceRefresh(context: Context) { scope.launch { refresh(context.applicationContext) } }
+    /** Force a fresh pull of the catalog file. `cacheBust` (e.g. the Worker's lastFlush
+     *  timestamp) appends a query param so GitHub's CDN can't serve a STALE cached copy —
+     *  used the moment the Worker reports a new flush so new avatars land immediately. */
+    fun forceRefresh(context: Context, cacheBust: String? = null) {
+        scope.launch { refresh(context.applicationContext, cacheBust) }
+    }
+
+    /** The Worker's last-flush timestamp (cheap /health read) — changes each time the
+     *  file is rewritten, so the admin can pull the new file the instant it updates. */
+    fun workerLastFlush(): String? {
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL("$WORKER_URL/health").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                connectTimeout = 10_000; readTimeout = 10_000
+            }
+            if (conn.responseCode != 200) return null
+            JSONObject(conn.inputStream.bufferedReader().readText()).optString("lastFlush", "")
+                .takeIf { it.isNotBlank() }
+        } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
+    }
 
     /** POST authoritative admin ops (upserts/removes) to the Worker /admin endpoint.
      *  `upserts` = entries to overwrite (refreshed fields), `removeFileIds` = dead.
@@ -405,15 +423,21 @@ object AvatarGlobalDb {
         } catch (e: Exception) { Log.w(TAG, "cache load failed", e) }
     }
 
-    private fun refresh(context: Context) {
+    private fun refresh(context: Context, cacheBust: String? = null) {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         // Read the file from EXACTLY where the Worker writes it — learn the URL from
         // /health (echoes rawUrl), so no repo/branch/path mismatch is possible.
-        val rawUrl = fetchWorkerRawUrl()
+        val baseUrl = fetchWorkerRawUrl()
             ?: prefs.getString(KEY_RAWURL, null)
             ?: "https://raw.githubusercontent.com/$REPO/main/$DB_PATH"
-        prefs.edit().putString(KEY_RAWURL, rawUrl).apply()
-        val etag = prefs.getString(KEY_ETAG, null)
+        prefs.edit().putString(KEY_RAWURL, baseUrl).apply()
+        // A cache-buster forces GitHub's CDN to serve the FRESH file (it caches ~5 min),
+        // so a just-flushed update isn't missed. When busting, skip the ETag (force 200).
+        val rawUrl = if (cacheBust != null)
+            baseUrl + (if (baseUrl.contains("?")) "&" else "?") + "v=" +
+                java.net.URLEncoder.encode(cacheBust, "UTF-8")
+        else baseUrl
+        val etag = if (cacheBust == null) prefs.getString(KEY_ETAG, null) else null
         var conn: HttpURLConnection? = null
         try {
             conn = (URL(rawUrl).openConnection() as HttpURLConnection).apply {
@@ -465,16 +489,37 @@ object AvatarGlobalDb {
                 val plats = o.optJSONArray("platforms")?.let { pa ->
                     (0 until pa.length()).mapNotNull { pa.optString(it, "").takeIf { s -> s.isNotBlank() } }
                 } ?: emptyList()
-                fresh[fileId] = Entry(
+                val fileEntry = Entry(
                     fileId, id, o.optString("name", ""),
                     o.optString("author", ""), o.optString("authorId", ""), plats,
                     o.optLong("checked", o.optLong("added", 0L)),
                     o.optString("desc", o.optString("description", "")),
                     o.optBoolean("filled", false)
                 )
+                fresh[fileId] = mergeWithLocal(fileEntry, map[fileId])
             }
             map.clear(); map.putAll(fresh)
         } catch (e: Exception) { Log.w(TAG, "parse failed", e) }
+    }
+
+    /** When re-pulling the file, PRESERVE local progress that's ahead of it — the bot
+     *  filled/checked an avatar but the Worker file hasn't flushed that yet. `filled` and
+     *  `checked` only ever advance (monotonic), and while local is ahead we keep the
+     *  locally-filled fields too — so the fill/liveness bots never RE-DO an avatar they've
+     *  already done just because a stale file pull momentarily reset it. Once the file
+     *  catches up (has filled=true) it takes over. */
+    private fun mergeWithLocal(file: Entry, local: Entry?): Entry {
+        if (local == null) return file
+        val keepFill = local.filled && !file.filled
+        return file.copy(
+            filled = local.filled || file.filled,
+            checked = maxOf(local.checked, file.checked),
+            name = if (keepFill) local.name.ifBlank { file.name } else file.name.ifBlank { local.name },
+            author = if (keepFill) local.author.ifBlank { file.author } else file.author.ifBlank { local.author },
+            authorId = if (keepFill) local.authorId.ifBlank { file.authorId } else file.authorId.ifBlank { local.authorId },
+            platforms = if (keepFill && file.platforms.isEmpty()) local.platforms else file.platforms.ifEmpty { local.platforms },
+            description = if (keepFill && file.description.isBlank()) local.description else file.description
+        )
     }
 
     // ---- own-avatar seed -----------------------------------------------------

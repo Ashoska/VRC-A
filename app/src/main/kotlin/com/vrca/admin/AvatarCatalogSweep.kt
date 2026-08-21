@@ -113,7 +113,7 @@ object AvatarCatalogSweep {
     // "blitz does nothing" / "liveness stuck idle".)
     private const val IDLE_SLEEP_MS = 20_000L
     private const val ACTIVE_PAUSE_MS = 1_500L
-    private const val CATALOG_REFRESH_MS = 5 * 60_000L   // keep the admin catalog fresh for FILL
+    private const val CATALOG_POLL_MS = 30_000L          // poll the Worker's flush marker
 
     private const val BLITZ_BATCH = 40           // entries per blitz pass (per bot)
 
@@ -181,13 +181,20 @@ object AvatarCatalogSweep {
                 finally { roles.forEach { progress.getValue(it).running = false; progress.getValue(it).status = "stopped" } }
             }
         }
-        // Keep the admin's local catalog FRESH so NEW ids contributed by user devices
-        // (which land unfilled) reach the FILL bot promptly, not only on the 30-min
-        // refresh. Cheap ETag pull; a 304 costs ~nothing.
+        // Pull the catalog the MOMENT the Worker rewrites the file: poll its cheap
+        // /health lastFlush marker every 30s and, when it changes, force a cache-busted
+        // refresh so newly-contributed (unfilled) avatars reach the FILL bot right away.
+        // The local-progress merge (parseInto) means a re-pull never re-triggers already
+        // done avatars. A stamp of "" on first run forces the initial pull.
         jobs += scope.launch {
+            var seenFlush = ""
             while (running && scope.isActive) {
-                AvatarGlobalDb.forceRefresh(app)
-                delay(CATALOG_REFRESH_MS)
+                val flush = AvatarGlobalDb.workerLastFlush()
+                if (flush != null && flush != seenFlush) {
+                    seenFlush = flush
+                    AvatarGlobalDb.forceRefresh(app, cacheBust = flush)
+                }
+                delay(CATALOG_POLL_MS)
             }
         }
     }
