@@ -105,7 +105,10 @@ object BotVrchatSession {
      * the stored trusted-device 2FA cookie if we have one (so a re-login skips the 2FA
      * prompt). One retry on a transient 401. Returns Needs2FA when VRChat wants a code.
      */
-    suspend fun login(context: Context, slot: Int, username: String, password: String): LoginResult =
+    suspend fun login(
+        context: Context, slot: Int, username: String, password: String,
+        onProgress: ((String) -> Unit)? = null
+    ): LoginResult =
         withContext(Dispatchers.IO) {
             prefs(context, slot)?.edit()
                 ?.putString(KEY_USER, username)?.putString(KEY_PASS, password)?.apply()
@@ -129,9 +132,19 @@ object BotVrchatSession {
                         ?.bufferedReader()?.readText() ?: ""
                     captureRolled(context, slot, conn.headerFields["Set-Cookie"] ?: emptyList())
                     if (code == 401) {
-                        // VRChat rate-limits rapid auth from one IP — retry once, then report.
-                        if (attempt++ == 0) { delay(3000); continue }
-                        return@withContext LoginResult.Error("HTTP 401 — wrong login, or VRChat rate-limited this IP (wait a minute).")
+                        // A 401 here is almost always VRChat rate-limiting Basic auth from
+                        // this IP (the "can't log in a 3rd/4th bot" wall) — NOT a bad
+                        // password (a valid login stays authed once accepted). So PATIENTLY
+                        // ride out the limit: retry with growing backoff for ~4 min. (If the
+                        // creds really are wrong it just keeps trying until the cap — the
+                        // user confirms the login before starting, so that's the safe bet.)
+                        val backoffs = longArrayOf(8_000, 15_000, 25_000, 40_000, 55_000, 55_000, 55_000)
+                        if (attempt < backoffs.size) {
+                            val s = backoffs[attempt] / 1000
+                            onProgress?.invoke("VRChat rate-limited the login — retrying in ${s}s (try ${attempt + 2})…")
+                            delay(backoffs[attempt]); attempt++; continue
+                        }
+                        return@withContext LoginResult.Error("Still rate-limited after several tries. Wait a couple of minutes, then tap Log in again.")
                     }
                     if (code != 200) return@withContext LoginResult.Error("HTTP $code")
                     val json = JSONObject(body)

@@ -47,6 +47,14 @@ object BotController {
     private val started = AtomicBoolean(false)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var pendingReports = 0
+    @Volatile private var validationSuspendedUntil = 0L
+
+    /** Pause background auth validation for [ms] — called around a manual login so its
+     *  /auth/user calls don't compete with the login for VRChat's per-IP auth budget
+     *  (which is what makes logging in a 3rd/4th bot 401). */
+    fun suspendValidation(ms: Long) {
+        validationSuspendedUntil = maxOf(validationSuspendedUntil, System.currentTimeMillis() + ms)
+    }
 
     /** Idempotent — safe to call on every Bots-tab entry. */
     fun start(context: Context) {
@@ -78,20 +86,23 @@ object BotController {
             }
         }
 
-        // Loop 2: validate + auto-relogin each slot, ONE AT A TIME, staggered — so four
-        // slots never hit /auth/user at once (VRChat rate-limits that, which was the
-        // "de-auths a lot" cause). Each slot is re-checked ~every 90s.
+        // Loop 2: validate + auto-relogin each slot, ONE AT A TIME, staggered, and only
+        // ~every 10 min — bots with saved creds + rolled cookies rarely expire, so
+        // frequent /auth/user calls just burn VRChat's per-IP auth budget (which blocks
+        // logging in more bots). Suspended entirely during a manual login.
         scope.launch {
             while (true) {
+                if (System.currentTimeMillis() < validationSuspendedUntil) { delay(5000); continue }
                 for (slot in 0 until BotVrchatSession.SLOTS) {
+                    if (System.currentTimeMillis() < validationSuspendedUntil) break
                     if (BotVrchatSession.isLoggedIn(app, slot)) {
                         var a = BotVrchatSession.validate(app, slot)
                         if (a == BotVrchatSession.Auth.EXPIRED) a = BotVrchatSession.autoRelogin(app, slot)
                         setAuth(slot, a)
+                        delay(20_000)
                     }
-                    delay(7000)
                 }
-                delay(45_000)
+                delay(10 * 60_000)
             }
         }
     }

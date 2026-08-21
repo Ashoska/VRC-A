@@ -264,7 +264,14 @@ object AvatarCatalogSweep {
             }
             if (blitzing && running) did = blitzPass(context, adminKey, slot, liveIndex, liveCount) || did
             if (!running) break
-            delay(if (did) ACTIVE_PAUSE_MS else IDLE_SLEEP_MS)
+            // Responsive sleep: wake IMMEDIATELY (within 500ms) if the blitz state flips,
+            // so clicking blitz kicks EVERY bot at once instead of each waiting out its
+            // idle sleep (the "blitz start is inconsistent" cause).
+            val target = if (did) ACTIVE_PAUSE_MS else IDLE_SLEEP_MS
+            var slept = 0L
+            while (slept < target && running && scope.isActive && blitzActive() == blitzing) {
+                delay(500); slept += 500
+            }
         }
     }
 
@@ -325,6 +332,9 @@ object AvatarCatalogSweep {
         clears: List<String> = emptyList(), checked: List<String> = emptyList()
     ): Boolean {
         val ok = AvatarGlobalDb.adminPush(context, adminKey, upserts, removes, clears, checked)
+        // Apply to the LOCAL catalog immediately so the backlog counts drop live (the
+        // authoritative copy is still the Worker's; this just avoids the ~15-min flush lag).
+        if (ok) AvatarGlobalDb.applyAdminLocal(upserts, removes)
         pushError = if (ok) "" else "PUSH REJECTED — set ADMIN_KEY as a Secret on Cloudflare matching the app key"
         return ok
     }

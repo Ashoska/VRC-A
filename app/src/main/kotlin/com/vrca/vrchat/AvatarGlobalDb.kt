@@ -182,6 +182,16 @@ object AvatarGlobalDb {
         for (fid in fileIds) map[fid]?.let { map[fid] = it.copy(checked = now) }
     }
 
+    /** Apply admin bot ops to the LOCAL in-memory catalog IMMEDIATELY (upserts set
+     *  filled/refreshed fields + bump checked; removes drop the entry) so the admin's
+     *  backlog counts drop live as the bots work, instead of waiting ~15 min for the
+     *  Worker flush + re-pull. The authoritative copy is still the Worker's. */
+    fun applyAdminLocal(upserts: List<Entry>, removes: Collection<String>) {
+        val now = System.currentTimeMillis()
+        for (fid in removes) map.remove(fid)
+        for (e in upserts) map[e.fileId] = e.copy(checked = now)
+    }
+
     /** Cheap pending-report count from /health (a single KV read on the Worker, no
      *  list op) — the sweep checks this first and only does the heavier /admin/reports
      *  list when there's actually something to verify. */

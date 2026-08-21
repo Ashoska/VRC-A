@@ -345,6 +345,7 @@ private fun BotSection(
                     enabled = !busy && code.isNotBlank(),
                     onClick = {
                         busy = true
+                        BotController.suspendValidation(90_000)
                         scope.launch {
                             val r = BotVrchatSession.verify2FA(ctx, slot, code.trim(), is2faEmail)
                             msg = when (r) {
@@ -370,9 +371,10 @@ private fun BotSection(
                 Button(
                     enabled = !busy && user.isNotBlank() && pass.isNotBlank(),
                     onClick = {
-                        busy = true
+                        busy = true; msg = "Signing in…"
+                        BotController.suspendValidation(5 * 60_000)
                         scope.launch {
-                            val r = BotVrchatSession.login(ctx, slot, user.trim(), pass)
+                            val r = BotVrchatSession.login(ctx, slot, user.trim(), pass) { p -> msg = p }
                             msg = when (r) {
                                 is BotVrchatSession.LoginResult.Success -> { pass = ""; BotController.refreshSlot(ctx, slot); "" }
                                 is BotVrchatSession.LoginResult.Needs2FA -> { needs2fa = true; is2faEmail = r.email; "" }
