@@ -1,7 +1,9 @@
 package com.vrca.admin
 
 import android.content.Context
+import android.content.SharedPreferences
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -18,6 +20,8 @@ import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -27,6 +31,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -46,57 +51,42 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
-/**
- * The "Bots" admin tab — everything for the crowdsourced avatar catalog's maintenance
- * bots: the live Worker health, the four bot login slots (each showing its account
- * name, a still-authed indicator, AND the queue + processed numbers for the role(s)
- * that bot is running), the shared ADMIN_KEY, and the full-catalog blitz button with
- * a global "to process" counter.
- */
+private const val PREFS_ADMIN = "vrca_admin_local"
+private const val KEY_ROLE_SLOTS = "avatar_role_slots"   // CSV of 4 ints, -1 = auto
+
+private fun loadRoleSlots(prefs: SharedPreferences): IntArray {
+    val csv = prefs.getString(KEY_ROLE_SLOTS, null) ?: return IntArray(4) { -1 }
+    val parts = csv.split(",")
+    return IntArray(4) { i -> parts.getOrNull(i)?.toIntOrNull() ?: -1 }
+}
+
+private fun saveRoleSlots(prefs: SharedPreferences, arr: IntArray) {
+    prefs.edit().putString(KEY_ROLE_SLOTS, arr.joinToString(",")).apply()
+}
+
 @Composable
 fun BotsTab() {
     val ctx = LocalContext.current
-    val prefs = remember { ctx.getSharedPreferences("vrca_admin_local", Context.MODE_PRIVATE) }
+    val prefs = remember { ctx.getSharedPreferences(PREFS_ADMIN, Context.MODE_PRIVATE) }
     var adminKey by remember { mutableStateOf(prefs.getString("avatar_admin_key", "") ?: "") }
+    var roleSlots by remember { mutableStateOf(loadRoleSlots(prefs)) }
 
-    // Track the logged-in slot set (as a signature) so the sweep is (re)started with the
-    // right role assignment whenever a bot logs in/out.
-    var liveSig by remember { mutableStateOf("") }
-    LaunchedEffect(Unit) {
-        while (true) {
-            liveSig = (0 until BotVrchatSession.SLOTS)
-                .joinToString(",") { if (BotVrchatSession.isLoggedIn(ctx, it)) "1" else "0" }
-            delay(2000)
-        }
-    }
-    LaunchedEffect(liveSig, adminKey) {
-        delay(700)
-        val key = adminKey.trim()
-        if (BotVrchatSession.loggedInCount(ctx) > 0 && key.isNotBlank()) {
-            AvatarCatalogSweep.stop(); AvatarCatalogSweep.start(ctx, key)
-        } else {
-            AvatarCatalogSweep.stop()
-        }
-    }
+    LaunchedEffect(Unit) { BotController.start(ctx) }
+    val bots by BotController.bots.collectAsState()
+    val views by BotController.views.collectAsState()
+    val totalQueued by BotController.totalQueued.collectAsState()
+    val blitz by BotController.blitz.collectAsState()
 
-    // Central poll of the per-role views (queued backlog + processed counts). The live
-    // report backlog comes from the Worker every ~12s; the fill/liveness backlogs are
-    // computed locally every 2s.
-    var pendingReports by remember { mutableIntStateOf(0) }
-    var views by remember { mutableStateOf(AvatarCatalogSweep.roleViews(0)) }
-    var blitz by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        var i = 0
-        while (true) {
-            if (i % 6 == 0) pendingReports = runCatching {
-                withContext(Dispatchers.IO) { com.vrca.vrchat.AvatarGlobalDb.pendingReportCount() }
-            }.getOrDefault(pendingReports)
-            views = AvatarCatalogSweep.roleViews(pendingReports)
-            blitz = AvatarCatalogSweep.blitzActive()
-            i++; delay(2000)
-        }
+    // (Re)assign the sweep only when the logged-in set / key / assignment actually change.
+    val liveSig = bots.joinToString(",") { if (it.loggedIn) "1" else "0" }
+    val manualSig = roleSlots.joinToString(",")
+    LaunchedEffect(liveSig, adminKey, manualSig) {
+        delay(500)
+        val manual = AvatarCatalogSweep.Role.values()
+            .mapIndexedNotNull { i, r -> roleSlots.getOrNull(i)?.takeIf { it >= 0 }?.let { r to it } }
+            .toMap()
+        AvatarCatalogSweep.ensureRunning(ctx, adminKey, manual)
     }
-    val totalQueued = views.sumOf { it.queued }
 
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
@@ -105,27 +95,19 @@ fun BotsTab() {
     ) {
         item { CatalogHealthCard() }
         item {
-            SweepStatusCard(
+            MaintenanceCard(
                 adminKey = adminKey,
                 onKeyChange = { adminKey = it; prefs.edit().putString("avatar_admin_key", it).apply() },
-                assignment = AvatarCatalogSweep.assignmentLabel,
                 totalQueued = totalQueued,
-                blitz = blitz
+                blitz = blitz,
+                roleSlots = roleSlots,
+                onRolePick = { roleOrdinal, slot ->
+                    roleSlots = roleSlots.copyOf().also { it[roleOrdinal] = slot }
+                    saveRoleSlots(prefs, roleSlots)
+                }
             )
         }
-        item {
-            Text(
-                "Log in up to ${BotVrchatSession.SLOTS} dedicated bot accounts. Roles are split " +
-                    "across them: reports, filling new avatars, and two liveness sweepers that never " +
-                    "check the same avatar. Each bot below shows the queue + progress for its role.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 2.dp)
-            )
-        }
-        items(BotVrchatSession.SLOTS) { slot ->
-            BotLoginCard(slot, views.filter { it.bot == "bot ${slot + 1}" })
-        }
+        item { BotsCard(bots, views) }
         item { Spacer(Modifier.height(12.dp)) }
     }
 }
@@ -139,7 +121,6 @@ private fun CatalogHealthCard() {
     var pending by remember { mutableStateOf("—") }
     var totals by remember { mutableStateOf("—") }
     var lastFlush by remember { mutableStateOf("—") }
-    var lastCommit by remember { mutableStateOf("—") }
     var adminKeySet by remember { mutableStateOf("—") }
     var tick by remember { mutableIntStateOf(0) }
     LaunchedEffect(tick) {
@@ -157,9 +138,8 @@ private fun CatalogHealthCard() {
                 val j = JSONObject(body)
                 entries = j.optInt("entries").toString()
                 pending = "${j.optInt("pendingBatches")} batch / ${j.optInt("reports")} rep"
-                totals = "＋${j.optInt("totalAdded")} added  ·  －${j.optInt("totalRemoved")} removed"
+                totals = "＋${j.optInt("totalAdded")}  ·  －${j.optInt("totalRemoved")}"
                 lastFlush = j.optString("lastFlush", "—")
-                lastCommit = j.optString("lastCommit", "—")
                 adminKeySet = if (j.optBoolean("adminKeySet")) "set" else "NOT set"
                 status = "live"
             }.onFailure { status = "unreachable (${it.javaClass.simpleName})" }
@@ -178,32 +158,25 @@ private fun CatalogHealthCard() {
             AdminLabeledRow("Totals", totals)
             AdminLabeledRow("Pending", pending)
             AdminLabeledRow("Last flush", lastFlush)
-            AdminLabeledRow("Last commit", lastCommit, mono = true)
             AdminLabeledRow("Admin key", adminKeySet)
         }
     }
 }
 
-// ---- admin key + blitz + global progress -----------------------------------
+// ---- admin key + role assignment + blitz -----------------------------------
 
 @Composable
-private fun SweepStatusCard(
+private fun MaintenanceCard(
     adminKey: String, onKeyChange: (String) -> Unit,
-    assignment: String, totalQueued: Int, blitz: Boolean
+    totalQueued: Int, blitz: Boolean,
+    roleSlots: IntArray, onRolePick: (Int, Int) -> Unit
 ) {
-    AdminSectionCard(title = "Catalog maintenance", icon = Icons.Filled.SportsEsports, tone = AdminTone.Warn) {
+    AdminSectionCard(title = "Maintenance", icon = Icons.Filled.SportsEsports, tone = AdminTone.Warn) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (assignment.isNotBlank()) {
-                Text(assignment, style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
             if (AvatarCatalogSweep.pushError.isNotBlank()) {
                 Text(AvatarCatalogSweep.pushError, style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error)
             }
-
-            Divider()
-
             OutlinedTextField(
                 value = adminKey,
                 onValueChange = onKeyChange,
@@ -216,44 +189,168 @@ private fun SweepStatusCard(
                     }) { Text("Generate") }
                 }
             )
-            Text(
-                "Generate one, then copy it into a Cloudflare Worker secret named ADMIN_KEY " +
-                    "(Settings → Variables → add → Secret). The two must match — it's the password " +
-                    "that lets ONLY your app remove/refresh catalog entries.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
 
-            Button(
-                onClick = { AvatarCatalogSweep.requestFullBlitz() },
-                modifier = Modifier.fillMaxWidth()
-            ) {
+            Divider()
+
+            AvatarCatalogSweep.Role.values().forEach { role ->
+                RoleAssignRow(role, roleSlots.getOrElse(role.ordinal) { -1 }) { slot -> onRolePick(role.ordinal, slot) }
+            }
+
+            Divider()
+
+            Button(onClick = { AvatarCatalogSweep.requestFullBlitz() }, modifier = Modifier.fillMaxWidth()) {
                 Icon(Icons.Filled.Bolt, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.size(6.dp))
                 Text(if (blitz) "Blitz running — extend" else "Check entire catalog (blitz)")
             }
-            // Global progress: how much is left across ALL roles right now. During a
-            // blitz you watch this count down as the bots chew through the catalog.
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("To process (all roles)", style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("To process", style = MaterialTheme.typography.bodyMedium)
                 StatusPill("$totalQueued", if (totalQueued == 0) AdminTone.Success else AdminTone.Warn)
             }
-            Text(
-                "The blitz makes all bots catch up the WHOLE catalog for ~30 min (fill every " +
-                    "avatar's info + dead-check). Re-press to extend.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
         }
     }
 }
 
-/** One role's queue + progress line (shown inside the bot card that runs it). */
+@Composable
+private fun RoleAssignRow(role: AvatarCatalogSweep.Role, slot: Int, onPick: (Int) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(role.label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+        Box {
+            OutlinedButton(onClick = { open = true }) { Text(if (slot < 0) "Auto" else "Bot ${slot + 1}") }
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                DropdownMenuItem(text = { Text("Auto") }, onClick = { onPick(-1); open = false })
+                (0 until BotVrchatSession.SLOTS).forEach { s ->
+                    DropdownMenuItem(text = { Text("Bot ${s + 1}") }, onClick = { onPick(s); open = false })
+                }
+            }
+        }
+    }
+}
+
+// ---- ONE card, four bots separated by function ------------------------------
+
+@Composable
+private fun BotsCard(bots: List<BotController.BotUi>, views: List<AvatarCatalogSweep.RoleView>) {
+    AdminSectionCard(title = "Bots", icon = Icons.Filled.SportsEsports, tone = AdminTone.Primary) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            bots.forEachIndexed { idx, bot ->
+                if (idx > 0) Divider()
+                BotSection(bot, views.filter { it.bot == "bot ${bot.slot + 1}" })
+            }
+        }
+    }
+}
+
+@Composable
+private fun BotSection(bot: BotController.BotUi, roleViews: List<AvatarCatalogSweep.RoleView>) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val slot = bot.slot
+
+    var user by remember { mutableStateOf("") }
+    var pass by remember { mutableStateOf("") }
+    var needs2fa by remember { mutableStateOf(false) }
+    var is2faEmail by remember { mutableStateOf(false) }
+    var code by remember { mutableStateOf("") }
+    var msg by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                if (bot.loggedIn && bot.name.isNotBlank()) bot.name else "Bot ${slot + 1}",
+                style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold
+            )
+            when {
+                !bot.loggedIn -> StatusPill("Signed out", AdminTone.Neutral)
+                bot.auth == BotVrchatSession.Auth.AUTHED -> StatusPill("Authed", AdminTone.Success)
+                bot.auth == BotVrchatSession.Auth.EXPIRED -> StatusPill("Expired", AdminTone.Error)
+                else -> StatusPill("Checking…", AdminTone.Warn)
+            }
+        }
+
+        when {
+            bot.loggedIn && !needs2fa -> {
+                if (bot.auth == BotVrchatSession.Auth.EXPIRED) {
+                    Text("Session expired and couldn't auto-recover — log out and back in.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                }
+                roleViews.forEach { RoleRow(it) }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton(onClick = {
+                        BotVrchatSession.logout(ctx, slot); BotController.refreshSlot(ctx, slot)
+                        needs2fa = false; msg = ""
+                    }) { Text("Log out") }
+                    if (busy) CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                }
+            }
+            needs2fa -> {
+                OutlinedTextField(
+                    value = code, onValueChange = { code = it },
+                    label = { Text("2FA code") }, singleLine = true, modifier = Modifier.fillMaxWidth()
+                )
+                Button(
+                    enabled = !busy && code.isNotBlank(),
+                    onClick = {
+                        busy = true
+                        scope.launch {
+                            val r = BotVrchatSession.verify2FA(ctx, slot, code.trim(), is2faEmail)
+                            msg = when (r) {
+                                is BotVrchatSession.LoginResult.Success -> { needs2fa = false; code = ""; BotController.refreshSlot(ctx, slot); "" }
+                                is BotVrchatSession.LoginResult.Error -> r.message
+                                else -> ""
+                            }
+                            busy = false
+                        }
+                    }
+                ) { Text("Verify") }
+            }
+            else -> {
+                OutlinedTextField(
+                    value = user, onValueChange = { user = it },
+                    label = { Text("Bot username / email") }, singleLine = true, modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = pass, onValueChange = { pass = it },
+                    label = { Text("Bot password") }, singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth()
+                )
+                Button(
+                    enabled = !busy && user.isNotBlank() && pass.isNotBlank(),
+                    onClick = {
+                        busy = true
+                        scope.launch {
+                            val r = BotVrchatSession.login(ctx, slot, user.trim(), pass)
+                            msg = when (r) {
+                                is BotVrchatSession.LoginResult.Success -> { pass = ""; BotController.refreshSlot(ctx, slot); "" }
+                                is BotVrchatSession.LoginResult.Needs2FA -> { needs2fa = true; is2faEmail = r.email; "" }
+                                is BotVrchatSession.LoginResult.Error -> r.message
+                            }
+                            busy = false
+                        }
+                    }
+                ) { Text("Log in") }
+            }
+        }
+        if (msg.isNotBlank()) {
+            Text(msg, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        }
+    }
+}
+
 @Composable
 private fun RoleRow(v: AvatarCatalogSweep.RoleView) {
     val queuedTone = when {
@@ -261,7 +358,7 @@ private fun RoleRow(v: AvatarCatalogSweep.RoleView) {
         v.queued > 500 -> AdminTone.Error
         else -> AdminTone.Warn
     }
-    Column(verticalArrangement = Arrangement.spacedBy(2.dp), modifier = Modifier.fillMaxWidth()) {
+    Column(verticalArrangement = Arrangement.spacedBy(1.dp), modifier = Modifier.fillMaxWidth()) {
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -277,151 +374,5 @@ private fun RoleRow(v: AvatarCatalogSweep.RoleView) {
             style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        if (v.status.isNotBlank()) {
-            Text(v.status, style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    }
-}
-
-// ---- per-bot login card -----------------------------------------------------
-
-@Composable
-private fun BotLoginCard(slot: Int, roleViews: List<AvatarCatalogSweep.RoleView>) {
-    val ctx = LocalContext.current
-    val scope = rememberCoroutineScope()
-
-    var loggedIn by remember { mutableStateOf(BotVrchatSession.isLoggedIn(ctx, slot)) }
-    var botName by remember { mutableStateOf(BotVrchatSession.botName(ctx, slot)) }
-    var auth by remember { mutableStateOf(BotVrchatSession.Auth.UNKNOWN) }
-    var user by remember { mutableStateOf("") }
-    var pass by remember { mutableStateOf("") }
-    var needs2fa by remember { mutableStateOf(false) }
-    var is2faEmail by remember { mutableStateOf(false) }
-    var code by remember { mutableStateOf("") }
-    var msg by remember { mutableStateOf("") }
-    var busy by remember { mutableStateOf(false) }
-
-    LaunchedEffect(slot) {
-        var i = 0
-        while (true) {
-            if (!needs2fa) loggedIn = BotVrchatSession.isLoggedIn(ctx, slot)
-            if (loggedIn && (i % 20 == 0)) {   // validate ~every 40s
-                auth = BotVrchatSession.validate(ctx, slot)
-                botName = BotVrchatSession.botName(ctx, slot)
-            }
-            if (!loggedIn) auth = BotVrchatSession.Auth.UNKNOWN
-            i++; delay(2000)
-        }
-    }
-
-    val tone = when {
-        !loggedIn -> AdminTone.Neutral
-        auth == BotVrchatSession.Auth.EXPIRED -> AdminTone.Error
-        auth == BotVrchatSession.Auth.AUTHED -> AdminTone.Success
-        else -> AdminTone.Warn
-    }
-    AdminSectionCard(
-        title = "Bot ${slot + 1}",
-        icon = Icons.Filled.SportsEsports,
-        tone = tone,
-        trailing = {
-            when {
-                !loggedIn -> StatusPill("Signed out", AdminTone.Neutral)
-                auth == BotVrchatSession.Auth.AUTHED -> StatusPill("Authed", AdminTone.Success)
-                auth == BotVrchatSession.Auth.EXPIRED -> StatusPill("Expired", AdminTone.Error)
-                else -> StatusPill("Checking…", AdminTone.Warn)
-            }
-        }
-    ) {
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            when {
-                needs2fa -> {
-                    OutlinedTextField(
-                        value = code, onValueChange = { code = it },
-                        label = { Text("2FA code") }, singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Button(
-                        enabled = !busy && code.isNotBlank(),
-                        onClick = {
-                            busy = true
-                            scope.launch {
-                                val r = BotVrchatSession.verify2FA(ctx, slot, code.trim(), is2faEmail)
-                                msg = when (r) {
-                                    is BotVrchatSession.LoginResult.Success -> {
-                                        loggedIn = true; needs2fa = false; code = ""
-                                        botName = BotVrchatSession.botName(ctx, slot)
-                                        auth = BotVrchatSession.validate(ctx, slot); "Logged in"
-                                    }
-                                    is BotVrchatSession.LoginResult.Error -> r.message
-                                    else -> ""
-                                }
-                                busy = false
-                            }
-                        }
-                    ) { Text("Verify") }
-                }
-                loggedIn -> {
-                    AdminLabeledRow("Account", botName.ifBlank { "(name unknown)" })
-                    if (auth == BotVrchatSession.Auth.EXPIRED) {
-                        Text("Session expired — log out and back in.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error)
-                    }
-                    // This bot's role queue + progress (only the roles it actually runs).
-                    if (roleViews.isNotEmpty()) {
-                        Divider()
-                        roleViews.forEach { RoleRow(it) }
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedButton(onClick = {
-                            BotVrchatSession.logout(ctx, slot)
-                            loggedIn = false; botName = ""; auth = BotVrchatSession.Auth.UNKNOWN
-                        }) { Text("Log out") }
-                        if (busy) CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                    }
-                }
-                else -> {
-                    OutlinedTextField(
-                        value = user, onValueChange = { user = it },
-                        label = { Text("Bot username / email") }, singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = pass, onValueChange = { pass = it },
-                        label = { Text("Bot password") }, singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Button(
-                        enabled = !busy && user.isNotBlank() && pass.isNotBlank(),
-                        onClick = {
-                            busy = true
-                            scope.launch {
-                                val r = BotVrchatSession.login(ctx, slot, user.trim(), pass)
-                                msg = when (r) {
-                                    is BotVrchatSession.LoginResult.Success -> {
-                                        loggedIn = true; pass = ""
-                                        botName = BotVrchatSession.botName(ctx, slot)
-                                        auth = BotVrchatSession.validate(ctx, slot); "Logged in"
-                                    }
-                                    is BotVrchatSession.LoginResult.Needs2FA -> {
-                                        needs2fa = true; is2faEmail = r.email; "Enter the 2FA code"
-                                    }
-                                    is BotVrchatSession.LoginResult.Error -> r.message
-                                }
-                                busy = false
-                            }
-                        }
-                    ) { Text("Log in") }
-                }
-            }
-            if (msg.isNotBlank()) {
-                Text(msg, style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
     }
 }

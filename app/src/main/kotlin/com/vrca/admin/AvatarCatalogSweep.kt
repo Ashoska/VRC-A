@@ -52,8 +52,39 @@ object AvatarCatalogSweep {
 
     @Volatile var running = false; private set
     @Volatile var pushError = ""; private set
+    @Volatile private var runningSig = ""
     @Volatile private var blitzUntilMs = 0L
     fun blitzActive(): Boolean = System.currentTimeMillis() < blitzUntilMs
+
+    /** Compute the role→slot assignment: honor a MANUAL choice (role→slot, only if that
+     *  slot is logged in), else auto-spread across the logged-in bots. */
+    private fun computeRoleSlot(live: List<Int>, manual: Map<Role, Int>): Map<Role, Int> {
+        if (live.isEmpty()) return emptyMap()
+        val auto = mapOf(
+            Role.REPORTS to live[0],
+            Role.FILL to (live.getOrNull(1) ?: live[0]),
+            Role.LIVENESS_A to (live.getOrNull(2) ?: live[0]),
+            Role.LIVENESS_B to (live.getOrNull(3) ?: live.getOrNull(1) ?: live[0]),
+        )
+        return Role.values().associateWith { r -> manual[r]?.takeIf { it in live } ?: auto.getValue(r) }
+    }
+
+    private fun sigOf(live: List<Int>, adminKey: String, roleSlot: Map<Role, Int>): String =
+        live.joinToString(",") + "|" + adminKey.hashCode() + "|" +
+            Role.values().joinToString(",") { "${it.ordinal}:${roleSlot[it]}" }
+
+    /** Idempotent: (re)start ONLY when the logged-in bots / key / assignment actually
+     *  changed. A no-op otherwise, so navigating away and back to the Bots tab keeps
+     *  the running sweep + its counters instead of resetting them. */
+    fun ensureRunning(context: Context, adminKey: String, manual: Map<Role, Int> = emptyMap()) {
+        val app = context.applicationContext
+        val key = adminKey.trim()
+        val live = (0 until BotVrchatSession.SLOTS).filter { BotVrchatSession.isLoggedIn(app, it) }
+        if (live.isEmpty() || key.isBlank()) { stop(); return }
+        val sig = sigOf(live, key, computeRoleSlot(live, manual))
+        if (running && sig == runningSig) return
+        stop(); start(app, key, manual)
+    }
 
     private const val PACE_MS = 1200L            // per avatar per bot
     // ONE /admin push per pass (= one KV write). BATCH is set ABOVE the per-pass sizes
@@ -65,8 +96,12 @@ object AvatarCatalogSweep {
     private const val RECHECK_INTERVAL_MS = 7L * 24 * 60 * 60 * 1000  // 7 days
     private const val BLITZ_RECHECK_MS = 60L * 60 * 1000               // 1 h while blitzing
     private const val BLITZ_WINDOW_MS = 30L * 60 * 1000                // blitz lasts 30 min per press
-    private const val IDLE_SLEEP_MS = 5 * 60_000L
-    private const val ACTIVE_PAUSE_MS = 2_000L
+    // Short idle poll (no network / no writes when idle — just a local snapshot scan) so
+    // a bot notices new work FAST: a blitz, freshly-loaded catalog, or new reports kick
+    // it within IDLE_SLEEP_MS instead of sleeping minutes. (This was 5 min — the cause of
+    // "blitz does nothing" / "liveness stuck idle".)
+    private const val IDLE_SLEEP_MS = 20_000L
+    private const val ACTIVE_PAUSE_MS = 1_500L
     private const val CATALOG_REFRESH_MS = 5 * 60_000L   // keep the admin catalog fresh for FILL
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -75,19 +110,14 @@ object AvatarCatalogSweep {
     /** A short human summary of which bot slot runs which roles (for the UI). */
     @Volatile var assignmentLabel = ""; private set
 
-    fun start(context: Context, adminKey: String) {
+    fun start(context: Context, adminKey: String, manual: Map<Role, Int> = emptyMap()) {
         if (running) return
         val app = context.applicationContext
         val live = (0 until BotVrchatSession.SLOTS).filter { BotVrchatSession.isLoggedIn(app, it) }
         if (live.isEmpty()) { progress.values.forEach { it.status = "no bot logged in" }; return }
         if (adminKey.isBlank()) { progress.values.forEach { it.status = "admin key not set" }; return }
-        // Assign roles to slots: one each when 4 bots, otherwise share the earliest slots.
-        val roleSlot = mapOf(
-            Role.REPORTS to live[0],
-            Role.FILL to (live.getOrNull(1) ?: live[0]),
-            Role.LIVENESS_A to (live.getOrNull(2) ?: live[0]),
-            Role.LIVENESS_B to (live.getOrNull(3) ?: live.getOrNull(1) ?: live[0]),
-        )
+        val roleSlot = computeRoleSlot(live, manual)
+        runningSig = sigOf(live, adminKey.trim(), roleSlot)
         Role.values().forEach { r ->
             progress.getValue(r).apply { running = true; slot = roleSlot.getValue(r); checked = 0; refreshed = 0; removed = 0; filled = 0; status = "starting…" }
         }
@@ -118,6 +148,7 @@ object AvatarCatalogSweep {
 
     fun stop() {
         running = false
+        runningSig = ""
         jobs.forEach { it.cancel() }; jobs.clear()
         progress.values.forEach { it.running = false; it.status = "stopped" }
     }
