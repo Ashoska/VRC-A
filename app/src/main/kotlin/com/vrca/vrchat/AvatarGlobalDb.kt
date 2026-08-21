@@ -222,15 +222,37 @@ object AvatarGlobalDb {
         } catch (e: Exception) { emptyList() } finally { runCatching { conn?.disconnect() } }
     }
 
-    /** Name search over the catalog (for the in-app avatar search). */
-    fun searchByName(query: String, limit: Int = 30): List<Entry> {
-        val q = query.trim().lowercase()
-        if (q.length < 2) return emptyList()
-        return map.values.asSequence()
-            .filter { it.name.lowercase().contains(q) }
-            .distinctBy { it.avatarId }
-            .take(limit)
-            .toList()
+    /**
+     * Search the catalog for the in-app avatar search. TOKEN-based across the avatar's
+     * NAME + AUTHOR + **DESCRIPTION** (bio) — so an avatar is findable by words in its
+     * description, not just its name (e.g. "cute fox" finds one whose bio says "a cute
+     * fox avatar" even if it's named "Foxxo"). Every query word must appear SOMEWHERE
+     * (AND), and results are ranked: a name hit weighs most, then author, then bio, with
+     * an exact/prefix name boost. This is the richer coverage the public name-only DBs
+     * can't offer — it grows as the fill bot backfills descriptions.
+     */
+    fun searchByName(query: String, limit: Int = 60): List<Entry> {
+        val ql = query.trim().lowercase()
+        val tokens = ql.split(Regex("\\s+")).filter { it.length >= 2 }
+        if (tokens.isEmpty()) return emptyList()
+        val scored = ArrayList<Pair<Entry, Int>>()
+        for (e in map.values) {
+            val name = e.name.lowercase()
+            val author = e.author.lowercase()
+            val desc = e.description.lowercase()
+            val hay = "$name $author $desc"
+            if (!tokens.all { hay.contains(it) }) continue   // AND — every word must match
+            var score = 0
+            for (t in tokens) score += when {
+                name.contains(t) -> 5
+                author.contains(t) -> 2
+                else -> 1                                     // description-only hit
+            }
+            if (name == ql) score += 20 else if (name.startsWith(tokens.first())) score += 3
+            scored.add(e to score)
+        }
+        return scored.sortedByDescending { it.second }
+            .map { it.first }.distinctBy { it.avatarId }.take(limit)
     }
 
     // ---- contribute / report -------------------------------------------------
