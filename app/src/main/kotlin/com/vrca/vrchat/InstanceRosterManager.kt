@@ -345,6 +345,29 @@ object InstanceRosterManager {
             (n.endsWith(".txt") || n.endsWith(".log"))
     }
 
+    /** VRChat's Quest output log is memory-mapped + size-capped (that's why it's exactly 10 MB
+     *  with trailing null padding), so its filesystem MTIME is unreliable — it can stop
+     *  updating while VRChat is still writing, and SAF providers report a stale/zero modified
+     *  time for a freshly-rotated file. That left the reader STUCK on the OLD log after VRChat
+     *  rotated/crashed (a low-memory disconnect → new log file), the "roster stopped, no new
+     *  logs" case. VRChat log names embed a sortable timestamp (output_log_YYYYMMDD_HHMMSS, with
+     *  or without separators), so pick the newest by NAME timestamp; fall back to mtime when the
+     *  name has none (player.log). */
+    private fun logStamp(name: String): Long {
+        val digits = name.filter { it.isDigit() }
+        if (digits.length < 14) return 0L
+        val v = digits.take(14).toLongOrNull() ?: return 0L   // FIRST 14 = the YYYYMMDDHHMMSS date
+        return if (v >= 20_000_000_000_000L) v else 0L        // sanity: a plausible real timestamp
+    }
+
+    /** True if log A (name/mtime) is NEWER than log B — name timestamp first, mtime as tiebreak. */
+    private fun isNewerLog(nameA: String, mtimeA: Long, nameB: String, mtimeB: Long): Boolean {
+        val sA = logStamp(nameA); val sB = logStamp(nameB)
+        return if (sA != sB) sA > sB else mtimeA > mtimeB
+    }
+
+    private fun fileName(path: String): String = path.substringAfterLast('/')
+
     // A log file we can tail, from either access route.
     private data class LogRef(
         val id: String,          // absolute path (File) or uri string (SAF)
@@ -368,7 +391,7 @@ object InstanceRosterManager {
                     continue
                 }
                 for (f in files) {
-                    if (best == null || f.lastModified() > best!!.lastModified) {
+                    if (best == null || isNewerLog(f.name, f.lastModified(), fileName(best!!.id), best!!.lastModified)) {
                         best = LogRef(f.absolutePath, f.length(), f.lastModified(), null)
                     }
                 }
@@ -387,6 +410,7 @@ object InstanceRosterManager {
                 tree, DocumentsContract.getTreeDocumentId(tree)
             )
             var best: LogRef? = null
+            var bestName = ""
             cr.query(
                 childrenUri,
                 arrayOf(
@@ -403,9 +427,10 @@ object InstanceRosterManager {
                     if (!looksLikeLog(name)) continue
                     val modified = c.getLong(2)
                     val size = c.getLong(3)
-                    if (best == null || modified > best!!.lastModified) {
+                    if (best == null || isNewerLog(name, modified, bestName, best!!.lastModified)) {
                         val docUri = DocumentsContract.buildDocumentUriUsingTree(tree, docId)
                         best = LogRef(docUri.toString(), size, modified, docUri)
+                        bestName = name
                     }
                 }
             }
