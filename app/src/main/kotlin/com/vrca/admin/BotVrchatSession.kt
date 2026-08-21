@@ -263,12 +263,20 @@ object BotVrchatSession {
         }
     }
 
-    /** One avatar's check result: alive + fresh fields (incl. bio), or dead (404/410/403). */
+    /** One avatar's check result: alive + fresh fields (incl. bio + per-platform perf), or
+     *  dead (404/410/403). Perf rank: 0=Excellent 1=Good 2=Medium 3=Poor 4=VeryPoor 5=unknown. */
     data class AvatarCheck(
         val alive: Boolean, val fileId: String?, val name: String,
         val author: String, val authorId: String, val platforms: List<String>,
-        val description: String = ""
+        val description: String = "",
+        val perfPc: Int = 5, val perfQuest: Int = 5, val perfIos: Int = 5
     )
+
+    /** VRChat `performanceRating` string → rank int (worst-known wins if seen twice). */
+    private fun perfRank(s: String): Int = when (s.trim().lowercase()) {
+        "excellent" -> 0; "good" -> 1; "medium" -> 2; "poor" -> 3; "verypoor", "very poor" -> 4
+        else -> 5
+    }
 
     /** GET /avatars/{id} with a BOT cookie. 404/410/403 = not publicly accessible → remove;
      *  a non-200 that isn't those (rate limit / network) returns null so the sweep skips it. */
@@ -294,19 +302,27 @@ object BotVrchatSession {
                 val fileId = Regex("file_[0-9a-fA-F-]{36}").find(
                     j.optString("thumbnailImageUrl", "").ifBlank { j.optString("imageUrl", "") }
                 )?.value
-                val plats = j.optJSONArray("unityPackages")?.let { ups ->
-                    (0 until ups.length()).mapNotNull {
-                        ups.optJSONObject(it)?.optString("platform", "")?.takeIf { s -> s.isNotBlank() }
-                    }.map {
-                        when (it.lowercase()) {
-                            "standalonewindows" -> "PC"; "android" -> "Quest"; "ios" -> "iOS"; else -> ""
+                // Walk unityPackages ONCE for both platforms and per-platform perf rank
+                // (VRChat exposes performanceRating per package). Best-known rank wins if a
+                // platform somehow appears twice (lower int = better; 5 = unknown).
+                var perfPc = 5; var perfQuest = 5; var perfIos = 5
+                val platSet = LinkedHashSet<String>()
+                j.optJSONArray("unityPackages")?.let { ups ->
+                    for (i in 0 until ups.length()) {
+                        val up = ups.optJSONObject(i) ?: continue
+                        val rawPlat = up.optString("platform", "")
+                        val rank = perfRank(up.optString("performanceRating", ""))
+                        when (rawPlat.lowercase()) {
+                            "standalonewindows" -> { platSet.add("PC"); if (rank < perfPc) perfPc = rank }
+                            "android" -> { platSet.add("Quest"); if (rank < perfQuest) perfQuest = rank }
+                            "ios" -> { platSet.add("iOS"); if (rank < perfIos) perfIos = rank }
                         }
-                    }.filter { it.isNotBlank() }.distinct()
-                } ?: emptyList()
+                    }
+                }
                 AvatarCheck(
                     true, fileId, j.optString("name", ""),
-                    j.optString("authorName", ""), j.optString("authorId", ""), plats,
-                    j.optString("description", "")
+                    j.optString("authorName", ""), j.optString("authorId", ""), platSet.toList(),
+                    j.optString("description", ""), perfPc, perfQuest, perfIos
                 )
             } catch (e: Exception) { null }
             finally { runCatching { conn?.disconnect() } }

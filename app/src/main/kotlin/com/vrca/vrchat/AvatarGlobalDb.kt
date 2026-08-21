@@ -73,6 +73,11 @@ object AvatarGlobalDb {
         val checked: Long = 0L,
         /** Avatar description/bio (device- or bot-filled; may be genuinely empty). */
         val description: String = "",
+        /** Per-platform performance/optimisation rank (bot-filled from unityPackages):
+         *  0=Excellent 1=Good 2=Medium 3=Poor 4=VeryPoor 5=None/unknown. */
+        val perfPc: Int = 5,
+        val perfQuest: Int = 5,
+        val perfIos: Int = 5,
         /** The bot has done a full first-fill (name/author/platforms/bio). Devices
          *  contribute filled=false; only the fill bot sets it true. */
         val filled: Boolean = false
@@ -182,6 +187,7 @@ object AvatarGlobalDb {
                         put("name", e.name); put("author", e.author); put("authorId", e.authorId)
                         put("platforms", JSONArray(e.platforms))
                         put("description", e.description)
+                        put("perfPc", e.perfPc); put("perfQuest", e.perfQuest); put("perfIos", e.perfIos)
                         put("filled", e.filled)
                     })
                 }
@@ -301,7 +307,7 @@ object AvatarGlobalDb {
         // clone RIGHT AWAY — no waiting for the Worker flush + next 30-min pull. Zero
         // extra KV cost (this is a purely in-memory local add).
         map[fileId] = Entry(fileId, avatarId, name, author, authorId, platforms,
-            System.currentTimeMillis(), description, false)
+            System.currentTimeMillis(), description, filled = false)
         val app = context.applicationContext
         scope.launch {
             queueMutex.withLock {
@@ -496,6 +502,7 @@ object AvatarGlobalDb {
                     o.optString("author", ""), o.optString("authorId", ""), plats,
                     o.optLong("checked", o.optLong("added", 0L)),
                     o.optString("desc", o.optString("description", "")),
+                    o.optInt("perfPc", 5), o.optInt("perfQuest", 5), o.optInt("perfIos", 5),
                     o.optBoolean("filled", false)
                 )
                 fresh[fileId] = mergeWithLocal(fileEntry, map[fileId])
@@ -520,7 +527,10 @@ object AvatarGlobalDb {
             author = if (keepFill) local.author.ifBlank { file.author } else file.author.ifBlank { local.author },
             authorId = if (keepFill) local.authorId.ifBlank { file.authorId } else file.authorId.ifBlank { local.authorId },
             platforms = if (keepFill && file.platforms.isEmpty()) local.platforms else file.platforms.ifEmpty { local.platforms },
-            description = if (keepFill && file.description.isBlank()) local.description else file.description
+            description = if (keepFill && file.description.isBlank()) local.description else file.description,
+            perfPc = if (keepFill && file.perfPc == 5) local.perfPc else file.perfPc,
+            perfQuest = if (keepFill && file.perfQuest == 5) local.perfQuest else file.perfQuest,
+            perfIos = if (keepFill && file.perfIos == 5) local.perfIos else file.perfIos
         )
     }
 

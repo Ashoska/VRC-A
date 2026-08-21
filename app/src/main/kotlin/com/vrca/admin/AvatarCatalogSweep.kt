@@ -401,7 +401,11 @@ object AvatarCatalogSweep {
             author = chk.author.ifBlank { e.author },
             authorId = chk.authorId.ifBlank { e.authorId },
             platforms = if (chk.platforms.isNotEmpty()) chk.platforms else e.platforms,
-            description = chk.description   // authoritative — reflects an edited OR cleared bio
+            description = chk.description,  // authoritative — reflects an edited OR cleared bio
+            // Perf can change on a re-upload; take the known value, keep the old if unknown.
+            perfPc = if (chk.perfPc < 5) chk.perfPc else e.perfPc,
+            perfQuest = if (chk.perfQuest < 5) chk.perfQuest else e.perfQuest,
+            perfIos = if (chk.perfIos < 5) chk.perfIos else e.perfIos
         )
         return if (upd != e) upd else null   // upd preserves checked+filled, so this compares the refreshable fields
     }
@@ -415,6 +419,9 @@ object AvatarCatalogSweep {
         authorId = chk.authorId.ifBlank { e.authorId },
         platforms = if (chk.platforms.isNotEmpty()) chk.platforms else e.platforms,
         description = chk.description.ifBlank { e.description },
+        perfPc = if (chk.perfPc < 5) chk.perfPc else e.perfPc,
+        perfQuest = if (chk.perfQuest < 5) chk.perfQuest else e.perfQuest,
+        perfIos = if (chk.perfIos < 5) chk.perfIos else e.perfIos,
         filled = true
     )
 

@@ -46,6 +46,13 @@ function validEntry(e) {
     typeof e.avatarId === "string" && AVTR_RE.test(e.avatarId);
 }
 
+// VRChat avatar performance/optimisation rank per platform:
+// 0=Excellent 1=Good 2=Medium 3=Poor 4=VeryPoor 5=None/unknown. Clamp + default 5.
+function clampPerf(v) {
+  const n = Number.isInteger(v) ? v : 5;
+  return n >= 0 && n <= 5 ? n : 5;
+}
+
 function cleanEntry(e) {
   const now = Date.now();
   const desc = typeof e.description === "string" ? e.description
@@ -60,6 +67,10 @@ function cleanEntry(e) {
       : [],
     // Avatar description/bio (device- or bot-filled). Kept short.
     desc: desc.slice(0, 400),
+    // Per-platform performance/optimisation rank (bot-filled from unityPackages).
+    perfPc: clampPerf(e.perfPc),
+    perfQuest: clampPerf(e.perfQuest),
+    perfIos: clampPerf(e.perfIos),
     // The bot has done a full first-fill of this entry (name/author/platforms/bio).
     // Devices contribute filled=false; the fill bot sets it true.
     filled: e.filled === true,
