@@ -86,6 +86,7 @@ object AvatarCatalogSweep {
     /** Idempotent: (re)start ONLY when the logged-in bots / key / assignment actually
      *  changed. A no-op otherwise, so navigating away and back to the Bots tab keeps
      *  the running sweep + its counters instead of resetting them. */
+    @Synchronized
     fun ensureRunning(context: Context, adminKey: String, manual: Map<Role, Int> = emptyMap()) {
         val app = context.applicationContext
         val key = adminKey.trim()
@@ -150,6 +151,7 @@ object AvatarCatalogSweep {
         }
     }
 
+    @Synchronized
     fun start(context: Context, adminKey: String, manual: Map<Role, Int> = emptyMap()) {
         if (running) return
         val app = context.applicationContext
@@ -190,6 +192,7 @@ object AvatarCatalogSweep {
         }
     }
 
+    @Synchronized
     fun stop() {
         running = false
         runningSig = ""
