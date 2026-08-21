@@ -336,15 +336,16 @@ private fun BotSection(
                     enabled = !busy && code.isNotBlank(),
                     onClick = {
                         busy = true
-                        BotController.suspendValidation(90_000)
+                        BotController.beginLogin()
                         scope.launch {
-                            val r = BotVrchatSession.verify2FA(ctx, slot, code.trim(), is2faEmail)
-                            msg = when (r) {
-                                is BotVrchatSession.LoginResult.Success -> { needs2fa = false; code = ""; BotController.refreshSlot(ctx, slot); "" }
-                                is BotVrchatSession.LoginResult.Error -> r.message
-                                else -> ""
-                            }
-                            busy = false
+                            try {
+                                val r = BotVrchatSession.verify2FA(ctx, slot, code.trim(), is2faEmail)
+                                msg = when (r) {
+                                    is BotVrchatSession.LoginResult.Success -> { needs2fa = false; code = ""; BotController.refreshSlot(ctx, slot); "" }
+                                    is BotVrchatSession.LoginResult.Error -> r.message
+                                    else -> ""
+                                }
+                            } finally { BotController.endLogin(); busy = false }
                         }
                     }
                 ) { Text("Verify") }
@@ -363,15 +364,16 @@ private fun BotSection(
                     enabled = !busy && user.isNotBlank() && pass.isNotBlank(),
                     onClick = {
                         busy = true; msg = "Signing in…"
-                        BotController.suspendValidation(5 * 60_000)
+                        BotController.beginLogin()   // the other bots go silent while this logs in
                         scope.launch {
-                            val r = BotVrchatSession.login(ctx, slot, user.trim(), pass) { p -> msg = p }
-                            msg = when (r) {
-                                is BotVrchatSession.LoginResult.Success -> { pass = ""; BotController.refreshSlot(ctx, slot); "" }
-                                is BotVrchatSession.LoginResult.Needs2FA -> { needs2fa = true; is2faEmail = r.email; "" }
-                                is BotVrchatSession.LoginResult.Error -> r.message
-                            }
-                            busy = false
+                            try {
+                                val r = BotVrchatSession.login(ctx, slot, user.trim(), pass) { p -> msg = p }
+                                msg = when (r) {
+                                    is BotVrchatSession.LoginResult.Success -> { pass = ""; BotController.refreshSlot(ctx, slot); "" }
+                                    is BotVrchatSession.LoginResult.Needs2FA -> { needs2fa = true; is2faEmail = r.email; "" }
+                                    is BotVrchatSession.LoginResult.Error -> r.message
+                                }
+                            } finally { BotController.endLogin(); busy = false }
                         }
                     }
                 ) { Text("Log in") }

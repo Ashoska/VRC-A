@@ -47,14 +47,22 @@ object BotController {
     private val started = AtomicBoolean(false)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var pendingReports = 0
-    @Volatile private var validationSuspendedUntil = 0L
+    // While a manual login is in progress, the ALREADY-logged-in bots must "chill" —
+    // stop the sweep AND validation — so their API traffic doesn't compete with the new
+    // login for VRChat's per-IP rate limit (the "3rd/4th bot won't log in" wall).
+    private val activeLogins = java.util.concurrent.atomic.AtomicInteger(0)
+    @Volatile private var chillDeadline = 0L
 
-    /** Pause background auth validation for [ms] — called around a manual login so its
-     *  /auth/user calls don't compete with the login for VRChat's per-IP auth budget
-     *  (which is what makes logging in a 3rd/4th bot 401). */
-    fun suspendValidation(ms: Long) {
-        validationSuspendedUntil = maxOf(validationSuspendedUntil, System.currentTimeMillis() + ms)
+    fun beginLogin() {
+        activeLogins.incrementAndGet()
+        chillDeadline = System.currentTimeMillis() + 6 * 60_000  // safety cap if endLogin is missed
+        AvatarCatalogSweep.stop()   // silence the working bots immediately
     }
+
+    fun endLogin() { if (activeLogins.decrementAndGet() < 0) activeLogins.set(0) }
+
+    /** True while any login is running (and within the safety window) — everything else chills. */
+    fun chilling(): Boolean = activeLogins.get() > 0 && System.currentTimeMillis() < chillDeadline
 
     /** Re-apply the sweep config from saved prefs (key / role assignment / pause). Kept
      *  here (not the UI) so the bots auto-start + resume on APP LAUNCH without opening
@@ -63,7 +71,8 @@ object BotController {
     fun applySweepConfig(context: Context) {
         val app = context.applicationContext
         val prefs = app.getSharedPreferences("vrca_admin_local", Context.MODE_PRIVATE)
-        if (prefs.getBoolean("bots_paused", false)) { AvatarCatalogSweep.stop(); return }
+        // Paused (manual) or chilling (a login is in progress) → the working bots go silent.
+        if (prefs.getBoolean("bots_paused", false) || chilling()) { AvatarCatalogSweep.stop(); return }
         val key = prefs.getString("avatar_admin_key", "") ?: ""
         val csv = prefs.getString("avatar_role_slots", null)
         val roleSlots = if (csv == null) IntArray(4) { -1 }
@@ -115,9 +124,9 @@ object BotController {
         scope.launch {
             var first = true
             while (true) {
-                if (System.currentTimeMillis() < validationSuspendedUntil) { delay(5000); continue }
+                if (chilling()) { delay(3000); continue }
                 for (slot in 0 until BotVrchatSession.SLOTS) {
-                    if (System.currentTimeMillis() < validationSuspendedUntil) break
+                    if (chilling()) break
                     if (BotVrchatSession.isLoggedIn(app, slot)) {
                         var a = BotVrchatSession.validate(app, slot)
                         if (a == BotVrchatSession.Auth.EXPIRED) a = BotVrchatSession.autoRelogin(app, slot)
