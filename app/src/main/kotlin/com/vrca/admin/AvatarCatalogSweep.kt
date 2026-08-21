@@ -205,6 +205,7 @@ object AvatarCatalogSweep {
         runningSig = ""
         liveSlots = emptyList()
         jobs.forEach { it.cancel() }; jobs.clear()
+        inFlight.clear()
         progress.values.forEach { it.running = false; it.status = "stopped" }
         blitzProgress.values.forEach { it.running = false }
     }
@@ -273,6 +274,11 @@ object AvatarCatalogSweep {
                 did = runRole(context, adminKey, slot, role) || did
             }
             if (blitzing && running) did = blitzPass(context, adminKey, slot, liveIndex, liveCount) || did
+            // LOAN: if this bot's own role(s) had no work and we're not blitzing, help the
+            // biggest backlog (fill first, then stale liveness). The shared claim set means
+            // no two bots ever touch the same avatar, and each bot is a SEPARATE VRChat
+            // account, so loaning multiplies throughput without tripping one account's limit.
+            if (!blitzing && running && !did) did = helpPass(context, adminKey, slot) || did
             if (!running) break
             // Responsive sleep: wake IMMEDIATELY (within 500ms) if the blitz state flips,
             // so clicking blitz kicks EVERY bot at once instead of each waiting out its
@@ -336,6 +342,17 @@ object AvatarCatalogSweep {
 
     // ---- shared helpers ------------------------------------------------------
 
+    // Entries a bot is CURRENTLY processing. Claimed atomically so multiple bots — the
+    // dedicated Fill/Liveness roles AND any idle bots loaning in — never grab the same
+    // avatar. Released when the pass finishes (in a finally).
+    private val inFlight = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private fun claimBatch(candidates: List<AvatarGlobalDb.Entry>, max: Int): List<AvatarGlobalDb.Entry> {
+        val out = ArrayList<AvatarGlobalDb.Entry>(max)
+        for (e in candidates) { if (out.size >= max) break; if (inFlight.add(e.fileId)) out.add(e) }
+        return out
+    }
+    private fun release(fileIds: Collection<String>) { inFlight.removeAll(fileIds.toSet()) }
+
     private suspend fun pushOps(
         context: Context, adminKey: String,
         upserts: List<AvatarGlobalDb.Entry>, removes: List<String>,
@@ -380,8 +397,13 @@ object AvatarCatalogSweep {
         filled = true
     )
 
-    private fun needsFill(e: AvatarGlobalDb.Entry): Boolean =
-        !e.filled || e.platforms.isEmpty() || e.author.isBlank() || e.name.isBlank()
+    // "Needs fill" = the bot hasn't SUCCESSFULLY fetched this entry yet. Keyed ONLY on
+    // `filled` — NOT on empty platforms/author/name — because a public avatar can legit
+    // return empty for those, and the old OR-conditions re-queued such an entry FOREVER
+    // (filled=true but still "needs fill"), so the Fill queue plateaued and never drained
+    // while the bot re-checked the same un-satisfiable entries. Once filled=true it's done;
+    // any later owner edit (new platform/name/bio) is picked up by the liveness refresh.
+    private fun needsFill(e: AvatarGlobalDb.Entry): Boolean = !e.filled
 
     private fun partitionOf(fileId: String): Int = (fileId.hashCode() and 0x7fffffff) % 2
 
@@ -425,65 +447,112 @@ object AvatarCatalogSweep {
     }
 
     private suspend fun fillPass(context: Context, adminKey: String, slot: Int, role: Role): Boolean {
-        val p = progress.getValue(role)
-        val entries = AvatarGlobalDb.snapshot().filter { needsFill(it) }.take(FILL_BATCH)
-        if (entries.isEmpty()) { p.status = "all filled — idle"; return false }
-        p.status = "filling ${entries.size} new/incomplete"
-        val upserts = mutableListOf<AvatarGlobalDb.Entry>()
-        val removes = mutableListOf<String>()
-        for (e in entries) {
-            if (!running) break
-            val chk = BotVrchatSession.checkAvatar(context, slot, e.avatarId)
-            p.checked++
-            if (chk == null) { delay(PACE_MS); continue }
-            if (!chk.alive) { removes.add(e.fileId); p.removed++ }
-            else {
-                val upd = fillRefresh(e, chk)
-                if (upd.fileId != e.fileId) removes.add(e.fileId)  // re-key on image change
-                upserts.add(upd); p.filled++
-            }
-            if (upserts.size + removes.size >= BATCH) {
-                pushOps(context, adminKey, upserts.toList(), removes.toList())
-                upserts.clear(); removes.clear()
-            }
-            delay(PACE_MS)
-        }
-        if (upserts.isNotEmpty() || removes.isNotEmpty())
-            pushOps(context, adminKey, upserts.toList(), removes.toList())
-        p.status = "fill: filled=${p.filled} removed=${p.removed}"
-        return true
+        val batch = claimBatch(AvatarGlobalDb.snapshot().filter { needsFill(it) }, FILL_BATCH)
+        if (batch.isEmpty()) { progress.getValue(role).status = "all filled — idle"; return false }
+        return processFillBatch(context, adminKey, slot, batch, role)
     }
 
     private suspend fun livenessPass(context: Context, adminKey: String, slot: Int, role: Role, partition: Int): Boolean {
-        val p = progress.getValue(role)
         val cutoff = System.currentTimeMillis() - (if (blitzActive()) BLITZ_RECHECK_MS else RECHECK_INTERVAL_MS)
-        val entries = AvatarGlobalDb.snapshot()
+        val cand = AvatarGlobalDb.snapshot()
             .filter { partitionOf(it.fileId) == partition && it.checked < cutoff }
-            .sortedBy { it.checked }.take(LIVENESS_BATCH)
-        if (entries.isEmpty()) { p.status = "all fresh — idle"; return false }
-        p.status = "checking oldest ${entries.size}${if (blitzActive()) " (blitz)" else ""}"
+            .sortedBy { it.checked }
+        val batch = claimBatch(cand, LIVENESS_BATCH)
+        if (batch.isEmpty()) { progress.getValue(role).status = "all fresh — idle"; return false }
+        return processLivenessBatch(context, adminKey, slot, batch, role)
+    }
+
+    /** LOAN pass: this bot's own role has no work, so help the largest backlog — FILL
+     *  first (the usual bottleneck), then the stale-liveness sweep — drawing from the SAME
+     *  claim set as the dedicated bots so nothing is double-processed. Counters land on the
+     *  HELPED role so its throughput reflects every bot pitching in. */
+    private suspend fun helpPass(context: Context, adminKey: String, slot: Int): Boolean {
+        val fillBatch = claimBatch(AvatarGlobalDb.snapshot().filter { needsFill(it) }, FILL_BATCH)
+        if (fillBatch.isNotEmpty()) return processFillBatch(context, adminKey, slot, fillBatch, Role.FILL)
+        val cutoff = System.currentTimeMillis() - (if (blitzActive()) BLITZ_RECHECK_MS else RECHECK_INTERVAL_MS)
+        val staleBatch = claimBatch(
+            AvatarGlobalDb.snapshot().filter { it.checked < cutoff }.sortedBy { it.checked }, LIVENESS_BATCH
+        )
+        if (staleBatch.isEmpty()) return false
+        return processLivenessBatch(context, adminKey, slot, staleBatch, Role.LIVENESS_A)
+    }
+
+    /** Process a PRE-CLAIMED fill batch (used by the FILL role AND by loaning bots). Backs
+     *  off the moment VRChat rate-limits (3 nulls in a row) so it doesn't hammer a throttled
+     *  account — the next cycle retries the released entries. Releases the whole claim in a
+     *  finally, so a break/exception can never permanently strand entries. */
+    private suspend fun processFillBatch(
+        context: Context, adminKey: String, slot: Int, batch: List<AvatarGlobalDb.Entry>, role: Role
+    ): Boolean {
+        val p = progress.getValue(role)
+        p.status = "filling ${batch.size}"
+        val upserts = mutableListOf<AvatarGlobalDb.Entry>()
+        val removes = mutableListOf<String>()
+        try {
+            var nulls = 0
+            for (e in batch) {
+                if (!running) break
+                val chk = BotVrchatSession.checkAvatar(context, slot, e.avatarId)
+                p.checked++
+                if (chk == null) {
+                    if (++nulls >= 3) { p.status = "rate-limited — backing off"; break }
+                    delay(PACE_MS); continue
+                }
+                nulls = 0
+                if (!chk.alive) { removes.add(e.fileId); p.removed++ }
+                else {
+                    val upd = fillRefresh(e, chk)
+                    if (upd.fileId != e.fileId) removes.add(e.fileId)  // re-key on image change
+                    upserts.add(upd); p.filled++
+                }
+                if (upserts.size + removes.size >= BATCH) {
+                    pushOps(context, adminKey, upserts.toList(), removes.toList())
+                    upserts.clear(); removes.clear()
+                }
+                delay(PACE_MS)
+            }
+            if (upserts.isNotEmpty() || removes.isNotEmpty())
+                pushOps(context, adminKey, upserts.toList(), removes.toList())
+            p.status = "fill: filled=${p.filled} removed=${p.removed}"
+            return true
+        } finally { release(batch.map { it.fileId }) }
+    }
+
+    /** Process a PRE-CLAIMED liveness batch (dead-check + refresh), same rate-limit backoff. */
+    private suspend fun processLivenessBatch(
+        context: Context, adminKey: String, slot: Int, batch: List<AvatarGlobalDb.Entry>, role: Role
+    ): Boolean {
+        val p = progress.getValue(role)
+        p.status = "checking oldest ${batch.size}${if (blitzActive()) " (blitz)" else ""}"
         val upserts = mutableListOf<AvatarGlobalDb.Entry>()
         val removes = mutableListOf<String>()
         val okChecked = mutableListOf<String>()
-        for (e in entries) {
-            if (!running) break
-            val chk = BotVrchatSession.checkAvatar(context, slot, e.avatarId)
-            p.checked++
-            if (chk == null) { delay(PACE_MS); continue }
-            if (!chk.alive) { removes.add(e.fileId); p.removed++ }
-            else {
-                val upd = liveRefresh(e, chk)
-                if (upd != null) {
-                    if (upd.fileId != e.fileId) removes.add(e.fileId)
-                    upserts.add(upd); p.refreshed++
-                } else okChecked.add(e.fileId)  // alive + identical → just bump last-checked
+        try {
+            var nulls = 0
+            for (e in batch) {
+                if (!running) break
+                val chk = BotVrchatSession.checkAvatar(context, slot, e.avatarId)
+                p.checked++
+                if (chk == null) {
+                    if (++nulls >= 3) { p.status = "rate-limited — backing off"; break }
+                    delay(PACE_MS); continue
+                }
+                nulls = 0
+                if (!chk.alive) { removes.add(e.fileId); p.removed++ }
+                else {
+                    val upd = liveRefresh(e, chk)
+                    if (upd != null) {
+                        if (upd.fileId != e.fileId) removes.add(e.fileId)
+                        upserts.add(upd); p.refreshed++
+                    } else okChecked.add(e.fileId)  // alive + identical → just bump last-checked
+                }
+                delay(PACE_MS)
             }
-            delay(PACE_MS)
-        }
-        AvatarGlobalDb.markCheckedLocally(okChecked + upserts.map { it.fileId })
-        if (removes.isNotEmpty() || upserts.isNotEmpty() || okChecked.isNotEmpty())
-            pushOps(context, adminKey, upserts.toList(), removes.toList(), emptyList(), okChecked.toList())
-        p.status = "checked=${p.checked} removed=${p.removed} refreshed=${p.refreshed}"
-        return true
+            AvatarGlobalDb.markCheckedLocally(okChecked + upserts.map { it.fileId })
+            if (removes.isNotEmpty() || upserts.isNotEmpty() || okChecked.isNotEmpty())
+                pushOps(context, adminKey, upserts.toList(), removes.toList(), emptyList(), okChecked.toList())
+            p.status = "checked=${p.checked} removed=${p.removed} refreshed=${p.refreshed}"
+            return true
+        } finally { release(batch.map { it.fileId }) }
     }
 }
