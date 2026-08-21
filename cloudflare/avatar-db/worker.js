@@ -57,26 +57,30 @@ function cleanEntry(e) {
   const now = Date.now();
   const desc = typeof e.description === "string" ? e.description
     : (typeof e.desc === "string" ? e.desc : "");
-  return {
+  const plats = Array.isArray(e.platforms)
+    ? e.platforms.filter((p) => typeof p === "string").slice(0, 4)
+    : [];
+  const out = {
     id: e.avatarId,
     name: typeof e.name === "string" ? e.name.slice(0, 100) : "",
     author: typeof e.author === "string" ? e.author.slice(0, 100) : "",
     authorId: typeof e.authorId === "string" ? e.authorId : "",
-    platforms: Array.isArray(e.platforms)
-      ? e.platforms.filter((p) => typeof p === "string").slice(0, 4)
-      : [],
+    platforms: plats,
     // Avatar description/bio (device- or bot-filled). Kept short.
     desc: desc.slice(0, 400),
-    // Per-platform performance/optimisation rank (bot-filled from unityPackages).
-    perfPc: clampPerf(e.perfPc),
-    perfQuest: clampPerf(e.perfQuest),
-    perfIos: clampPerf(e.perfIos),
     // The bot has done a full first-fill of this entry (name/author/platforms/bio).
     // Devices contribute filled=false; the fill bot sets it true.
     filled: e.filled === true,
     added: now,
     checked: now, // last time the bot verified this avatar is alive (= added at first)
   };
+  // Per-platform performance/optimisation rank — ONLY store it for platforms the avatar
+  // actually has a build for (it's in `platforms`). A PC-only avatar shouldn't carry a
+  // Quest/iOS rating; perf for an unsupported platform is meaningless noise.
+  if (plats.includes("PC")) out.perfPc = clampPerf(e.perfPc);
+  if (plats.includes("Quest")) out.perfQuest = clampPerf(e.perfQuest);
+  if (plats.includes("iOS")) out.perfIos = clampPerf(e.perfIos);
+  return out;
 }
 
 export default {
