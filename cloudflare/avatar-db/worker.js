@@ -118,6 +118,47 @@ export default {
         return json({ ok: true });
       }
 
+      if (req.method === "GET" && url.pathname === "/admin/restore") {
+        // ONE-TIME recovery: restore db.json from a known-good commit sha. Guarded by
+        // ADMIN_KEY. Usage: /admin/restore?key=ADMIN_KEY&sha=<goodCommitSha>
+        const key = url.searchParams.get("key");
+        if (!env.ADMIN_KEY || key !== env.ADMIN_KEY) return json({ ok: false, error: "bad admin key" }, 403);
+        const ref = url.searchParams.get("sha");
+        if (!ref) return json({ ok: false, error: "need ?sha=<good commit>" }, 400);
+        const repo = env.GH_REPO, path = env.DB_PATH, branch = env.GH_BRANCH || "main";
+        const gh = ghHeaders(env);
+        const apiUrl = `https://api.github.com/repos/${repo}/contents/${path}`;
+        // Read the file AT the good commit (blob API handles the >1MB file).
+        const oldRes = await fetch(apiUrl + "?ref=" + encodeURIComponent(ref), { headers: gh });
+        if (oldRes.status !== 200) return json({ ok: false, error: "read old http " + oldRes.status }, 500);
+        const oldJson = await oldRes.json();
+        let b64 = oldJson.content || "";
+        if (b64.replace(/\s/g, "").length === 0 && oldJson.sha) {
+          const blobRes = await fetch(`https://api.github.com/repos/${repo}/git/blobs/${oldJson.sha}`, { headers: gh });
+          if (blobRes.status !== 200) return json({ ok: false, error: "blob http " + blobRes.status }, 500);
+          b64 = ((await blobRes.json()).content) || "";
+        }
+        b64 = b64.replace(/\s/g, "");
+        let restored;
+        try { restored = JSON.parse(b64decode(b64)); } catch (e) { return json({ ok: false, error: "old file unparseable" }, 500); }
+        const count = Object.keys(restored.avatars || {}).length;
+        if (count < 1) return json({ ok: false, error: "old file has 0 avatars" }, 500);
+        // Overwrite current main with it.
+        const curRes = await fetch(apiUrl + "?ref=" + encodeURIComponent(branch), { headers: gh });
+        const curSha = curRes.status === 200 ? (await curRes.json()).sha : undefined;
+        const putBody = { message: `avatar-db: RESTORE ${count} avatars from ${ref}`, content: b64, branch };
+        if (curSha) putBody.sha = curSha;
+        const putRes = await fetch(apiUrl, { method: "PUT", headers: gh, body: JSON.stringify(putBody) });
+        if (putRes.status !== 200 && putRes.status !== 201)
+          return json({ ok: false, error: "put http " + putRes.status + " " + (await putRes.text()).slice(0, 200) }, 500);
+        await env.AVATAR_KV.put("dbcache", serializeDb(restored));
+        const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+        await env.AVATAR_KV.put("meta", JSON.stringify({
+          ...meta, entries: count, lastFlush: new Date().toISOString(), lastCommit: `RESTORED ${count} from ${ref}`,
+        }));
+        return json({ ok: true, restored: count, from: ref });
+      }
+
       if (req.method === "GET" && url.pathname === "/db") {
         // The current serialized catalog, served FRESH from KV (no GitHub CDN lag) so
         // the admin bots notice new avatars immediately. Empty until the first flush.
