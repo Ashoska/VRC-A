@@ -18,17 +18,26 @@
 - Migration is **staged** (§2): streaming parse → slim resident model → full CDN sharding →
   Action-driven rebuild pipeline. Each stage is independently shippable and backward
   compatible (dual-source reads, fallbacks).
-- **Hard constraint from the user (load-bearing):** do NOT increase Cloudflare Worker usage.
-  Regular-user reads must stay on the **free GitHub CDN** (static files). The Worker keeps
-  only its current write-side jobs (`/contribute`, `/report`, `/admin`, `/health`, `/db`,
-  cron flush). No per-user `/lookup` or `/search` Worker traffic — ever.
-- **Second user constraint:** aggressive presence-scoped eviction. When the last wearer of
-  an avatar leaves the instance, its cached entry is dropped. No cross-encounter "cached =
-  instant"; every new encounter is a fresh ~200 ms shard fetch. The pending-contribution
-  queue is a SEPARATE store, never evicted (see §7.4).
-- Cloudflare's own limits also forbid the Worker ever loading the whole catalog (128 MB
-  Worker memory) — heavy rebuilds move to **GitHub Actions** (real RAM, free for public
-  repos). See §5.
+- **STORAGE BACKEND DECISION (updated): Cloudflare R2, not the GitHub CDN.** The live
+  catalog (lookup shards + index buckets + manifest) lives in an **R2 bucket**; a periodic
+  full **master export stays on GitHub** (`db.json`) for browsability + disaster recovery.
+  R2 chosen because it kills the entire write-path pain: direct `bucket.put()` (no git
+  commits, no Contents-API 1 MB limit so the wipe-root-cause is GONE, no history bloat, ms
+  writes) + free egress + trivial storage cost. See §3.0 and §5b.
+- **Cost discipline (revised from the old "reads must be free on GitHub" rule):** reads now
+  bill R2 Class B ($0.36/M) on a cache MISS, but **edge caching makes hits free**, so the
+  goal is a high cache-hit rate via a cached serving path (§5b). Realistic total at 1M
+  avatars / ~10k users ≈ **$5–8/mo, dominated by the flat $5 Workers Paid base** (storage
+  pennies, writes within the free tier, cached reads cheap, egress free). The $5 tier covers
+  the planned scale. Deliberate trade: a few $/mo + a Cloudflare dependency in exchange for
+  eliminating the fragile git write path and the catastrophic-wipe risk class.
+- **Presence-scoped eviction (user constraint):** when the last wearer of an avatar leaves
+  the instance, its cached entry is dropped. No cross-encounter "cached = instant"; every new
+  encounter is a fresh ~200 ms shard fetch. The pending-contribution queue is a SEPARATE
+  store, never evicted (see §7.10).
+- Cloudflare's 128 MB Worker-memory limit still forbids loading the whole catalog in a
+  Worker — but with R2, per-shard writes are direct and tiny, so the heavy **GitHub Action
+  rebuild (§5.3) is now OPTIONAL** (only for the master export + a periodic full-index GC).
 
 ---
 
@@ -156,8 +165,45 @@ stage is shippable alone.
 
 ## 3. Sharded data model (Stage C)
 
-All files live in the image-store repo (`Ashoska/VRC-A-Image-store`) under `avatars/`, served
-by the GitHub CDN (raw / jsDelivr). Compute every path client-side; never list a directory.
+### 3.0 Storage backend: Cloudflare R2 (CHOSEN) + GitHub master export (hybrid)
+
+Live catalog objects (lookup shards, index buckets, manifest) live in an **R2 bucket**,
+served edge-cached (§5b). The full **master `db.json` export stays on GitHub** (dumped by the
+Action or a scheduled Worker) for human browsability + disaster recovery only — never read on
+the hot path. Compute every object key client-side; never list a bucket/dir on the client.
+
+Why R2 over the GitHub CDN (the decision):
+- **Writes are direct `bucket.put(key, body)`** — no git commit dance, no Contents-API 1 MB
+  limit (the wipe root cause is GONE), no history bloat, ms latency. This deletes §5.1's Git
+  Data API pipeline and makes §5.3's Action rebuild optional (master export + index GC only).
+- **Free egress**; storage $0.015/GB-mo (millions of avatars ≈ ~1 GB ≈ pennies); writes
+  (Class A $4.50/M) fit the 1M/mo free tier at our flush rate; reads (Class B $0.36/M) are
+  cheap and mostly free once edge-cached (§5b).
+
+wrangler.toml binding:
+```
+[[r2_buckets]]
+binding = "CATALOG"
+bucket_name = "vrca-avatar-catalog"
+```
+
+Worker write (on flush): one `put` per changed object, with a cache TTL so edge caches expire:
+```
+await env.CATALOG.put(`lookup/${prefix}.json`, JSON.stringify(shard), {
+  httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=300" }
+});
+```
+No git, no 1 MB limit, no whole-catalog load. The Worker reads+merges only the touched shard
+(tiny, fits 128 MB): `const cur = await env.CATALOG.get(key); const obj = cur ? await cur.json() : {v:1,e:{}}`.
+
+Client base URL is CONFIGURABLE (`AvatarGlobalDb.CATALOG_BASE`, learned from `/health` so a
+serving change needs no app update): the app fetches `${CATALOG_BASE}/lookup/${prefix}.json`.
+
+Keys mirror §3.1–3.5: `lookup/<3hex>.json`, `index/<2char>.json`, `_manifest.json` in R2;
+`db.json` master on GitHub.
+
+--- (paths below describe the KEY structure; on R2 they are object keys, on the GitHub master
+they are the shape of the exported file) ---
 
 ### 3.1 File-id shard key
 - File id = `file_` + UUID (`8-4-4-4-12` hex). Use the **first 3 hex chars of the UUID**
@@ -284,13 +330,18 @@ by the GitHub CDN (raw / jsDelivr). Compute every path client-side; never list a
   (`AvatarGlobalDb.flushQueue` + Worker cron). Do NOT do a KV write per avatar. The Worker
   merges pending into shards in the single scheduled flush.
 
-### 5.2 Endpoints (unchanged surface; regular users still never hit these)
-- `/contribute`, `/report`, `/admin`, `/admin/reports`, `/admin/restore`, `/health`, `/db`
-  remain. `/health` gains `shardScheme`/`entryCount`/`lastFullRebuild` echoes for the client
-  manifest + admin panel. Still NO `/lookup` or `/search` (would add per-user Worker cost —
-  forbidden by the user constraint).
+### 5.2 Endpoints (write-side; reads go to R2 objects via §5b, not here)
+- `/contribute`, `/report`, `/admin`, `/admin/reports`, `/admin/restore`, `/health` remain.
+  `/db` can be dropped once R2 is the read source (or kept pointing at the R2 master). `/health`
+  gains `catalogBase` (the R2 serving URL — §5b), `shardScheme`/`entryCount`/`lastFullRebuild`
+  for the client manifest + admin panel. There is NO `/lookup` or `/search` request endpoint —
+  reads are R2 object GETs (edge-cached), so lookups never invoke a per-request Worker.
 
-### 5.3 GitHub Action rebuild pipeline (the heavy lifting — free, real RAM)
+### 5.3 GitHub Action rebuild pipeline (OPTIONAL with R2 — master export + index GC only)
+- With R2 the Worker writes shards directly, so the Action is no longer load-bearing. Keep a
+  lighter version ONLY for: (a) dumping the GitHub **master `db.json`** export (browsable
+  backup) from the R2 shards, and (b) a periodic **full-index GC** (purge dead postings, re-cull
+  hot buckets) that's cheaper to do with real RAM than incrementally. Cadence 30–60 min.
 - New workflow `.github/workflows/catalog-rebuild.yml` in the IMAGE-STORE repo (not the app
   repo), `schedule` every 15–30 min + `workflow_dispatch`.
 - Node script: read all `lookup/` shards (or the master), regenerate:
@@ -306,6 +357,53 @@ by the GitHub CDN (raw / jsDelivr). Compute every path client-side; never list a
   the Worker's shard writes. If a race commit conflicts, retry with a fresh base tree.
 
 ---
+
+## 5b. Serving R2 reads cheaply (the "custom domain" question, answered)
+
+R2 buckets are PRIVATE by default. Three ways to expose the shard objects over HTTPS; pick by
+scale. The app's `CATALOG_BASE` just points at whichever you use.
+
+1. **`r2.dev` public URL** (`https://pub-xxxx.r2.dev/...`) — free, instant, but NOT
+   CDN-cached and rate-limited → every read bills a Class B op. **Dev/testing ONLY.**
+
+2. **Worker + Cache API on `*.workers.dev`** (no domain needed — START HERE):
+   ```
+   const cache = caches.default;
+   let res = await cache.match(req);
+   if (!res) {
+     const obj = await env.CATALOG.get(key);              // 1 Class B op on MISS only
+     if (!obj) return new Response("", { status: 404 });
+     res = new Response(obj.body, { headers: {
+       "content-type": "application/json", "cache-control": "public, max-age=300" } });
+     ctx.waitUntil(cache.put(req, res.clone()));
+   }
+   return res;
+   ```
+   - A cache HIT skips R2 (no Class B) but STILL runs the Worker (1 request). Workers Paid
+     includes 10M req/mo, then $0.30/M — so at ~30M reads/mo this adds ~$6/mo.
+   - Zero new purchase; works today on `vrca-avatar-db.workers.dev`.
+
+3. **R2 custom domain + Cache Rules** (cheapest at scale — needs a domain): attach a hostname
+   you control (e.g. `cdn.vrca.app`) to the bucket in the R2 dashboard. Reads serve at the
+   PURE CDN layer — a cache hit invokes NO Worker and hits R2 zero times → **free**; only cold
+   misses cost a Class B op.
+   - A "custom domain" is JUST a hostname pointing at the bucket — NOT a website to build.
+     Files become `https://cdn.vrca.app/lookup/abc.json`.
+   - The feature is free; you need a DOMAIN (free subdomain if one's already in the Cloudflare
+     account, else ~$8–12/yr at Cloudflare Registrar — the only added cost, per-year not
+     per-read). Set a Cache Rule / `cache-control: max-age=300`.
+
+**Path:** ship with #2 (no domain, works now); switch `CATALOG_BASE` to #3 once read volume
+makes the Worker-request cost worth a ~$10/yr domain. Because `CATALOG_BASE` is read from
+`/health`, the #2→#3 switch needs NO app-store update.
+
+### Cache invalidation on write
+- **TTL (recommended, simplest):** `cache-control: max-age=300` → a changed shard is live
+  within ~5 min, matching today's GitHub-CDN staleness. No purge logic. The §4.5
+  retry-not-found loop + §4.6 refresh-on-use already cover the roster case, so TTL is enough.
+- **Purge-on-write (instant, only if ever needed):** after a `put`, call Cloudflare's cache
+  purge API for that URL (or cache tags). More moving parts; skip unless 5-min staleness
+  becomes a real complaint.
 
 ## 6. Client changes (Stage C)
 
@@ -330,8 +428,8 @@ by the GitHub CDN (raw / jsDelivr). Compute every path client-side; never list a
   tokens (respect `_meta.json` sub-sharding); AND-intersect postings by `a`; rank by
   Σ(token weight) × `r`; apply platform/perf filters. Then `AvatarSearch.searchAll` unions
   this with avtrdb + VRCX mirrors exactly as today. Contribute-back unchanged.
-- The index buckets are CDN static files (no Worker). First query on a token ≈ 200–500 ms,
-  then within-session cached; mirrors stream alongside.
+- The index buckets are R2 objects served edge-cached (§5b), no per-request Worker on a hit.
+  First query on a token ≈ 200–500 ms, then within-session cached; mirrors stream alongside.
 
 ### 6.3 Contribute / eviction / master
 - `contribute()`: keep queue→POST→Worker + immediate `localOverlay` insert (so the
@@ -386,17 +484,28 @@ by the GitHub CDN (raw / jsDelivr). Compute every path client-side; never list a
 
 ---
 
-## 8. Cost model (must stay ~flat)
-- **Cloudflare:** Worker write-side only (contribute/report/admin/health/db + cron). No
-  per-user reads. Unchanged by sharding. KV: batched writes only.
-- **GitHub CDN (raw/jsDelivr):** all regular-user reads (shards + index + manifest). Free,
-  scales with users at zero cost to us. More, smaller requests than today's single file —
-  still free.
-- **GitHub Actions:** rebuild pipeline. Free for public repos. Minutes scale with catalog
-  size / cadence, not user count.
-- **GitHub storage:** repo holds shards + index + master. Past ~hundreds of k, move master to
-  a release asset (Stage E) to cap git-history growth; shards/index are small per-file and
-  churn slowly (one avatar touches one shard + a few buckets), so their history is fine.
+## 8. Cost model (R2 backend — verify current rates on Cloudflare's pricing page)
+Approximate current R2 rates: storage $0.015/GB-mo; Class A (writes/list) $4.50/M; Class B
+(reads) $0.36/M; **egress FREE**; monthly free tier 10 GB storage, 1M Class A, **10M Class B**.
+
+At **1M avatars + ~10k users**, with edge caching (§5b):
+- **Storage:** shards+index+manifest ≈ ~1 GB → **~$0.02/mo** (a few GB even for millions).
+- **Class A writes:** ~200k/mo (flush `put`s) → within the 1M free tier → **~$0**.
+- **Class B reads:** with ~85–95% cache hits, a big chunk falls in the 10M free tier →
+  **~$0.50–$2/mo** (uncached-worst-case ~$11/mo → that's what caching prevents).
+- **Egress:** **$0** (R2 free egress).
+- **Workers:** the flat **$5/mo Workers Paid** base. If reads use serving option §5b.2
+  (Worker+Cache), add ~$6/mo at ~30M reads — so at scale move to §5b.3 (custom domain) to
+  drop that.
+- **Custom domain (optional, §5b.3):** ~$8–12/**yr** for a domain if you don't own one.
+
+**Total ≈ $5–8/mo at the planned scale, dominated by the flat $5.** The variable that scales
+with USERS is Class B reads, flattened by edge caching. Storage/writes are negligible at any
+avatar count.
+
+- **GitHub (now backup only):** holds the master `db.json` export. Move it to a release asset
+  (Stage E) past ~hundreds of k so git history doesn't bloat. Shards/index are NOT in git
+  anymore (they're R2 objects), so the earlier git-history concern is largely moot.
 
 ---
 
@@ -405,14 +514,18 @@ by the GitHub CDN (raw / jsDelivr). Compute every path client-side; never list a
 2. `perf` field end-to-end (§4.1) — small, independently useful now, and gets it into the
    schema before shards freeze the format.
 3. Stage B slim resident + move search to an index (interim on-disk index acceptable).
-4. Worker: incremental per-shard writes + one-commit Git Data API (§5.1). Dual-write: keep
-   producing `db.json` (master) AND the shards so old app versions still work.
-5. Client: `lookupSharded` + shard LRU + eviction + resolver step-0 swap (fallback to old
-   whole-file read if a shard 404s during rollout).
-6. Client: `searchSharded` + index buckets, unioned with mirrors.
-7. Action rebuild pipeline (§5.3) + `_manifest.json`.
+4. **R2 setup:** create bucket `vrca-avatar-catalog`, add the wrangler binding (§3.0), stand up
+   serving option §5b.2 (Worker+Cache on workers.dev — no domain), expose `catalogBase` via
+   `/health`. Worker flush switches from git writes to `bucket.put` per changed shard/bucket.
+   Dual-write the GitHub master export in parallel so old app versions still work during rollout.
+5. Client: `CATALOG_BASE` (from `/health`) + `lookupSharded` + shard LRU + eviction + resolver
+   step-0 swap (fallback to the old whole-file read if a shard 404s during rollout).
+6. Client: `searchSharded` + index buckets (R2), unioned with mirrors.
+7. Optional Action: master export dump + periodic full-index GC (§5.3) + `_manifest.json`.
 8. §4.5 retry-not-found + §4.6 refresh-on-use.
-9. Stage E master → release asset (only once git history growth is a real problem).
+9. At scale: register a domain, switch serving to §5b.3 (R2 custom domain + Cache Rules) by
+   flipping `catalogBase` in `/health` — no app update. Move the GitHub master to a release
+   asset (Stage E).
 10. Retire the whole-file client read path once telemetry shows all clients updated.
 
 ## 10. Testing strategy
@@ -421,9 +534,10 @@ by the GitHub CDN (raw / jsDelivr). Compute every path client-side; never list a
   platform/perf bitmask encode/decode, `mergeWithLocal` monotonicity per-shard, never-wipe
   guards per-shard. Run via `./gradlew testPublicAppDebugUnitTest`, delete before commit.
 - Worker: `node -c worker.js`; a local harness POSTing synthetic contributions and asserting
-  one-commit-per-flush + shard membership + never-wipe on a simulated empty/short read.
-- Device-only (can't unit test): CDN staleness timing, roster resolve latency, OEM memory
-  pressure at the Stage-B resident size, Action rebuild wall-clock at scale.
+  one-`put`-per-changed-shard + shard membership + never-wipe (per-shard) on a simulated
+  empty/short read; R2 `get`→merge→`put` round-trip with `miniflare`/`wrangler dev --local`.
+- Device-only (can't unit test): R2 edge-cache staleness timing, roster resolve latency, OEM
+  memory pressure at the Stage-B resident size, optional Action rebuild wall-clock at scale.
 
 ## 11b. Shard size optimization (near-instant downloads)
 
