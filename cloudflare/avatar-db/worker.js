@@ -118,6 +118,17 @@ export default {
         return json({ ok: true });
       }
 
+      if (req.method === "GET" && url.pathname === "/db") {
+        // The current serialized catalog, served FRESH from KV (no GitHub CDN lag) so
+        // the admin bots notice new avatars immediately. Empty until the first flush.
+        const cached = await env.AVATAR_KV.get("dbcache");
+        return new Response(cached || '{"avatars":{}}', {
+          status: 200,
+          headers: { "content-type": "application/json", "cache-control": "no-store",
+            "access-control-allow-origin": "*" },
+        });
+      }
+
       if (req.method === "GET" && (url.pathname === "/health" || url.pathname === "/")) {
         // ONE cheap KV read (no list ops — those have a tight 1k/day free limit and
         // this is polled every 15s). Pending counts come from meta (set at flush).
@@ -303,14 +314,39 @@ async function flush(env) {
   let db = { version: 1, avatars: {} };
   let sha;
   let legacySha; // sha of a stray "undefined" file to migrate + delete
+  let hadExistingFile = false;
   const getRes = await fetch(apiUrl + "?ref=" + encodeURIComponent(branch), { headers });
   if (getRes.status === 200) {
     const j = await getRes.json();
     sha = j.sha;
+    hadExistingFile = true;
+    // The Contents API returns EMPTY content for files >1MB — fetch the blob instead
+    // (handles up to 100MB). THIS 1MB LIMIT, plus the old reset-to-empty on failure, is
+    // what wiped the catalog once it grew past ~1MB.
+    let contentB64 = j.content || "";
+    if (contentB64.replace(/\s/g, "").length === 0 && j.sha) {
+      const blobRes = await fetch(`https://api.github.com/repos/${repo}/git/blobs/${j.sha}`, { headers });
+      if (blobRes.status === 200) {
+        contentB64 = ((await blobRes.json()).content) || "";
+      } else {
+        // Couldn't read the big file — ABORT, do NOT wipe. Retry next cron.
+        await env.AVATAR_KV.put("meta", JSON.stringify({
+          ...prevMeta, lastFlush: new Date().toISOString(),
+          lastCommit: "ABORTED: blob read http " + blobRes.status + " (kept everything)",
+        }));
+        return;
+      }
+    }
     try {
-      db = JSON.parse(b64decode(j.content));
-    } catch (_) {
-      db = { version: 1, avatars: {} };
+      db = JSON.parse(b64decode(contentB64.replace(/\s/g, "")));
+    } catch (e) {
+      // CRITICAL: never reset to empty. If we can't parse the current file we must NOT
+      // write a smaller one — abort and keep all pending for the next cron.
+      await env.AVATAR_KV.put("meta", JSON.stringify({
+        ...prevMeta, lastFlush: new Date().toISOString(),
+        lastCommit: "ABORTED: could not parse current db.json (kept everything)",
+      }));
+      return;
     }
     if (!db.avatars) db.avatars = {};
   } else if (getRes.status !== 404) {
@@ -431,6 +467,18 @@ async function flush(env) {
 
   const entries = Object.keys(db.avatars).length;
 
+  // SAFETY GUARD: never commit a catalog that suddenly lost most of its entries — a
+  // drop far bigger than our explicit removes means the base read was corrupt. Abort
+  // and keep everything (pending is preserved), so a read glitch can't wipe the DB.
+  const prevEntries = prevMeta.entries || 0;
+  if (hadExistingFile && prevEntries > 200 && entries < (prevEntries - removed) * 0.7) {
+    await env.AVATAR_KV.put("meta", JSON.stringify({
+      ...prevMeta, lastFlush: new Date().toISOString(),
+      lastCommit: `ABORTED: entries ${prevEntries}->${entries} (safety guard, kept everything)`,
+    }));
+    return;
+  }
+
   // 4. Commit when something changed OR we're migrating the legacy "undefined" file.
   let lastCommit = "no change";
   if (added > 0 || removed > 0 || repClear.length > 0 || legacySha || adminChanged) {
@@ -474,6 +522,11 @@ async function flush(env) {
       lastCommit += " (migrated from undefined)";
     }
   }
+
+  // Cache the CURRENT serialized DB in KV so the app can read it FRESH from the Worker
+  // (GET /db) with zero GitHub CDN lag — the CDN caches raw files ~5 min, which delayed
+  // the admin bots noticing new avatars. Updated every flush (the committed state).
+  await env.AVATAR_KV.put("dbcache", serializeDb(db));
 
   await env.AVATAR_KV.put(
     "meta",
