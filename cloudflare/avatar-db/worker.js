@@ -154,6 +154,21 @@ export default {
         try { restored = JSON.parse(b64decode(b64)); } catch (e) { return json({ ok: false, error: "old file unparseable" }, 500); }
         const count = Object.keys(restored.avatars || {}).length;
         if (count < 1) return json({ ok: false, error: "old file has 0 avatars" }, 500);
+        // SAFETY (anti-footgun): a restore that would SHRINK the catalog is almost always an
+        // accident (e.g. reverting the grown catalog back to an old snapshot). Recovering MORE
+        // avatars than we currently have is always allowed; a REDUCING restore is refused
+        // unless &force=1 is explicitly added. This is what stops an accidental re-click of an
+        // old restore link from wiping the current data.
+        const force = url.searchParams.get("force") === "1";
+        const metaNow = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+        const curCount = metaNow.entries || 0;
+        if (!force && curCount > 200 && count < curCount * 0.7) {
+          return json({
+            ok: false,
+            error: `REFUSED: restore from ${ref} has ${count} avatars but the catalog currently has ${curCount}. This would DELETE ${curCount - count} avatars. If you REALLY mean to shrink it, add &force=1.`,
+            current: curCount, restore: count,
+          }, 409);
+        }
         // Overwrite current main with it.
         const curRes = await fetch(apiUrl + "?ref=" + encodeURIComponent(branch), { headers: gh });
         const curSha = curRes.status === 200 ? (await curRes.json()).sha : undefined;
