@@ -191,7 +191,6 @@ object BotVrchatSession {
                 }
                 @Suppress("UNREACHABLE_CODE") LoginResult.Error("unreachable")
             }
-            @Suppress("UNREACHABLE_CODE") LoginResult.Error("unreachable")
         }
 
     suspend fun verify2FA(context: Context, slot: Int, code: String, email: Boolean): LoginResult =
