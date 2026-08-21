@@ -101,6 +101,7 @@ fun BotsTab() {
                 totalQueued = totalQueued,
                 blitz = blitz,
                 roleSlots = roleSlots,
+                slotLabels = List(BotVrchatSession.SLOTS) { s -> bots.getOrNull(s)?.name ?: "" },
                 onRolePick = { roleOrdinal, slot ->
                     roleSlots = roleSlots.copyOf().also { it[roleOrdinal] = slot }
                     saveRoleSlots(prefs, roleSlots)
@@ -169,7 +170,7 @@ private fun CatalogHealthCard() {
 private fun MaintenanceCard(
     adminKey: String, onKeyChange: (String) -> Unit,
     totalQueued: Int, blitz: Boolean,
-    roleSlots: IntArray, onRolePick: (Int, Int) -> Unit
+    roleSlots: IntArray, slotLabels: List<String>, onRolePick: (Int, Int) -> Unit
 ) {
     AdminSectionCard(title = "Maintenance", icon = Icons.Filled.SportsEsports, tone = AdminTone.Warn) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -193,7 +194,9 @@ private fun MaintenanceCard(
             Divider()
 
             AvatarCatalogSweep.Role.values().forEach { role ->
-                RoleAssignRow(role, roleSlots.getOrElse(role.ordinal) { -1 }) { slot -> onRolePick(role.ordinal, slot) }
+                RoleAssignRow(role, roleSlots.getOrElse(role.ordinal) { -1 }, slotLabels) { slot ->
+                    onRolePick(role.ordinal, slot)
+                }
             }
 
             Divider()
@@ -216,8 +219,12 @@ private fun MaintenanceCard(
 }
 
 @Composable
-private fun RoleAssignRow(role: AvatarCatalogSweep.Role, slot: Int, onPick: (Int) -> Unit) {
+private fun RoleAssignRow(role: AvatarCatalogSweep.Role, slot: Int, slotLabels: List<String>, onPick: (Int) -> Unit) {
     var open by remember { mutableStateOf(false) }
+    fun label(s: Int): String {
+        val name = slotLabels.getOrNull(s)?.takeIf { it.isNotBlank() }
+        return "Bot ${s + 1}" + (name?.let { " · $it" } ?: "")
+    }
     Row(
         Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -225,11 +232,11 @@ private fun RoleAssignRow(role: AvatarCatalogSweep.Role, slot: Int, onPick: (Int
     ) {
         Text(role.label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
         Box {
-            OutlinedButton(onClick = { open = true }) { Text(if (slot < 0) "Auto" else "Bot ${slot + 1}") }
+            OutlinedButton(onClick = { open = true }) { Text(if (slot < 0) "Auto" else label(slot)) }
             DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
                 DropdownMenuItem(text = { Text("Auto") }, onClick = { onPick(-1); open = false })
                 (0 until BotVrchatSession.SLOTS).forEach { s ->
-                    DropdownMenuItem(text = { Text("Bot ${s + 1}") }, onClick = { onPick(s); open = false })
+                    DropdownMenuItem(text = { Text(label(s)) }, onClick = { onPick(s); open = false })
                 }
             }
         }

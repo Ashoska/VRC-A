@@ -59,6 +59,15 @@ object BotVrchatSession {
 
     fun botName(context: Context, slot: Int = 0): String = prefs(context, slot)?.getString(KEY_NAME, "") ?: ""
 
+    /** A human label for a slot: the VRChat display name once known, else the login
+     *  email/username (so you can tell accounts apart before the name resolves), else "". */
+    fun accountLabel(context: Context, slot: Int): String {
+        val p = prefs(context, slot) ?: return ""
+        return p.getString(KEY_NAME, "")?.takeIf { it.isNotBlank() }
+            ?: p.getString(KEY_USER, "")?.takeIf { it.isNotBlank() }
+            ?: ""
+    }
+
     fun logout(context: Context, slot: Int = 0) { prefs(context, slot)?.edit()?.clear()?.apply() }
 
     fun loggedInCount(context: Context): Int = (0 until SLOTS).count { isLoggedIn(context, it) }

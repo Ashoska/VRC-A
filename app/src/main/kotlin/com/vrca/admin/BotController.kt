@@ -65,7 +65,7 @@ object BotController {
                     val li = BotVrchatSession.isLoggedIn(app, b.slot)
                     b.copy(
                         loggedIn = li,
-                        name = BotVrchatSession.botName(app, b.slot),
+                        name = BotVrchatSession.accountLabel(app, b.slot),
                         auth = if (!li) BotVrchatSession.Auth.UNKNOWN else b.auth
                     )
                 }
@@ -103,7 +103,7 @@ object BotController {
             var a = if (!li) BotVrchatSession.Auth.UNKNOWN else BotVrchatSession.validate(app, slot)
             if (a == BotVrchatSession.Auth.EXPIRED) a = BotVrchatSession.autoRelogin(app, slot)
             _bots.value = _bots.value.map {
-                if (it.slot == slot) BotUi(slot, li, BotVrchatSession.botName(app, slot), a) else it
+                if (it.slot == slot) BotUi(slot, li, BotVrchatSession.accountLabel(app, slot), a) else it
             }
         }
     }

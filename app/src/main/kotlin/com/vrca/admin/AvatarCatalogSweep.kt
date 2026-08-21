@@ -56,17 +56,27 @@ object AvatarCatalogSweep {
     @Volatile private var blitzUntilMs = 0L
     fun blitzActive(): Boolean = System.currentTimeMillis() < blitzUntilMs
 
-    /** Compute the role→slot assignment: honor a MANUAL choice (role→slot, only if that
-     *  slot is logged in), else auto-spread across the logged-in bots. */
+    /** Compute the role→slot assignment: honor every MANUAL choice (role→slot, if that
+     *  slot is logged in), then LOAD-BALANCE the remaining roles onto the least-busy
+     *  logged-in bots — so a manual pick is respected exactly and the rest spread out
+     *  to DISTINCT bots instead of piling onto the one you picked (the "assignment is
+     *  random / doesn't do that task" bug). */
     private fun computeRoleSlot(live: List<Int>, manual: Map<Role, Int>): Map<Role, Int> {
         if (live.isEmpty()) return emptyMap()
-        val auto = mapOf(
-            Role.REPORTS to live[0],
-            Role.FILL to (live.getOrNull(1) ?: live[0]),
-            Role.LIVENESS_A to (live.getOrNull(2) ?: live[0]),
-            Role.LIVENESS_B to (live.getOrNull(3) ?: live.getOrNull(1) ?: live[0]),
-        )
-        return Role.values().associateWith { r -> manual[r]?.takeIf { it in live } ?: auto.getValue(r) }
+        val result = LinkedHashMap<Role, Int>()
+        val load = HashMap<Int, Int>().apply { live.forEach { put(it, 0) } }
+        // 1. Manual picks first.
+        for (r in Role.values()) {
+            val s = manual[r]?.takeIf { it in live } ?: continue
+            result[r] = s; load[s] = (load[s] ?: 0) + 1
+        }
+        // 2. Auto: each remaining role to the currently least-loaded bot (distinct where possible).
+        for (r in Role.values()) {
+            if (result.containsKey(r)) continue
+            val s = live.minByOrNull { load[it] ?: 0 } ?: live[0]
+            result[r] = s; load[s] = (load[s] ?: 0) + 1
+        }
+        return result
     }
 
     private fun sigOf(live: List<Int>, adminKey: String, roleSlot: Map<Role, Int>): String =
