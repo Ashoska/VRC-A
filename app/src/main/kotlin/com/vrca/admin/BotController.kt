@@ -64,6 +64,13 @@ object BotController {
     /** True while any login is running (and within the safety window) — everything else chills. */
     fun chilling(): Boolean = activeLogins.get() > 0 && System.currentTimeMillis() < chillDeadline
 
+    /** Total VRChat silence: a manual pause OR a login in progress. Nothing touches the
+     *  VRChat API — no sweep, no validation, no auto-relogin — so the stored cookies just
+     *  sit (valid) and NO re-auth is triggered (which is what caused the rate-limit loop). */
+    private fun silenced(app: Context): Boolean =
+        chilling() || app.getSharedPreferences("vrca_admin_local", Context.MODE_PRIVATE)
+            .getBoolean("bots_paused", false)
+
     /** Re-apply the sweep config from saved prefs (key / role assignment / pause). Kept
      *  here (not the UI) so the bots auto-start + resume on APP LAUNCH without opening
      *  the Bots tab, and self-include a bot as soon as it's logged in. Idempotent —
@@ -72,7 +79,7 @@ object BotController {
         val app = context.applicationContext
         val prefs = app.getSharedPreferences("vrca_admin_local", Context.MODE_PRIVATE)
         // Paused (manual) or chilling (a login is in progress) → the working bots go silent.
-        if (prefs.getBoolean("bots_paused", false) || chilling()) { AvatarCatalogSweep.stop(); return }
+        if (silenced(app)) { AvatarCatalogSweep.stop(); return }
         val key = prefs.getString("avatar_admin_key", "") ?: ""
         val csv = prefs.getString("avatar_role_slots", null)
         val roleSlots = if (csv == null) IntArray(4) { -1 }
@@ -124,9 +131,9 @@ object BotController {
         scope.launch {
             var first = true
             while (true) {
-                if (chilling()) { delay(3000); continue }
+                if (silenced(app)) { delay(3000); continue }
                 for (slot in 0 until BotVrchatSession.SLOTS) {
-                    if (chilling()) break
+                    if (silenced(app)) break
                     if (BotVrchatSession.isLoggedIn(app, slot)) {
                         var a = BotVrchatSession.validate(app, slot)
                         if (a == BotVrchatSession.Auth.EXPIRED) a = BotVrchatSession.autoRelogin(app, slot)
