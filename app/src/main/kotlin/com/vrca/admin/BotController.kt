@@ -56,7 +56,24 @@ object BotController {
         validationSuspendedUntil = maxOf(validationSuspendedUntil, System.currentTimeMillis() + ms)
     }
 
-    /** Idempotent — safe to call on every Bots-tab entry. */
+    /** Re-apply the sweep config from saved prefs (key / role assignment / pause). Kept
+     *  here (not the UI) so the bots auto-start + resume on APP LAUNCH without opening
+     *  the Bots tab, and self-include a bot as soon as it's logged in. Idempotent —
+     *  ensureRunning only (re)starts when the live set / key / assignment actually change. */
+    fun applySweepConfig(context: Context) {
+        val app = context.applicationContext
+        val prefs = app.getSharedPreferences("vrca_admin_local", Context.MODE_PRIVATE)
+        if (prefs.getBoolean("bots_paused", false)) { AvatarCatalogSweep.stop(); return }
+        val key = prefs.getString("avatar_admin_key", "") ?: ""
+        val csv = prefs.getString("avatar_role_slots", null)
+        val roleSlots = if (csv == null) IntArray(4) { -1 }
+            else IntArray(4) { i -> csv.split(",").getOrNull(i)?.toIntOrNull() ?: -1 }
+        val manual = AvatarCatalogSweep.Role.values()
+            .mapIndexedNotNull { i, r -> roleSlots.getOrNull(i)?.takeIf { it >= 0 }?.let { r to it } }.toMap()
+        AvatarCatalogSweep.ensureRunning(app, key, manual)
+    }
+
+    /** Idempotent — safe to call on every Bots-tab entry AND on admin app launch. */
     fun start(context: Context) {
         val app = context.applicationContext
         if (!started.compareAndSet(false, true)) return
@@ -66,6 +83,9 @@ object BotController {
         scope.launch {
             var i = 0
             while (true) {
+                // Keep the sweep running per the saved config (auto-starts on launch,
+                // self-includes a bot once it's logged in). Idempotent.
+                applySweepConfig(app)
                 if (i % 6 == 0) pendingReports =
                     runCatching { AvatarGlobalDb.pendingReportCount() }.getOrDefault(pendingReports)
                 val vs = withContext(Dispatchers.Default) { AvatarCatalogSweep.roleViews(pendingReports) }
@@ -86,11 +106,14 @@ object BotController {
             }
         }
 
-        // Loop 2: validate + auto-relogin each slot, ONE AT A TIME, staggered, and only
-        // ~every 10 min — bots with saved creds + rolled cookies rarely expire, so
-        // frequent /auth/user calls just burn VRChat's per-IP auth budget (which blocks
-        // logging in more bots). Suspended entirely during a manual login.
+        // Loop 2: validate each slot. Validating a STORED COOKIE is a plain GET /auth/user
+        // — NOT the rate-limited endpoint (only the Basic-auth password login is), so this
+        // is cheap and can be quick: the FIRST pass on launch validates all bots within
+        // ~10s (so a reopen shows them authed + working fast), then re-checks every ~3 min.
+        // autoRelogin (Basic auth, rate-limited) only fires when a cookie has actually
+        // EXPIRED. Suspended during a manual login so it doesn't compete for the budget.
         scope.launch {
+            var first = true
             while (true) {
                 if (System.currentTimeMillis() < validationSuspendedUntil) { delay(5000); continue }
                 for (slot in 0 until BotVrchatSession.SLOTS) {
@@ -99,10 +122,11 @@ object BotController {
                         var a = BotVrchatSession.validate(app, slot)
                         if (a == BotVrchatSession.Auth.EXPIRED) a = BotVrchatSession.autoRelogin(app, slot)
                         setAuth(slot, a)
-                        delay(20_000)
+                        delay(if (first) 2500 else 15_000)
                     }
                 }
-                delay(10 * 60_000)
+                first = false
+                delay(3 * 60_000)
             }
         }
     }

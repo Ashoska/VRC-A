@@ -78,19 +78,10 @@ fun BotsTab() {
     val totalQueued by BotController.totalQueued.collectAsState()
     val blitz by BotController.blitz.collectAsState()
     val blitzViews by BotController.blitzViews.collectAsState()
-
-    // (Re)assign the sweep only when the logged-in set / key / assignment / pause change.
-    // Paused = stopped so you can log every bot in first, then release them together.
-    val liveSig = bots.joinToString(",") { if (it.loggedIn) "1" else "0" }
-    val manualSig = roleSlots.joinToString(",")
-    LaunchedEffect(liveSig, adminKey, manualSig, paused) {
-        delay(500)
-        if (paused) { AvatarCatalogSweep.stop(); return@LaunchedEffect }
-        val manual = AvatarCatalogSweep.Role.values()
-            .mapIndexedNotNull { i, r -> roleSlots.getOrNull(i)?.takeIf { it >= 0 }?.let { r to it } }
-            .toMap()
-        AvatarCatalogSweep.ensureRunning(ctx, adminKey, manual)
-    }
+    // The sweep lifecycle is owned by BotController (reads the saved key/assignment/pause
+    // every couple seconds), so it auto-runs from app launch. The UI just writes those
+    // prefs; nudge it to re-apply immediately on a change.
+    LaunchedEffect(adminKey, roleSlots.joinToString(","), paused) { BotController.applySweepConfig(ctx) }
 
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
