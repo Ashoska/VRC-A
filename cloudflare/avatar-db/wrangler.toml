@@ -22,4 +22,6 @@ DB_PATH = "avatars/db.json"
 GH_BRANCH = "main"
 
 [triggers]
-crons = ["*/10 * * * *"]
+# Flush pending contributions/reports into the file every 2 min (paid tier) so new
+# avatars + reports reach the bots quickly, not up to 10 min later.
+crons = ["*/2 * * * *"]

@@ -58,7 +58,7 @@ object AvatarGlobalDb {
     // batch lands before the Worker's ~10-min GitHub push (so they don't stagnate),
     // still batched so it's a small number of writes. Contributions POST in chunks of
     // this many entries (the Worker caps a single POST) so a big harvest isn't lost.
-    private const val FLUSH_MS = 5 * 60_000L
+    private const val FLUSH_MS = 2 * 60_000L
     private const val CONTRIBUTE_CHUNK = 200
 
     data class Entry(
@@ -431,12 +431,11 @@ object AvatarGlobalDb {
             ?: prefs.getString(KEY_RAWURL, null)
             ?: "https://raw.githubusercontent.com/$REPO/main/$DB_PATH"
         prefs.edit().putString(KEY_RAWURL, baseUrl).apply()
-        // A cache-buster forces GitHub's CDN to serve the FRESH file (it caches ~5 min),
-        // so a just-flushed update isn't missed. When busting, skip the ETag (force 200).
-        val rawUrl = if (cacheBust != null)
-            baseUrl + (if (baseUrl.contains("?")) "&" else "?") + "v=" +
-                java.net.URLEncoder.encode(cacheBust, "UTF-8")
-        else baseUrl
+        // For a fresh pull (cacheBust set), read STRAIGHT FROM THE WORKER (/db, served
+        // from KV) — GitHub's raw CDN caches ~5 min and ignores cache-busting query
+        // params, which delayed the admin bots seeing new avatars. The normal (public)
+        // refresh still uses the CDN with an ETag (free, fine at 30-min cadence).
+        val rawUrl = if (cacheBust != null) "$WORKER_URL/db" else baseUrl
         val etag = if (cacheBust == null) prefs.getString(KEY_ETAG, null) else null
         var conn: HttpURLConnection? = null
         try {
@@ -479,6 +478,9 @@ object AvatarGlobalDb {
     private fun parseInto(text: String) {
         try {
             val avatars = JSONObject(text).optJSONObject("avatars") ?: return
+            // SAFETY: never replace a populated local catalog with an empty one (a blank
+            // /db before the first flush, a truncated read, etc.) — that would wipe it.
+            if (avatars.length() == 0 && map.isNotEmpty()) return
             val fresh = HashMap<String, Entry>(avatars.length())
             val keys = avatars.keys()
             while (keys.hasNext()) {

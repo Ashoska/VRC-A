@@ -141,7 +141,7 @@ private fun CatalogHealthCard() {
                 adminKeySet = if (j.optBoolean("adminKeySet")) "set" else "NOT set"
                 status = "live"
             }.onFailure { status = "unreachable (${it.javaClass.simpleName})" }
-            delay(30_000)
+            delay(15_000)   // auto-refreshes every 15s
         }
     }
     AdminSectionCard(
