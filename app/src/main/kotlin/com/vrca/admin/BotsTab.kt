@@ -70,18 +70,22 @@ fun BotsTab() {
     val prefs = remember { ctx.getSharedPreferences(PREFS_ADMIN, Context.MODE_PRIVATE) }
     var adminKey by remember { mutableStateOf(prefs.getString("avatar_admin_key", "") ?: "") }
     var roleSlots by remember { mutableStateOf(loadRoleSlots(prefs)) }
+    var paused by remember { mutableStateOf(prefs.getBoolean("bots_paused", false)) }
 
     LaunchedEffect(Unit) { BotController.start(ctx) }
     val bots by BotController.bots.collectAsState()
     val views by BotController.views.collectAsState()
     val totalQueued by BotController.totalQueued.collectAsState()
     val blitz by BotController.blitz.collectAsState()
+    val blitzViews by BotController.blitzViews.collectAsState()
 
-    // (Re)assign the sweep only when the logged-in set / key / assignment actually change.
+    // (Re)assign the sweep only when the logged-in set / key / assignment / pause change.
+    // Paused = stopped so you can log every bot in first, then release them together.
     val liveSig = bots.joinToString(",") { if (it.loggedIn) "1" else "0" }
     val manualSig = roleSlots.joinToString(",")
-    LaunchedEffect(liveSig, adminKey, manualSig) {
+    LaunchedEffect(liveSig, adminKey, manualSig, paused) {
         delay(500)
+        if (paused) { AvatarCatalogSweep.stop(); return@LaunchedEffect }
         val manual = AvatarCatalogSweep.Role.values()
             .mapIndexedNotNull { i, r -> roleSlots.getOrNull(i)?.takeIf { it >= 0 }?.let { r to it } }
             .toMap()
@@ -100,6 +104,8 @@ fun BotsTab() {
                 onKeyChange = { adminKey = it; prefs.edit().putString("avatar_admin_key", it).apply() },
                 totalQueued = totalQueued,
                 blitz = blitz,
+                paused = paused,
+                onTogglePause = { paused = !paused; prefs.edit().putBoolean("bots_paused", paused).apply() },
                 roleSlots = roleSlots,
                 slotLabels = List(BotVrchatSession.SLOTS) { s -> bots.getOrNull(s)?.name ?: "" },
                 onRolePick = { roleOrdinal, slot ->
@@ -108,7 +114,7 @@ fun BotsTab() {
                 }
             )
         }
-        item { BotsCard(bots, views) }
+        item { BotsCard(bots, views, blitzViews) }
         item { Spacer(Modifier.height(12.dp)) }
     }
 }
@@ -170,10 +176,26 @@ private fun CatalogHealthCard() {
 private fun MaintenanceCard(
     adminKey: String, onKeyChange: (String) -> Unit,
     totalQueued: Int, blitz: Boolean,
+    paused: Boolean, onTogglePause: () -> Unit,
     roleSlots: IntArray, slotLabels: List<String>, onRolePick: (Int, Int) -> Unit
 ) {
     AdminSectionCard(title = "Maintenance", icon = Icons.Filled.SportsEsports, tone = AdminTone.Warn) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            // Master pause: stop ALL bots so you can log every account in first, then
+            // resume them together. Sessions stay authed while paused.
+            Button(
+                onClick = onTogglePause,
+                modifier = Modifier.fillMaxWidth(),
+                colors = if (paused) androidx.compose.material3.ButtonDefaults.buttonColors()
+                         else androidx.compose.material3.ButtonDefaults.buttonColors(
+                             containerColor = MaterialTheme.colorScheme.errorContainer,
+                             contentColor = MaterialTheme.colorScheme.onErrorContainer
+                         )
+            ) { Text(if (paused) "Resume all bots" else "Pause all bots") }
+            if (paused) {
+                Text("Paused — no bot is doing anything.", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             if (AvatarCatalogSweep.pushError.isNotBlank()) {
                 Text(AvatarCatalogSweep.pushError, style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error)
@@ -246,19 +268,27 @@ private fun RoleAssignRow(role: AvatarCatalogSweep.Role, slot: Int, slotLabels: 
 // ---- ONE card, four bots separated by function ------------------------------
 
 @Composable
-private fun BotsCard(bots: List<BotController.BotUi>, views: List<AvatarCatalogSweep.RoleView>) {
+private fun BotsCard(
+    bots: List<BotController.BotUi>,
+    views: List<AvatarCatalogSweep.RoleView>,
+    blitzViews: Map<Int, AvatarCatalogSweep.BlitzView>
+) {
     AdminSectionCard(title = "Bots", icon = Icons.Filled.SportsEsports, tone = AdminTone.Primary) {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             bots.forEachIndexed { idx, bot ->
                 if (idx > 0) Divider()
-                BotSection(bot, views.filter { it.bot == "bot ${bot.slot + 1}" })
+                BotSection(bot, views.filter { it.bot == "bot ${bot.slot + 1}" }, blitzViews[bot.slot])
             }
         }
     }
 }
 
 @Composable
-private fun BotSection(bot: BotController.BotUi, roleViews: List<AvatarCatalogSweep.RoleView>) {
+private fun BotSection(
+    bot: BotController.BotUi,
+    roleViews: List<AvatarCatalogSweep.RoleView>,
+    blitzView: AvatarCatalogSweep.BlitzView?
+) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val slot = bot.slot
@@ -295,7 +325,9 @@ private fun BotSection(bot: BotController.BotUi, roleViews: List<AvatarCatalogSw
                     Text("Session expired and couldn't auto-recover — log out and back in.",
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                 }
-                roleViews.forEach { RoleRow(it) }
+                // During a blitz every bot shares the fill+dead-check work, so show its
+                // blitz progress instead of the idle assigned-role rows.
+                if (blitzView != null) BlitzRow(blitzView) else roleViews.forEach { RoleRow(it) }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     OutlinedButton(onClick = {
                         BotVrchatSession.logout(ctx, slot); BotController.refreshSlot(ctx, slot)
@@ -355,6 +387,26 @@ private fun BotSection(bot: BotController.BotUi, roleViews: List<AvatarCatalogSw
         if (msg.isNotBlank()) {
             Text(msg, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         }
+    }
+}
+
+@Composable
+private fun BlitzRow(v: AvatarCatalogSweep.BlitzView) {
+    Column(verticalArrangement = Arrangement.spacedBy(1.dp), modifier = Modifier.fillMaxWidth()) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("⚡ Blitz", style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            StatusPill("queued ${v.queued}", if (v.queued <= 0) AdminTone.Success else AdminTone.Warn)
+        }
+        Text(
+            "checked ${v.checked} · filled ${v.filled} · refreshed ${v.refreshed} · removed ${v.removed}",
+            style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 

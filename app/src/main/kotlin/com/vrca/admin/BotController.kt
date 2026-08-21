@@ -41,6 +41,9 @@ object BotController {
     private val _blitz = MutableStateFlow(false)
     val blitz: StateFlow<Boolean> = _blitz
 
+    private val _blitzViews = MutableStateFlow<Map<Int, AvatarCatalogSweep.BlitzView>>(emptyMap())
+    val blitzViews: StateFlow<Map<Int, AvatarCatalogSweep.BlitzView>> = _blitzViews
+
     private val started = AtomicBoolean(false)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var pendingReports = 0
@@ -58,9 +61,11 @@ object BotController {
                 if (i % 6 == 0) pendingReports =
                     runCatching { AvatarGlobalDb.pendingReportCount() }.getOrDefault(pendingReports)
                 val vs = withContext(Dispatchers.Default) { AvatarCatalogSweep.roleViews(pendingReports) }
+                val bv = withContext(Dispatchers.Default) { AvatarCatalogSweep.blitzViews() }
                 _views.value = vs
                 _totalQueued.value = vs.sumOf { it.queued }
                 _blitz.value = AvatarCatalogSweep.blitzActive()
+                _blitzViews.value = bv
                 _bots.value = _bots.value.map { b ->
                     val li = BotVrchatSession.isLoggedIn(app, b.slot)
                     b.copy(

@@ -114,11 +114,41 @@ object AvatarCatalogSweep {
     private const val ACTIVE_PAUSE_MS = 1_500L
     private const val CATALOG_REFRESH_MS = 5 * 60_000L   // keep the admin catalog fresh for FILL
 
+    private const val BLITZ_BATCH = 40           // entries per blitz pass (per bot)
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val jobs = mutableListOf<Job>()
 
     /** A short human summary of which bot slot runs which roles (for the UI). */
     @Volatile var assignmentLabel = ""; private set
+
+    // The logged-in slots (in order) + a per-slot blitz progress, so during a blitz EVERY
+    // bot chews its OWN partition of the whole catalog (fill + dead-check) instead of the
+    // reports/idle bots sitting out.
+    @Volatile private var liveSlots: List<Int> = emptyList()
+    private val blitzProgress = java.util.concurrent.ConcurrentHashMap<Int, Progress>()
+
+    data class BlitzView(
+        val slot: Int, val queued: Int, val checked: Int,
+        val removed: Int, val filled: Int, val refreshed: Int, val status: String
+    )
+
+    /** Per-bot blitz progress + remaining backlog (empty when not blitzing). */
+    fun blitzViews(): Map<Int, BlitzView> {
+        if (!blitzActive()) return emptyMap()
+        val live = liveSlots; val count = live.size
+        if (count == 0) return emptyMap()
+        val snap = AvatarGlobalDb.snapshot()
+        val cutoff = System.currentTimeMillis() - BLITZ_RECHECK_MS
+        return live.withIndex().associate { (idx, slot) ->
+            val queued = snap.count {
+                (it.fileId.hashCode() and 0x7fffffff) % count == idx && (needsFill(it) || it.checked < cutoff)
+            }
+            val p = blitzProgress[slot]
+            slot to BlitzView(slot, queued, p?.checked ?: 0, p?.removed ?: 0, p?.filled ?: 0, p?.refreshed ?: 0,
+                p?.status ?: "blitz")
+        }
+    }
 
     fun start(context: Context, adminKey: String, manual: Map<Role, Int> = emptyMap()) {
         if (running) return
@@ -136,12 +166,16 @@ object AvatarCatalogSweep {
             "bot ${s + 1}: $roles"
         }
         running = true; pushError = ""
+        liveSlots = live
+        blitzProgress.clear(); live.forEach { blitzProgress[it] = Progress().apply { slot = it } }
         // One coroutine PER SLOT; it round-robins the roles assigned to that slot so a
         // single VRChat session never fires two roles in parallel (rate-limit safety).
+        // liveIndex/liveCount give the bot its share of the catalog during a blitz.
         val bySlot = roleSlot.entries.groupBy({ it.value }, { it.key })
         for ((slot, roles) in bySlot) {
+            val liveIndex = live.indexOf(slot)
             jobs += scope.launch {
-                try { slotLoop(app, adminKey, slot, roles) }
+                try { slotLoop(app, adminKey, slot, roles, liveIndex, live.size) }
                 finally { roles.forEach { progress.getValue(it).running = false; progress.getValue(it).status = "stopped" } }
             }
         }
@@ -159,8 +193,10 @@ object AvatarCatalogSweep {
     fun stop() {
         running = false
         runningSig = ""
+        liveSlots = emptyList()
         jobs.forEach { it.cancel() }; jobs.clear()
         progress.values.forEach { it.running = false; it.status = "stopped" }
+        blitzProgress.values.forEach { it.running = false }
     }
 
     /** Kick a bounded full-catalog blitz: for the next window, FILL targets every
@@ -215,16 +251,63 @@ object AvatarCatalogSweep {
 
     // ---- the per-slot loop ---------------------------------------------------
 
-    private suspend fun slotLoop(context: Context, adminKey: String, slot: Int, roles: List<Role>) {
+    private suspend fun slotLoop(context: Context, adminKey: String, slot: Int, roles: List<Role>, liveIndex: Int, liveCount: Int) {
         while (running && scope.isActive) {
             var did = false
+            val blitzing = blitzActive()
             for (role in roles) {
                 if (!running) break
+                // During a blitz, EVERY bot shares the fill+dead-check work (below), so
+                // skip the assigned fill/liveness role here — but still run reports.
+                if (blitzing && role != Role.REPORTS) continue
                 did = runRole(context, adminKey, slot, role) || did
             }
+            if (blitzing && running) did = blitzPass(context, adminKey, slot, liveIndex, liveCount) || did
             if (!running) break
             delay(if (did) ACTIVE_PAUSE_MS else IDLE_SLEEP_MS)
         }
+    }
+
+    /** BLITZ: this bot processes ITS partition of the WHOLE catalog — fill the
+     *  unfilled, dead-check the rest — so all logged-in bots work together to catch up
+     *  everything. Partitioned by (fileId hash) % liveCount == liveIndex, so no two
+     *  bots touch the same avatar. */
+    private suspend fun blitzPass(context: Context, adminKey: String, slot: Int, liveIndex: Int, liveCount: Int): Boolean {
+        if (liveCount <= 0) return false
+        val p = blitzProgress.getOrPut(slot) { Progress().apply { this.slot = slot } }
+        p.running = true
+        val cutoff = System.currentTimeMillis() - BLITZ_RECHECK_MS
+        val mine = AvatarGlobalDb.snapshot().filter { (it.fileId.hashCode() and 0x7fffffff) % liveCount == liveIndex }
+        // Unfilled first, then stale — so bios/info fill fastest during a blitz.
+        val batch = (mine.filter { needsFill(it) } + mine.filter { !needsFill(it) && it.checked < cutoff }).take(BLITZ_BATCH)
+        if (batch.isEmpty()) { p.status = "blitz: caught up"; return false }
+        p.status = "blitz: ${batch.size}"
+        val upserts = mutableListOf<AvatarGlobalDb.Entry>()
+        val removes = mutableListOf<String>()
+        val okChecked = mutableListOf<String>()
+        for (e in batch) {
+            if (!running) break
+            val chk = BotVrchatSession.checkAvatar(context, slot, e.avatarId)
+            p.checked++
+            if (chk == null) { delay(PACE_MS); continue }
+            if (!chk.alive) { removes.add(e.fileId); p.removed++ }
+            else if (needsFill(e)) {
+                val upd = fillRefresh(e, chk)
+                if (upd.fileId != e.fileId) removes.add(e.fileId)
+                upserts.add(upd); p.filled++
+            } else {
+                val upd = liveRefresh(e, chk)
+                if (upd != null) {
+                    if (upd.fileId != e.fileId) removes.add(e.fileId)
+                    upserts.add(upd); p.refreshed++
+                } else okChecked.add(e.fileId)
+            }
+            delay(PACE_MS)
+        }
+        AvatarGlobalDb.markCheckedLocally(okChecked + upserts.map { it.fileId })
+        if (removes.isNotEmpty() || upserts.isNotEmpty() || okChecked.isNotEmpty())
+            pushOps(context, adminKey, upserts.toList(), removes.toList(), emptyList(), okChecked.toList())
+        return true
     }
 
     private suspend fun runRole(context: Context, adminKey: String, slot: Int, role: Role): Boolean = when (role) {
