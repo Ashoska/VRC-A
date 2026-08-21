@@ -93,7 +93,12 @@ object AvatarCatalogSweep {
         val live = (0 until BotVrchatSession.SLOTS).filter { BotVrchatSession.isLoggedIn(app, it) }
         if (live.isEmpty() || key.isBlank()) { stop(); return }
         val sig = sigOf(live, key, computeRoleSlot(live, manual))
-        if (running && sig == runningSig) return
+        // Restart when the assignment changed OR when a worker coroutine DIED unexpectedly.
+        // An uncaught throw ends that one slot's job while `running` stays true, so without
+        // this the Fill/Liveness sweep sits frozen forever — the bot shows "Authed" but its
+        // queue never moves ("stuck, not checking"). Checking jobs.all{isActive} every tick
+        // makes a dead slot self-heal within ~2s.
+        if (running && sig == runningSig && jobs.isNotEmpty() && jobs.all { it.isActive }) return
         stop(); start(app, key, manual)
     }
 
@@ -189,11 +194,14 @@ object AvatarCatalogSweep {
         jobs += scope.launch {
             var seenFlush = ""
             while (running && scope.isActive) {
-                val flush = AvatarGlobalDb.workerLastFlush()
-                if (flush != null && flush != seenFlush) {
-                    seenFlush = flush
-                    AvatarGlobalDb.forceRefresh(app, cacheBust = flush)
-                }
+                try {
+                    val flush = AvatarGlobalDb.workerLastFlush()
+                    if (flush != null && flush != seenFlush) {
+                        seenFlush = flush
+                        AvatarGlobalDb.forceRefresh(app, cacheBust = flush)
+                    }
+                } catch (c: kotlinx.coroutines.CancellationException) { throw c }
+                catch (t: Throwable) { android.util.Log.w("AvatarCatalogSweep", "catalog poll error", t) }
                 delay(CATALOG_POLL_MS)
             }
         }
@@ -264,29 +272,42 @@ object AvatarCatalogSweep {
 
     private suspend fun slotLoop(context: Context, adminKey: String, slot: Int, roles: List<Role>, liveIndex: Int, liveCount: Int) {
         while (running && scope.isActive) {
-            var did = false
-            val blitzing = blitzActive()
-            for (role in roles) {
+            // Per-cycle guard: ANY unexpected throw is logged + retried instead of ending
+            // this slot's coroutine (which would freeze its queue permanently while `running`
+            // stayed true). A cancellation still propagates (that's a real stop). This is the
+            // primary fix for "queue stuck, bot not checking"; the ensureRunning watchdog is
+            // the backstop.
+            try {
+                var did = false
+                val blitzing = blitzActive()
+                for (role in roles) {
+                    if (!running) break
+                    // During a blitz, EVERY bot shares the fill+dead-check work (below), so
+                    // skip the assigned fill/liveness role here — but still run reports.
+                    if (blitzing && role != Role.REPORTS) continue
+                    did = runRole(context, adminKey, slot, role) || did
+                }
+                if (blitzing && running) did = blitzPass(context, adminKey, slot, liveIndex, liveCount) || did
+                // LOAN: if this bot's own role(s) had no work and we're not blitzing, help the
+                // biggest backlog (fill first, then stale liveness). The shared claim set means
+                // no two bots ever touch the same avatar, and each bot is a SEPARATE VRChat
+                // account, so loaning multiplies throughput without tripping one account's limit.
+                if (!blitzing && running && !did) did = helpPass(context, adminKey, slot) || did
                 if (!running) break
-                // During a blitz, EVERY bot shares the fill+dead-check work (below), so
-                // skip the assigned fill/liveness role here — but still run reports.
-                if (blitzing && role != Role.REPORTS) continue
-                did = runRole(context, adminKey, slot, role) || did
-            }
-            if (blitzing && running) did = blitzPass(context, adminKey, slot, liveIndex, liveCount) || did
-            // LOAN: if this bot's own role(s) had no work and we're not blitzing, help the
-            // biggest backlog (fill first, then stale liveness). The shared claim set means
-            // no two bots ever touch the same avatar, and each bot is a SEPARATE VRChat
-            // account, so loaning multiplies throughput without tripping one account's limit.
-            if (!blitzing && running && !did) did = helpPass(context, adminKey, slot) || did
-            if (!running) break
-            // Responsive sleep: wake IMMEDIATELY (within 500ms) if the blitz state flips,
-            // so clicking blitz kicks EVERY bot at once instead of each waiting out its
-            // idle sleep (the "blitz start is inconsistent" cause).
-            val target = if (did) ACTIVE_PAUSE_MS else IDLE_SLEEP_MS
-            var slept = 0L
-            while (slept < target && running && scope.isActive && blitzActive() == blitzing) {
-                delay(500); slept += 500
+                // Responsive sleep: wake IMMEDIATELY (within 500ms) if the blitz state flips,
+                // so clicking blitz kicks EVERY bot at once instead of each waiting out its
+                // idle sleep (the "blitz start is inconsistent" cause).
+                val target = if (did) ACTIVE_PAUSE_MS else IDLE_SLEEP_MS
+                var slept = 0L
+                while (slept < target && running && scope.isActive && blitzActive() == blitzing) {
+                    delay(500); slept += 500
+                }
+            } catch (c: kotlinx.coroutines.CancellationException) {
+                throw c
+            } catch (t: Throwable) {
+                android.util.Log.w("AvatarCatalogSweep", "slot $slot cycle error — recovering", t)
+                progress.values.filter { it.slot == slot }.forEach { it.status = "recovered from error" }
+                delay(3000)
             }
         }
     }
