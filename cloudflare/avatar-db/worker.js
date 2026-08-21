@@ -169,14 +169,23 @@ export default {
             current: curCount, restore: count,
           }, 409);
         }
-        // Overwrite current main with it.
-        const curRes = await fetch(apiUrl + "?ref=" + encodeURIComponent(branch), { headers: gh });
-        const curSha = curRes.status === 200 ? (await curRes.json()).sha : undefined;
-        const putBody = { message: `avatar-db: RESTORE ${count} avatars from ${ref}`, content: b64, branch };
-        if (curSha) putBody.sha = curSha;
-        const putRes = await fetch(apiUrl, { method: "PUT", headers: gh, body: JSON.stringify(putBody) });
-        if (putRes.status !== 200 && putRes.status !== 201)
-          return json({ ok: false, error: "put http " + putRes.status + " " + (await putRes.text()).slice(0, 200) }, 500);
+        // Overwrite current main with it. RETRY on a 409: the cron flush commits every ~2
+        // min and can move the file's sha BETWEEN our read-sha and our write, which GitHub
+        // rejects as a conflict ("is at X but expected Y"). Re-read the fresh sha and retry a
+        // few times so a concurrent flush can't make the recovery fail.
+        let putOk = false, putErr = "";
+        for (let attempt = 0; attempt < 6; attempt++) {
+          const curRes = await fetch(apiUrl + "?ref=" + encodeURIComponent(branch), { headers: gh });
+          const curSha = curRes.status === 200 ? (await curRes.json()).sha : undefined;
+          const putBody = { message: `avatar-db: RESTORE ${count} avatars from ${ref}`, content: b64, branch };
+          if (curSha) putBody.sha = curSha;
+          const putRes = await fetch(apiUrl, { method: "PUT", headers: gh, body: JSON.stringify(putBody) });
+          if (putRes.status === 200 || putRes.status === 201) { putOk = true; break; }
+          putErr = "http " + putRes.status + " " + (await putRes.text()).slice(0, 160);
+          if (putRes.status !== 409) break;                  // non-conflict = real failure, stop
+          await new Promise((r) => setTimeout(r, 700));       // brief backoff, then re-read sha
+        }
+        if (!putOk) return json({ ok: false, error: "put failed after retries: " + putErr }, 500);
         await env.AVATAR_KV.put("dbcache", serializeDb(restored));
         const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
         await env.AVATAR_KV.put("meta", JSON.stringify({
