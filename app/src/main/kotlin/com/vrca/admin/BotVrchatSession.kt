@@ -6,6 +6,8 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -100,10 +102,21 @@ object BotVrchatSession {
         e.apply()
     }
 
+    // ONE global login gate for the whole app: only one Basic-auth login runs at a time
+    // (across manual logins AND background auto-relogins), and no two attempts fire within
+    // MIN_LOGIN_GAP_MS. VRChat's login rate limit is a cooldown that EVERY attempt resets,
+    // so hammering it keeps you locked out — spacing attempts is what actually gets you in.
+    private val loginGate = Mutex()
+    @Volatile private var lastLoginAttemptMs = 0L
+    private const val MIN_LOGIN_GAP_MS = 30_000L      // never two logins closer than this
+    private const val RATE_LIMIT_WAIT_MS = 75_000L    // quiet wait after a rate-limit hit (lets it clear)
+    private const val MAX_RATE_RETRIES = 4
+
     /**
      * Log in. Saves the credentials FIRST (so auto-relogin can recover later) and sends
      * the stored trusted-device 2FA cookie if we have one (so a re-login skips the 2FA
-     * prompt). One retry on a transient 401. Returns Needs2FA when VRChat wants a code.
+     * prompt). SERIALIZED + SPACED via [loginGate] so concurrent/rapid logins can't
+     * trip VRChat's per-IP rate limit. Returns Needs2FA when VRChat wants a code.
      */
     suspend fun login(
         context: Context, slot: Int, username: String, password: String,
@@ -112,54 +125,71 @@ object BotVrchatSession {
         withContext(Dispatchers.IO) {
             prefs(context, slot)?.edit()
                 ?.putString(KEY_USER, username)?.putString(KEY_PASS, password)?.apply()
-            var attempt = 0
-            while (true) {
-                var conn: HttpURLConnection? = null
-                try {
-                    val basic = Base64.encodeToString(
-                        "${enc(username)}:${enc(password)}".toByteArray(Charsets.UTF_8), Base64.NO_WRAP
-                    )
-                    val twofa = prefs(context, slot)?.getString(KEY_2FA, null)
-                    conn = (URL("$BASE/auth/user").openConnection() as HttpURLConnection).apply {
-                        requestMethod = "GET"
-                        setRequestProperty("Authorization", "Basic $basic")
-                        setRequestProperty("User-Agent", UA)
-                        if (twofa != null) setRequestProperty("Cookie", twofa)
-                        connectTimeout = 15000; readTimeout = 15000
+            loginGate.withLock {
+                var rateRetries = 0
+                while (true) {
+                    // Space this attempt out from the previous login (any bot).
+                    val since = System.currentTimeMillis() - lastLoginAttemptMs
+                    if (since < MIN_LOGIN_GAP_MS) {
+                        val wait = MIN_LOGIN_GAP_MS - since
+                        onProgress?.invoke("Spacing logins to dodge VRChat's limit — ${wait / 1000}s…")
+                        delay(wait)
                     }
-                    val code = conn.responseCode
-                    val body = (if (code < 400) conn.inputStream else conn.errorStream)
-                        ?.bufferedReader()?.readText() ?: ""
-                    captureRolled(context, slot, conn.headerFields["Set-Cookie"] ?: emptyList())
-                    if (code == 401) {
-                        // A 401 here is almost always VRChat rate-limiting Basic auth from
-                        // this IP (the "can't log in a 3rd/4th bot" wall) — NOT a bad
-                        // password (a valid login stays authed once accepted). So PATIENTLY
-                        // ride out the limit: retry with growing backoff for ~4 min. (If the
-                        // creds really are wrong it just keeps trying until the cap — the
-                        // user confirms the login before starting, so that's the safe bet.)
-                        val backoffs = longArrayOf(8_000, 15_000, 25_000, 40_000, 55_000, 55_000, 55_000)
-                        if (attempt < backoffs.size) {
-                            val s = backoffs[attempt] / 1000
-                            onProgress?.invoke("VRChat rate-limited the login — retrying in ${s}s (try ${attempt + 2})…")
-                            delay(backoffs[attempt]); attempt++; continue
+                    lastLoginAttemptMs = System.currentTimeMillis()
+                    var conn: HttpURLConnection? = null
+                    try {
+                        val basic = Base64.encodeToString(
+                            "${enc(username)}:${enc(password)}".toByteArray(Charsets.UTF_8), Base64.NO_WRAP
+                        )
+                        val twofa = prefs(context, slot)?.getString(KEY_2FA, null)
+                        conn = (URL("$BASE/auth/user").openConnection() as HttpURLConnection).apply {
+                            requestMethod = "GET"
+                            setRequestProperty("Authorization", "Basic $basic")
+                            setRequestProperty("User-Agent", UA)
+                            if (twofa != null) setRequestProperty("Cookie", twofa)
+                            connectTimeout = 15000; readTimeout = 15000
                         }
-                        return@withContext LoginResult.Error("Still rate-limited after several tries. Wait a couple of minutes, then tap Log in again.")
-                    }
-                    if (code != 200) return@withContext LoginResult.Error("HTTP $code")
-                    val json = JSONObject(body)
-                    json.optString("displayName", "").takeIf { it.isNotBlank() }?.let {
-                        prefs(context, slot)?.edit()?.putString(KEY_NAME, it)?.apply()
-                    }
-                    val requires = json.optJSONArray("requiresTwoFactorAuth")
-                    if (requires != null && requires.length() > 0) {
-                        val email = (0 until requires.length()).any { requires.optString(it).contains("email", true) }
-                        return@withContext LoginResult.Needs2FA(email)
-                    }
-                    return@withContext LoginResult.Success
-                } catch (e: Exception) {
-                    return@withContext LoginResult.Error(e.javaClass.simpleName)
-                } finally { runCatching { conn?.disconnect() } }
+                        val code = conn.responseCode
+                        val body = (if (code < 400) conn.inputStream else conn.errorStream)
+                            ?.bufferedReader()?.readText() ?: ""
+                        captureRolled(context, slot, conn.headerFields["Set-Cookie"] ?: emptyList())
+
+                        // VRChat's error message tells us WHICH failure this is.
+                        val vrcMsg = runCatching {
+                            JSONObject(body).optJSONObject("error")?.optString("message", "") ?: ""
+                        }.getOrDefault("").ifBlank { body }.take(160)
+                        val lower = vrcMsg.lowercase()
+                        val rateLimited = code == 429 || lower.contains("rate") || lower.contains("too many")
+                        val badCreds = code == 401 && !rateLimited &&
+                            (lower.contains("invalid") || lower.contains("incorrect") ||
+                             lower.contains("password") || lower.contains("credential"))
+
+                        if (badCreds) return@withLock LoginResult.Error("VRChat rejected the login: $vrcMsg")
+                        if (rateLimited || (code == 401)) {
+                            rateRetries++
+                            if (rateRetries > MAX_RATE_RETRIES)
+                                return@withLock LoginResult.Error("Still rate-limited. Wait ~2 min, then tap Log in again.")
+                            onProgress?.invoke("VRChat rate-limited — waiting ${RATE_LIMIT_WAIT_MS / 1000}s (it clears if we stop knocking)…")
+                            delay(RATE_LIMIT_WAIT_MS)
+                            continue
+                        }
+                        if (code != 200) return@withLock LoginResult.Error("HTTP $code $vrcMsg")
+
+                        val json = JSONObject(body)
+                        json.optString("displayName", "").takeIf { it.isNotBlank() }?.let {
+                            prefs(context, slot)?.edit()?.putString(KEY_NAME, it)?.apply()
+                        }
+                        val requires = json.optJSONArray("requiresTwoFactorAuth")
+                        if (requires != null && requires.length() > 0) {
+                            val email = (0 until requires.length()).any { requires.optString(it).contains("email", true) }
+                            return@withLock LoginResult.Needs2FA(email)
+                        }
+                        return@withLock LoginResult.Success
+                    } catch (e: Exception) {
+                        return@withLock LoginResult.Error(e.javaClass.simpleName)
+                    } finally { runCatching { conn?.disconnect() } }
+                }
+                @Suppress("UNREACHABLE_CODE") LoginResult.Error("unreachable")
             }
             @Suppress("UNREACHABLE_CODE") LoginResult.Error("unreachable")
         }
