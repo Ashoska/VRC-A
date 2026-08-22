@@ -40,11 +40,20 @@
          admin builds keep cleartext BLOCKED); it does NOT downgrade any existing
          https:// call — it only permits http when we explicitly use it. -->
     <application
+        android:banner="@drawable/vrca_quest_banner"
         android:resizeableActivity="true"
         android:usesCleartextTraffic="true"
         tools:node="merge">
+        <!-- android:banner: a proper 1440x720 (2:1) landscape cover for the Horizon OS
+             app-library tile. Without it, Horizon falls back to the SQUARE launcher icon
+             and stretches/upscales it across the wide tile (the low-res stretched look).
+             Headset flavor only — the banner PNG lives in src/headsetApp/res, so the
+             phone/admin APKs never carry it. NOTE: a Meta Horizon STORE / App Lab listing
+             draws its cover from the store dashboard art, not this — this fixes the
+             SIDELOADED tile (and is honored by Horizon where it reads the manifest banner). -->
         <activity
             android:name=".app.MainActivity"
+            android:banner="@drawable/vrca_quest_banner"
             android:screenOrientation="sensorLandscape"
             android:resizeableActivity="true"
             tools:node="merge" />
