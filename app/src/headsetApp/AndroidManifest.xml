@@ -44,13 +44,13 @@
         android:resizeableActivity="true"
         android:usesCleartextTraffic="true"
         tools:node="merge">
-        <!-- android:banner: a proper 1440x720 (2:1) landscape cover for the Horizon OS
-             app-library tile. Without it, Horizon falls back to the SQUARE launcher icon
-             and stretches/upscales it across the wide tile (the low-res stretched look).
-             Headset flavor only — the banner PNG lives in src/headsetApp/res, so the
-             phone/admin APKs never carry it. NOTE: a Meta Horizon STORE / App Lab listing
-             draws its cover from the store dashboard art, not this — this fixes the
-             SIDELOADED tile (and is honored by Horizon where it reads the manifest banner). -->
+        <!-- android:banner: a 1440x720 (2:1) landscape cover, kept as BEST-EFFORT for
+             launchers that read the manifest banner (LightningLauncher / Android-TV-style
+             grids). NOTE: it does NOT drive the tile in QGO (Quest Games Optimizer) or the
+             stock Meta library — those pull cover art from their OWN thumbnail databases
+             (or fall back to the square icon, stretched), and ignore the APK's banner. A
+             proper QGO tile needs a custom cover set in QGO / submitted to its database;
+             a stock/store tile needs the Meta dashboard cover art. Headset flavor only. -->
         <activity
             android:name=".app.MainActivity"
             android:banner="@drawable/vrca_quest_banner"
