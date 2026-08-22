@@ -852,6 +852,21 @@ object VrchatAuthManager {
         val trustRank: String = ""
     )
 
+    /**
+     * The CURRENT user's platform. Prefer the LIVE `platform` (the game-client presence
+     * platform) over `last_platform`: `last_platform` is the last *authenticated* platform,
+     * and VRC-A's own API re-logins (frequent on mobile as the IP-bound cookie invalidates)
+     * can make VRChat stamp it "standalonewindows" — which made a Quest user's OWN platform
+     * intermittently show PC. `platform` is set by the actual game client (and is blank /
+     * "offline" when not in-game), so use it when it's a real platform and fall back to
+     * `last_platform` only when the user isn't currently in VRChat. (Roster/other-user code
+     * still uses last_platform: a stranger's live `platform` is "offline" to us.)
+     */
+    private fun pickSelfPlatform(live: String, last: String): String {
+        val l = live.trim().lowercase()
+        return if (l.isNotBlank() && l != "offline") live else last
+    }
+
     suspend fun fetchPresence(context: Context): VrcUserPresence? = withContext(Dispatchers.IO) {
         val cookieHeader = getCookieHeader(context) ?: run {
             Log.w(TAG, "fetchPresence: no cookie header available")
@@ -872,7 +887,7 @@ object VrchatAuthManager {
             var location = json.optString("location", "offline")
             var status = json.optString("status", "offline")
             var statusDescription = json.optString("statusDescription", "")
-            var platform = json.optString("last_platform", "")
+            var platform = pickSelfPlatform(json.optString("platform", ""), json.optString("last_platform", ""))
             var displayName = json.optString("displayName")
             var avatarThumb = json.optString("currentAvatarThumbnailImageUrl", "")
             // VRChat+ images: userIcon is the round profile picture; the
@@ -915,7 +930,8 @@ object VrchatAuthManager {
                         }
                         if (uStatus.isNotBlank()) status = uStatus
                         uj.optString("statusDescription", "").let { if (it.isNotBlank()) statusDescription = it }
-                        uj.optString("last_platform", "").let { if (it.isNotBlank()) platform = it }
+                        pickSelfPlatform(uj.optString("platform", ""), uj.optString("last_platform", ""))
+                            .let { if (it.isNotBlank()) platform = it }
                         uj.optString("displayName", "").let { if (it.isNotBlank()) displayName = it }
                         uj.optString("currentAvatarThumbnailImageUrl", "").let { if (it.isNotBlank()) avatarThumb = it }
                         // The /users/{id} endpoint is the authoritative source for
@@ -1030,7 +1046,7 @@ object VrchatAuthManager {
                 status = status,
                 statusDescription = uj.optString("statusDescription", ""),
                 location = location,
-                platform = uj.optString("last_platform", ""),
+                platform = pickSelfPlatform(uj.optString("platform", ""), uj.optString("last_platform", "")),
                 worldName = "",
                 instancePlayerCount = 0,
                 instanceCapacity = 0,
