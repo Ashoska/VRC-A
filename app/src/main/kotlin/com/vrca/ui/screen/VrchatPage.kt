@@ -779,11 +779,18 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
             val local = com.vrca.vrchat.AvatarSearch.localResults(q)
             if (seq != searchSeq) return@launch
             results = local
-            searching = local.isEmpty()   // spinner only while there's nothing to show yet
-            loadingMore = true
+            // "Enough" = a full first page (matches `shown`). When our catalog already
+            // covers the query, the search is DONE from the user's view — show the
+            // results instantly with NO loading indicator and let the external sources
+            // run SILENTLY in the background only to catch avatars we're missing +
+            // contribute them back. Only when local is sparse/empty do we visibly wait.
+            val enough = local.size >= 12
+            searching = local.isEmpty()
+            loadingMore = local.isNotEmpty() && !enough
             val remote = com.vrca.vrchat.AvatarSearch.remoteFill(ctx, q)
             if (seq != searchSeq) return@launch
-            // Merge: our catalog wins, dedup by normalized avatar id.
+            // Merge: our catalog wins, dedup by normalized avatar id. When we already
+            // had "enough", any remote-only extras just append quietly beneath them.
             val merged = LinkedHashMap<String, com.vrca.vrchat.AvatarSearch.Result>()
             for (r in local + remote) {
                 val k = r.id.trim().lowercase()
