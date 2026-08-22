@@ -129,7 +129,13 @@ object AvatarCatalogSweep {
     private const val LIVENESS_BATCH = 40        // entries per liveness pass
     private const val RECHECK_INTERVAL_MS = 7L * 24 * 60 * 60 * 1000  // 7 days
     private const val BLITZ_RECHECK_MS = 60L * 60 * 1000               // 1 h while blitzing
-    private const val BLITZ_WINDOW_MS = 30L * 60 * 1000                // blitz lasts 30 min per press
+    private const val BLITZ_WINDOW_MS = 30L * 60 * 1000                // initial blitz window per press
+    // While a blitz is actively doing work, keep its window rolling forward by this much, so a
+    // full-catalog blitz that takes >30 min doesn't EXPIRE mid-way (the "blitz queue disappears
+    // before it's complete" bug). Once every bot is caught up (no more work), no bot extends it,
+    // so it self-ends ~this long after the last work — it can't run forever (the 1h recheck
+    // cutoff means freshly-checked avatars aren't re-selected).
+    private const val BLITZ_KEEPALIVE_MS = 5L * 60 * 1000
     // Short idle poll (no network / no writes when idle — just a local snapshot scan) so
     // a bot notices new work FAST: a blitz, freshly-loaded catalog, or new reports kick
     // it within IDLE_SLEEP_MS instead of sleeping minutes. (This was 5 min — the cause of
@@ -191,7 +197,13 @@ object AvatarCatalogSweep {
         }
         running = true; pushError = ""
         liveSlots = live
-        blitzProgress.clear(); live.forEach { blitzProgress[it] = Progress().apply { slot = it } }
+        if (blitzActive()) {
+            // Mid-blitz restart (watchdog / re-login): KEEP the running blitz counters instead
+            // of wiping them (part of the "blitz queue randomly disappears" reset).
+            live.forEach { blitzProgress.getOrPut(it) { Progress().apply { slot = it } } }
+        } else {
+            blitzProgress.clear(); live.forEach { blitzProgress[it] = Progress().apply { slot = it } }
+        }
         // One coroutine PER SLOT; it round-robins the roles assigned to that slot so a
         // single VRChat session never fires two roles in parallel (rate-limit safety).
         // liveIndex/liveCount give the bot its share of the catalog during a blitz.
@@ -346,6 +358,8 @@ object AvatarCatalogSweep {
         // Unfilled first, then stale — so bios/info fill fastest during a blitz.
         val batch = (mine.filter { needsFill(it) } + mine.filter { !needsFill(it) && it.checked < cutoff }).take(BLITZ_BATCH)
         if (batch.isEmpty()) { p.status = "blitz: caught up"; return false }
+        // Still work to do → roll the blitz window forward so it doesn't expire mid-catalog.
+        blitzUntilMs = maxOf(blitzUntilMs, System.currentTimeMillis() + BLITZ_KEEPALIVE_MS)
         p.status = "blitz: ${batch.size}"
         val upserts = mutableListOf<AvatarGlobalDb.Entry>()
         val removes = mutableListOf<String>()

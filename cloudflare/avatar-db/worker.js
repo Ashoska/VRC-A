@@ -347,8 +347,15 @@ function ghHeaders(env) {
 
 function b64encode(str) {
   const bytes = new TextEncoder().encode(str);
+  // Build the binary string in 32KB chunks. The old byte-by-byte concat did ~13
+  // MILLION single-char appends on the full catalog and blew the Worker CPU limit
+  // (Cloudflare error 1102 -> flush stopped committing to GitHub). fromCharCode.apply
+  // over a subarray does ~one call per 32KB (a few hundred total) instead.
   let bin = "";
-  for (const b of bytes) bin += String.fromCharCode(b);
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
   return btoa(bin);
 }
 
@@ -560,11 +567,17 @@ async function flush(env) {
   }
 
   // 4. Commit when something changed OR we're migrating the legacy "undefined" file.
+  // serializeDb() is the single heaviest step on a big catalog (builds a ~13MB
+  // string), so compute it AT MOST ONCE per flush and reuse it for both the PUT
+  // body and the dbcache. A no-op flush serializes nothing.
   let lastCommit = "no change";
-  if (added > 0 || removed > 0 || repClear.length > 0 || legacySha || adminChanged) {
+  const changed = added > 0 || removed > 0 || repClear.length > 0 || legacySha || adminChanged;
+  let serialized = null;
+  if (changed) {
+    serialized = serializeDb(db);
     const putBody = {
       message: `avatar-db: +${added} -${removed} (${entries} total)`,
-      content: b64encode(serializeDb(db)),
+      content: b64encode(serialized),
       branch,
     };
     if (sha) putBody.sha = sha;
@@ -605,8 +618,13 @@ async function flush(env) {
 
   // Cache the CURRENT serialized DB in KV so the app can read it FRESH from the Worker
   // (GET /db) with zero GitHub CDN lag — the CDN caches raw files ~5 min, which delayed
-  // the admin bots noticing new avatars. Updated every flush (the committed state).
-  await env.AVATAR_KV.put("dbcache", serializeDb(db));
+  // the admin bots noticing new avatars. Only rewrite it when the file actually changed
+  // (otherwise the existing cache is already current) — reuses the SAME serialized
+  // string built for the commit, so a flush serializes the catalog at most once. This
+  // (plus the chunked b64encode) is what got flush back under the Worker CPU limit.
+  if (changed && serialized) {
+    await env.AVATAR_KV.put("dbcache", serialized);
+  }
 
   await env.AVATAR_KV.put(
     "meta",

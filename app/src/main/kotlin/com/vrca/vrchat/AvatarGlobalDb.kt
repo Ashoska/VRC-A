@@ -169,6 +169,25 @@ object AvatarGlobalDb {
         } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
     }
 
+    /** A CONTENT signal (cheap /health read) that changes ONLY when the catalog's
+     *  contents actually change — new avatars merged (`totalAdded`), removals
+     *  (`totalRemoved` / `entries`). Unlike [workerLastFlush] (which advances every
+     *  2-min cron even on a no-op flush), keying the admin refresh off this pulls the
+     *  full file ONLY when there's really something new — so a newly-added avatar
+     *  reaches the FILL bot promptly, without a wasteful 13MB re-parse every 2 min. */
+    fun workerContentSignal(): String? {
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL("$WORKER_URL/health").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                connectTimeout = 10_000; readTimeout = 10_000
+            }
+            if (conn.responseCode != 200) return null
+            val j = JSONObject(conn.inputStream.bufferedReader().readText())
+            "${j.optInt("entries", -1)}:${j.optInt("totalAdded", 0)}:${j.optInt("totalRemoved", 0)}"
+        } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
+    }
+
     /** POST authoritative admin ops (upserts/removes) to the Worker /admin endpoint.
      *  `upserts` = entries to overwrite (refreshed fields), `removeFileIds` = dead.
      *  Returns true on a 2xx. Admin build only (needs the ADMIN_KEY). */

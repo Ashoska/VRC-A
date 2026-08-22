@@ -102,16 +102,22 @@ object BotController {
         // the moment it flushes. All Worker reads, no VRChat — safe during a login/pause.
         AvatarGlobalDb.start(app)
         scope.launch {
-            var seenFlush = ""
+            var seenSignal = ""
             while (true) {
                 try {
-                    val flush = AvatarGlobalDb.workerLastFlush()
-                    if (flush != null && flush != seenFlush) {
-                        seenFlush = flush
-                        AvatarGlobalDb.forceRefresh(app, cacheBust = flush)
+                    // Key on a CONTENT signal (entries:totalAdded:totalRemoved), NOT the
+                    // 2-min flush timestamp — so the admin device re-pulls the full file
+                    // ONLY when avatars were actually added/removed. A newly-added avatar
+                    // reaches the FILL bot within one poll (~30s) of the flush that merged
+                    // it, and an idle catalog costs a cheap /health read instead of a 13MB
+                    // re-parse every 2 min.
+                    val sig = AvatarGlobalDb.workerContentSignal()
+                    if (sig != null && sig != seenSignal) {
+                        seenSignal = sig
+                        AvatarGlobalDb.forceRefresh(app, cacheBust = sig)
                     }
                 } catch (_: Throwable) { /* transient — retry next tick */ }
-                delay(45_000)
+                delay(30_000)
             }
         }
 

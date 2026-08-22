@@ -172,6 +172,20 @@ class KeepAliveService : Service() {
             (applicationContext as? com.vrca.app.VrcaApplication)?.ensureRuntimeViewModel()
         } catch (_: Throwable) {}
 
+        // ADMIN BUILD: start (or resume) the avatar-catalog bots here — NOT only from
+        // the admin UI. KeepAliveService starts on every app open AND is revived after
+        // an OS/OEM kill by the watchdog (~15 min) / START_STICKY / boot, so anchoring
+        // BotController.start() to this point means the bots keep running while the app
+        // is backgrounded, the screen is off, or the admin is on a different VRC-A tab,
+        // and resume on their own after a process kill — without the admin having to
+        // open the Bots tab. BotController.start() is idempotent and self-gating (it
+        // no-ops when paused / no admin key / no bot logged in), so this is safe to call
+        // unconditionally on the admin build. A deliberate swipe still stops them (the
+        // guard above already returned for that case).
+        if (com.vrca.BuildConfig.IS_ADMIN_BUILD) {
+            try { com.vrca.admin.BotController.start(applicationContext) } catch (_: Throwable) {}
+        }
+
         // If killed, try to come back.
         return START_STICKY
     }
