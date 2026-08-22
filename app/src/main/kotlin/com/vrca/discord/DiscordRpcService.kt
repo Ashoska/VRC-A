@@ -1252,6 +1252,10 @@ private const val WS_HOOK_JS = """
     window._vrca_user_status = 'online';
     window._vrca_intended_status = 'online';
     window._vrca_asset_cache = {};
+    window._vrca_pendingImageUrl = null;   // large_image awaiting resolution (persistent retry)
+    window._vrca_pendingActivity = null;
+    window._vrca_pendingGen = 0;
+    window._vrca_pendingTries = 0;
     window._vrca_token = null;
     // Gateway health tracking. These let the native session monitor tell a
     // genuinely-working gateway from one that is OPEN at the socket level but
@@ -1435,6 +1439,39 @@ private const val MODULE_FINDER_JS = """
             }).catch(function() { return null; });
         };
 
+        // PERSISTENT image-resolution retry. When large_image resolution fails
+        // (VRChat/Discord connection blip, token not yet grabbed, fetch deferred
+        // under background throttling), the activity is sent WITHOUT the image and
+        // the URL is parked in _vrca_pendingImageUrl. This function re-attempts and,
+        // on success, upgrades _vrca_activity + re-pushes. It's driven both by the
+        // fast in-call first attempt AND by the in-page _vrca_pushInterval (which
+        // runs even when the app is backgrounded and native VRCA_setActivity pushes
+        // are throttled by Chromium) — so a connection-failed image keeps retrying
+        // until it lands or the world changes, instead of giving up after one ~20s
+        // window and only recovering on an app reopen. Self-stops when the world
+        // changes (gen guard) or after MAX tries so a genuinely unresolvable URL
+        // can't hammer external-assets forever.
+        window._vrca_resolvePending = function() {
+            var url = window._vrca_pendingImageUrl;
+            if (!url) return;
+            if (window._vrca_pendingGen !== window._vrca_activityGen) {
+                window._vrca_pendingImageUrl = null; return;   // superseded by a new world
+            }
+            var apply = function(resolved) {
+                if (window._vrca_pendingGen !== window._vrca_activityGen) return;
+                if (!resolved) return;   // leave pending set → the interval retries
+                var act = window._vrca_pendingActivity;
+                if (act && act.assets) { act.assets.large_image = resolved; window._vrca_activity = act; }
+                window._vrca_pendingImageUrl = null;
+                window._vrca_sendPresence();
+            };
+            var cached = window._vrca_asset_cache[url];
+            if (cached) { apply(cached); return; }
+            window._vrca_pendingTries = (window._vrca_pendingTries || 0) + 1;
+            if (window._vrca_pendingTries > 90) { window._vrca_pendingImageUrl = null; return; } // ~15 min then give up (RPC stays image-less)
+            VRCA_resolveAsset(url).then(apply);
+        };
+
         window._vrca_sendPresence = function() {
             var gw = window._vrca_gatewayWs;
             if (!gw || gw.readyState !== 1) return;
@@ -1485,6 +1522,7 @@ private const val MODULE_FINDER_JS = """
                     if (cached) {
                         activity.assets.large_image = cached;
                         window._vrca_activity = activity;
+                        window._vrca_pendingImageUrl = null;   // resolved — nothing pending
                         window._vrca_sendPresence();
                         return 'ok';
                     }
@@ -1502,28 +1540,23 @@ private const val MODULE_FINDER_JS = """
                     if (immediate.assets) { delete immediate.assets.large_image; }
                     window._vrca_activity = immediate;
                     window._vrca_sendPresence();
-                    var retries = 0;
-                    var tryResolve = function() {
-                        VRCA_resolveAsset(imageUrl).then(function(resolved) {
-                            // Superseded by a newer world? Abandon — do not overwrite
-                            // the current activity or keep retrying for a stale world.
-                            if (myGen !== window._vrca_activityGen) return;
-                            if (resolved) {
-                                activity.assets.large_image = resolved;
-                                window._vrca_activity = activity;
-                                window._vrca_sendPresence();
-                            } else if (retries < 10) {
-                                retries++;
-                                setTimeout(tryResolve, 2000);
-                            }
-                            // On permanent failure we keep the image-less activity
-                            // (already sent + stored), so the RPC stays visible.
-                        });
-                    };
-                    tryResolve();
+                    // Park the image for PERSISTENT resolution. _vrca_resolvePending
+                    // upgrades the activity once the image resolves; if it fails
+                    // (connection blip / throttled fetch), the URL stays parked and
+                    // the in-page _vrca_pushInterval keeps retrying it — even while
+                    // backgrounded — so the thumbnail lands on its own instead of
+                    // only recovering when the user reopens the app. A newer world
+                    // (gen bump) replaces the pending URL; the gen guard abandons the
+                    // stale one. Fast first attempt now:
+                    window._vrca_pendingImageUrl = imageUrl;
+                    window._vrca_pendingActivity = activity;
+                    window._vrca_pendingGen = myGen;
+                    window._vrca_pendingTries = 0;
+                    window._vrca_resolvePending();
                     return 'ok';
                 }
                 window._vrca_activity = activity;
+                window._vrca_pendingImageUrl = null;   // no http image to resolve
                 window._vrca_sendPresence();
                 return 'ok';
             } catch(e) {
@@ -1537,6 +1570,7 @@ private const val MODULE_FINDER_JS = """
                 // activity after we've cleared it.
                 window._vrca_activityGen = (window._vrca_activityGen || 0) + 1;
                 window._vrca_activity = null;
+                window._vrca_pendingImageUrl = null;   // stop any pending image retry
                 // Don't let a reload restore a cleared activity.
                 try { localStorage.removeItem('_vrca_last_activity'); } catch(e) {}
                 var gw = window._vrca_gatewayWs;
@@ -1568,6 +1602,7 @@ private const val MODULE_FINDER_JS = """
             try {
                 window._vrca_activityGen = (window._vrca_activityGen || 0) + 1;
                 window._vrca_activity = null;
+                window._vrca_pendingImageUrl = null;   // stop any pending image retry
                 try { localStorage.removeItem('_vrca_last_activity'); } catch(e) {}
                 var gw = window._vrca_gatewayWs;
                 if (!gw) return 'no_gateway';
@@ -1632,9 +1667,17 @@ private const val MODULE_FINDER_JS = """
         window._vrca_pushInterval = setInterval(function() {
             try {
                 if (!window._vrca_activity) return;
-                // Skip if a native push already re-asserted within the last 7s, so
-                // this only fires when native evaluateJavascript pushes are being
-                // throttled (background) — avoids doubling OP 3 in the foreground.
+                // PERSISTENT image retry: if a large_image failed to resolve
+                // (connection blip / throttled fetch), keep re-attempting here. This
+                // interval runs even when the app is backgrounded (native pushes are
+                // throttled by Chromium then), so the thumbnail lands on its own once
+                // connectivity returns — no app reopen needed. No-op once resolved
+                // (_vrca_pendingImageUrl is cleared).
+                if (window._vrca_pendingImageUrl) { window._vrca_resolvePending(); }
+                // Skip the presence re-push if a native push already re-asserted
+                // within the last 7s, so this only re-pushes when native
+                // evaluateJavascript pushes are being throttled (background) — avoids
+                // doubling OP 3 in the foreground.
                 var lastSent = window._vrca_lastSentMs || 0;
                 if (Date.now() - lastSent < 7000) return;
                 window._vrca_sendPresence();
