@@ -757,17 +757,40 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
     var query by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf("") }
     var results by remember { mutableStateOf<List<com.vrca.vrchat.AvatarSearch.Result>>(emptyList()) }
     var searching by remember { mutableStateOf(false) }
+    var loadingMore by remember { mutableStateOf(false) }
     var searched by remember { mutableStateOf(false) }
     var shown by remember { mutableStateOf(12) }
+    var searchSeq by remember { mutableStateOf(0) }
     // Avatar ids confirmed dead (image 404 + existence check) — hidden from results.
     val deadIds = remember { androidx.compose.runtime.mutableStateListOf<String>() }
 
     fun runSearch() {
         if (query.isBlank()) return
-        searching = true; searched = true; shown = 12; deadIds.clear()
+        searched = true; shown = 12; deadIds.clear()
+        searchSeq += 1
+        val seq = searchSeq
+        val q = query
         scope.launch {
-            results = com.vrca.vrchat.AvatarSearch.searchAll(ctx, query)
-            searching = false
+            // LOCAL FIRST: show our crowdsourced catalog INSTANTLY (in-memory, no
+            // network), then fold in the external sources. Once our DB covers a query
+            // the results are immediate and avtrdb/mirrors no longer gate the search —
+            // they still run (each with a timeout) only to catch avatars we don't have
+            // and contribute them back.
+            val local = com.vrca.vrchat.AvatarSearch.localResults(q)
+            if (seq != searchSeq) return@launch
+            results = local
+            searching = local.isEmpty()   // spinner only while there's nothing to show yet
+            loadingMore = true
+            val remote = com.vrca.vrchat.AvatarSearch.remoteFill(ctx, q)
+            if (seq != searchSeq) return@launch
+            // Merge: our catalog wins, dedup by normalized avatar id.
+            val merged = LinkedHashMap<String, com.vrca.vrchat.AvatarSearch.Result>()
+            for (r in local + remote) {
+                val k = r.id.trim().lowercase()
+                if (k.startsWith("avtr_")) merged.putIfAbsent(k, r)
+            }
+            results = merged.values.toList()
+            searching = false; loadingMore = false
             // Fill our catalog from results that lacked a file id (avtrdb).
             com.vrca.vrchat.AvatarGlobalDb.harvestSearchResults(ctx, results)
         }
@@ -800,7 +823,8 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
                 keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSearch = { runSearch() })
             )
             when {
-                searching -> androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth())
+                searching || loadingMore ->
+                    androidx.compose.material3.LinearProgressIndicator(Modifier.fillMaxWidth())
                 searched && results.isEmpty() -> Text(
                     "No results.",
                     style = MaterialTheme.typography.bodySmall,

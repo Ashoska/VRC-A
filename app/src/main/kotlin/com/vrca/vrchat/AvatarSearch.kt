@@ -7,6 +7,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -216,6 +217,52 @@ object AvatarSearch {
         // difference between sources can't slip a duplicate through. Our catalog wins.
         val merged = LinkedHashMap<String, Result>()
         for (r in ours + remote) {
+            val key = r.id.trim().lowercase()
+            if (key.startsWith("avtr_")) merged.putIfAbsent(key, r)
+        }
+        val list = merged.values.toList()
+        // Fill our DB from the file-id-bearing results (free — no VRChat call).
+        for (r in list) {
+            val fid = r.imageFileId
+            if (fid != null && r.source != "catalog") {
+                AvatarGlobalDb.contribute(context, fid, r.id, r.name, r.author, r.authorId, r.platforms)
+            }
+        }
+        list
+    }
+
+    // ---- local-first progressive search --------------------------------------
+    // Instead of blocking on avtrdb + the mirrors before showing anything, the UI
+    // shows [localResults] INSTANTLY (our in-memory catalog) and then folds in
+    // [remoteFill]. Once our catalog covers a query, results are instant and the
+    // external sources — whose hits all dedup away — no longer gate the search;
+    // they still run (with a per-source timeout) purely to catch avatars we don't
+    // have yet and to contribute them back.
+
+    /** How long any single external source may take before it's dropped for this
+     *  search (one slow mirror can't stall the whole thing). */
+    private const val REMOTE_SOURCE_TIMEOUT_MS = 6_000L
+
+    /** Our crowdsourced catalog as search results — LOCAL, in-memory, instant. */
+    fun localResults(query: String): List<Result> =
+        if (query.isBlank()) emptyList() else catalogResults(query)
+
+    /**
+     * The EXTERNAL sources only (avtrdb + the two VRCX mirrors), in parallel, each
+     * capped by [REMOTE_SOURCE_TIMEOUT_MS], deduped by avtr_ id. File-id-bearing
+     * results (VRCX) are contributed back immediately; the avtrdb ones (no file id)
+     * are resolved + contributed by the caller's harvestSearchResults. Returns only
+     * remote results — the caller merges these behind the already-shown local ones.
+     */
+    suspend fun remoteFill(context: Context, query: String): List<Result> = coroutineScope {
+        if (query.isBlank()) return@coroutineScope emptyList()
+        val q = URLEncoder.encode(query.trim(), "UTF-8")
+        val remote = (
+            listOf(async { withTimeoutOrNull(REMOTE_SOURCE_TIMEOUT_MS) { runCatching { search(query) }.getOrDefault(emptyList()) } ?: emptyList() }) +
+            VRCX_MIRRORS.map { m -> async { withTimeoutOrNull(REMOTE_SOURCE_TIMEOUT_MS) { vrcxResults("$m?search=$q") } ?: emptyList() } }
+        ).awaitAll().flatten()
+        val merged = LinkedHashMap<String, Result>()
+        for (r in remote) {
             val key = r.id.trim().lowercase()
             if (key.startsWith("avtr_")) merged.putIfAbsent(key, r)
         }
