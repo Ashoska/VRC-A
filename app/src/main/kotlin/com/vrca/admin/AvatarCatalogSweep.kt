@@ -144,6 +144,11 @@ object AvatarCatalogSweep {
     private const val ACTIVE_PAUSE_MS = 1_500L
 
     private const val BLITZ_BATCH = 40           // entries per blitz pass (per bot)
+    // An idle bot only LOANS to another role's backlog once that backlog is genuinely
+    // "in the red" — matches BotsTab's queued>500 red threshold. Below this, the idle
+    // bot stays idle and lets the dedicated bot handle its own small backlog, instead
+    // of every free bot piling onto a minor queue. (Keep in sync with BotsTab's red.)
+    private const val LOAN_RED_THRESHOLD = 500
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val jobs = mutableListOf<Job>()
@@ -543,18 +548,30 @@ object AvatarCatalogSweep {
         // Attribute the loaned work to the BOT'S OWN role progress (+ a `helping` marker) so
         // each bot's card shows what IT is doing, instead of all the loaned work vanishing into
         // the Fill card and the idle bots looking like they do nothing.
-        val fillBatch = claimBatch(AvatarGlobalDb.snapshot().filter { needsFill(it) }, FILL_BATCH)
-        if (fillBatch.isNotEmpty()) {
-            progress.getValue(ownRole).helping = "Fill"
-            return processFillBatch(context, adminKey, slot, fillBatch, ownRole)
+        //
+        // GATE: only loan when the target backlog is genuinely "in the red"
+        // (> LOAN_RED_THRESHOLD, matching the UI). Below that, the idle bot stays idle and
+        // leaves the dedicated bot to work its own small backlog — no piling onto a minor
+        // queue. Blitz is unaffected (it uses every bot regardless and never calls helpPass).
+        val snap = AvatarGlobalDb.snapshot()
+        val fillItems = snap.filter { needsFill(it) }
+        if (fillItems.size > LOAN_RED_THRESHOLD) {
+            val fillBatch = claimBatch(fillItems, FILL_BATCH)
+            if (fillBatch.isNotEmpty()) {
+                progress.getValue(ownRole).helping = "Fill"
+                return processFillBatch(context, adminKey, slot, fillBatch, ownRole)
+            }
         }
         val cutoff = System.currentTimeMillis() - (if (blitzActive()) BLITZ_RECHECK_MS else RECHECK_INTERVAL_MS)
-        val staleBatch = claimBatch(
-            AvatarGlobalDb.snapshot().filter { it.checked < cutoff }.sortedBy { it.checked }, LIVENESS_BATCH
-        )
-        if (staleBatch.isEmpty()) return false
-        progress.getValue(ownRole).helping = "Liveness"
-        return processLivenessBatch(context, adminKey, slot, staleBatch, ownRole)
+        val staleItems = snap.filter { it.checked < cutoff }
+        if (staleItems.size > LOAN_RED_THRESHOLD) {
+            val staleBatch = claimBatch(staleItems.sortedBy { it.checked }, LIVENESS_BATCH)
+            if (staleBatch.isNotEmpty()) {
+                progress.getValue(ownRole).helping = "Liveness"
+                return processLivenessBatch(context, adminKey, slot, staleBatch, ownRole)
+            }
+        }
+        return false
     }
 
     /** Process a PRE-CLAIMED fill batch (used by the FILL role AND by loaning bots). Backs
