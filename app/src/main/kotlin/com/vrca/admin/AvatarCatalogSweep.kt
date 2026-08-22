@@ -9,6 +9,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * The admin catalog maintenance workers, using dedicated [BotVrchatSession] slots (so
@@ -153,6 +156,26 @@ object AvatarCatalogSweep {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val jobs = mutableListOf<Job>()
 
+    // ---- time-based Worker flush (bounds Cloudflare KV writes) ----------------
+    // Every op is applied to the LOCAL catalog IMMEDIATELY (free, in-memory — this is
+    // what makes the backlog counters tick down smoothly per avatar instead of
+    // teleporting a whole batch at a time), and the Worker push is BUFFERED here. One
+    // timer drains the buffer to /admin every FLUSH_MS in size-capped chunks, so KV
+    // write volume is bounded by TIME, not by how many avatars are processed — a blitz
+    // can churn thousands/min and still cost only a few writes/min. Failed chunks are
+    // re-queued (eventual consistency); a buffer lost to process death self-heals on
+    // restart (the entry re-pulls unfilled/stale and is re-processed).
+    private const val FLUSH_MS = 60_000L
+    private const val FLUSH_CHUNK = 200            // ops per /admin push (≈ one KV write each)
+    private val pendingUpserts = java.util.concurrent.ConcurrentHashMap<String, AvatarGlobalDb.Entry>()
+    private val pendingRemoves = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val pendingClears = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val pendingChecked = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val flushMutex = Mutex()
+    private val flusherStarted = AtomicBoolean(false)
+    @Volatile private var flushCtx: Context? = null
+    @Volatile private var flushKey = ""
+
     /** A short human summary of which bot slot runs which roles (for the UI). */
     @Volatile var assignmentLabel = ""; private set
 
@@ -202,6 +225,18 @@ object AvatarCatalogSweep {
         }
         running = true; pushError = ""
         liveSlots = live
+        // Wire the time-based flusher (context + current admin key) and launch it ONCE.
+        // It lives on `scope` (NOT in `jobs`, which stop() cancels), so buffered ops still
+        // reach the Worker after the sweep is stopped/paused.
+        flushCtx = app; flushKey = adminKey.trim()
+        if (flusherStarted.compareAndSet(false, true)) {
+            scope.launch {
+                while (true) {
+                    try { flushPending() } catch (_: Throwable) { /* retry next tick */ }
+                    delay(FLUSH_MS)
+                }
+            }
+        }
         if (blitzActive()) {
             // Mid-blitz restart (watchdog / re-login): KEEP the running blitz counters instead
             // of wiping them (part of the "blitz queue randomly disappears" reset).
@@ -376,23 +411,24 @@ object AvatarCatalogSweep {
             if (chk == null) { delay(PACE_MS); continue }
             if (chk.alive) noteAlive()
             if (!chk.alive) {
-                if (canRemove()) { removes.add(e.fileId); p.removed++ }
+                if (canRemove()) { removes.add(e.fileId); p.removed++; applyItemLocal(remove = e.fileId) }
                 // else: suspected VRChat outage — defer the removal
             }
             else if (needsFill(e)) {
                 val upd = fillRefresh(e, chk)
                 if (upd.fileId != e.fileId) removes.add(e.fileId)
                 upserts.add(upd); p.filled++
+                applyItemLocal(upd = upd, rekeyFrom = if (upd.fileId != e.fileId) e.fileId else null)
             } else {
                 val upd = liveRefresh(e, chk)
                 if (upd != null) {
                     if (upd.fileId != e.fileId) removes.add(e.fileId)
                     upserts.add(upd); p.refreshed++
-                } else okChecked.add(e.fileId)
+                    applyItemLocal(upd = upd, rekeyFrom = if (upd.fileId != e.fileId) e.fileId else null)
+                } else { okChecked.add(e.fileId); applyItemLocal(checked = e.fileId) }
             }
             delay(PACE_MS)
         }
-        AvatarGlobalDb.markCheckedLocally(okChecked + upserts.map { it.fileId })
         if (removes.isNotEmpty() || upserts.isNotEmpty() || okChecked.isNotEmpty())
             pushOps(context, adminKey, upserts.toList(), removes.toList(), emptyList(), okChecked.toList())
         return true
@@ -418,17 +454,73 @@ object AvatarCatalogSweep {
     }
     private fun release(fileIds: Collection<String>) { inFlight.removeAll(fileIds.toSet()) }
 
-    private suspend fun pushOps(
+    // Buffer a pass's Worker ops for the time-based flush. The LOCAL catalog is applied
+    // PER ITEM in the loops (smooth counters), so this does NO local apply and NO network
+    // — it only queues the ops. context/adminKey are unused (the flusher holds them from
+    // start()) but kept so the call sites don't change.
+    private fun pushOps(
         context: Context, adminKey: String,
         upserts: List<AvatarGlobalDb.Entry>, removes: List<String>,
         clears: List<String> = emptyList(), checked: List<String> = emptyList()
-    ): Boolean {
-        val ok = AvatarGlobalDb.adminPush(context, adminKey, upserts, removes, clears, checked)
-        // Apply to the LOCAL catalog immediately so the backlog counts drop live (the
-        // authoritative copy is still the Worker's; this just avoids the ~15-min flush lag).
-        if (ok) AvatarGlobalDb.applyAdminLocal(upserts, removes)
-        pushError = if (ok) "" else "PUSH REJECTED — set ADMIN_KEY as a Secret on Cloudflare matching the app key"
-        return ok
+    ) {
+        enqueueOps(upserts, removes, clears, checked)
+    }
+
+    /** Add ops to the time-based flush buffer. Dedups by file id; a remove supersedes a
+     *  pending upsert of the same id (and clears its pending checked-bump), and an upsert
+     *  cancels a pending remove — so re-keys and rapid re-processing can't leave stale
+     *  buffered ops. NO network here; the flusher drains it. */
+    private fun enqueueOps(
+        upserts: List<AvatarGlobalDb.Entry>, removes: List<String>,
+        clears: List<String> = emptyList(), checked: List<String> = emptyList()
+    ) {
+        for (e in upserts) { pendingRemoves.remove(e.fileId); pendingUpserts[e.fileId] = e }
+        for (fid in removes) { pendingUpserts.remove(fid); pendingChecked.remove(fid); pendingRemoves.add(fid) }
+        for (fid in clears) pendingClears.add(fid)
+        for (fid in checked) if (!pendingUpserts.containsKey(fid) && !pendingRemoves.contains(fid)) pendingChecked.add(fid)
+    }
+
+    /** Drain the buffered ops to the Worker in size-capped chunks (≈ one KV write each),
+     *  re-queuing anything that fails so nothing is lost. Called on the FLUSH_MS timer,
+     *  so KV writes scale with TIME, not with how fast the bots process avatars. */
+    private suspend fun flushPending() {
+        val ctx = flushCtx ?: return
+        if (flushKey.isBlank()) return
+        flushMutex.withLock {
+            val upserts = ArrayDeque(pendingUpserts.values.toList()); pendingUpserts.clear()
+            val removes = ArrayDeque(pendingRemoves.toList()); pendingRemoves.clear()
+            val clears = ArrayDeque(pendingClears.toList()); pendingClears.clear()
+            val checked = ArrayDeque(pendingChecked.toList()); pendingChecked.clear()
+            if (upserts.isEmpty() && removes.isEmpty() && clears.isEmpty() && checked.isEmpty()) { pushError = ""; return }
+            var failed = false
+            while (upserts.isNotEmpty() || removes.isNotEmpty() || clears.isNotEmpty() || checked.isNotEmpty()) {
+                val u = ArrayList<AvatarGlobalDb.Entry>(); repeat(FLUSH_CHUNK) { upserts.removeFirstOrNull()?.let(u::add) }
+                val r = ArrayList<String>(); repeat(FLUSH_CHUNK) { removes.removeFirstOrNull()?.let(r::add) }
+                val c = ArrayList<String>(); repeat(FLUSH_CHUNK) { clears.removeFirstOrNull()?.let(c::add) }
+                val k = ArrayList<String>(); repeat(FLUSH_CHUNK) { checked.removeFirstOrNull()?.let(k::add) }
+                if (u.isEmpty() && r.isEmpty() && c.isEmpty() && k.isEmpty()) break
+                if (!AvatarGlobalDb.adminPush(ctx, flushKey, u, r, c, k)) {
+                    // Re-queue this chunk + everything still pending, retry next flush.
+                    (u + upserts).forEach { pendingUpserts.putIfAbsent(it.fileId, it) }
+                    (r + removes).forEach { pendingRemoves.add(it) }
+                    (c + clears).forEach { pendingClears.add(it) }
+                    (k + checked).forEach { if (!pendingUpserts.containsKey(it) && !pendingRemoves.contains(it)) pendingChecked.add(it) }
+                    failed = true; break
+                }
+            }
+            pushError = if (failed) "PUSH REJECTED — set ADMIN_KEY as a Secret on Cloudflare matching the app key" else ""
+        }
+    }
+
+    /** Reflect ONE processed avatar in the LOCAL catalog right away (free, in-memory) so
+     *  the backlog counters tick down per avatar instead of jumping a whole batch at once.
+     *  The Worker push is buffered separately (pushOps → enqueueOps). */
+    private fun applyItemLocal(upd: AvatarGlobalDb.Entry? = null, rekeyFrom: String? = null,
+                              remove: String? = null, checked: String? = null) {
+        val ups = if (upd != null) listOf(upd) else emptyList()
+        val rems = listOfNotNull(rekeyFrom, remove)
+        if (ups.isNotEmpty() || rems.isNotEmpty()) AvatarGlobalDb.applyAdminLocal(ups, rems)
+        if (checked != null) AvatarGlobalDb.markCheckedLocally(listOf(checked))
     }
 
     /** LIVENESS/REPORTS refresh: on a CONFIRMED-alive check (HTTP 200), pick up the
@@ -501,7 +593,7 @@ object AvatarCatalogSweep {
                 // Don't remove on a report during a suspected VRChat outage — a 404 could be
                 // false. Skip clearing too, so the report stays pending and is re-verified once
                 // VRChat is back (don't mark a maybe-alive avatar's report resolved).
-                if (canRemove()) { removes.add(r.fileId); p.removed++ }
+                if (canRemove()) { removes.add(r.fileId); p.removed++; applyItemLocal(remove = r.fileId) }
             }
             else {
                 clears.add(r.fileId)  // alive → false positive
@@ -509,7 +601,8 @@ object AvatarCatalogSweep {
                     liveRefresh(cur, chk)?.let { upd ->
                         if (upd.fileId != cur.fileId) removes.add(cur.fileId)
                         upserts.add(upd); p.refreshed++
-                    }
+                        applyItemLocal(upd = upd, rekeyFrom = if (upd.fileId != cur.fileId) cur.fileId else null)
+                    } ?: applyItemLocal(checked = r.fileId)  // alive + identical → bump last-checked
                 }
             }
             if (upserts.size + removes.size + clears.size >= BATCH) {
@@ -598,12 +691,13 @@ object AvatarCatalogSweep {
                 nulls = 0
                 if (chk.alive) noteAlive()
                 if (!chk.alive) {
-                    if (canRemove()) { removes.add(e.fileId); p.removed++ }
+                    if (canRemove()) { removes.add(e.fileId); p.removed++; applyItemLocal(remove = e.fileId) }
                     // else: suspected VRChat outage — defer the removal, retry next pass
                 } else {
                     val upd = fillRefresh(e, chk)
                     if (upd.fileId != e.fileId) removes.add(e.fileId)  // re-key on image change (safe on a 200)
                     upserts.add(upd); p.filled++
+                    applyItemLocal(upd = upd, rekeyFrom = if (upd.fileId != e.fileId) e.fileId else null)
                 }
                 if (upserts.size + removes.size >= BATCH) {
                     pushOps(context, adminKey, upserts.toList(), removes.toList())
@@ -640,18 +734,18 @@ object AvatarCatalogSweep {
                 nulls = 0
                 if (chk.alive) noteAlive()
                 if (!chk.alive) {
-                    if (canRemove()) { removes.add(e.fileId); p.removed++ }
+                    if (canRemove()) { removes.add(e.fileId); p.removed++; applyItemLocal(remove = e.fileId) }
                     // else: suspected VRChat outage — defer the removal, retry next pass
                 } else {
                     val upd = liveRefresh(e, chk)
                     if (upd != null) {
                         if (upd.fileId != e.fileId) removes.add(e.fileId)
                         upserts.add(upd); p.refreshed++
-                    } else okChecked.add(e.fileId)  // alive + identical → just bump last-checked
+                        applyItemLocal(upd = upd, rekeyFrom = if (upd.fileId != e.fileId) e.fileId else null)
+                    } else { okChecked.add(e.fileId); applyItemLocal(checked = e.fileId) }  // alive + identical → bump last-checked
                 }
                 delay(PACE_MS)
             }
-            AvatarGlobalDb.markCheckedLocally(okChecked + upserts.map { it.fileId })
             if (removes.isNotEmpty() || upserts.isNotEmpty() || okChecked.isNotEmpty())
                 pushOps(context, adminKey, upserts.toList(), removes.toList(), emptyList(), okChecked.toList())
             p.status = "checked=${p.checked} removed=${p.removed} refreshed=${p.refreshed}"
