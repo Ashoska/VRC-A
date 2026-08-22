@@ -98,6 +98,7 @@ object AvatarGlobalDb {
     @Volatile private var ownAvatar = "not harvested yet"
     @Volatile private var lastContributed = "none"
     @Volatile private var contributedCount = 0
+    @Volatile private var lastOwnHarvestMs = 0L
 
     // ---- lifecycle -----------------------------------------------------------
 
@@ -664,6 +665,19 @@ object AvatarGlobalDb {
             }
             ownAvatar = "lib +$added, fav +$favAdded/${favs.size}, ${privateRemoved} now-private ${nowShort()}"
         } catch (ex: Exception) { Log.w(TAG, "library harvest failed", ex) }
+    }
+
+    /** Harvest the user's CURRENTLY-WORN avatar RIGHT NOW (public-only). Called when
+     *  the pipeline detects the user changed their own avatar, so a newly-worn PUBLIC
+     *  avatar is contributed within seconds instead of waiting for the next 30-min
+     *  cycle / app reopen. Debounced (>=8s apart) so the 10s presence loop can't spam
+     *  it; a PRIVATE avatar is still skipped by avatarCatalogEntry (privacy). */
+    fun harvestOwnAvatarNow(context: Context) {
+        val now = System.currentTimeMillis()
+        if (now - lastOwnHarvestMs < 8_000) return
+        lastOwnHarvestMs = now
+        val app = context.applicationContext
+        scope.launch { harvestOwnAvatar(app) }
     }
 
     private suspend fun harvestOwnAvatar(context: Context) {

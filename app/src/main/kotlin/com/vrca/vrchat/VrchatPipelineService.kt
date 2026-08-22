@@ -3224,12 +3224,25 @@ class VrchatPipelineService : Service() {
         val status = user.optString("status", prev.status).ifBlank { prev.status }
         val statusDesc = user.optString("statusDescription", prev.statusDescription)
         val state = user.optString("state", prev.state).ifBlank { prev.state }
+        // The self user-update carries the worn-avatar thumbnail, same as friend-update.
+        // A change means the user swapped their OWN avatar -> harvest it into the shared
+        // catalog RIGHT AWAY (public-only; private is skipped downstream), instead of
+        // waiting for the 30-min periodic harvest. This is the "wore a new avatar but it
+        // didn't contribute" fix. Debounced inside harvestOwnAvatarNow.
+        val newThumb = user.optString("currentAvatarThumbnailImageUrl", prev.currentAvatarThumbnailUrl)
+        val avatarChanged = newThumb.isNotBlank() &&
+            prev.currentAvatarThumbnailUrl.isNotBlank() &&
+            newThumb != prev.currentAvatarThumbnailUrl
         VrchatPipelineState.presence = prev.copy(
             status = status,
             statusDescription = statusDesc,
             state = state,
-            isOnlineInVRChat = state != "offline"
+            isOnlineInVRChat = state != "offline",
+            currentAvatarThumbnailUrl = newThumb
         )
+        if (avatarChanged) {
+            com.vrca.vrchat.AvatarGlobalDb.harvestOwnAvatarNow(applicationContext)
+        }
         pushSelfPresenceToFirestoreIfWatched()
     }
 
