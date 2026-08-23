@@ -54,6 +54,9 @@ object BotController {
 
     private val started = AtomicBoolean(false)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // A bot that made a successful authed API call within this window is shown "Authed" even
+    // if the periodic validate hasn't run / returned UNKNOWN. Covers the slow-validate gap.
+    private const val AUTH_OK_WINDOW_MS = 5 * 60_000L
     @Volatile private var pendingReports = 0
     // While a manual login is in progress, the ALREADY-logged-in bots must "chill" —
     // stop the sweep AND validation — so their API traffic doesn't compete with the new
@@ -164,10 +167,19 @@ object BotController {
                     else System.currentTimeMillis() - AvatarCatalogSweep.lastCycleMs
                 _bots.value = _bots.value.map { b ->
                     val li = BotVrchatSession.isLoggedIn(app, b.slot)
+                    // Flip "Checking…" (UNKNOWN) to "Authed" the moment the bot proves auth via a
+                    // real successful API call — so a bot doing work never sits on "Checking"
+                    // waiting for the slow periodic validate (which can stall UNKNOWN on a 429).
+                    val provenAuthed = li && b.auth != BotVrchatSession.Auth.AUTHED &&
+                        System.currentTimeMillis() - BotVrchatSession.lastAuthOkMs(b.slot) < AUTH_OK_WINDOW_MS
                     b.copy(
                         loggedIn = li,
                         name = BotVrchatSession.accountLabel(app, b.slot),
-                        auth = if (!li) BotVrchatSession.Auth.UNKNOWN else b.auth
+                        auth = when {
+                            !li -> BotVrchatSession.Auth.UNKNOWN
+                            provenAuthed -> BotVrchatSession.Auth.AUTHED
+                            else -> b.auth
+                        }
                     )
                 }
                 i++; delay(2000)
@@ -205,7 +217,16 @@ object BotController {
     }
 
     private fun setAuth(slot: Int, a: BotVrchatSession.Auth) {
-        _bots.value = _bots.value.map { if (it.slot == slot) it.copy(auth = a) else it }
+        _bots.value = _bots.value.map {
+            if (it.slot == slot) {
+                // A transient UNKNOWN (network / 429 on the periodic validate) must NOT downgrade
+                // a bot already known AUTHED — that's the "flips back to Checking" flicker. Only a
+                // real EXPIRED (401) or a confirmed AUTHED changes a known-good state.
+                val next = if (a == BotVrchatSession.Auth.UNKNOWN && it.auth == BotVrchatSession.Auth.AUTHED)
+                    BotVrchatSession.Auth.AUTHED else a
+                it.copy(auth = next)
+            } else it
+        }
     }
 
     /** Refresh one slot immediately after a login/logout action in the UI. */
