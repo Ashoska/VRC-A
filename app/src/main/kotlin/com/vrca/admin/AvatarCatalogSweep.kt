@@ -200,6 +200,20 @@ object AvatarCatalogSweep {
     /** A short human summary of which bot slot runs which roles (for the UI). */
     @Volatile var assignmentLabel = ""; private set
 
+    // Role->slot the bots WOULD run, computed from the currently logged-in bots + saved
+    // manual picks even while the sweep is STOPPED/paused — so the Bots tab can attribute
+    // each role's queued backlog to its bot BEFORE the admin presses Start (otherwise the
+    // per-bot queued rows only appeared once running, since progress[r].slot was -1).
+    @Volatile private var assignmentPreview: Map<Role, Int> = emptyMap()
+
+    /** Recompute the preview assignment from the current live bots + manual picks.
+     *  Called every UI tick by BotController, running or not. */
+    fun setAssignmentPreview(context: Context, manual: Map<Role, Int> = emptyMap()) {
+        val app = context.applicationContext
+        val live = (0 until BotVrchatSession.SLOTS).filter { BotVrchatSession.isLoggedIn(app, it) }
+        assignmentPreview = if (live.isEmpty()) emptyMap() else computeRoleSlot(live, manual)
+    }
+
     // The logged-in slots (in order) + a per-slot blitz progress, so during a blitz EVERY
     // bot chews its OWN partition of the whole catalog (fill + dead-check) instead of the
     // reports/idle bots sitting out.
@@ -350,9 +364,12 @@ object AvatarCatalogSweep {
             val t = targetOf(r)
             val n = (workers[t] ?: 1).coerceAtLeast(1)
             val share = (backlogOf(t) + n - 1) / n   // ceil-split among the bots on this backlog
+            // While running, use the live progress slot; while stopped, fall back to the
+            // preview assignment so the per-bot queued rows show BEFORE Start.
+            val slot = p.slot.takeIf { it >= 0 } ?: assignmentPreview[r] ?: -1
             RoleView(
                 role = r,
-                bot = if (p.slot >= 0) "bot ${p.slot + 1}" else "—",
+                bot = if (slot >= 0) "bot ${slot + 1}" else "—",
                 queued = share,
                 checked = p.checked,
                 removed = p.removed,

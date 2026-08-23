@@ -83,18 +83,25 @@ object BotController {
      *  here (not the UI) so the bots auto-start + resume on APP LAUNCH without opening
      *  the Bots tab, and self-include a bot as soon as it's logged in. Idempotent —
      *  ensureRunning only (re)starts when the live set / key / assignment actually change. */
-    fun applySweepConfig(context: Context) {
-        val app = context.applicationContext
-        val prefs = app.getSharedPreferences("vrca_admin_local", Context.MODE_PRIVATE)
-        // Paused (manual) or chilling (a login is in progress) → the working bots go silent.
-        if (silenced(app)) { AvatarCatalogSweep.stop(); return }
-        val key = prefs.getString("avatar_admin_key", "") ?: ""
+    /** Parse the saved manual role→slot picks (CSV of 4 ints, -1 = auto). */
+    private fun currentManual(prefs: android.content.SharedPreferences): Map<AvatarCatalogSweep.Role, Int> {
         val csv = prefs.getString("avatar_role_slots", null)
         val roleSlots = if (csv == null) IntArray(4) { -1 }
             else IntArray(4) { i -> csv.split(",").getOrNull(i)?.toIntOrNull() ?: -1 }
-        val manual = AvatarCatalogSweep.Role.values()
+        return AvatarCatalogSweep.Role.values()
             .mapIndexedNotNull { i, r -> roleSlots.getOrNull(i)?.takeIf { it >= 0 }?.let { r to it } }.toMap()
-        AvatarCatalogSweep.ensureRunning(app, key, manual)
+    }
+
+    fun applySweepConfig(context: Context) {
+        val app = context.applicationContext
+        val prefs = app.getSharedPreferences("vrca_admin_local", Context.MODE_PRIVATE)
+        // Keep the preview assignment fresh so the per-bot queued rows show what each bot
+        // WOULD process even before Start / while paused (independent of ensureRunning).
+        AvatarCatalogSweep.setAssignmentPreview(app, currentManual(prefs))
+        // Paused (manual) or chilling (a login is in progress) → the working bots go silent.
+        if (silenced(app)) { AvatarCatalogSweep.stop(); return }
+        val key = prefs.getString("avatar_admin_key", "") ?: ""
+        AvatarCatalogSweep.ensureRunning(app, key, currentManual(prefs))
     }
 
     /** Idempotent — safe to call on every Bots-tab entry AND on admin app launch. */
