@@ -424,6 +424,20 @@ object VrchatAuthManager {
         withContext(Dispatchers.IO) {
             val id = avatarId.trim()
             if (!id.startsWith("avtr_")) return@withContext InviteResult(false, "No avatar id yet")
+            // DIAGNOSTIC: record EVERY select VRC-A issues (id + wall-clock time + a
+            // running count, persisted). The user reports booting into a VRC-A-cloned
+            // avatar even after switching — this proves whether VRC-A is re-selecting on
+            // its own (count climbs with no tap) or the revert is VRChat's saved
+            // current-avatar (count stays put). Surfaced in Settings -> Debug.
+            runCatching {
+                val p = context.getSharedPreferences("vrca_diag", Context.MODE_PRIVATE)
+                p.edit()
+                    .putString("avatar_select_last_id", id)
+                    .putLong("avatar_select_last_at", System.currentTimeMillis())
+                    .putInt("avatar_select_count", p.getInt("avatar_select_count", 0) + 1)
+                    .commit()
+            }
+            Log.w(TAG, "selectAvatar CALLED for $id")
             val cookieHeader = getCookieHeader(context)
                 ?: return@withContext InviteResult(false, "Not signed in to VRChat")
             try {
@@ -440,6 +454,21 @@ object VrchatAuthManager {
                 InviteResult(false, "Network error")
             }
         }
+
+    /** Debug readout of the last avatar-select VRC-A performed (id, when, and a
+     *  running count that survives reboots). If the count climbs after a VRChat
+     *  reopen WITHOUT the user tapping a clone button, VRC-A is re-selecting on its
+     *  own; if it stays put, the boot avatar is VRChat's own saved current-avatar. */
+    fun selectAvatarDiag(context: Context): String {
+        val p = context.getSharedPreferences("vrca_diag", Context.MODE_PRIVATE)
+        val id = p.getString("avatar_select_last_id", null)
+        val at = p.getLong("avatar_select_last_at", 0L)
+        val n = p.getInt("avatar_select_count", 0)
+        if (id == null || at == 0L) return "no avatar clone/select this install yet"
+        val ago = "${(System.currentTimeMillis() - at) / 1000}s ago"
+        val clock = java.text.SimpleDateFormat("MMM d HH:mm:ss", java.util.Locale.US).format(java.util.Date(at))
+        return "last select: $id\n  at $clock ($ago) · total this install: $n"
+    }
 
     /**
      * Headers required to LOAD an auth-gated VRChat image (`api.vrchat.cloud`

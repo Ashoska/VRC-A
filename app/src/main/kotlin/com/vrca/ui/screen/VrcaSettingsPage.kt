@@ -534,6 +534,27 @@ internal fun SettingsPage(
                             )
                         }
 
+                        // Avatar clone/select tracker: proves whether VRC-A re-selects
+                        // an avatar on its own (count climbs with no tap) vs VRChat
+                        // restoring its saved current-avatar (count stays put).
+                        Text("Avatar clone/select (VRC-A)", style = MaterialTheme.typography.labelMedium)
+                        var selDiag by remember {
+                            mutableStateOf(com.vrca.vrchat.VrchatAuthManager.selectAvatarDiag(ctx))
+                        }
+                        androidx.compose.runtime.LaunchedEffect(Unit) {
+                            while (true) {
+                                selDiag = com.vrca.vrchat.VrchatAuthManager.selectAvatarDiag(ctx)
+                                kotlinx.coroutines.delay(1500)
+                            }
+                        }
+                        SelectionContainer {
+                            Text(
+                                selDiag,
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+
                         // Per-DB health: probe each avatar source individually so a
                         // misconfigured/blocked source is visible (tap to run).
                         Text("Avatar DBs (tap to test)", style = MaterialTheme.typography.labelMedium)
