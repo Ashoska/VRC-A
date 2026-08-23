@@ -53,6 +53,7 @@ object AvatarGlobalDb {
     private const val KEY_QUEUE = "queue"        // pending contributions (JSON array)
     private const val KEY_REPORTS = "reports"    // pending reports (JSON array)
     private const val KEY_FAV_PROCESSED = "fav_processed"  // favourite ids resolved once (persistent)
+    private const val KEY_SEED_QUEUE = "seed_queue"        // pending seed-search names (persistent)
     private const val CACHE_FILE = "avatar_db.json"
     private const val REFRESH_MS = 30 * 60_000L  // every 30 min (+ once on open)
     // Push queued contributions to the Worker every 5 min — frequent enough that each
@@ -70,6 +71,8 @@ object AvatarGlobalDb {
     private const val SEARCH_SEED_PACE_MS = 6_000L
     private const val SEARCH_SEED_QUEUE_CAP = 1500   // favourite lists can be ~1000
     private const val SEARCH_SEED_MIN_LEN = 3
+    private const val SEED_YIELD_MS = 1_000L         // re-check the roster this often while paused
+    private const val SEED_MAX_YIELD_MS = 90_000L    // never starve the seed longer than this
     // Favourites can be up to ~1000. Resolving each via VRChat REST would rate-limit, so:
     // skip any already in the catalog (no call), cap NEW resolves per 30-min sweep (spread
     // 1000 across sweeps), and back off on a run of nulls (a 429 burst).
@@ -107,10 +110,31 @@ object AvatarGlobalDb {
     private val queueMutex = Mutex()
 
     // Paced DB-search seed queue: names from favourites / worn avatars, drained one at a
-    // time by a slow timer so a big favourites list can't rate-limit the DBs. Deduped per
-    // session so the same name is never re-searched.
+    // time by a slow timer so a big favourites list can't rate-limit the DBs. Deduped so the
+    // same name is never re-searched. PERSISTED to disk so a big backlog (a ~1000-favourite
+    // list takes ~100 min to drain) resumes across app reopens instead of being lost.
     private val searchSeedQueue = java.util.concurrent.ConcurrentLinkedQueue<String>()
     private val seededSearchNames = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+    @Volatile private var seedQueueLoaded = false
+
+    private fun loadSeedQueue(context: Context) {
+        if (seedQueueLoaded) return
+        seedQueueLoaded = true
+        try {
+            val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_SEED_QUEUE, "") ?: ""
+            raw.split('\n').forEach { n ->
+                val name = n.trim()
+                if (name.length >= SEARCH_SEED_MIN_LEN && seededSearchNames.add(name.lowercase())) searchSeedQueue.add(name)
+            }
+        } catch (e: Exception) { Log.w(TAG, "load seed queue failed", e) }
+    }
+
+    private fun saveSeedQueue(context: Context) {
+        try {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .putString(KEY_SEED_QUEUE, searchSeedQueue.joinToString("\n")).apply()
+        } catch (e: Exception) { Log.w(TAG, "save seed queue failed", e) }
+    }
 
     private val FILE_RE = Regex("""file_[0-9a-fA-F-]{36}""")
     private val AVTR_RE = Regex("""avtr_[0-9a-fA-F-]{36}""")
@@ -139,6 +163,7 @@ object AvatarGlobalDb {
         scope.launch {
             loadLocalCache(app)
             loadProcessedFavourites(app)
+            loadSeedQueue(app)
             refresh(app)
             flushQueue(app)
             harvestOwnAvatar(app)
@@ -167,10 +192,27 @@ object AvatarGlobalDb {
         // ZERO VRChat REST (searchAll never resolves file ids). One name/10s keeps the DBs
         // well under any rate limit no matter how many favourites are queued.
         scope.launch {
+            var yieldStart = 0L
             while (isActive) {
+                // YIELD to the instance roster: its clone-id resolution hits the SAME
+                // avtrdb/VRCX mirrors, so running the seed search during the roster's initial
+                // load starves it + rate-limits the DBs (the roster takes forever). Pause the
+                // seed while the roster is resolving; resume the instant it goes idle. A hard
+                // SEED_MAX_YIELD_MS cap lets one name trickle through so a perpetually-busy
+                // instance can't starve the seed forever. (Always idle on non-headset builds.)
+                if (com.vrca.vrchat.InstanceRosterManager.isResolvingRoster()) {
+                    if (yieldStart == 0L) yieldStart = System.currentTimeMillis()
+                    if (System.currentTimeMillis() - yieldStart < SEED_MAX_YIELD_MS) {
+                        if (searchSeedQueue.isNotEmpty())
+                            lastSeedSearch = "paused — roster loading (${searchSeedQueue.size} queued)"
+                        delay(SEED_YIELD_MS); continue
+                    }
+                }
+                yieldStart = 0L
                 val name = searchSeedQueue.poll()
                 if (name == null) { delay(SEARCH_SEED_PACE_MS); continue }
                 runCatching { AvatarSearch.searchAll(app, name) }
+                saveSeedQueue(app)   // persist the shrunk queue so a reopen resumes here
                 lastSeedSearch = "'$name' (${searchSeedQueue.size} queued) ${nowShort()}"
                 delay(SEARCH_SEED_PACE_MS)
             }
@@ -770,6 +812,7 @@ object AvatarGlobalDb {
                 delay(FAV_PACE_MS)
             }
             if (favProcessed > 0) saveProcessedFavourites(context)
+            saveSeedQueue(context)   // persist the names this sweep queued (favourites seed the queue)
             lastFav = "favourites ${favs.size}: $favNew new / $favKnown known" +
                 (if (favDead > 0) " / $favDead dead-reported" else "") +
                 (if (favSkipped > 0) " / $favSkipped private" else "") +

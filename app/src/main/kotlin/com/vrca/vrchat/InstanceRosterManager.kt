@@ -231,6 +231,11 @@ object InstanceRosterManager {
     private val avatarPlatformsCache = ConcurrentHashMap<String, List<String>>()
     private val avatarResolveInFlight = ConcurrentHashMap.newKeySet<String>()
     private val resolvingAvatars = java.util.concurrent.atomic.AtomicBoolean(false)
+    /** True while the roster is actively resolving members' clone ids — that pass hits the
+     *  SAME avtrdb/VRCX mirrors the catalog seed search does, so the seed search yields to it
+     *  (see AvatarGlobalDb) to keep the instance roster loading fast + avoid DB rate-limits.
+     *  Always false on non-headset builds (the roster never starts there). */
+    fun isResolvingRoster(): Boolean = resolvingAvatars.get()
     private const val RESOLVE_PACE_MS = 1_000L
     private val enrichAttempts = ConcurrentHashMap<String, Int>()
     // Per-user platform (/users/{id} -> last_platform) is the ONLY source for a
