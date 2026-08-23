@@ -60,6 +60,15 @@ object AvatarGlobalDb {
     // this many entries (the Worker caps a single POST) so a big harvest isn't lost.
     private const val FLUSH_MS = 2 * 60_000L
     private const val CONTRIBUTE_CHUNK = 200
+    // Paced DB-search seeding from favourites / worn avatars. Each name runs ONE
+    // AvatarSearch.searchAll (avtrdb + 2 VRCX mirrors + our catalog), which contributes
+    // any file-id-bearing result back — so it grows the catalog with OTHER avatars indexed
+    // under that name, with ZERO VRChat REST (searchAll never resolves file ids itself).
+    // Drained one name per SEARCH_SEED_PACE_MS so a big favourites list can't rate-limit
+    // the DBs; names deduped per session; queue capped.
+    private const val SEARCH_SEED_PACE_MS = 10_000L
+    private const val SEARCH_SEED_QUEUE_CAP = 200
+    private const val SEARCH_SEED_MIN_LEN = 3
 
     data class Entry(
         val fileId: String,
@@ -90,6 +99,12 @@ object AvatarGlobalDb {
     // (which drains it) can't race a concurrent contribute (which appends) and lose it.
     private val queueMutex = Mutex()
 
+    // Paced DB-search seed queue: names from favourites / worn avatars, drained one at a
+    // time by a slow timer so a big favourites list can't rate-limit the DBs. Deduped per
+    // session so the same name is never re-searched.
+    private val searchSeedQueue = java.util.concurrent.ConcurrentLinkedQueue<String>()
+    private val seededSearchNames = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+
     private val FILE_RE = Regex("""file_[0-9a-fA-F-]{36}""")
     private val AVTR_RE = Regex("""avtr_[0-9a-fA-F-]{36}""")
 
@@ -101,6 +116,7 @@ object AvatarGlobalDb {
     @Volatile private var lastContributed = "none"
     @Volatile private var contributedCount = 0
     @Volatile private var lastOwnHarvestMs = 0L
+    @Volatile private var lastSeedSearch = "none"
 
     // ---- lifecycle -----------------------------------------------------------
 
@@ -135,6 +151,20 @@ object AvatarGlobalDb {
             while (isActive) {
                 delay(FLUSH_MS)
                 flushQueue(app)
+            }
+        }
+        // Paced DB-search seeder: drain ONE queued name per SEARCH_SEED_PACE_MS. searchAll
+        // hits avtrdb + 2 VRCX mirrors + our catalog and contributes any file-id-bearing
+        // result back — growing the catalog with other avatars indexed under that name, with
+        // ZERO VRChat REST (searchAll never resolves file ids). One name/10s keeps the DBs
+        // well under any rate limit no matter how many favourites are queued.
+        scope.launch {
+            while (isActive) {
+                val name = searchSeedQueue.poll()
+                if (name == null) { delay(SEARCH_SEED_PACE_MS); continue }
+                runCatching { AvatarSearch.searchAll(app, name) }
+                lastSeedSearch = "'$name' (${searchSeedQueue.size} queued) ${nowShort()}"
+                delay(SEARCH_SEED_PACE_MS)
             }
         }
     }
@@ -591,6 +621,7 @@ object AvatarGlobalDb {
                 "${if (added) "CONTRIBUTED (new)" else "already in catalog"} ${nowShort()}"
             AvatarSearch.Diag.record("you worn -> ${e.name.ifBlank { e.avatarId }}: " +
                 if (added) "contributed (new)" else "already in catalog")
+            seedSearchFromName(e.name)   // grow the catalog from this worn avatar's name
         } catch (ex: Exception) { Log.w(TAG, "avatar-change harvest failed", ex) }
     }
 
@@ -679,6 +710,7 @@ object AvatarGlobalDb {
                 // once — no per-cycle flooding of the resolves log.
                 AvatarSearch.Diag.record("fav -> ${e.name.ifBlank { e.avatarId }}: " +
                     if (favNewOne) "contributed (new)" else "already in catalog")
+                seedSearchFromName(e.name)   // grow the catalog from this favourite's name
                 delay(400) // pace VRChat REST
             }
             lastFav = "uploads: $libNew new / $libKnown known · " +
@@ -695,6 +727,17 @@ object AvatarGlobalDb {
      *  avatar is contributed within seconds instead of waiting for the next 30-min
      *  cycle / app reopen. Debounced (>=8s apart) so the 10s presence loop can't spam
      *  it; a PRIVATE avatar is still skipped by avatarCatalogEntry (privacy). */
+    /** Queue a name (from a favourite / worn avatar) for a paced DB search that grows the
+     *  catalog with OTHER avatars indexed under it. Deduped per session; capped; drained one
+     *  name per SEARCH_SEED_PACE_MS by the loop in [start] — so it never bursts the DBs. */
+    fun seedSearchFromName(name: String) {
+        val n = name.trim()
+        if (n.length < SEARCH_SEED_MIN_LEN) return
+        if (!seededSearchNames.add(n.lowercase())) return          // already seeded this session
+        if (searchSeedQueue.size >= SEARCH_SEED_QUEUE_CAP) return   // bounded
+        searchSeedQueue.add(n)
+    }
+
     fun harvestOwnAvatarNow(context: Context) {
         val now = System.currentTimeMillis()
         if (now - lastOwnHarvestMs < 8_000) return
@@ -716,6 +759,7 @@ object AvatarGlobalDb {
             // Only record NEW contributions here — this runs every 30 min, so logging an
             // "already in catalog" line each cycle would flood the resolves log.
             if (added) AvatarSearch.Diag.record("you current -> ${e.name.ifBlank { e.avatarId }}: contributed (new)")
+            seedSearchFromName(e.name)   // grow the catalog from this avatar's name
         } catch (ex: Exception) {
             ownAvatar = "error ${ex.javaClass.simpleName}"
             Log.w(TAG, "own-avatar harvest failed", ex)
@@ -732,6 +776,7 @@ object AvatarGlobalDb {
             "current avatar: $ownAvatar\n" +
             "last switch: $lastSwitch\n" +
             "favourites/uploads: $lastFav\n" +
+            "seed search: $lastSeedSearch (${searchSeedQueue.size} queued)\n" +
             "contributed (new this run)=$contributedCount last=$lastContributed\n" +
             "queue=$q reports=$r\nlastPost=$lastPost"
     }
