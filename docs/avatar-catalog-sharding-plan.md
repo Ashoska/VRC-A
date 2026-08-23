@@ -3,8 +3,17 @@
 > Audience: a future Claude Code session working on VRC-A. This is a design/engineering
 > document, NOT user-facing. Assume full context of the codebase. Be precise, reference
 > exact files/functions/constants. Nothing here is implemented yet except where noted
-> "(shipped)". Do not implement any of this until the trigger thresholds in §2 are hit —
-> at current scale (~3k avatars) the in-RAM design is strictly better.
+> "(shipped)".
+>
+> **STATUS (2026-08-23): the triggers in §2 are HIT — implement now.** The catalog is at
+> **~57k entries (~18 MB `db.json`)** and the single-file git-commit flush is actively
+> FAILING: cron flushes take ~11.5s and intermittently hit the Worker CPU/time limit (the
+> "repo stopped updating" / error-1102 reports). The in-RAM + whole-file-commit design is no
+> longer "strictly better" — it's breaking. Execution order agreed with the user (2026-08-24):
+> **Stage A (streaming parse) → R2 write path (per-shard `bucket.put`, kills the flush) →
+> client `lookupSharded` + `searchSharded` → then enable the avtrdb crawler.** The user is
+> standing up the **custom domain tomorrow** (go toward §5b.3 directly, or §5b.2 then flip),
+> and will enable **Workers Paid + create the R2 bucket** (prerequisites, account-owner only).
 
 ---
 
@@ -38,6 +47,21 @@
 - Cloudflare's 128 MB Worker-memory limit still forbids loading the whole catalog in a
   Worker — but with R2, per-shard writes are direct and tiny, so the heavy **GitHub Action
   rebuild (§5.3) is now OPTIONAL** (only for the master export + a periodic full-index GC).
+- **avtrdb crawler = the ingestion firehose that FILLS the sharded catalog (shipped, gated
+  OFF).** `AvatarCatalogSweep.avtrdbCrawlLoop` (admin bots, `avtrdb_crawl_enabled` pref,
+  Bots-tab toggle) pages avtrdb by rotating terms, resolves each NEW avatar's file id via a
+  BOT session, and contributes it. It is **intentionally OFF** until the R2 write path lands —
+  on the current whole-file git-commit flush it's a firehose that accelerates the 1102 failure.
+  Once §5.1 (R2 per-shard `put`) is live, the flush absorbs the volume and the crawler can run
+  hot to "dry up" avtrdb. Coverage ceiling is honest: term-crawl misses pure-non-Latin
+  name+author avatars (add CJK/Cyrillic/2-gram terms) and avtrdb's own gaps; a real avtrdb
+  browse/enumeration endpoint (probe first) would be true full coverage. See §5c.
+- **Search field coverage is SETTLED (§3.3, §6.2, §11b.4):** name + author (display + `usr_`) +
+  description are token-indexed; platform (`p` bitmask) + per-platform perf (`pf`) + popularity
+  (`r`) ride each result summary for **client-side** filter/sort (free). The **fragment-store
+  split** (token→ids, summary-once) is the chosen index shape for this many fields. `perf` is
+  ALREADY in-schema (`Entry.perfPc/Quest/iOS`, `cleanEntry`, `AvatarCheck`) — it just needs to
+  flow into the fragment summaries when the index is built.
 
 ---
 
@@ -111,6 +135,31 @@ Serialized JSON per entry ≈ 250–350 bytes; ~310 avg. Worker writes one avata
   Contents API 1 MB inline-content limit (the past catastrophic-wipe root cause — already
   mitigated in worker.js via Blob API, but a growing single file keeps flirting with it).
 - **Worker memory:** 128 MB hard cap. Cannot load/rewrite a large whole-catalog file.
+
+### 1.4 Shipped since this doc was written (2026-08-23) — carry these forward
+- **Seed-search queue** (`AvatarGlobalDb`): favourites + worn/switched avatars queue their
+  NAME into a paced (`SEARCH_SEED_PACE_MS` 6s) `searchSeedQueue` → `AvatarSearch.searchAll`,
+  contributing file-id-bearing results. **Persisted** (`KEY_SEED_QUEUE`), deduped, cap 1500.
+  **Yields to the roster**: pauses while `InstanceRosterManager.isResolvingRoster()` (same
+  avtrdb/VRCX mirrors) with a 90s max-yield cap. In the sharded world this stays valid (it's a
+  contribution source; it just feeds shards instead of the whole file).
+- **Favourites = resolve ONCE, persistently** (`processedFavourites`, `KEY_FAV_PROCESSED`):
+  each favourite is fetched at most once ever (favourite lists can be ~1000). That one pass IS
+  the dead-check — a favourite already in the catalog that 404s is `report()`ed to the bots.
+  `VrchatAuthManager.avatarCatalogEntryDetailed` returns FOUND/DEAD/PRIVATE/UNAVAILABLE so the
+  sweep distinguishes a 404 (report) from a 429 (retry, backoff). Cap `FAV_RESOLVE_PER_SWEEP`.
+- **avtrdb crawler** (`AvatarCatalogSweep.avtrdbCrawlLoop`, `avtrdb_crawl_enabled` OFF): see §0
+  + §5c. `AvatarSearch.searchPage(query,page)` added for paced single-page crawling;
+  `AvatarSearch.PAGE_SIZE` exposed. `VRCX_MIRRORS` is currently EMPTY (community mirrors dead)
+  → avtrdb + our catalog are the only live external sources.
+- **`harvestSearchResults` uncapped** (avtrdb terms match name/author only, so result sets are
+  bounded): dedups by avatar id first (no VRChat call for known), 5-consecutive-null backoff.
+- **Worker `added` is now immutable** (worker.js admin-upsert merge preserves the existing
+  `added`; only `checked` moves on a refresh). Carry this into the per-shard merge (§7.13).
+- **Bots**: blitz cutoff anchored to blitz-start so it CONVERGES (was a rolling-1h treadmill);
+  per-bot queued preview before Start (`setAssignmentPreview`); loop proof-of-life heartbeat
+  (`sweepAlive`/`lastCycleMs`); loan-only-when-red (`LOAN_RED_THRESHOLD` 500). RECHECK 7d,
+  BLITZ recheck = blitz-start.
 
 ---
 
@@ -405,6 +454,29 @@ makes the Worker-request cost worth a ~$10/yr domain. Because `CATALOG_BASE` is 
   purge API for that URL (or cache tags). More moving parts; skip unless 5-min staleness
   becomes a real complaint.
 
+## 5c. avtrdb crawler — ingestion firehose (SHIPPED, gated OFF until R2)
+
+- **Where (settled):** ADMIN bots only (`AvatarCatalogSweep.avtrdbCrawlLoop`). File-id
+  resolution runs on **dedicated bot sessions** (`BotVrchatSession.checkAvatar`), never a
+  public user's VRChat session — mass `GET /avatars/{id}` must not throttle real users, and
+  the flush volume stays where the admin controls it. `AvatarCatalogSweep` is admin-only, so
+  the crawler inherently cannot run on public/headset builds.
+- **How:** rotate crawl terms → `AvatarSearch.searchPage(term, page)` (paced paging) → for each
+  NEW avatar (deduped vs catalog by `avatarId`, so known = zero VRChat call) resolve file id via
+  bot session → `AvatarGlobalDb.contribute`. `PACE_MS` between resolves, `CRAWL_PAGE_GAP_MS`
+  between pages, 5-null rate-limit backoff, persists `avtrdb_crawl_idx`.
+- **GATE:** `avtrdb_crawl_enabled` (Bots-tab toggle), OFF by default + forced off while
+  paused/logging-in. **Must stay OFF until §5.1 (R2 per-shard `put`) is live** — on the current
+  whole-file git-commit flush it firehoses the 1102 failure. After R2, run it hot.
+- **Coverage ceiling (honest):** term-crawl finds an avatar only if its name/author contains a
+  crawl term. Current terms = `a-z` + `0-9` → misses avatars whose name AND author are entirely
+  non-Latin. **TODO before running hot:** (1) probe avtrdb for a real browse/enumeration
+  endpoint (`?query=` blank, `/recent`, `/list`?) — if it exists, that's true full coverage far
+  cheaper than term-crawl; the API probe was blocked in the planning session, do it live. (2)
+  else add CJK/Cyrillic/common-2-gram terms. avtrdb is itself incomplete; private/dead avatars
+  won't resolve (correct). Realistic outcome: absorbs the large majority of avtrdb's live public
+  avatars over time (weeks at ~1.2s/new-avatar across 4 bots), not a provable 100% mirror.
+
 ## 6. Client changes (Stage C)
 
 ### 6.1 Resolver
@@ -481,6 +553,12 @@ makes the Worker-request cost worth a ~$10/yr domain. Because `CATALOG_BASE` is 
 11. **PC-only gate:** save PC-only avatars to the catalog regardless, but grey the clone
     button when local user is Quest and the avatar lacks a Quest package (`p & 2 == 0`).
 12. **Privacy:** public-only (`releaseStatus=="public"`); never contribute private avatars.
+13. **`added` is immutable** (shipped in worker.js): the moment an avatar first entered the
+    catalog. Only `checked` moves on a refresh. The per-shard merge (§5.1) must preserve the
+    existing entry's `added` on an upsert exactly like the whole-file merge does now — a blind
+    `shard[fid] = incoming` would reset it (the bug just fixed).
+14. **Favourites resolve once, persistently** (shipped): `processedFavourites`/`KEY_FAV_PROCESSED`.
+    Do not reintroduce per-session re-resolution of the whole favourites list.
 
 ---
 
@@ -510,6 +588,20 @@ avatar count.
 ---
 
 ## 9. Suggested implementation order (when triggered)
+
+**IMMEDIATE order agreed 2026-08-24 (triggers already hit, flush failing):**
+0a. Prereqs (account owner): enable **Workers Paid**, create R2 bucket `vrca-avatar-catalog`,
+    add the wrangler binding (§3.0); user sets up the **custom domain** (§5b.3) same day.
+0b. **Stage A streaming parse** first (removes the OOM risk; low risk; independent).
+0c. **R2 write path** — Worker flush switches from the whole-file git commit to per-shard
+    `bucket.put` (§5.1 on R2 / §3.0). THIS is what stops the active 1102/flush failure. Keep
+    dual-writing the GitHub master export so un-updated clients still work during rollout.
+0d. Client `lookupSharded` + shard LRU + resolver step-0 swap (§6.1), then `searchSharded` +
+    index/fragment buckets (§6.2, §11b.4) — carry `perf` into fragment summaries.
+0e. THEN flip the avtrdb crawler on (§5c) — only after 0c, and after adding CJK terms / probing
+    for an avtrdb browse endpoint.
+
+**Full staged order (reference):**
 1. Stage A streaming parse (do early — removes the scariest failure mode; low risk).
 2. `perf` field end-to-end (§4.1) — small, independently useful now, and gets it into the
    schema before shards freeze the format.
