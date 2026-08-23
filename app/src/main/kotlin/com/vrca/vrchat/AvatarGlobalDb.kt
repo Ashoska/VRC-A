@@ -52,6 +52,7 @@ object AvatarGlobalDb {
     private const val KEY_RAWURL = "rawurl"       // exact file URL learned from the Worker /health
     private const val KEY_QUEUE = "queue"        // pending contributions (JSON array)
     private const val KEY_REPORTS = "reports"    // pending reports (JSON array)
+    private const val KEY_FAV_PROCESSED = "fav_processed"  // favourite ids resolved once (persistent)
     private const val CACHE_FILE = "avatar_db.json"
     private const val REFRESH_MS = 30 * 60_000L  // every 30 min (+ once on open)
     // Push queued contributions to the Worker every 5 min — frequent enough that each
@@ -137,6 +138,7 @@ object AvatarGlobalDb {
         }
         scope.launch {
             loadLocalCache(app)
+            loadProcessedFavourites(app)
             refresh(app)
             flushQueue(app)
             harvestOwnAvatar(app)
@@ -680,10 +682,28 @@ object AvatarGlobalDb {
     }
 
     /** Seed the catalog from the user's OWN uploaded + favourited avatars (all
-     *  readable with ids). Once per app open — a big free coverage boost. */
-    // Favourite avatar ids we've already resolved this session (avoids re-resolving
-    // the whole favourites list every 30-min cycle). Resets on restart.
-    private val resolvedFavourites = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+     *  readable with ids). Each favourite is resolved EXACTLY ONCE, ever. */
+    // Favourite ids already resolved (contributed / confirmed dead / private). PERSISTED to
+    // disk so a favourite is never re-resolved across restarts — the whole point of "run each
+    // favourite once and then not again" at ~1000-favourite scale. Loaded on start.
+    private val processedFavourites = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+    @Volatile private var processedFavLoaded = false
+
+    private fun loadProcessedFavourites(context: Context) {
+        if (processedFavLoaded) return
+        processedFavLoaded = true
+        try {
+            val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_FAV_PROCESSED, "") ?: ""
+            if (raw.isNotBlank()) raw.split('\n').forEach { if (it.startsWith("avtr_")) processedFavourites.add(it) }
+        } catch (e: Exception) { Log.w(TAG, "load processed favourites failed", e) }
+    }
+
+    private fun saveProcessedFavourites(context: Context) {
+        try {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .putString(KEY_FAV_PROCESSED, processedFavourites.joinToString("\n")).apply()
+        } catch (e: Exception) { Log.w(TAG, "save processed favourites failed", e) }
+    }
 
     private suspend fun harvestLibrary(context: Context) {
         try {
@@ -702,51 +722,59 @@ object AvatarGlobalDb {
                     privateRemoved++
                 }
             }
-            // 2. FAVOURITES — up to ~1000. SKIP any already in our catalog (a mature catalog
-            //    covers most favourites) so no VRChat call is made for them; resolve only
-            //    UNKNOWN ones, CAPPED per sweep + rate-limit-aware, so 1000 favourites spread
-            //    across sweeps instead of bursting VRChat REST. Every favourite (known or
-            //    newly resolved) still seeds a paced DB search.
+            // 2. FAVOURITES — up to ~1000, each resolved EXACTLY ONCE, ever (processedFavourites
+            //    is persistent). That one pass IS the dead-check: a favourite already in our
+            //    catalog that now 404s is REPORTED to the admin bots to double-check + remove;
+            //    a public one not yet in the catalog is contributed. Capped per sweep + backs
+            //    off on a run of UNAVAILABLE (429) so ~1000 favourites spread across sweeps
+            //    without rate-limiting VRChat; UNAVAILABLE ids are NOT marked, so they retry.
+            //    After a favourite is processed once it's never fetched again (the admin bots'
+            //    7-day liveness sweep covers ongoing death of catalog entries).
             val favs = VrchatAuthManager.favouriteAvatarIds(context)
-            val knownById = HashMap<String, String>(map.size)
-            for (e in map.values) knownById[e.avatarId] = e.name
-            var favNew = 0; var favKnown = 0; var favSkipped = 0; var favResolved = 0
-            var consecutiveNull = 0; var rateLimited = false
+            val knownById = HashMap<String, AvatarGlobalDb.Entry>(map.size)
+            for (e in map.values) knownById[e.avatarId] = e
+            var favNew = 0; var favKnown = 0; var favSkipped = 0; var favDead = 0; var favProcessed = 0
+            var consecutiveUnavail = 0; var rateLimited = false
             for (id in favs) {
-                if (resolvedFavourites.contains(id)) continue
-                val knownName = knownById[id]
-                if (knownName != null) {
-                    // Already in the catalog — no VRChat call needed.
-                    resolvedFavourites.add(id); favKnown++
-                    seedSearchFromName(knownName)
-                    continue
+                if (processedFavourites.contains(id)) continue
+                if (favProcessed >= FAV_RESOLVE_PER_SWEEP) continue   // cap per sweep; rest next sweep
+                val known = knownById[id]
+                val res = VrchatAuthManager.avatarCatalogEntryDetailed(context, id)
+                when (res.status) {
+                    VrchatAuthManager.AvatarFetch.UNAVAILABLE -> {
+                        // 429/network — don't mark; a run of these = rate-limited, stop the sweep.
+                        if (++consecutiveUnavail >= FAV_RL_BACKOFF) { rateLimited = true; break }
+                        delay(FAV_PACE_MS); continue
+                    }
+                    VrchatAuthManager.AvatarFetch.DEAD -> {
+                        consecutiveUnavail = 0; processedFavourites.add(id); favProcessed++
+                        // Only reportable if it's in our catalog (report is keyed by file id);
+                        // an unknown dead favourite was never in the catalog, so nothing to remove.
+                        if (known != null) { report(context, known.fileId, known.avatarId, "dead"); favDead++ }
+                        AvatarSearch.Diag.record("fav -> ${known?.name ?: id}: DEAD${if (known != null) " (reported)" else ""}")
+                    }
+                    VrchatAuthManager.AvatarFetch.PRIVATE -> {
+                        consecutiveUnavail = 0; processedFavourites.add(id); favProcessed++; favSkipped++
+                        known?.let { seedSearchFromName(it.name) }
+                    }
+                    VrchatAuthManager.AvatarFetch.FOUND -> {
+                        consecutiveUnavail = 0; processedFavourites.add(id); favProcessed++
+                        val e = res.entry!!
+                        val favNewOne = contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
+                        if (favNewOne) favNew++ else favKnown++
+                        AvatarSearch.Diag.record("fav -> ${e.name.ifBlank { e.avatarId }}: " +
+                            if (favNewOne) "contributed (new)" else "already in catalog")
+                        seedSearchFromName(e.name)
+                    }
                 }
-                if (favResolved >= FAV_RESOLVE_PER_SWEEP) continue   // cap NEW resolves; rest next sweep
-                val e = try { VrchatAuthManager.avatarCatalogEntry(context, id) } catch (ex: Exception) { null }
-                if (e == null) {
-                    // null = a genuine private/dead favourite OR a 429/network blip — the API
-                    // can't tell them apart. Treat a RUN of nulls as rate-limiting: stop this
-                    // sweep and retry the rest next time (do NOT mark them resolved). A lone
-                    // null is a private/dead favourite -> mark resolved so it isn't retried
-                    // every sweep forever.
-                    if (++consecutiveNull >= FAV_RL_BACKOFF) { rateLimited = true; break }
-                    resolvedFavourites.add(id); favSkipped++; favResolved++
-                    delay(FAV_PACE_MS); continue
-                }
-                consecutiveNull = 0
-                resolvedFavourites.add(id)
-                val favNewOne = contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
-                if (favNewOne) favNew++ else favKnown++
-                AvatarSearch.Diag.record("fav -> ${e.name.ifBlank { e.avatarId }}: " +
-                    if (favNewOne) "contributed (new)" else "already in catalog")
-                seedSearchFromName(e.name)
-                favResolved++
                 delay(FAV_PACE_MS)
             }
+            if (favProcessed > 0) saveProcessedFavourites(context)
             lastFav = "favourites ${favs.size}: $favNew new / $favKnown known" +
+                (if (favDead > 0) " / $favDead dead-reported" else "") +
                 (if (favSkipped > 0) " / $favSkipped private" else "") +
                 (if (rateLimited) " · rate-limited, resuming next sweep" else "") +
-                " · ${resolvedFavourites.size}/${favs.size} done · uploads +$libNew" +
+                " · ${processedFavourites.size} done all-time · uploads +$libNew" +
                 (if (privateRemoved > 0) " · $privateRemoved now-private" else "") +
                 " ${nowShort()}"
         } catch (ex: Exception) { Log.w(TAG, "library harvest failed", ex) }

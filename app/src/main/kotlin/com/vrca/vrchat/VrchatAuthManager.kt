@@ -1655,6 +1655,42 @@ object VrchatAuthManager {
         } catch (e: Exception) { null }
     }
 
+    enum class AvatarFetch { FOUND, DEAD, PRIVATE, UNAVAILABLE }
+    data class AvatarFetchResult(val status: AvatarFetch, val entry: CatalogEntry? = null)
+
+    /** Like [avatarCatalogEntry] but reports WHY it failed so a favourites sweep can react:
+     *  FOUND(entry) on a public 200; DEAD on 404/410 (report it to the bots); PRIVATE on a
+     *  non-public 200 or 403 (skip, never report — not gone, just not shareable); UNAVAILABLE
+     *  on 429/5xx/network/no-cookie (RETRY later — must never be mistaken for dead). */
+    suspend fun avatarCatalogEntryDetailed(context: Context, avatarId: String): AvatarFetchResult =
+        withContext(Dispatchers.IO) {
+            val cookie = getCookieHeader(context) ?: return@withContext AvatarFetchResult(AvatarFetch.UNAVAILABLE)
+            try {
+                val (code, body, raw) = get("$BASE/avatars/$avatarId", null, cookie)
+                if (code == 200) captureRolledCookies(context, raw)
+                when {
+                    code == 404 || code == 410 -> AvatarFetchResult(AvatarFetch.DEAD)
+                    code == 403 -> AvatarFetchResult(AvatarFetch.PRIVATE)
+                    code != 200 || !body.startsWith("{") -> AvatarFetchResult(AvatarFetch.UNAVAILABLE)
+                    else -> {
+                        val j = org.json.JSONObject(body)
+                        if (j.optString("releaseStatus", "public") != "public")
+                            return@withContext AvatarFetchResult(AvatarFetch.PRIVATE)
+                        val fileId = fileIdOf(j.optString("thumbnailImageUrl", "").ifBlank { j.optString("imageUrl", "") })
+                            ?: return@withContext AvatarFetchResult(AvatarFetch.PRIVATE)
+                        val plats = j.optJSONArray("unityPackages")?.let { ups ->
+                            (0 until ups.length()).mapNotNull {
+                                ups.optJSONObject(it)?.optString("platform", "")?.takeIf { s -> s.isNotBlank() }
+                            }.map { prettyPlatform(it) }.filter { it.isNotBlank() }.distinct()
+                        } ?: emptyList()
+                        AvatarFetchResult(AvatarFetch.FOUND, CatalogEntry(fileId, avatarId,
+                            j.optString("name", ""), j.optString("authorName", ""),
+                            j.optString("authorId", ""), plats, j.optString("description", "")))
+                    }
+                }
+            } catch (e: Exception) { AvatarFetchResult(AvatarFetch.UNAVAILABLE) }
+        }
+
     /** The avatar ids the user has FAVOURITED, via the reliable `GET /favorites?
      *  type=avatar` (each record's `favoriteId` is the `avtr_` id). Paginated — most
      *  people have >100 favourites. Details are resolved per-id by the caller. */
