@@ -10,9 +10,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import android.util.JsonReader
+import android.util.JsonToken
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.Reader
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
@@ -106,7 +109,7 @@ object AvatarGlobalDb {
     private val map = ConcurrentHashMap<String, Entry>()   // fileId -> entry
     // Mirror of every avatarId in `map`, for O(1) "do we already have this avatar?" checks
     // (the avtrdb crawler / search harvest dedup by avatarId to skip a VRChat resolve for
-    // avatars we already hold). Kept in sync in parseInto/contribute/applyAdminLocal.
+    // avatars we already hold). Kept in sync in parseStream/contribute/applyAdminLocal.
     private val avatarIds = ConcurrentHashMap.newKeySet<String>()
     /** True if this `avtr_` id is already in the catalog (any file id). O(1). */
     fun hasAvatarId(avatarId: String): Boolean = avatarIds.contains(avatarId)
@@ -539,8 +542,8 @@ object AvatarGlobalDb {
     private fun loadLocalCache(context: Context) {
         try {
             val f = File(context.filesDir, CACHE_FILE)
-            if (f.exists()) parseInto(f.readText())
-        } catch (e: Exception) { Log.w(TAG, "cache load failed", e) }
+            if (f.exists()) parseFile(f)   // STREAMING — never reads the whole file into memory
+        } catch (e: Throwable) { Log.w(TAG, "cache load failed", e) }
     }
 
     private fun refresh(context: Context, cacheBust: String? = null) {
@@ -568,15 +571,30 @@ object AvatarGlobalDb {
             when (conn.responseCode) {
                 304 -> lastPull = "304 (unchanged) ${nowShort()}"
                 200 -> {
-                    val text = conn.inputStream.bufferedReader().readText()
-                    parseInto(text)
-                    File(context.filesDir, CACHE_FILE).writeText(text)
-                    conn.getHeaderField("ETag")?.let { prefs.edit().putString(KEY_ETAG, it).apply() }
-                    lastPull = "pulled ${map.size} at ${nowShort()}"
+                    // Stream the body straight to a temp file (NEVER hold the whole ~20 MB+
+                    // response as one String — that whole-file read is what OOM'd the Quest's
+                    // ~268 MB heap on boot), then STREAM-PARSE it with JsonReader.
+                    val tmp = File(context.filesDir, "$CACHE_FILE.tmp")
+                    conn.inputStream.use { input ->
+                        tmp.outputStream().buffered(64 * 1024).use { out -> input.copyTo(out, 64 * 1024) }
+                    }
+                    val applied = parseFile(tmp)
+                    if (applied >= 0) {
+                        // Good parse — promote tmp to the cache file atomically.
+                        val cache = File(context.filesDir, CACHE_FILE)
+                        if (cache.exists()) cache.delete()
+                        if (!tmp.renameTo(cache)) { runCatching { tmp.copyTo(cache, overwrite = true) }; tmp.delete() }
+                        conn.getHeaderField("ETag")?.let { prefs.edit().putString(KEY_ETAG, it).apply() }
+                        lastPull = "pulled ${map.size} at ${nowShort()}"
+                    } else {
+                        // Empty/bad read — keep the existing cache + catalog.
+                        tmp.delete()
+                        lastPull = "parse skipped (kept ${map.size}) at ${nowShort()}"
+                    }
                 }
                 else -> lastPull = "http ${conn.responseCode} at ${nowShort()} ($rawUrl)"
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             lastPull = "error ${e.javaClass.simpleName} ${nowShort()}"
         } finally { runCatching { conn?.disconnect() } }
     }
@@ -595,35 +613,115 @@ object AvatarGlobalDb {
         } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
     }
 
-    private fun parseInto(text: String) {
-        try {
-            val avatars = JSONObject(text).optJSONObject("avatars") ?: return
-            // SAFETY: never replace a populated local catalog with an empty one (a blank
-            // /db before the first flush, a truncated read, etc.) — that would wipe it.
-            if (avatars.length() == 0 && map.isNotEmpty()) return
-            val fresh = HashMap<String, Entry>(avatars.length())
-            val keys = avatars.keys()
-            while (keys.hasNext()) {
-                val fileId = keys.next()
-                val o = avatars.optJSONObject(fileId) ?: continue
-                val id = o.optString("id", "")
-                if (!id.startsWith("avtr_")) continue
-                val plats = o.optJSONArray("platforms")?.let { pa ->
-                    (0 until pa.length()).mapNotNull { pa.optString(it, "").takeIf { s -> s.isNotBlank() } }
-                } ?: emptyList()
-                val fileEntry = Entry(
-                    fileId, id, o.optString("name", ""),
-                    o.optString("author", ""), o.optString("authorId", ""), plats,
-                    o.optLong("checked", o.optLong("added", 0L)),
-                    o.optString("desc", o.optString("description", "")),
-                    o.optInt("perfPc", 5), o.optInt("perfQuest", 5), o.optInt("perfIos", 5),
-                    o.optBoolean("filled", false)
-                )
-                fresh[fileId] = mergeWithLocal(fileEntry, map[fileId])
+    /**
+     * STREAMING parse of the catalog file. Returns the number of entries applied to
+     * `map` (>= 0), or -1 if it declined to swap (empty/bad read over a populated
+     * catalog, or a parse error) so the caller keeps the existing cache.
+     *
+     * Memory-bounded on purpose: the file is read through Android's pull-based
+     * [JsonReader], so the whole ~20 MB+ document is NEVER materialised as a single
+     * String or a full `JSONObject` tree. Peak heap is roughly (result map + one
+     * entry at a time), instead of (file String + full JSON tree + map) — the old
+     * whole-file read is what OOM-crashed the Quest 3's ~268 MB growth-limit heap on
+     * every boot. Catches `Throwable` (incl. OutOfMemoryError) so a pathological file
+     * degrades to "keep the old catalog" rather than crashing the app.
+     */
+    private fun parseFile(file: File): Int = try {
+        file.bufferedReader().use { br -> parseStream(br) }
+    } catch (e: Throwable) { Log.w(TAG, "parse failed", e); -1 }
+
+    private fun parseStream(reader: Reader): Int {
+        val fresh = HashMap<String, Entry>(1 shl 16)
+        val jr = JsonReader(reader)
+        jr.isLenient = true
+        jr.beginObject()
+        while (jr.hasNext()) {
+            if (jr.nextName() == "avatars" && jr.peek() == JsonToken.BEGIN_OBJECT) {
+                jr.beginObject()
+                while (jr.hasNext()) {
+                    val fileId = jr.nextName()
+                    val e = readEntry(jr, fileId)
+                    // Merge local progress (filled/checked ahead of the file) as we go, so
+                    // we never hold a third full map just to merge.
+                    if (e != null) fresh[fileId] = mergeWithLocal(e, map[fileId])
+                }
+                jr.endObject()
+            } else jr.skipValue()
+        }
+        jr.endObject()
+        // SAFETY: never replace a populated catalog with an empty parse (a blank /db
+        // before the first flush, a truncated read, etc.).
+        if (fresh.isEmpty() && map.isNotEmpty()) return -1
+        map.clear(); map.putAll(fresh)
+        avatarIds.clear(); fresh.values.forEach { avatarIds.add(it.avatarId) }
+        return fresh.size
+    }
+
+    /** Read one `"file_...": { ... }` catalog entry from the stream. Consumes exactly
+     *  the value token for [fileId]. Returns null (still consuming the value) for a
+     *  malformed / non-object / non-avatar entry. */
+    private fun readEntry(jr: JsonReader, fileId: String): Entry? {
+        if (jr.peek() != JsonToken.BEGIN_OBJECT) { jr.skipValue(); return null }
+        var id = ""; var name = ""; var author = ""; var authorId = ""; var desc = ""
+        var checked = 0L; var added = 0L
+        var perfPc = 5; var perfQuest = 5; var perfIos = 5
+        var filled = false
+        val plats = ArrayList<String>(3)
+        jr.beginObject()
+        while (jr.hasNext()) {
+            when (jr.nextName()) {
+                "id" -> id = jr.readStringSafe()
+                "name" -> name = jr.readStringSafe()
+                "author" -> author = jr.readStringSafe()
+                "authorId" -> authorId = jr.readStringSafe()
+                "desc", "description" -> { val d = jr.readStringSafe(); if (d.isNotBlank()) desc = d }
+                "checked" -> checked = jr.readLongSafe()
+                "added" -> added = jr.readLongSafe()
+                "perfPc" -> perfPc = jr.readIntSafe(5)
+                "perfQuest" -> perfQuest = jr.readIntSafe(5)
+                "perfIos" -> perfIos = jr.readIntSafe(5)
+                "filled" -> filled = jr.readBoolSafe()
+                "platforms" -> {
+                    if (jr.peek() == JsonToken.BEGIN_ARRAY) {
+                        jr.beginArray()
+                        while (jr.hasNext()) { val s = jr.readStringSafe(); if (s.isNotBlank()) plats.add(s) }
+                        jr.endArray()
+                    } else jr.skipValue()
+                }
+                else -> jr.skipValue()
             }
-            map.clear(); map.putAll(fresh)
-            avatarIds.clear(); fresh.values.forEach { avatarIds.add(it.avatarId) }
-        } catch (e: Exception) { Log.w(TAG, "parse failed", e) }
+        }
+        jr.endObject()
+        if (!FILE_RE.matches(fileId)) return null
+        if (!id.startsWith("avtr_")) return null
+        return Entry(
+            fileId, id, name, author, authorId, plats,
+            if (checked != 0L) checked else added, desc, perfPc, perfQuest, perfIos, filled
+        )
+    }
+
+    // Defensive token readers — tolerate null / type-mismatched values without throwing
+    // (a bad field degrades to a default instead of aborting the whole streaming parse).
+    private fun JsonReader.readStringSafe(): String = when (peek()) {
+        JsonToken.NULL -> { nextNull(); "" }
+        JsonToken.BOOLEAN -> nextBoolean().toString()
+        else -> try { nextString() } catch (e: Exception) { runCatching { skipValue() }; "" }
+    }
+    private fun JsonReader.readLongSafe(): Long = when (peek()) {
+        JsonToken.NULL -> { nextNull(); 0L }
+        JsonToken.STRING -> nextString().toLongOrNull() ?: 0L
+        else -> try { nextLong() } catch (e: Exception) { runCatching { skipValue() }; 0L }
+    }
+    private fun JsonReader.readIntSafe(def: Int): Int = when (peek()) {
+        JsonToken.NULL -> { nextNull(); def }
+        JsonToken.STRING -> nextString().toIntOrNull() ?: def
+        else -> try { nextInt() } catch (e: Exception) { runCatching { skipValue() }; def }
+    }
+    private fun JsonReader.readBoolSafe(): Boolean = when (peek()) {
+        JsonToken.NULL -> { nextNull(); false }
+        JsonToken.BOOLEAN -> nextBoolean()
+        JsonToken.STRING -> nextString().equals("true", true)
+        else -> { runCatching { skipValue() }; false }
     }
 
     /** When re-pulling the file, PRESERVE local progress that's ahead of it — the bot
