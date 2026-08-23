@@ -104,6 +104,12 @@ object AvatarGlobalDb {
     )
 
     private val map = ConcurrentHashMap<String, Entry>()   // fileId -> entry
+    // Mirror of every avatarId in `map`, for O(1) "do we already have this avatar?" checks
+    // (the avtrdb crawler / search harvest dedup by avatarId to skip a VRChat resolve for
+    // avatars we already hold). Kept in sync in parseInto/contribute/applyAdminLocal.
+    private val avatarIds = ConcurrentHashMap.newKeySet<String>()
+    /** True if this `avtr_` id is already in the catalog (any file id). O(1). */
+    fun hasAvatarId(avatarId: String): Boolean = avatarIds.contains(avatarId)
     private val started = AtomicBoolean(false)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     // Serializes all read-modify-write of the persisted contribution queue so a flush
@@ -315,8 +321,8 @@ object AvatarGlobalDb {
      *  Worker flush + re-pull. The authoritative copy is still the Worker's. */
     fun applyAdminLocal(upserts: List<Entry>, removes: Collection<String>) {
         val now = System.currentTimeMillis()
-        for (fid in removes) map.remove(fid)
-        for (e in upserts) map[e.fileId] = e.copy(checked = now)
+        for (fid in removes) map.remove(fid)?.let { avatarIds.remove(it.avatarId) }
+        for (e in upserts) { map[e.fileId] = e.copy(checked = now); avatarIds.add(e.avatarId) }
     }
 
     /** Cheap pending-report count from /health (a single KV read on the Worker, no
@@ -414,6 +420,7 @@ object AvatarGlobalDb {
         // extra KV cost (this is a purely in-memory local add).
         map[fileId] = Entry(fileId, avatarId, name, author, authorId, platforms,
             System.currentTimeMillis(), description, filled = false)
+        avatarIds.add(avatarId)
         val app = context.applicationContext
         scope.launch {
             queueMutex.withLock {
@@ -615,6 +622,7 @@ object AvatarGlobalDb {
                 fresh[fileId] = mergeWithLocal(fileEntry, map[fileId])
             }
             map.clear(); map.putAll(fresh)
+            avatarIds.clear(); fresh.values.forEach { avatarIds.add(it.avatarId) }
         } catch (e: Exception) { Log.w(TAG, "parse failed", e) }
     }
 

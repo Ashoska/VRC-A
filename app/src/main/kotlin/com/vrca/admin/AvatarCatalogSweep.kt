@@ -198,75 +198,80 @@ object AvatarCatalogSweep {
     @Volatile private var flushKey = ""
 
     // ---- avtrdb digestion crawl (admin bots, OPT-IN, OFF by default) ----------
-    // Crawls avtrdb page-by-page by rotating terms, resolves each NEW avatar's file id via a
-    // BOT session (never a public user's), and contributes it — so the catalog absorbs avtrdb
-    // using the bots' dedicated accounts. OFF by default so the build can ship BEFORE the
-    // sharding migration; the admin flips it on (Bots tab) once sharding can absorb the volume.
-    // Page-paced + rate-limit backoff so it's polite to both avtrdb and VRChat; the catalog
-    // dedup means each avatar is resolved once and re-runs cost almost nothing.
+    // ALL logged-in bots crawl TOGETHER: it's a MODE inside the per-slot loop (see slotLoop),
+    // so each bot does EITHER its role OR a crawl pass in a given cycle — never both, so a bot's
+    // session is never double-loaded (the role/crawl collision fix). Bots pull terms from a
+    // SHARED atomic cursor (no overlap, self-balancing) and share the `inFlight` claim set so
+    // no avatar is resolved twice. Resolution runs on the BOT session (never a public user's).
+    // OFF by default so the build ships BEFORE the sharding migration; flip on (Bots tab) after.
     @Volatile var avtrdbCrawlEnabled = false
     @Volatile var avtrdbCrawlStatus = "off"; private set
-    private val crawlStarted = AtomicBoolean(false)
     private val CRAWL_TERMS = (('a'..'z').map { it.toString() } + ('0'..'9').map { it.toString() })
     private const val CRAWL_PAGE_GAP_MS = 1_500L   // pace avtrdb paging (polite to the DB)
-    private const val CRAWL_TERM_GAP_MS = 5_000L
+    private const val CRAWL_TERM_GAP_MS = 3_000L
     private const val CRAWL_RL_BACKOFF = 5         // consecutive resolve failures => rate-limited
+    // Shared across all crawling bots: the next term to hand out (partitions the term space with
+    // zero overlap) + a cumulative "new avatars" counter for the status line.
+    private val crawlTermCursor = java.util.concurrent.atomic.AtomicInteger(0)
+    private val crawlNewTotal = java.util.concurrent.atomic.AtomicInteger(0)
+    @Volatile private var crawlCursorLoaded = false
 
-    /** Enable/disable the crawl + ensure its loop exists. Called by BotController from the
-     *  saved pref (and forced off while paused / a login is in progress). */
+    /** Enable/disable the crawl (a mode the running per-slot loops pick up). No separate loop —
+     *  the bots' slotLoops switch between role work and crawling based on this flag, so there's
+     *  never a bot running a role AND a crawl at once. Called by BotController from the saved
+     *  pref (forced off while paused / a login is in progress). */
     fun setAvtrdbCrawl(context: Context, enabled: Boolean) {
+        if (enabled && !crawlCursorLoaded) {
+            crawlCursorLoaded = true
+            runCatching {
+                crawlTermCursor.set(context.getSharedPreferences("vrca_admin_local", Context.MODE_PRIVATE)
+                    .getInt("avtrdb_crawl_idx", 0))
+            }
+        }
         avtrdbCrawlEnabled = enabled
-        ensureCrawlLoop(context.applicationContext)
+        if (!enabled && avtrdbCrawlStatus != "off") avtrdbCrawlStatus = "off"
     }
 
-    /** Launch the crawl loop once (idempotent). It idles until enabled + a bot is logged in. */
-    fun ensureCrawlLoop(context: Context) {
-        val app = context.applicationContext
-        if (!crawlStarted.compareAndSet(false, true)) return
-        scope.launch { avtrdbCrawlLoop(app) }
-    }
-
-    private suspend fun avtrdbCrawlLoop(app: Context) {
-        val prefs = app.getSharedPreferences("vrca_admin_local", Context.MODE_PRIVATE)
-        var termIdx = prefs.getInt("avtrdb_crawl_idx", 0)
-        while (scope.isActive) {
-            if (!avtrdbCrawlEnabled) { avtrdbCrawlStatus = "off"; delay(5_000); continue }
-            val slot = (0 until BotVrchatSession.SLOTS).firstOrNull { BotVrchatSession.isLoggedIn(app, it) }
-            if (slot == null) { avtrdbCrawlStatus = "waiting for a bot login"; delay(10_000); continue }
-            val term = CRAWL_TERMS[((termIdx % CRAWL_TERMS.size) + CRAWL_TERMS.size) % CRAWL_TERMS.size]
-            // Dedup against the current catalog by avatar id (no VRChat call for known ones).
-            val known = HashSet<String>(AvatarGlobalDb.snapshot().map { it.avatarId })
-            var new = 0; var seen = 0; var nulls = 0; var page = 0
-            crawl@ while (avtrdbCrawlEnabled && scope.isActive) {
-                val pageResults = try { com.vrca.vrchat.AvatarSearch.searchPage(term, page) }
-                    catch (e: Throwable) { emptyList() }
-                if (pageResults.isEmpty()) break
-                for (r in pageResults) {
-                    if (!avtrdbCrawlEnabled || !scope.isActive) break@crawl
-                    seen++
-                    if (known.contains(r.id)) continue
-                    val chk = BotVrchatSession.checkAvatar(app, slot, r.id)
+    /** One crawl pass for ONE bot: take the next shared term, page avtrdb, resolve each NEW
+     *  avatar (deduped vs catalog by avatar id — zero VRChat call for known ones — and claimed
+     *  in `inFlight` so two bots never resolve the same one), contribute via the bot session. */
+    private suspend fun avtrdbCrawlPass(context: Context, slot: Int): Boolean {
+        val termN = crawlTermCursor.getAndIncrement()
+        // Persist the cursor occasionally so a restart resumes roughly where it left off.
+        if (termN % 4 == 0) runCatching {
+            context.getSharedPreferences("vrca_admin_local", Context.MODE_PRIVATE)
+                .edit().putInt("avtrdb_crawl_idx", termN).apply()
+        }
+        val term = CRAWL_TERMS[((termN % CRAWL_TERMS.size) + CRAWL_TERMS.size) % CRAWL_TERMS.size]
+        var new = 0; var nulls = 0; var page = 0
+        crawl@ while (avtrdbCrawlEnabled && running && scope.isActive) {
+            val pageResults = try { com.vrca.vrchat.AvatarSearch.searchPage(term, page) }
+                catch (e: Throwable) { emptyList() }
+            if (pageResults.isEmpty()) break
+            for (r in pageResults) {
+                if (!avtrdbCrawlEnabled || !running || !scope.isActive) break@crawl
+                if (AvatarGlobalDb.hasAvatarId(r.id)) continue   // already in catalog — no VRChat call
+                if (!inFlight.add(r.id)) continue                // another bot is resolving this one
+                try {
+                    val chk = BotVrchatSession.checkAvatar(context, slot, r.id)
                     if (chk == null) {
-                        if (++nulls >= CRAWL_RL_BACKOFF) { avtrdbCrawlStatus = "rate-limited — pausing"; delay(30_000); break@crawl }
+                        if (++nulls >= CRAWL_RL_BACKOFF) { avtrdbCrawlStatus = "bot ${slot + 1} rate-limited — pausing"; delay(30_000); break@crawl }
                         delay(PACE_MS); continue
                     }
                     nulls = 0
                     if (chk.alive && chk.fileId != null) {
-                        AvatarGlobalDb.contribute(app, chk.fileId, r.id, chk.name, chk.author, chk.authorId, chk.platforms, chk.description)
-                        known.add(r.id); new++
+                        AvatarGlobalDb.contribute(context, chk.fileId, r.id, chk.name, chk.author, chk.authorId, chk.platforms, chk.description)
+                        new++
+                        avtrdbCrawlStatus = "'$term' (bot ${slot + 1}) p$page: +$new · total +${crawlNewTotal.incrementAndGet()}"
                     }
-                    avtrdbCrawlStatus = "term '$term' p$page: +$new new / $seen seen"
-                    delay(PACE_MS)
-                }
-                if (pageResults.size < com.vrca.vrchat.AvatarSearch.PAGE_SIZE) break   // last page
-                page++
-                delay(CRAWL_PAGE_GAP_MS)
+                } finally { inFlight.remove(r.id) }
+                delay(PACE_MS)
             }
-            avtrdbCrawlStatus = "term '$term' done: +$new new / $seen seen"
-            termIdx++
-            prefs.edit().putInt("avtrdb_crawl_idx", termIdx).apply()
-            delay(CRAWL_TERM_GAP_MS)
+            if (pageResults.size < com.vrca.vrchat.AvatarSearch.PAGE_SIZE) break   // last page
+            page++
+            delay(CRAWL_PAGE_GAP_MS)
         }
+        return true
     }
 
     /** A short human summary of which bot slot runs which roles (for the UI). */
@@ -469,30 +474,44 @@ object AvatarCatalogSweep {
             // stayed true). A cancellation still propagates (that's a real stop). This is the
             // primary fix for "queue stuck, bot not checking"; the ensureRunning watchdog is
             // the backstop.
+            // Capture the two mode flags for THIS cycle. A cycle does EXACTLY ONE kind of
+            // work — crawl, blitz, or roles — so a bot never runs a role AND a crawl at once
+            // (the session double-load / collision fix). The responsive sleep below wakes the
+            // instant either flag flips, so toggling crawl kicks every bot into/out of it fast.
+            val crawling = avtrdbCrawlEnabled
             try {
                 var did = false
                 val blitzing = blitzActive()
-                for (role in roles) {
-                    if (!running) break
-                    // During a blitz, EVERY bot shares the fill+dead-check work (below), so
-                    // skip the assigned fill/liveness role here — but still run reports.
-                    if (blitzing && role != Role.REPORTS) continue
-                    did = runRole(context, adminKey, slot, role) || did
+                if (crawling) {
+                    // CRAWL MODE: this bot pulls the next shared avtrdb term and digests it.
+                    // Roles/blitz are skipped this cycle → no collision. All logged-in bots do
+                    // this in parallel (distinct terms via the shared cursor).
+                    did = avtrdbCrawlPass(context, slot)
+                    roles.forEach { progress.getValue(it).status = "crawling avtrdb" }
+                } else {
+                    for (role in roles) {
+                        if (!running) break
+                        // During a blitz, EVERY bot shares the fill+dead-check work (below), so
+                        // skip the assigned fill/liveness role here — but still run reports.
+                        if (blitzing && role != Role.REPORTS) continue
+                        did = runRole(context, adminKey, slot, role) || did
+                    }
+                    if (blitzing && running) did = blitzPass(context, adminKey, slot, liveIndex, liveCount) || did
+                    // LOAN: if this bot's own role(s) had no work and we're not blitzing, help the
+                    // biggest backlog (fill first, then stale liveness). The shared claim set means
+                    // no two bots ever touch the same avatar, and each bot is a SEPARATE VRChat
+                    // account, so loaning multiplies throughput without tripping one account's limit.
+                    if (!blitzing && running && !did && ownRole != null)
+                        did = helpPass(context, adminKey, slot, ownRole) || did
                 }
-                if (blitzing && running) did = blitzPass(context, adminKey, slot, liveIndex, liveCount) || did
-                // LOAN: if this bot's own role(s) had no work and we're not blitzing, help the
-                // biggest backlog (fill first, then stale liveness). The shared claim set means
-                // no two bots ever touch the same avatar, and each bot is a SEPARATE VRChat
-                // account, so loaning multiplies throughput without tripping one account's limit.
-                if (!blitzing && running && !did && ownRole != null)
-                    did = helpPass(context, adminKey, slot, ownRole) || did
                 if (!running) break
-                // Responsive sleep: wake IMMEDIATELY (within 500ms) if the blitz state flips,
-                // so clicking blitz kicks EVERY bot at once instead of each waiting out its
-                // idle sleep (the "blitz start is inconsistent" cause).
-                val target = if (did) ACTIVE_PAUSE_MS else IDLE_SLEEP_MS
+                // Responsive sleep: wake IMMEDIATELY (within 500ms) if the blitz OR crawl state
+                // flips, so toggling either kicks EVERY bot at once instead of each waiting out
+                // its idle sleep. Crawl uses the short term-gap (it always has work).
+                val target = if (crawling) CRAWL_TERM_GAP_MS else if (did) ACTIVE_PAUSE_MS else IDLE_SLEEP_MS
                 var slept = 0L
-                while (slept < target && running && scope.isActive && blitzActive() == blitzing) {
+                while (slept < target && running && scope.isActive &&
+                       blitzActive() == blitzing && avtrdbCrawlEnabled == crawling) {
                     delay(500); slept += 500
                 }
             } catch (c: kotlinx.coroutines.CancellationException) {
