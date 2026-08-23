@@ -96,6 +96,8 @@ object AvatarGlobalDb {
     @Volatile private var lastPull = "never"
     @Volatile private var lastPost = "none"
     @Volatile private var ownAvatar = "not harvested yet"
+    @Volatile private var lastSwitch = "no avatar switch seen yet"
+    @Volatile private var lastFav = "no favourites sweep yet"
     @Volatile private var lastContributed = "none"
     @Volatile private var contributedCount = 0
     @Volatile private var lastOwnHarvestMs = 0L
@@ -317,11 +319,14 @@ object AvatarGlobalDb {
         context: Context, fileId: String, avatarId: String,
         name: String, author: String, authorId: String = "", platforms: List<String> = emptyList(),
         description: String = ""
-    ) {
+    ): Boolean {
         // Only add entries we ACTUALLY have a valid avatar id + file id for.
-        if (!FILE_RE.matches(fileId)) return
-        if (!AVTR_RE.matches(avatarId)) return
-        if (map.containsKey(fileId)) return
+        // Returns TRUE only when this call adds a genuinely NEW entry — so harvest
+        // callers can report "new" vs "already in catalog" (the common case for a
+        // mature catalog, where a worn/favourited avatar is usually already present).
+        if (!FILE_RE.matches(fileId)) return false
+        if (!AVTR_RE.matches(avatarId)) return false
+        if (map.containsKey(fileId)) return false
         // Insert into the LOCAL catalog immediately so the contributing device can see
         // its own new avatars (own uploads, favourites, resolved strangers) in search /
         // clone RIGHT AWAY — no waiting for the Worker flush + next 30-min pull. Zero
@@ -350,6 +355,7 @@ object AvatarGlobalDb {
                 lastContributed = "${name.ifBlank { avatarId }} (${nowShort()})"
             }
         }
+        return true
     }
 
     /** Report an entry as dead (404/private) or renamed so the file self-heals. The
@@ -574,9 +580,17 @@ object AvatarGlobalDb {
 
     private suspend fun harvestAvatarId(context: Context, avatarId: String) {
         try {
-            val e = VrchatAuthManager.avatarCatalogEntry(context, avatarId) ?: return
-            ownAvatar = "${e.name.ifBlank { e.avatarId }} (changed) ${nowShort()}"
-            contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
+            val e = VrchatAuthManager.avatarCatalogEntry(context, avatarId)
+            if (e == null) {
+                lastSwitch = "switched to a non-public avatar (not contributed) ${nowShort()}"
+                AvatarSearch.Diag.record("you worn -> non-public avatar (not contributed)")
+                return
+            }
+            val added = contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
+            lastSwitch = "switched -> ${e.name.ifBlank { e.avatarId }} — " +
+                "${if (added) "CONTRIBUTED (new)" else "already in catalog"} ${nowShort()}"
+            AvatarSearch.Diag.record("you worn -> ${e.name.ifBlank { e.avatarId }}: " +
+                if (added) "contributed (new)" else "already in catalog")
         } catch (ex: Exception) { Log.w(TAG, "avatar-change harvest failed", ex) }
     }
 
@@ -638,12 +652,12 @@ object AvatarGlobalDb {
         try {
             // 1. Own UPLOADS (with local public<->private detection).
             val lib = VrchatAuthManager.ownAvatarLibrary(context)
-            var added = 0; var privateRemoved = 0
+            var libNew = 0; var libKnown = 0; var privateRemoved = 0
             for (a in lib) {
                 val e = a.entry
                 if (a.isPublic) {
-                    contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
-                    added++
+                    if (contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description))
+                        libNew++ else libKnown++
                 } else if (a.ownUpload && map.containsKey(e.fileId)) {
                     // The user made their own PUBLIC avatar private -> report removal
                     // (the admin bot confirms via a 404 on the now-private avatar).
@@ -653,17 +667,26 @@ object AvatarGlobalDb {
             }
             // 2. FAVOURITES — resolve each new one (public-only via avatarCatalogEntry).
             val favs = VrchatAuthManager.favouriteAvatarIds(context)
-            var favAdded = 0
+            var favNew = 0; var favKnown = 0; var favSkipped = 0
             for (id in favs) {
                 if (resolvedFavourites.contains(id)) continue
                 resolvedFavourites.add(id) // mark attempted (retries on next app launch)
                 val e = try { VrchatAuthManager.avatarCatalogEntry(context, id) } catch (ex: Exception) { null }
-                    ?: continue // null = private/dead/transient — skipped
-                contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
-                favAdded++
+                if (e == null) { favSkipped++; continue } // null = private/dead/transient — skipped
+                val favNewOne = contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
+                if (favNewOne) favNew++ else favKnown++
+                // resolvedFavourites dedups per session, so each favourite records at most
+                // once — no per-cycle flooding of the resolves log.
+                AvatarSearch.Diag.record("fav -> ${e.name.ifBlank { e.avatarId }}: " +
+                    if (favNewOne) "contributed (new)" else "already in catalog")
                 delay(400) // pace VRChat REST
             }
-            ownAvatar = "lib +$added, fav +$favAdded/${favs.size}, ${privateRemoved} now-private ${nowShort()}"
+            lastFav = "uploads: $libNew new / $libKnown known · " +
+                "favourites: $favNew new / $favKnown known" +
+                (if (favSkipped > 0) " / $favSkipped private" else "") +
+                " this sweep · ${resolvedFavourites.size}/${favs.size} processed" +
+                (if (privateRemoved > 0) " · $privateRemoved now-private" else "") +
+                " ${nowShort()}"
         } catch (ex: Exception) { Log.w(TAG, "library harvest failed", ex) }
     }
 
@@ -683,9 +706,16 @@ object AvatarGlobalDb {
     private suspend fun harvestOwnAvatar(context: Context) {
         try {
             val e = VrchatAuthManager.currentAvatarCatalogEntry(context)
-            if (e == null) { ownAvatar = "no current avatar (not logged in?) ${nowShort()}"; return }
-            ownAvatar = "${e.name.ifBlank { e.avatarId }} ${nowShort()}"
-            contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
+            if (e == null) {
+                ownAvatar = "current avatar not public / not logged in (not contributed) ${nowShort()}"
+                return
+            }
+            val added = contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
+            ownAvatar = "${e.name.ifBlank { e.avatarId }} — " +
+                "${if (added) "CONTRIBUTED (new)" else "already in catalog"} ${nowShort()}"
+            // Only record NEW contributions here — this runs every 30 min, so logging an
+            // "already in catalog" line each cycle would flood the resolves log.
+            if (added) AvatarSearch.Diag.record("you current -> ${e.name.ifBlank { e.avatarId }}: contributed (new)")
         } catch (ex: Exception) {
             ownAvatar = "error ${ex.javaClass.simpleName}"
             Log.w(TAG, "own-avatar harvest failed", ex)
@@ -699,8 +729,10 @@ object AvatarGlobalDb {
         val q = try { JSONArray(prefs.getString(KEY_QUEUE, "[]")).length() } catch (e: Exception) { 0 }
         val r = try { JSONArray(prefs.getString(KEY_REPORTS, "[]")).length() } catch (e: Exception) { 0 }
         return "entries=${map.size}\npull=$lastPull\n" +
-            "ownAvatar=$ownAvatar\n" +
-            "contributed=$contributedCount last=$lastContributed\n" +
+            "current avatar: $ownAvatar\n" +
+            "last switch: $lastSwitch\n" +
+            "favourites/uploads: $lastFav\n" +
+            "contributed (new this run)=$contributedCount last=$lastContributed\n" +
             "queue=$q reports=$r\nlastPost=$lastPost"
     }
 

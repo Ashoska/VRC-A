@@ -367,7 +367,7 @@ object AvatarSearch {
      * "worked, matched" from "worked, avatar not in the author's public list".
      */
     object Diag {
-        private const val MAX = 6
+        private const val MAX = 12
         private val entries = ArrayDeque<String>()
         /** Result of the most recent official author-avatars-listing attempt. */
         @Volatile var authorListing: String = "(not attempted yet)"
