@@ -44,6 +44,14 @@ object BotController {
     private val _blitzViews = MutableStateFlow<Map<Int, AvatarCatalogSweep.BlitzView>>(emptyMap())
     val blitzViews: StateFlow<Map<Int, AvatarCatalogSweep.BlitzView>> = _blitzViews
 
+    /** Proof-of-life for the sweep loop: true while it has cycled within the last minute
+     *  (alive even when idle/caught-up), and how many ms since the last cycle (-1 = never).
+     *  Lets the Bots tab show "running (idle)" vs "stopped" when the backlog is flat. */
+    private val _sweepAlive = MutableStateFlow(false)
+    val sweepAlive: StateFlow<Boolean> = _sweepAlive
+    private val _sweepLastCycleAgoMs = MutableStateFlow(-1L)
+    val sweepLastCycleAgoMs: StateFlow<Long> = _sweepLastCycleAgoMs
+
     private val started = AtomicBoolean(false)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var pendingReports = 0
@@ -139,6 +147,10 @@ object BotController {
                 _totalQueued.value = AvatarCatalogSweep.lastTotalBacklog
                 _blitz.value = AvatarCatalogSweep.blitzActive()
                 _blitzViews.value = bv
+                _sweepAlive.value = AvatarCatalogSweep.sweepAlive()
+                _sweepLastCycleAgoMs.value =
+                    if (AvatarCatalogSweep.lastCycleMs == 0L) -1L
+                    else System.currentTimeMillis() - AvatarCatalogSweep.lastCycleMs
                 _bots.value = _bots.value.map { b ->
                     val li = BotVrchatSession.isLoggedIn(app, b.slot)
                     b.copy(

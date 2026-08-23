@@ -64,7 +64,29 @@ object AvatarCatalogSweep {
     @Volatile var lastTotalBacklog = 0; private set
     @Volatile private var runningSig = ""
     @Volatile private var blitzUntilMs = 0L
+    // The instant the CURRENT blitz began. During a blitz the liveness cutoff is anchored
+    // HERE (not a rolling "now - 1h"), so an avatar checked during the blitz — checked > this
+    // — is never re-selected, and the blitz queue drains to ZERO instead of treadmilling.
+    // (The old rolling 1h window made a full-catalog sweep, which takes HOURS at 1.2s/avatar,
+    // re-queue avatars it had already checked this same blitz — the "did 17k, still 7.7k left"
+    // bug.) Anchored once per fresh blitz; a re-press only EXTENDS the window, keeping the anchor.
+    @Volatile private var blitzStartMs = 0L
     fun blitzActive(): Boolean = System.currentTimeMillis() < blitzUntilMs
+
+    /** The staleness cutoff for the liveness/blitz sweeps: during a blitz it's the blitz
+     *  START (each avatar checked at most once per blitz → the queue converges to 0);
+     *  otherwise the normal 7-day recheck interval. */
+    private fun livenessCutoff(): Long =
+        if (blitzActive()) blitzStartMs else System.currentTimeMillis() - RECHECK_INTERVAL_MS
+
+    // ---- process-lifetime proof-of-life -------------------------------------
+    // Unlike the per-role/blitz Progress counters (zeroed on every ensureRunning restart),
+    // this timestamp updates on EVERY slot-loop cycle — including idle cycles when there's
+    // no work — so the admin can tell "bots alive, just caught up" apart from "bots dead"
+    // even when the backlog numbers are flat. Surfaced in the Bots tab via BotController.
+    @Volatile var lastCycleMs = 0L; private set
+    /** True while the sweep loop has cycled within the last minute (alive, even if idle). */
+    fun sweepAlive(): Boolean = running && System.currentTimeMillis() - lastCycleMs < 60_000L
 
     // VRChat-OUTAGE guard: only REMOVE an avatar (dead-check) when VRChat has recently
     // confirmed SOMETHING alive (a real 200). If every check is failing (VRChat down / a
@@ -130,14 +152,13 @@ object AvatarCatalogSweep {
     private const val BATCH = 500                // ops per /admin push (effectively one/pass)
     private const val FILL_BATCH = 40            // entries per fill pass
     private const val LIVENESS_BATCH = 40        // entries per liveness pass
-    private const val RECHECK_INTERVAL_MS = 7L * 24 * 60 * 60 * 1000  // 7 days
-    private const val BLITZ_RECHECK_MS = 60L * 60 * 1000               // 1 h while blitzing
+    private const val RECHECK_INTERVAL_MS = 7L * 24 * 60 * 60 * 1000  // 7 days (steady-state recheck)
     private const val BLITZ_WINDOW_MS = 30L * 60 * 1000                // initial blitz window per press
     // While a blitz is actively doing work, keep its window rolling forward by this much, so a
     // full-catalog blitz that takes >30 min doesn't EXPIRE mid-way (the "blitz queue disappears
     // before it's complete" bug). Once every bot is caught up (no more work), no bot extends it,
-    // so it self-ends ~this long after the last work — it can't run forever (the 1h recheck
-    // cutoff means freshly-checked avatars aren't re-selected).
+    // so it self-ends ~this long after the last work — it can't run forever (the blitz-start
+    // cutoff means an avatar checked during the blitz is never re-selected, so it converges).
     private const val BLITZ_KEEPALIVE_MS = 5L * 60 * 1000
     // Short idle poll (no network / no writes when idle — just a local snapshot scan) so
     // a bot notices new work FAST: a blitz, freshly-loaded catalog, or new reports kick
@@ -196,7 +217,7 @@ object AvatarCatalogSweep {
         val live = liveSlots; val count = live.size
         if (count == 0) return emptyMap()
         val snap = AvatarGlobalDb.snapshot()
-        val cutoff = System.currentTimeMillis() - BLITZ_RECHECK_MS
+        val cutoff = livenessCutoff()
         return live.withIndex().associate { (idx, slot) ->
             val queued = snap.count {
                 (it.fileId.hashCode() and 0x7fffffff) % count == idx && (needsFill(it) || it.checked < cutoff)
@@ -274,7 +295,14 @@ object AvatarCatalogSweep {
     /** Kick a bounded full-catalog blitz: for the next window, FILL targets every
      *  incomplete entry and LIVENESS re-checks anything older than 1h — so all bots
      *  catch up the whole catalog (bios + dead checks) from before. Re-press to extend. */
-    fun requestFullBlitz() { blitzUntilMs = System.currentTimeMillis() + BLITZ_WINDOW_MS }
+    fun requestFullBlitz() {
+        val now = System.currentTimeMillis()
+        // Fresh blitz → anchor the cutoff to NOW so every currently-stale avatar is swept
+        // exactly once. A re-press while one is already running only EXTENDS the window and
+        // KEEPS the anchor, so it keeps draining the remainder instead of restarting the sweep.
+        if (!blitzActive()) blitzStartMs = now
+        blitzUntilMs = now + BLITZ_WINDOW_MS
+    }
 
     fun progressLine(role: Role): String {
         val p = progress.getValue(role)
@@ -296,7 +324,7 @@ object AvatarCatalogSweep {
      *  backlogs are computed LOCALLY from the cached catalog (one cheap pass). */
     fun roleViews(pendingReports: Int): List<RoleView> {
         val snap = AvatarGlobalDb.snapshot()
-        val cutoff = System.currentTimeMillis() - (if (blitzActive()) BLITZ_RECHECK_MS else RECHECK_INTERVAL_MS)
+        val cutoff = livenessCutoff()
         var fill = 0; var la = 0; var lb = 0
         for (e in snap) {
             if (needsFill(e)) fill++
@@ -342,6 +370,9 @@ object AvatarCatalogSweep {
     private suspend fun slotLoop(context: Context, adminKey: String, slot: Int, roles: List<Role>, liveIndex: Int, liveCount: Int) {
         val ownRole = roles.firstOrNull()
         while (running && scope.isActive) {
+            // Proof-of-life heartbeat: stamped every cycle (work or idle) so the UI can show
+            // the sweep is alive even when the backlog is 0 / nothing is moving.
+            lastCycleMs = System.currentTimeMillis()
             // Each cycle starts NOT helping; helpPass sets the marker if this bot loans.
             ownRole?.let { progress.getValue(it).helping = "" }
             // Per-cycle guard: ANY unexpected throw is logged + retried instead of ending
@@ -393,7 +424,7 @@ object AvatarCatalogSweep {
         if (liveCount <= 0) return false
         val p = blitzProgress.getOrPut(slot) { Progress().apply { this.slot = slot } }
         p.running = true
-        val cutoff = System.currentTimeMillis() - BLITZ_RECHECK_MS
+        val cutoff = livenessCutoff()
         val mine = AvatarGlobalDb.snapshot().filter { (it.fileId.hashCode() and 0x7fffffff) % liveCount == liveIndex }
         // Unfilled first, then stale — so bios/info fill fastest during a blitz.
         val batch = (mine.filter { needsFill(it) } + mine.filter { !needsFill(it) && it.checked < cutoff }).take(BLITZ_BATCH)
@@ -624,7 +655,7 @@ object AvatarCatalogSweep {
     }
 
     private suspend fun livenessPass(context: Context, adminKey: String, slot: Int, role: Role, partition: Int): Boolean {
-        val cutoff = System.currentTimeMillis() - (if (blitzActive()) BLITZ_RECHECK_MS else RECHECK_INTERVAL_MS)
+        val cutoff = livenessCutoff()
         val cand = AvatarGlobalDb.snapshot()
             .filter { partitionOf(it.fileId) == partition && it.checked < cutoff }
             .sortedBy { it.checked }
@@ -655,7 +686,7 @@ object AvatarCatalogSweep {
                 return processFillBatch(context, adminKey, slot, fillBatch, ownRole)
             }
         }
-        val cutoff = System.currentTimeMillis() - (if (blitzActive()) BLITZ_RECHECK_MS else RECHECK_INTERVAL_MS)
+        val cutoff = livenessCutoff()
         val staleItems = snap.filter { it.checked < cutoff }
         if (staleItems.size > LOAN_RED_THRESHOLD) {
             val staleBatch = claimBatch(staleItems.sortedBy { it.checked }, LIVENESS_BATCH)
