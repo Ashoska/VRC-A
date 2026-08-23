@@ -66,9 +66,15 @@ object AvatarGlobalDb {
     // under that name, with ZERO VRChat REST (searchAll never resolves file ids itself).
     // Drained one name per SEARCH_SEED_PACE_MS so a big favourites list can't rate-limit
     // the DBs; names deduped per session; queue capped.
-    private const val SEARCH_SEED_PACE_MS = 10_000L
-    private const val SEARCH_SEED_QUEUE_CAP = 200
+    private const val SEARCH_SEED_PACE_MS = 6_000L
+    private const val SEARCH_SEED_QUEUE_CAP = 1500   // favourite lists can be ~1000
     private const val SEARCH_SEED_MIN_LEN = 3
+    // Favourites can be up to ~1000. Resolving each via VRChat REST would rate-limit, so:
+    // skip any already in the catalog (no call), cap NEW resolves per 30-min sweep (spread
+    // 1000 across sweeps), and back off on a run of nulls (a 429 burst).
+    private const val FAV_RESOLVE_PER_SWEEP = 120
+    private const val FAV_PACE_MS = 600L
+    private const val FAV_RL_BACKOFF = 5             // consecutive nulls => assume rate-limited, stop this sweep
 
     data class Entry(
         val fileId: String,
@@ -696,27 +702,51 @@ object AvatarGlobalDb {
                     privateRemoved++
                 }
             }
-            // 2. FAVOURITES — resolve each new one (public-only via avatarCatalogEntry).
+            // 2. FAVOURITES — up to ~1000. SKIP any already in our catalog (a mature catalog
+            //    covers most favourites) so no VRChat call is made for them; resolve only
+            //    UNKNOWN ones, CAPPED per sweep + rate-limit-aware, so 1000 favourites spread
+            //    across sweeps instead of bursting VRChat REST. Every favourite (known or
+            //    newly resolved) still seeds a paced DB search.
             val favs = VrchatAuthManager.favouriteAvatarIds(context)
-            var favNew = 0; var favKnown = 0; var favSkipped = 0
+            val knownById = HashMap<String, String>(map.size)
+            for (e in map.values) knownById[e.avatarId] = e.name
+            var favNew = 0; var favKnown = 0; var favSkipped = 0; var favResolved = 0
+            var consecutiveNull = 0; var rateLimited = false
             for (id in favs) {
                 if (resolvedFavourites.contains(id)) continue
-                resolvedFavourites.add(id) // mark attempted (retries on next app launch)
+                val knownName = knownById[id]
+                if (knownName != null) {
+                    // Already in the catalog — no VRChat call needed.
+                    resolvedFavourites.add(id); favKnown++
+                    seedSearchFromName(knownName)
+                    continue
+                }
+                if (favResolved >= FAV_RESOLVE_PER_SWEEP) continue   // cap NEW resolves; rest next sweep
                 val e = try { VrchatAuthManager.avatarCatalogEntry(context, id) } catch (ex: Exception) { null }
-                if (e == null) { favSkipped++; continue } // null = private/dead/transient — skipped
+                if (e == null) {
+                    // null = a genuine private/dead favourite OR a 429/network blip — the API
+                    // can't tell them apart. Treat a RUN of nulls as rate-limiting: stop this
+                    // sweep and retry the rest next time (do NOT mark them resolved). A lone
+                    // null is a private/dead favourite -> mark resolved so it isn't retried
+                    // every sweep forever.
+                    if (++consecutiveNull >= FAV_RL_BACKOFF) { rateLimited = true; break }
+                    resolvedFavourites.add(id); favSkipped++; favResolved++
+                    delay(FAV_PACE_MS); continue
+                }
+                consecutiveNull = 0
+                resolvedFavourites.add(id)
                 val favNewOne = contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
                 if (favNewOne) favNew++ else favKnown++
-                // resolvedFavourites dedups per session, so each favourite records at most
-                // once — no per-cycle flooding of the resolves log.
                 AvatarSearch.Diag.record("fav -> ${e.name.ifBlank { e.avatarId }}: " +
                     if (favNewOne) "contributed (new)" else "already in catalog")
-                seedSearchFromName(e.name)   // grow the catalog from this favourite's name
-                delay(400) // pace VRChat REST
+                seedSearchFromName(e.name)
+                favResolved++
+                delay(FAV_PACE_MS)
             }
-            lastFav = "uploads: $libNew new / $libKnown known · " +
-                "favourites: $favNew new / $favKnown known" +
+            lastFav = "favourites ${favs.size}: $favNew new / $favKnown known" +
                 (if (favSkipped > 0) " / $favSkipped private" else "") +
-                " this sweep · ${resolvedFavourites.size}/${favs.size} processed" +
+                (if (rateLimited) " · rate-limited, resuming next sweep" else "") +
+                " · ${resolvedFavourites.size}/${favs.size} done · uploads +$libNew" +
                 (if (privateRemoved > 0) " · $privateRemoved now-private" else "") +
                 " ${nowShort()}"
         } catch (ex: Exception) { Log.w(TAG, "library harvest failed", ex) }
