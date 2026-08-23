@@ -73,6 +73,10 @@ object AvatarGlobalDb {
     private const val SEARCH_SEED_MIN_LEN = 3
     private const val SEED_YIELD_MS = 1_000L         // re-check the roster this often while paused
     private const val SEED_MAX_YIELD_MS = 90_000L    // never starve the seed longer than this
+    // How many file-id-less (avtrdb) search results one search may resolve+absorb. User-gated
+    // (only grows on real searches) so it can't firehose the Worker flush. Kept modest until
+    // the sharding migration lands; then the avtrdb crawler + a higher cap become safe.
+    private const val SEARCH_ABSORB_CAP = 500
     // Favourites can be up to ~1000. Resolving each via VRChat REST would rate-limit, so:
     // skip any already in the catalog (no call), cap NEW resolves per 30-min sweep (spread
     // 1000 across sweeps), and back off on a run of nulls (a 429 burst).
@@ -683,7 +687,7 @@ object AvatarGlobalDb {
         scope.launch {
             var n = 0
             for (r in results) {
-                if (n >= 300) break                           // generous bound for a huge search
+                if (n >= SEARCH_ABSORB_CAP) break             // per-search absorption cap (user-gated)
                 if (r.imageFileId != null) continue           // already contributed in searchAll
                 val fid = try { VrchatAuthManager.avatarCatalogEntry(app, r.id)?.fileId }
                     catch (e: Exception) { null } ?: continue // null also = private/dead (skipped)
