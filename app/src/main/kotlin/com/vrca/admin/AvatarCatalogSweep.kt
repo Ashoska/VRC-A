@@ -197,6 +197,78 @@ object AvatarCatalogSweep {
     @Volatile private var flushCtx: Context? = null
     @Volatile private var flushKey = ""
 
+    // ---- avtrdb digestion crawl (admin bots, OPT-IN, OFF by default) ----------
+    // Crawls avtrdb page-by-page by rotating terms, resolves each NEW avatar's file id via a
+    // BOT session (never a public user's), and contributes it — so the catalog absorbs avtrdb
+    // using the bots' dedicated accounts. OFF by default so the build can ship BEFORE the
+    // sharding migration; the admin flips it on (Bots tab) once sharding can absorb the volume.
+    // Page-paced + rate-limit backoff so it's polite to both avtrdb and VRChat; the catalog
+    // dedup means each avatar is resolved once and re-runs cost almost nothing.
+    @Volatile var avtrdbCrawlEnabled = false
+    @Volatile var avtrdbCrawlStatus = "off"; private set
+    private val crawlStarted = AtomicBoolean(false)
+    private val CRAWL_TERMS = (('a'..'z').map { it.toString() } + ('0'..'9').map { it.toString() })
+    private const val CRAWL_PAGE_GAP_MS = 1_500L   // pace avtrdb paging (polite to the DB)
+    private const val CRAWL_TERM_GAP_MS = 5_000L
+    private const val CRAWL_RL_BACKOFF = 5         // consecutive resolve failures => rate-limited
+
+    /** Enable/disable the crawl + ensure its loop exists. Called by BotController from the
+     *  saved pref (and forced off while paused / a login is in progress). */
+    fun setAvtrdbCrawl(context: Context, enabled: Boolean) {
+        avtrdbCrawlEnabled = enabled
+        ensureCrawlLoop(context.applicationContext)
+    }
+
+    /** Launch the crawl loop once (idempotent). It idles until enabled + a bot is logged in. */
+    fun ensureCrawlLoop(context: Context) {
+        val app = context.applicationContext
+        if (!crawlStarted.compareAndSet(false, true)) return
+        scope.launch { avtrdbCrawlLoop(app) }
+    }
+
+    private suspend fun avtrdbCrawlLoop(app: Context) {
+        val prefs = app.getSharedPreferences("vrca_admin_local", Context.MODE_PRIVATE)
+        var termIdx = prefs.getInt("avtrdb_crawl_idx", 0)
+        while (scope.isActive) {
+            if (!avtrdbCrawlEnabled) { avtrdbCrawlStatus = "off"; delay(5_000); continue }
+            val slot = (0 until BotVrchatSession.SLOTS).firstOrNull { BotVrchatSession.isLoggedIn(app, it) }
+            if (slot == null) { avtrdbCrawlStatus = "waiting for a bot login"; delay(10_000); continue }
+            val term = CRAWL_TERMS[((termIdx % CRAWL_TERMS.size) + CRAWL_TERMS.size) % CRAWL_TERMS.size]
+            // Dedup against the current catalog by avatar id (no VRChat call for known ones).
+            val known = HashSet<String>(AvatarGlobalDb.snapshot().map { it.avatarId })
+            var new = 0; var seen = 0; var nulls = 0; var page = 0
+            crawl@ while (avtrdbCrawlEnabled && scope.isActive) {
+                val pageResults = try { com.vrca.vrchat.AvatarSearch.searchPage(term, page) }
+                    catch (e: Throwable) { emptyList() }
+                if (pageResults.isEmpty()) break
+                for (r in pageResults) {
+                    if (!avtrdbCrawlEnabled || !scope.isActive) break@crawl
+                    seen++
+                    if (known.contains(r.id)) continue
+                    val chk = BotVrchatSession.checkAvatar(app, slot, r.id)
+                    if (chk == null) {
+                        if (++nulls >= CRAWL_RL_BACKOFF) { avtrdbCrawlStatus = "rate-limited — pausing"; delay(30_000); break@crawl }
+                        delay(PACE_MS); continue
+                    }
+                    nulls = 0
+                    if (chk.alive && chk.fileId != null) {
+                        AvatarGlobalDb.contribute(app, chk.fileId, r.id, chk.name, chk.author, chk.authorId, chk.platforms, chk.description)
+                        known.add(r.id); new++
+                    }
+                    avtrdbCrawlStatus = "term '$term' p$page: +$new new / $seen seen"
+                    delay(PACE_MS)
+                }
+                if (pageResults.size < com.vrca.vrchat.AvatarSearch.PAGE_SIZE) break   // last page
+                page++
+                delay(CRAWL_PAGE_GAP_MS)
+            }
+            avtrdbCrawlStatus = "term '$term' done: +$new new / $seen seen"
+            termIdx++
+            prefs.edit().putInt("avtrdb_crawl_idx", termIdx).apply()
+            delay(CRAWL_TERM_GAP_MS)
+        }
+    }
+
     /** A short human summary of which bot slot runs which roles (for the UI). */
     @Volatile var assignmentLabel = ""; private set
 

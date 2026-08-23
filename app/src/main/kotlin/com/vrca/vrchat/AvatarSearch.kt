@@ -103,6 +103,19 @@ object AvatarSearch {
         out.values.toList()
     }
 
+    /** ONE avtrdb page (for the admin crawler, which paces its own paging instead of
+     *  bursting all pages via [search]). Empty = no more pages / error. Page size is
+     *  [AVTRDB_PAGE_SIZE]; a short/empty page means the last page. */
+    suspend fun searchPage(query: String, page: Int): List<Result> = withContext(Dispatchers.IO) {
+        if (query.isBlank()) return@withContext emptyList()
+        val q = URLEncoder.encode(query.trim(), "UTF-8")
+        val body = httpGet("$BASE?query=$q&page=$page") ?: return@withContext emptyList()
+        try { parseAvtrdbResults(body) } catch (e: Exception) { Log.w(TAG, "avtrdb page parse failed", e); emptyList() }
+    }
+
+    /** Page size avtrdb returns per page — the crawler treats a short page as the last. */
+    const val PAGE_SIZE = AVTRDB_PAGE_SIZE
+
     // ---- multi-DB candidate resolve (for the roster clone button) ------------
 
     /** A resolve candidate from ANY avatar DB. `imageFileId` is the RAW VRChat

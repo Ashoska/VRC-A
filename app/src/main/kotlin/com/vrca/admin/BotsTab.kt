@@ -71,6 +71,7 @@ fun BotsTab() {
     var adminKey by remember { mutableStateOf(prefs.getString("avatar_admin_key", "") ?: "") }
     var roleSlots by remember { mutableStateOf(loadRoleSlots(prefs)) }
     var paused by remember { mutableStateOf(prefs.getBoolean("bots_paused", false)) }
+    var avtrdbCrawl by remember { mutableStateOf(prefs.getBoolean("avtrdb_crawl_enabled", false)) }
 
     LaunchedEffect(Unit) { BotController.start(ctx) }
     val bots by BotController.bots.collectAsState()
@@ -83,7 +84,7 @@ fun BotsTab() {
     // The sweep lifecycle is owned by BotController (reads the saved key/assignment/pause
     // every couple seconds), so it auto-runs from app launch. The UI just writes those
     // prefs; nudge it to re-apply immediately on a change.
-    LaunchedEffect(adminKey, roleSlots.joinToString(","), paused) { BotController.applySweepConfig(ctx) }
+    LaunchedEffect(adminKey, roleSlots.joinToString(","), paused, avtrdbCrawl) { BotController.applySweepConfig(ctx) }
 
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
@@ -101,6 +102,8 @@ fun BotsTab() {
                 sweepAgoMs = sweepAgoMs,
                 paused = paused,
                 onTogglePause = { paused = !paused; prefs.edit().putBoolean("bots_paused", paused).apply() },
+                avtrdbCrawl = avtrdbCrawl,
+                onToggleCrawl = { avtrdbCrawl = !avtrdbCrawl; prefs.edit().putBoolean("avtrdb_crawl_enabled", avtrdbCrawl).apply() },
                 roleSlots = roleSlots,
                 slotLabels = List(BotVrchatSession.SLOTS) { s -> bots.getOrNull(s)?.name ?: "" },
                 onRolePick = { roleOrdinal, slot ->
@@ -173,6 +176,7 @@ private fun MaintenanceCard(
     totalQueued: Int, blitz: Boolean,
     sweepAlive: Boolean, sweepAgoMs: Long,
     paused: Boolean, onTogglePause: () -> Unit,
+    avtrdbCrawl: Boolean, onToggleCrawl: () -> Unit,
     roleSlots: IntArray, slotLabels: List<String>, onRolePick: (Int, Int) -> Unit
 ) {
     AdminSectionCard(title = "Maintenance", icon = Icons.Filled.SportsEsports, tone = AdminTone.Warn) {
@@ -249,6 +253,32 @@ private fun MaintenanceCard(
                     }
                     else -> StatusPill("Stopped", AdminTone.Error)
                 }
+            }
+
+            Divider()
+
+            // avtrdb digestion crawl — OFF by default. Uses a BOT session to resolve + absorb
+            // avtrdb into the catalog. Keep OFF until the sharding migration lands (it's a
+            // volume firehose into the Worker flush).
+            Button(
+                onClick = onToggleCrawl,
+                modifier = Modifier.fillMaxWidth(),
+                colors = if (avtrdbCrawl) androidx.compose.material3.ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer,
+                    contentColor = MaterialTheme.colorScheme.onErrorContainer
+                ) else androidx.compose.material3.ButtonDefaults.buttonColors()
+            ) { Text(if (avtrdbCrawl) "Absorbing avtrdb — ON (tap to stop)" else "Absorb avtrdb (crawl) — OFF") }
+            Text(
+                "Crawl: ${AvatarCatalogSweep.avtrdbCrawlStatus}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (avtrdbCrawl) {
+                Text(
+                    "Warning: leave OFF until sharding — it firehoses the Worker flush.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
             }
         }
     }

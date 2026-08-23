@@ -98,6 +98,10 @@ object BotController {
         // Keep the preview assignment fresh so the per-bot queued rows show what each bot
         // WOULD process even before Start / while paused (independent of ensureRunning).
         AvatarCatalogSweep.setAssignmentPreview(app, currentManual(prefs))
+        // avtrdb digestion crawl: driven by the saved toggle, but forced OFF while paused or
+        // a login is in progress (it uses a bot session, so it must chill with the rest).
+        AvatarCatalogSweep.setAvtrdbCrawl(app,
+            prefs.getBoolean("avtrdb_crawl_enabled", false) && !silenced(app))
         // Paused (manual) or chilling (a login is in progress) → the working bots go silent.
         if (silenced(app)) { AvatarCatalogSweep.stop(); return }
         val key = prefs.getString("avatar_admin_key", "") ?: ""

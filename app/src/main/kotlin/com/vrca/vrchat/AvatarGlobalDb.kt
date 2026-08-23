@@ -73,10 +73,7 @@ object AvatarGlobalDb {
     private const val SEARCH_SEED_MIN_LEN = 3
     private const val SEED_YIELD_MS = 1_000L         // re-check the roster this often while paused
     private const val SEED_MAX_YIELD_MS = 90_000L    // never starve the seed longer than this
-    // How many file-id-less (avtrdb) search results one search may resolve+absorb. User-gated
-    // (only grows on real searches) so it can't firehose the Worker flush. Kept modest until
-    // the sharding migration lands; then the avtrdb crawler + a higher cap become safe.
-    private const val SEARCH_ABSORB_CAP = 500
+    private const val HARVEST_RL_BACKOFF = 5         // consecutive resolve failures => stop (rate-limited)
     // Favourites can be up to ~1000. Resolving each via VRChat REST would rate-limit, so:
     // skip any already in the catalog (no call), cap NEW resolves per 30-min sweep (spread
     // 1000 across sweeps), and back off on a run of nulls (a 429 burst).
@@ -685,15 +682,22 @@ object AvatarGlobalDb {
     fun harvestSearchResults(context: Context, results: List<AvatarSearch.Result>) {
         val app = context.applicationContext
         scope.launch {
-            var n = 0
+            // NO count cap — an avtrdb query matches name/author only (no bios), so a term's
+            // result set is bounded; resolve them all. Dedup by avatar id against the catalog
+            // FIRST (zero VRChat call for ones we already have), and back off if VRChat starts
+            // rate-limiting (HARVEST_RL_BACKOFF consecutive failures) so a broad search can't
+            // hammer the user's session.
+            val knownIds = HashSet<String>(map.size); for (e in map.values) knownIds.add(e.avatarId)
+            var nulls = 0
             for (r in results) {
-                if (n >= SEARCH_ABSORB_CAP) break             // per-search absorption cap (user-gated)
                 if (r.imageFileId != null) continue           // already contributed in searchAll
+                if (knownIds.contains(r.id)) continue          // already in catalog — no VRChat call
                 val fid = try { VrchatAuthManager.avatarCatalogEntry(app, r.id)?.fileId }
-                    catch (e: Exception) { null } ?: continue // null also = private/dead (skipped)
+                    catch (e: Exception) { null }
+                if (fid == null) { if (++nulls >= HARVEST_RL_BACKOFF) break; delay(600); continue }
+                nulls = 0
                 if (map.containsKey(fid)) continue
                 contribute(app, fid, r.id, r.name, r.author, r.authorId, r.platforms)
-                n++
                 delay(600)  // pace VRChat REST
             }
         }
