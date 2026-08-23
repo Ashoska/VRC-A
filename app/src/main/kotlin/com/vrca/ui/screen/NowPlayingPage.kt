@@ -58,6 +58,7 @@ import kotlinx.coroutines.delay
 internal fun NowPlayingPage(
     vm: VrcaViewModel,
     isBanned: Boolean,
+    onOpenPermissions: () -> Unit,
     onPersistSpotifyPreset: (Int) -> Unit
 ) {
     val ctx = LocalContext.current
@@ -105,7 +106,7 @@ internal fun NowPlayingPage(
                 Row(
                     Modifier
                         .fillMaxWidth()
-                        .clickable { vm.launchNotificationAccess(ctx) }
+                        .clickable { onOpenPermissions() }
                         .padding(12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -117,7 +118,7 @@ internal fun NowPlayingPage(
                         modifier = Modifier.size(20.dp)
                     )
                     Text(
-                        "Notification Access is missing — tap to grant it so music can be detected.",
+                        "Notification Access is missing — tap to grant it in Settings so music can be detected.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onErrorContainer
                     )
