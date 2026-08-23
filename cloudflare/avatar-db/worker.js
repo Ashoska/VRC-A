@@ -527,7 +527,18 @@ async function flush(env) {
     if (!val) continue;
     try {
       const batch = JSON.parse(val);
-      for (const fid of Object.keys(batch)) { db.avatars[fid] = batch[fid]; adminChanged = true; }
+      for (const fid of Object.keys(batch)) {
+        const incoming = batch[fid];
+        const prev = db.avatars[fid];
+        // `added` is IMMUTABLE — the moment the avatar first entered the catalog. cleanEntry
+        // stamps added=now on every upsert, so without this a routine bot REFRESH would reset
+        // added to now (both added+checked moved together — the reported bug). Preserve the
+        // original added for an existing entry; only a genuinely NEW entry keeps added=now.
+        // `checked` correctly takes the fresh value (that's what a re-check updates).
+        if (prev && typeof prev.added === "number") incoming.added = prev.added;
+        db.avatars[fid] = incoming;
+        adminChanged = true;
+      }
     } catch (_) {}
   }
   for (const kname of admrNames) {
