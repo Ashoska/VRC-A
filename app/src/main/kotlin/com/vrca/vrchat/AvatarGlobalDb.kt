@@ -454,6 +454,112 @@ object AvatarGlobalDb {
      *  queue + catalogBase are untouched (separate stores). */
     fun evictShardCache() { synchronized(shardLru) { shardLru.clear() } }
 
+    // ---- sharded SEARCH (token index + fragment store) -----------------------
+    // Search is served by two R2 object types (built by the rebuild job from the shards):
+    //   index/<3hex>.json      = { v, t: { "<token>": ["avtr_..", ...] } }   (token -> ids)
+    //   fragments/<3hex>.json  = { v, e: { "avtr_..": { f, n, au, ai, p, pf } } } (id -> summary)
+    // A query fetches the buckets for its tokens (AND-intersect the id lists), then the
+    // fragments for the top ids — a handful of edge-cached GETs, never the whole catalog.
+    // Bucket keys are computed IDENTICALLY here and in the rebuild job:
+    //   index token bucket   = (token.hashCode() & 0xfff)   -> 3 hex   (JS replicates hashCode)
+    //   fragment id bucket   = the 3 hex after "avtr_"                  (even, matches shards)
+    private const val SEARCH_CACHE_MAX = 96
+    private val searchCache = object : LinkedHashMap<String, JSONObject>(128, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, JSONObject>): Boolean = size > SEARCH_CACHE_MAX
+    }
+
+    /** True when the sharded search index is the live source (post-cutover). Callers use
+     *  the whole-map [searchByName] when this is false (pre-cutover / R2 off). */
+    fun r2SearchActive(context: Context): Boolean { ensureCatalogBase(context); return r2Serving }
+
+    /** Context-free read of the same flag (for the sync search entry points that don't
+     *  carry a Context). False until /health has been learned once, so it safely defaults
+     *  to the whole-map path on a cold start. */
+    fun isR2SearchLive(): Boolean = r2Serving
+
+    private fun indexBucketOf(token: String): String = (token.hashCode() and 0xfff).toString(16).padStart(3, '0')
+    private fun fragBucketOf(avatarId: String): String =
+        if (avatarId.length >= 8) avatarId.substring(5, 8).lowercase() else "000"
+
+    /**
+     * Search the sharded index (token buckets + fragments). Tokenize the query, AND-intersect
+     * the token posting lists, fetch the fragments for the survivors, rank (name > author >
+     * desc-absent), return as [Entry]s. Empty when R2 search isn't live or nothing matches —
+     * the caller then keeps its existing behaviour (whole-map / mirrors).
+     */
+    suspend fun searchSharded(context: Context, query: String, limit: Int = 60): List<Entry> {
+        ensureCatalogBase(context)
+        if (!r2Serving) return emptyList()
+        val base = catalogBase ?: return emptyList()
+        val ql = query.trim().lowercase()
+        val tokens = ql.split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length >= 2 }.distinct()
+        if (tokens.isEmpty()) return emptyList()
+        var acc: MutableSet<String>? = null
+        for (t in tokens) {
+            val ids = fetchTokenIds(base, t)
+            if (ids.isEmpty()) return emptyList()          // AND — a token with no postings kills the match
+            acc = if (acc == null) ids.toMutableSet() else acc.apply { retainAll(ids) }
+            if (acc.isEmpty()) return emptyList()
+        }
+        val idList = (acc ?: return emptyList()).toList().take(limit * 4)
+        val out = ArrayList<Entry>(idList.size)
+        for ((bucket, ids) in idList.groupBy { fragBucketOf(it) }) {
+            val frags = fetchFragments(base, bucket) ?: continue
+            for (id in ids) frags[id]?.let { out.add(it) }
+        }
+        return out.sortedByDescending { e ->
+            val name = e.name.lowercase(); val author = e.author.lowercase()
+            var s = 0
+            for (t in tokens) s += when { name.contains(t) -> 5; author.contains(t) -> 2; else -> 1 }
+            if (name == ql) s += 20 else if (name.startsWith(tokens.first())) s += 3
+            s
+        }.distinctBy { it.avatarId }.take(limit)
+    }
+
+    private suspend fun fetchTokenIds(base: String, token: String): List<String> {
+        val obj = fetchSearchJson("$base/index/${indexBucketOf(token)}.json") ?: return emptyList()
+        val arr = obj.optJSONObject("t")?.optJSONArray(token) ?: return emptyList()
+        return (0 until arr.length()).mapNotNull { arr.optString(it, "").takeIf { s -> s.startsWith("avtr_") } }
+    }
+
+    private suspend fun fetchFragments(base: String, bucket: String): Map<String, Entry>? {
+        val obj = fetchSearchJson("$base/fragments/$bucket.json") ?: return null
+        val e = obj.optJSONObject("e") ?: return emptyMap()
+        val out = HashMap<String, Entry>()
+        val keys = e.keys()
+        while (keys.hasNext()) {
+            val id = keys.next(); if (!id.startsWith("avtr_")) continue
+            val o = e.optJSONObject(id) ?: continue
+            val mask = o.optInt("p", 0)
+            val plats = buildList { if (mask and 1 != 0) add("PC"); if (mask and 2 != 0) add("Quest"); if (mask and 4 != 0) add("iOS") }
+            val pf = o.optJSONObject("pf")
+            out[id] = Entry(
+                o.optString("f", ""), id, o.optString("n", ""), o.optString("au", ""), o.optString("ai", ""),
+                plats, 0L, "",
+                pf?.optInt("pc", 5) ?: 5, pf?.optInt("q", 5) ?: 5, pf?.optInt("i", 5) ?: 5, filled = true
+            )
+        }
+        return out
+    }
+
+    /** GET a small index/fragment JSON object, memory-cached (bounded, size-evicted — search
+     *  results aren't instance-scoped, so this is a plain LRU, not presence-evicted). */
+    private suspend fun fetchSearchJson(url: String): JSONObject? {
+        synchronized(searchCache) { searchCache[url] }?.let { return it }
+        val obj = kotlinx.coroutines.withContext(Dispatchers.IO) {
+            var conn: HttpURLConnection? = null
+            try {
+                conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                    connectTimeout = 10_000; readTimeout = 10_000
+                }
+                if (conn.responseCode != 200) null else JSONObject(conn.inputStream.bufferedReader().readText())
+            } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
+        } ?: return null
+        synchronized(searchCache) { searchCache[url] = obj }
+        return obj
+    }
+
     private suspend fun fetchShardSingleFlight(base: String, prefix: String): Map<String, Entry>? {
         val deferred = shardFetches.computeIfAbsent(prefix) { scope.async { fetchShard(base, prefix) } }
         return try { deferred.await() } finally { shardFetches.remove(prefix, deferred) }

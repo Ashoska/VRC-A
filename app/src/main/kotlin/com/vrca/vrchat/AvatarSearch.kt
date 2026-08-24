@@ -225,7 +225,7 @@ object AvatarSearch {
         val remote = (listOf(async { runCatching { search(query) }.getOrDefault(emptyList()) }) +
             VRCX_MIRRORS.map { m -> async { vrcxResults("$m?search=$q") } })
             .awaitAll().flatten()
-        val ours = catalogResults(query)
+        val ours = ourCatalog(context, query)
         // Dedup by a NORMALIZED avatar id (trim + lowercase) so a casing/whitespace
         // difference between sources can't slip a duplicate through. Our catalog wins.
         val merged = LinkedHashMap<String, Result>()
@@ -256,9 +256,11 @@ object AvatarSearch {
      *  search (one slow mirror can't stall the whole thing). */
     private const val REMOTE_SOURCE_TIMEOUT_MS = 6_000L
 
-    /** Our crowdsourced catalog as search results — LOCAL, in-memory, instant. */
+    /** Our crowdsourced catalog as search results — LOCAL, in-memory, instant. When the
+     *  sharded index is the live source there is no instant local (the catalog isn't held
+     *  whole in memory), so this returns empty and [remoteFill] folds in the sharded results. */
     fun localResults(query: String): List<Result> =
-        if (query.isBlank()) emptyList() else catalogResults(query)
+        if (query.isBlank() || AvatarGlobalDb.isR2SearchLive()) emptyList() else catalogResults(query)
 
     /**
      * The EXTERNAL sources only (avtrdb + the two VRCX mirrors), in parallel, each
@@ -287,7 +289,14 @@ object AvatarSearch {
                 AvatarGlobalDb.contribute(context, fid, r.id, r.name, r.author, r.authorId, r.platforms)
             }
         }
-        list
+        // When the sharded index is live, OUR catalog results come from here too (there is no
+        // instant local path) — merged AHEAD of the mirror results so our entries win the dedup.
+        val ours = if (AvatarGlobalDb.isR2SearchLive())
+            AvatarGlobalDb.searchSharded(context, query).map { entryToResult(it) } else emptyList()
+        if (ours.isEmpty()) return@coroutineScope list
+        val out = LinkedHashMap<String, Result>()
+        for (r in ours + list) { val k = r.id.trim().lowercase(); if (k.startsWith("avtr_")) out.putIfAbsent(k, r) }
+        out.values.toList()
     }
 
     /** VRCX-style mirror results, parsed richly (image url + platforms) for display. */
@@ -314,14 +323,20 @@ object AvatarSearch {
     }
 
     /** Our own catalog as search results (image reconstructed from the file id). */
+    private fun entryToResult(e: AvatarGlobalDb.Entry): Result = Result(
+        id = e.avatarId, name = e.name, author = e.author,
+        imageUrl = "https://api.vrchat.cloud/api/1/image/${e.fileId}/1/256",
+        platforms = e.platforms, authorId = e.authorId, imageFileId = e.fileId, source = "catalog"
+    )
+
     private fun catalogResults(query: String): List<Result> =
-        AvatarGlobalDb.searchByName(query).map { e ->
-            Result(
-                id = e.avatarId, name = e.name, author = e.author,
-                imageUrl = "https://api.vrchat.cloud/api/1/image/${e.fileId}/1/256",
-                platforms = e.platforms, authorId = e.authorId, imageFileId = e.fileId, source = "catalog"
-            )
-        }
+        AvatarGlobalDb.searchByName(query).map { entryToResult(it) }
+
+    /** Our catalog as results — the SHARDED index when it's the live source (post-cutover),
+     *  else the in-memory whole-map. Suspend because the sharded path is network. */
+    private suspend fun ourCatalog(context: Context, query: String): List<Result> =
+        if (AvatarGlobalDb.isR2SearchLive()) AvatarGlobalDb.searchSharded(context, query).map { entryToResult(it) }
+        else catalogResults(query)
 
     // ---- per-DB health (Settings -> Debug) -----------------------------------
 
