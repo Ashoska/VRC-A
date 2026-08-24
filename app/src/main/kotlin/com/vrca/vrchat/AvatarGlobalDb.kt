@@ -7,6 +7,8 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
@@ -535,27 +537,31 @@ object AvatarGlobalDb {
      * desc-absent), return as [Entry]s. Empty when R2 search isn't live or nothing matches —
      * the caller then keeps its existing behaviour (whole-map / mirrors).
      */
-    suspend fun searchSharded(context: Context, query: String, limit: Int = 60): List<Entry> {
+    suspend fun searchSharded(context: Context, query: String, limit: Int = 60): List<Entry> = coroutineScope {
         ensureCatalogBase(context)
-        if (!r2Serving) return emptyList()
-        val base = catalogBase ?: return emptyList()
+        if (!r2Serving) return@coroutineScope emptyList()
+        val base = catalogBase ?: return@coroutineScope emptyList()
         val ql = query.trim().lowercase()
         val tokens = ql.split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length >= 2 }.distinct()
-        if (tokens.isEmpty()) return emptyList()
+        if (tokens.isEmpty()) return@coroutineScope emptyList()
+        // Fetch every token's posting list IN PARALLEL, then AND-intersect.
+        val postings = tokens.map { t -> async { fetchTokenIds(base, t) } }.awaitAll()
         var acc: MutableSet<String>? = null
-        for (t in tokens) {
-            val ids = fetchTokenIds(base, t)
-            if (ids.isEmpty()) return emptyList()          // AND — a token with no postings kills the match
+        for (ids in postings) {
+            if (ids.isEmpty()) return@coroutineScope emptyList()   // AND — a token with no postings kills it
             acc = if (acc == null) ids.toMutableSet() else acc.apply { retainAll(ids) }
-            if (acc.isEmpty()) return emptyList()
+            if (acc.isEmpty()) return@coroutineScope emptyList()
         }
-        val idList = (acc ?: return emptyList()).toList().take(limit * 4)
+        // Cap candidates, then fetch their fragment buckets IN PARALLEL (was one-at-a-time =
+        // N network round-trips = "takes ages for 40 avatars"). Grouped by bucket so shared
+        // buckets are fetched once.
+        val idList = (acc ?: return@coroutineScope emptyList()).toList().take(100)
+        val byBucket = idList.groupBy { fragBucketOf(it) }
+        val fetched = byBucket.keys.map { b -> async { b to (fetchFragments(base, b) ?: emptyMap()) } }
+            .awaitAll().toMap()
         val out = ArrayList<Entry>(idList.size)
-        for ((bucket, ids) in idList.groupBy { fragBucketOf(it) }) {
-            val frags = fetchFragments(base, bucket) ?: continue
-            for (id in ids) frags[id]?.let { out.add(it) }
-        }
-        return out.sortedByDescending { e ->
+        for ((bucket, ids) in byBucket) { val frags = fetched[bucket] ?: continue; for (id in ids) frags[id]?.let { out.add(it) } }
+        out.sortedByDescending { e ->
             val name = e.name.lowercase(); val author = e.author.lowercase()
             var s = 0
             for (t in tokens) s += when { name.contains(t) -> 5; author.contains(t) -> 2; else -> 1 }

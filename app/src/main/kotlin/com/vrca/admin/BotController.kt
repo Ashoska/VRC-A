@@ -154,6 +154,10 @@ object BotController {
         scope.launch {
             var i = 0
             while (true) {
+                // Learn r2Serving/catalogBase from /health (TTL-throttled inside) so the sweep's
+                // shardWalkLive() is current — otherwise the bots only switch to shard-walk after
+                // the user happens to run a search/clone (which is what triggers ensureCatalogBase).
+                runCatching { AvatarGlobalDb.r2SearchActive(app) }
                 // Keep the sweep running per the saved config (auto-starts on launch,
                 // self-includes a bot once it's logged in). Idempotent.
                 applySweepConfig(app)
