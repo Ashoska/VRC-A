@@ -84,12 +84,14 @@ async function fetchShard(prefix) {
   return {};
 }
 
-async function r2Put(key, bodyStr) {
+async function r2Put(key, bodyStr, ttl = 300) {
   const url = `${R2_ENDPOINT}/${R2_BUCKET}/${key}`;
   for (let attempt = 0; attempt < 4; attempt++) {
     const res = await aws.fetch(url, {
       method: "PUT", body: bodyStr,
-      headers: { "content-type": "application/json", "cache-control": "public, max-age=3600" },
+      // The Action rewrites these every run and can't purge the edge, so keep the TTL short
+      // enough that a rebuild propagates: ~5 min for buckets, tiny for the manifest counts.
+      headers: { "content-type": "application/json", "cache-control": `public, max-age=${ttl}` },
     });
     if (res.ok) return true;
     await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
@@ -195,8 +197,8 @@ async function main() {
   await r2Put("_manifest.json", JSON.stringify({
     v: 1, shardScheme: "filehex3-full", shardCount: 4096, indexScheme: "hash3", entryCount: fileIds.length,
     unfilled, searchReady: true, lastFullRebuild: new Date().toISOString(),
-  }));
-  await r2Put("_hashes.json", JSON.stringify(newHashes));
+  }), 60);   // tiny TTL: the Bots-tab backlog count reads this and should track the rebuild closely
+  await r2Put("_hashes.json", JSON.stringify(newHashes), 60);
   console.log(`Done. ${fileIds.length} avatars (${unfilled} unfilled); wrote ${toWrite.length} changed, deleted ${staleKeys.length}.`);
 }
 
