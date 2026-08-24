@@ -991,6 +991,9 @@ async function flushGithub(env) {
       // For /health (so it needn't list KV): activity seen at this flush.
       pendingBatches: pendNames.length,
       reports: repNames.length,
+      // Preserve the migration status marker across flushes (this fresh meta object
+      // would otherwise drop it, so a completed migration's `done` stamp vanished).
+      migrate: prevMeta.migrate || null,
     })
   );
 }
