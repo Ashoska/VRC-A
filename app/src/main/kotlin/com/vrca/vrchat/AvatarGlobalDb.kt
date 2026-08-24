@@ -782,6 +782,12 @@ object AvatarGlobalDb {
     }
 
     private fun refresh(context: Context, cacheBust: String? = null) {
+        ensureCatalogBase(context)   // keep r2Serving current for the source decision below
+        // POST-CUTOVER, the PUBLIC build no longer holds the whole catalog — clone goes
+        // through lookupSharded and search through searchSharded, so skip the ~25 MB
+        // whole-file pull entirely (this is the memory-flat-at-scale win). The ADMIN build
+        // still loads it (the bots iterate the whole map).
+        if (r2Serving && !com.vrca.BuildConfig.IS_ADMIN_BUILD) return
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         // Read the file from EXACTLY where the Worker writes it — learn the URL from
         // /health (echoes rawUrl), so no repo/branch/path mismatch is possible.
@@ -793,7 +799,10 @@ object AvatarGlobalDb {
         // from KV) — GitHub's raw CDN caches ~5 min and ignores cache-busting query
         // params, which delayed the admin bots seeing new avatars. The normal (public)
         // refresh still uses the CDN with an ETag (free, fine at 30-min cadence).
-        val rawUrl = if (cacheBust != null) "$WORKER_URL/db" else baseUrl
+        // Post-cutover the Worker /db (KV dbcache) is FROZEN (flushR2 doesn't rebuild it) —
+        // the ADMIN reads the GitHub master instead, which the rebuild Action keeps fresh
+        // from the shards. Pre-cutover, keep the fast KV /db path for the freshness poll.
+        val rawUrl = if (cacheBust != null && !r2Serving) "$WORKER_URL/db" else baseUrl
         val etag = if (cacheBust == null) prefs.getString(KEY_ETAG, null) else null
         var conn: HttpURLConnection? = null
         try {

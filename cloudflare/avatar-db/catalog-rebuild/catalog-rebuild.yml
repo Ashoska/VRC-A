@@ -1,0 +1,35 @@
+# Copy this file into the IMAGE-STORE repo at .github/workflows/catalog-rebuild.yml
+# (Ashoska/VRC-A-Image-store). It rebuilds the search index + fragments (to R2) and the
+# master db.json backup (to this repo) from the R2 lookup shards, every 20 min.
+name: catalog-rebuild
+on:
+  schedule:
+    - cron: "*/20 * * * *"   # every 20 min (adjust to taste; search freshness = this cadence)
+  workflow_dispatch: {}       # manual "Run workflow" button
+
+concurrency:
+  group: catalog-rebuild
+  cancel-in-progress: false
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm init -y && npm i aws4fetch@1
+      # Put rebuild.mjs at the repo root (or adjust the path below).
+      - run: node rebuild.mjs
+        env:
+          CATALOG_DOMAIN: cdn.gremlininc.app
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: vrca-avatar-catalog
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          DB_PATH: avatars/db.json
+          GH_BRANCH: main
