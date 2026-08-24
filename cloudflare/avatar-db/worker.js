@@ -250,36 +250,47 @@ export default {
         const hi = (url.searchParams.get("hi") || "fff").toLowerCase();
         const loN = parseInt(lo, 16), hiN = parseInt(hi, 16);
         if (isNaN(loN) || isNaN(hiN) || loN > hiN) return json({ ok: false, error: "bad lo/hi (3 hex each)" }, 400);
-        const db = await readMasterDb(env);
-        if (!db) return json({ ok: false, error: "could not read master db.json" }, 500);
-        // Bucket ONLY the in-range shards, to bound Worker memory on a big catalog.
+        // Process a FIXED prefix span per call (<= SPAN shard puts, and only that span's
+        // entries held in memory). Two limits are respected: R2 puts are subrequests
+        // (~1000 cap) and the Worker has 128 MB — so we (a) LINE-parse the master (never
+        // JSON.parse the whole ~25 MB file into one object graph) and (b) keep only the
+        // in-span entries. This is what makes migration work at any catalog size.
+        const SPAN = 512;
+        const endN = Math.min(loN + SPAN - 1, hiN);
+        const text = await readMasterText(env);
+        if (!text) return json({ ok: false, error: "could not read master db.json" }, 500);
         const byShard = {};
-        for (const fid of Object.keys(db.avatars || {})) {
+        let entriesInRange = 0;
+        for (const raw of text.split("\n")) {
+          const line = raw.trim().replace(/,$/, "");
+          if (!line.startsWith('"file_')) continue;      // skip header / closing braces
+          const idx = line.indexOf('":');
+          if (idx < 0) continue;
+          const fid = line.slice(1, idx);
+          if (!FILE_RE.test(fid)) continue;
           const sp = shardPrefix(fid);
           const n = parseInt(sp, 16);
-          if (n < loN || n > hiN) continue;
-          (byShard[sp] ||= {})[fid] = db.avatars[fid];
+          if (n < loN || n > endN) continue;             // only this call's span
+          let val; try { val = JSON.parse(line.slice(idx + 2)); } catch (_) { continue; }
+          (byShard[sp] ||= {})[fid] = val;
+          entriesInRange++;
         }
-        // Each R2 put is a subrequest; a Worker invocation is capped (~1000). Write at
-        // most MAX_MIGRATE_SHARDS per call and hand back the next range so a big catalog
-        // migrates over a few taps instead of blowing the limit (Error 1102).
-        const MAX_MIGRATE_SHARDS = 500;
-        const prefixes = Object.keys(byShard).sort(); // 3-char lowercase hex sorts numerically
-        let written = 0, entriesInRange = 0, nextLo = null;
-        for (const sp of prefixes) {
-          if (written >= MAX_MIGRATE_SHARDS) { nextLo = sp; break; }
-          entriesInRange += Object.keys(byShard[sp]).length;
+        let written = 0;
+        for (const sp of Object.keys(byShard)) {
           await env.CATALOG.put(`shard/${sp}.json`, JSON.stringify({ v: 1, e: byShard[sp] }), {
             httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + SHARD_TTL },
           });
           written++;
         }
-        const done = nextLo === null;
+        const nextN = endN + 1;
+        const done = nextN > hiN;
+        const nextLo = done ? null : nextN.toString(16).padStart(3, "0");
         const origin = `${url.protocol}//${url.host}`;
         const nextUrl = done ? null
           : `${origin}/admin/migrate-r2?key=${encodeURIComponent(url.searchParams.get("key"))}&lo=${nextLo}&hi=${hi}`;
-        return json({ ok: true, range: `${lo}-${hi}`, shardsWritten: written, entriesInRange, done, nextLo, nextUrl,
-          note: done ? "migration complete for this range" : "open nextUrl to continue (tap it)" });
+        return json({ ok: true, range: `${lo}-${endN.toString(16).padStart(3, "0")}`,
+          shardsWritten: written, entriesInRange, done, nextLo, nextUrl,
+          note: done ? "migration complete" : "open nextUrl to continue (tap it)" });
       }
 
       if (req.method === "GET" && url.pathname === "/db") {
@@ -483,9 +494,29 @@ async function flush(env) {
   return flushGithub(env);
 }
 
+// Read the GitHub master db.json as RAW TEXT (handles the >1 MB blob case). Returns the
+// decoded string or null. The migration line-parses this instead of JSON.parse-ing the
+// whole file into one object graph, so Worker memory stays bounded at any catalog size.
+async function readMasterText(env) {
+  const repo = env.GH_REPO, path = env.DB_PATH, branch = env.GH_BRANCH || "main";
+  if (!repo || !path || repo === "undefined" || path === "undefined") return null;
+  const headers = ghHeaders(env);
+  const apiUrl = `https://api.github.com/repos/${repo}/contents/${path}`;
+  const getRes = await fetch(apiUrl + "?ref=" + encodeURIComponent(branch), { headers });
+  if (getRes.status !== 200) return null;
+  const j = await getRes.json();
+  let b64 = j.content || "";
+  if (b64.replace(/\s/g, "").length === 0 && j.sha) {
+    const blobRes = await fetch(`https://api.github.com/repos/${repo}/git/blobs/${j.sha}`, { headers });
+    if (blobRes.status !== 200) return null;
+    b64 = ((await blobRes.json()).content) || "";
+  }
+  try { return b64decode(b64.replace(/\s/g, "")); } catch (_) { return null; }
+}
+
 // Read + parse the whole GitHub master db.json (handles the >1 MB blob case). Returns
-// the parsed { version, avatars } or null on any read/parse failure. Used by the R2
-// migration endpoint; the R2 flush itself never reads the whole master.
+// the parsed { version, avatars } or null on any read/parse failure. (Kept for possible
+// reuse; the migration endpoint uses readMasterText to stay memory-bounded.)
 async function readMasterDb(env) {
   const repo = env.GH_REPO, path = env.DB_PATH, branch = env.GH_BRANCH || "main";
   if (!repo || !path || repo === "undefined" || path === "undefined") return null;
