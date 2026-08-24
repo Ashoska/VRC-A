@@ -3,8 +3,10 @@ package com.vrca.vrchat
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
@@ -399,6 +401,133 @@ object AvatarGlobalDb {
         }
         return scored.sortedByDescending { it.second }
             .map { it.first }.distinctBy { it.avatarId }.take(limit)
+    }
+
+    // ---- sharded reads (R2, learned from /health) ----------------------------
+    // The clone path can resolve a worn avatar by fetching ONLY its shard from the R2
+    // catalog (edge-cached CDN GET), instead of relying on this device's up-to-~30-min
+    // whole-file map. This is what keeps memory flat + clone-resolution fresh at scale.
+    //
+    // DORMANT until R2 is the LIVE write backend: `refreshCatalogBase` only enables shard
+    // fetches when /health reports backend=="r2" (post-cutover). Before cutover the shards
+    // are a frozen migration snapshot, so we don't waste requests on them — lookupSharded
+    // is a no-op and the existing whole-map + DB-stack paths are unchanged.
+    private const val KEY_CATALOG_BASE = "catalog_base" // persisted for cold-start recovery
+    private const val KEY_R2 = "r2_serving"
+    private const val HEALTH_TTL_MS = 5 * 60_000L
+    private const val SHARD_LRU_MAX = 48                 // bounded; evicted on instance leave + overflow
+
+    @Volatile private var catalogBase: String? = null    // e.g. https://cdn.gremlininc.app
+    @Volatile private var r2Serving = false              // true only when R2 is the live backend
+    @Volatile private var catalogBaseLoaded = false
+    @Volatile private var lastHealthMs = 0L
+
+    // Memory-only LRU of recently-fetched shards (prefix -> fileId -> Entry). Access-ordered
+    // so the least-recently-used shard falls off past the cap. Cleared on instance leave.
+    private val shardLru = object : LinkedHashMap<String, Map<String, Entry>>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Map<String, Entry>>): Boolean = size > SHARD_LRU_MAX
+    }
+    // Single-flight: a roster resolves many members at once and several can share a shard;
+    // coalesce concurrent fetches of the same prefix into one request.
+    private val shardFetches = ConcurrentHashMap<String, Deferred<Map<String, Entry>?>>()
+
+    /** Resolve a worn avatar by its image file id from the R2 shard (post-cutover). Checks
+     *  the local map + shard LRU first (both instant), else one edge-cached shard GET.
+     *  Returns null when R2 isn't the live backend yet, on a miss, or on any error — so the
+     *  caller falls through to its existing paths. Image-file-id-keyed, so a hit is exact
+     *  (satisfies the "only an image-confirmed match" resolver invariant by construction). */
+    suspend fun lookupSharded(context: Context, fileId: String?): Entry? {
+        if (fileId == null || !FILE_RE.matches(fileId)) return null
+        map[fileId]?.let { return it }                    // own/whole-map (instant)
+        ensureCatalogBase(context)
+        if (!r2Serving) return null                       // dormant pre-cutover
+        val base = catalogBase ?: return null
+        val prefix = fileId.substring(5, 8).lowercase()
+        synchronized(shardLru) { shardLru[prefix] }?.let { return it[fileId] }
+        val shard = fetchShardSingleFlight(base, prefix) ?: return null
+        synchronized(shardLru) { shardLru[prefix] = shard }
+        return shard[fileId]
+    }
+
+    /** Drop the in-memory shard cache — called on instance leave (presence-scoped
+     *  eviction), alongside the roster's own cache clears. The persisted contribution
+     *  queue + catalogBase are untouched (separate stores). */
+    fun evictShardCache() { synchronized(shardLru) { shardLru.clear() } }
+
+    private suspend fun fetchShardSingleFlight(base: String, prefix: String): Map<String, Entry>? {
+        val deferred = shardFetches.computeIfAbsent(prefix) { scope.async { fetchShard(base, prefix) } }
+        return try { deferred.await() } finally { shardFetches.remove(prefix, deferred) }
+    }
+
+    private fun fetchShard(base: String, prefix: String): Map<String, Entry>? {
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL("$base/shard/$prefix.json").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                connectTimeout = 10_000; readTimeout = 10_000
+            }
+            if (conn.responseCode != 200) return null      // 404 = empty prefix; treat as miss
+            parseShard(conn.inputStream.bufferedReader().readText())
+        } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
+    }
+
+    private fun parseShard(text: String): Map<String, Entry> {
+        val out = HashMap<String, Entry>()
+        val e = JSONObject(text).optJSONObject("e") ?: return out
+        val keys = e.keys()
+        while (keys.hasNext()) {
+            val fid = keys.next()
+            val o = e.optJSONObject(fid) ?: continue
+            val id = o.optString("id", "")
+            if (!id.startsWith("avtr_")) continue
+            val plats = o.optJSONArray("platforms")?.let { pa ->
+                (0 until pa.length()).mapNotNull { pa.optString(it, "").takeIf { s -> s.isNotBlank() } }
+            } ?: emptyList()
+            out[fid] = Entry(
+                fid, id, o.optString("name", ""), o.optString("author", ""), o.optString("authorId", ""),
+                plats, o.optLong("checked", o.optLong("added", 0L)),
+                o.optString("desc", o.optString("description", "")),
+                o.optInt("perfPc", 5), o.optInt("perfQuest", 5), o.optInt("perfIos", 5),
+                o.optBoolean("filled", false)
+            )
+        }
+        return out
+    }
+
+    /** Learn `catalogBase` + whether R2 is the live backend from /health (TTL'd, off-thread).
+     *  Loads persisted values first so a cold start can resolve shards immediately, before
+     *  /health responds (crash-recovery). */
+    private fun ensureCatalogBase(context: Context) {
+        if (!catalogBaseLoaded) {
+            catalogBaseLoaded = true
+            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            catalogBase = prefs.getString(KEY_CATALOG_BASE, null)
+            r2Serving = prefs.getBoolean(KEY_R2, false)
+        }
+        val now = System.currentTimeMillis()
+        if (now - lastHealthMs < HEALTH_TTL_MS) return
+        lastHealthMs = now
+        scope.launch { refreshCatalogBase(context.applicationContext) }
+    }
+
+    private fun refreshCatalogBase(context: Context) {
+        var conn: HttpURLConnection? = null
+        try {
+            conn = (URL("$WORKER_URL/health").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                connectTimeout = 10_000; readTimeout = 10_000
+            }
+            if (conn.responseCode != 200) return
+            val j = JSONObject(conn.inputStream.bufferedReader().readText())
+            val base = j.optString("catalogBase", "").takeIf { it.startsWith("https://") } ?: return
+            // Only trust shards once R2 is the live write backend — before cutover they're a
+            // frozen snapshot, so we stay dormant (no wasted requests).
+            val r2 = j.optBoolean("r2", false) && j.optString("backend", "") == "r2"
+            catalogBase = base
+            r2Serving = r2
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .putString(KEY_CATALOG_BASE, base).putBoolean(KEY_R2, r2).apply()
+        } catch (e: Exception) { /* keep last-known */ } finally { runCatching { conn?.disconnect() } }
     }
 
     // ---- contribute / report -------------------------------------------------

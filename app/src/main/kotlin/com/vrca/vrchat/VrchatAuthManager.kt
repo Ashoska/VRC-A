@@ -1486,6 +1486,13 @@ object VrchatAuthManager {
             com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog"
             return@withContext WornAvatarResult(it.avatarId, it.platforms)
         }
+        // SHARDED catalog (R2) — one edge-cached shard GET keyed by the worn file id, so it
+        // catches avatars newer than this device's ~30-min whole-file map. Image-file-id-keyed
+        // (exact). Dormant until R2 is the live backend, so pre-cutover this is a no-op.
+        com.vrca.vrchat.AvatarGlobalDb.lookupSharded(context, wornFileId)?.let {
+            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog (shard)"
+            return@withContext WornAvatarResult(it.avatarId, it.platforms)
+        }
         // 0. EXACT, NAME-INDEPENDENT: look the avatar up by its worn IMAGE FILE ID.
         if (wornFileId != null) {
             val byFile = try { com.vrca.vrchat.AvatarSearch.searchCandidatesByImageFileId(wornFileId) }
