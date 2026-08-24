@@ -547,7 +547,11 @@ object AvatarCatalogSweep {
             if (!running) break
             val chk = BotVrchatSession.checkAvatar(context, slot, e.avatarId)
             p.checked++
-            if (chk == null) { delay(PACE_MS); continue }
+            if (chk == null) {
+                if (needsFill(e)) noteFillNull(slot, e.fileId)   // poison-entry strike (fill items only)
+                delay(PACE_MS); continue
+            }
+            clearFillAttempt(e.fileId)
             if (chk.alive) noteAlive()
             if (!chk.alive) {
                 if (canRemove()) { removes.add(e.fileId); p.removed++; applyItemLocal(remove = e.fileId) }
@@ -586,6 +590,38 @@ object AvatarCatalogSweep {
     // dedicated Fill/Liveness roles AND any idle bots loaning in — never grab the same
     // avatar. Released when the pass finishes (in a finally).
     private val inFlight = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    // ---- poison-entry guard (fixes the "To process / queued stuck at N" bug) -----
+    // An avatar whose VRChat check keeps returning null — never a definitive alive (to
+    // fill) or 404/410 (to remove), e.g. a persistent 5xx/redirect/odd response — would
+    // sit in the Fill backlog FOREVER: filled never flips true, so needsFill stays true,
+    // so it pins "To process / queued" at a nonzero value even when every other entry is
+    // done. Count consecutive null checks per file id and, once past a threshold, drop it
+    // from the Fill queue for this process so the backlog drains. Strictly guarded:
+    //  - only counted while the bot SESSION is proven alive (a recent authenticated
+    //    success on this slot), so a global rate-limit / dead session never benches a
+    //    perfectly-good entry;
+    //  - cleared on ANY definitive result, so a transient blip never sticks;
+    //  - in-memory only, so the next admin restart retries the entry (and the 7-day
+    //    liveness sweep still covers it meanwhile).
+    private val fillAttempts = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    private val fillGaveUp = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private const val FILL_GIVEUP_ATTEMPTS = 6
+    private const val SESSION_ALIVE_WINDOW_MS = 6L * 60 * 1000
+    private fun sessionAlive(slot: Int): Boolean {
+        val t = BotVrchatSession.lastAuthOkMs(slot)
+        return t > 0 && System.currentTimeMillis() - t < SESSION_ALIVE_WINDOW_MS
+    }
+    /** Count a null check against a fill entry as a poison strike (only when the session
+     *  is proven alive); bench it once it exceeds the threshold. */
+    private fun noteFillNull(slot: Int, fileId: String) {
+        if (!sessionAlive(slot)) return
+        val n = (fillAttempts[fileId] ?: 0) + 1
+        if (n >= FILL_GIVEUP_ATTEMPTS) { fillGaveUp.add(fileId); fillAttempts.remove(fileId) }
+        else fillAttempts[fileId] = n
+    }
+    private fun clearFillAttempt(fileId: String) { fillAttempts.remove(fileId) }
+
     private fun claimBatch(candidates: List<AvatarGlobalDb.Entry>, max: Int): List<AvatarGlobalDb.Entry> {
         val out = ArrayList<AvatarGlobalDb.Entry>(max)
         for (e in candidates) { if (out.size >= max) break; if (inFlight.add(e.fileId)) out.add(e) }
@@ -706,7 +742,9 @@ object AvatarCatalogSweep {
     // (filled=true but still "needs fill"), so the Fill queue plateaued and never drained
     // while the bot re-checked the same un-satisfiable entries. Once filled=true it's done;
     // any later owner edit (new platform/name/bio) is picked up by the liveness refresh.
-    private fun needsFill(e: AvatarGlobalDb.Entry): Boolean = !e.filled
+    // Also excludes benched poison entries (see the poison-entry guard) so one perpetually
+    // null-checking avatar can't pin the Fill backlog at a nonzero value forever.
+    private fun needsFill(e: AvatarGlobalDb.Entry): Boolean = !e.filled && !fillGaveUp.contains(e.fileId)
 
     private fun partitionOf(fileId: String): Int = (fileId.hashCode() and 0x7fffffff) % 2
 
@@ -824,10 +862,12 @@ object AvatarCatalogSweep {
                 val chk = BotVrchatSession.checkAvatar(context, slot, e.avatarId)
                 p.checked++
                 if (chk == null) {
+                    noteFillNull(slot, e.fileId)   // poison-entry strike (only if session is alive)
                     if (++nulls >= 3) { p.status = "rate-limited — backing off"; break }
                     delay(PACE_MS); continue
                 }
                 nulls = 0
+                clearFillAttempt(e.fileId)         // definitive result → reset the poison strike
                 if (chk.alive) noteAlive()
                 if (!chk.alive) {
                     if (canRemove()) { removes.add(e.fileId); p.removed++; applyItemLocal(remove = e.fileId) }
