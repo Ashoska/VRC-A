@@ -25,10 +25,33 @@ cpu_ms = 300000
 binding = "AVATAR_KV"
 id = "e72fc7074f9f44c3b9cde9f6ac7a646b"
 
+# R2 bucket for the SHARDED catalog (per-shard `shard/<3hex>.json` objects). Create the
+# bucket in Cloudflare -> R2 -> "Create bucket" named vrca-avatar-catalog, then this
+# binding activates the R2 write path (flushR2) automatically — no whole-file commit, so
+# the CPU/memory/large-commit wall is gone. Until this bucket exists the Worker keeps the
+# old GitHub whole-file flush (env.CATALOG absent -> flushGithub), so deploying is safe
+# before you create it. After creating it: seed the existing catalog into shards via
+# GET /admin/migrate-r2?key=ADMIN_KEY&lo=000&hi=fff (chunk lo/hi if it times out).
+[[r2_buckets]]
+binding = "CATALOG"
+bucket_name = "vrca-avatar-catalog"
+
 [vars]
 GH_REPO = "Ashoska/VRC-A-Image-store"
 DB_PATH = "avatars/db.json"
 GH_BRANCH = "main"
+# Where the app reads the sharded catalog from (it appends /shard/<prefix>.json etc.).
+# Leave this line commented to serve via the Worker's own edge-cached /catalog route
+# (works today on *.workers.dev, no domain). Once you attach a custom domain to the R2
+# bucket, set CATALOG_BASE to it (e.g. "https://cdn.yourdomain.com") so reads hit the pure
+# CDN and bypass the Worker — /health echoes catalogBase, so the app picks it up with NO
+# app-store update.
+# CATALOG_BASE = "https://cdn.yourdomain.com"
+# CUTOVER SWITCH. The R2 per-shard flush stays OFF until this is set to "1", even after the
+# bucket + binding exist — so you can seed + serve + verify shards first. Flip it to "1"
+# (and redeploy) ONLY once the sharded-read side is live; before that, flipping it would
+# freeze the admin sweep + un-updated clients (they still read the whole-file master).
+# R2_WRITE = "1"
 
 [triggers]
 # Flush pending contributions/reports into the file every 2 min (paid tier) so new

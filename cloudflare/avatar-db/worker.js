@@ -28,6 +28,21 @@ const AVTR_RE = /^avtr_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 const FILE_RE = /^file_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const REMOVE_QUORUM = 2; // independent "dead" reports needed before a hard remove
 
+// ---- R2 sharding -----------------------------------------------------------
+// When the R2 bucket binding `CATALOG` is present, the flush writes per-shard objects
+// (`shard/<3hex>.json`) instead of committing the whole ~18 MB db.json to GitHub every
+// cron — which is what hit the Worker CPU/memory/large-commit wall past ~50k entries.
+// Each shard holds the FULL records for the file ids whose UUID starts with those 3 hex,
+// so the whole catalog is NEVER loaded into the Worker at once. 4096 shards.
+const SHARD_TTL = 300; // seconds; R2 cacheControl so edge caches expire in ~5 min
+
+// file id = "file_" + UUID (8-4-4-4-12 hex). The 3 hex after "file_" (string index 5..7)
+// are the shard prefix. Guarded: fall back to "000" if the format ever differs.
+function shardPrefix(fileId) {
+  const p = (fileId || "").slice(5, 8);
+  return /^[0-9a-f]{3}$/i.test(p) ? p.toLowerCase() : "000";
+}
+
 function json(obj, status = 200) {
   return new Response(JSON.stringify(obj), {
     status,
@@ -84,10 +99,35 @@ function cleanEntry(e) {
 }
 
 export default {
-  async fetch(req, env) {
+  async fetch(req, env, ctx) {
     const url = new URL(req.url);
     if (req.method === "OPTIONS") return json({ ok: true });
     try {
+      // ---- R2 catalog serving (edge-cached) --------------------------------
+      // GET /catalog/<key> -> the R2 object at <key> (e.g. /catalog/shard/ab1.json).
+      // A cache HIT skips R2 entirely (free); a MISS is one Class B read, then cached.
+      // This is serving option 5b.2 — works on *.workers.dev TODAY, no domain needed.
+      // Once a custom domain is attached to the bucket, CATALOG_BASE (in /health) flips
+      // to it and reads bypass the Worker at the pure CDN layer (no app update needed).
+      if (req.method === "GET" && url.pathname.startsWith("/catalog/")) {
+        if (!env.CATALOG) return json({ ok: false, error: "R2 not configured" }, 503);
+        const key = url.pathname.slice("/catalog/".length);
+        if (!key || key.includes("..")) return json({ ok: false, error: "bad key" }, 400);
+        const cache = caches.default;
+        const hit = await cache.match(req);
+        if (hit) return hit;
+        const obj = await env.CATALOG.get(key);
+        if (!obj) return new Response("", { status: 404, headers: { "access-control-allow-origin": "*" } });
+        const res = new Response(obj.body, {
+          headers: {
+            "content-type": "application/json",
+            "cache-control": "public, max-age=" + SHARD_TTL,
+            "access-control-allow-origin": "*",
+          },
+        });
+        if (ctx && ctx.waitUntil) ctx.waitUntil(cache.put(req, res.clone()));
+        return res;
+      }
       if (req.method === "POST" && url.pathname === "/contribute") {
         const body = await req.json().catch(() => null);
         const list = body && Array.isArray(body.entries)
@@ -198,6 +238,40 @@ export default {
         return json({ ok: true, restored: count, from: ref });
       }
 
+      if (req.method === "GET" && url.pathname === "/admin/migrate-r2") {
+        // ONE-TIME, RESUMABLE seed of the R2 shards from the current GitHub master.
+        // Guarded by ADMIN_KEY. Processes a hex-prefix RANGE per call so a huge catalog
+        // migrates in chunks without one over-long invocation:
+        //   /admin/migrate-r2?key=KEY&lo=000&hi=0ff   (then 100-1ff, ... up to fff)
+        // Safe to re-run; each shard is overwritten from the master (source of truth here).
+        if (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY) return json({ ok: false, error: "unauthorized" }, 401);
+        if (!env.CATALOG) return json({ ok: false, error: "R2 not configured" }, 503);
+        const lo = (url.searchParams.get("lo") || "000").toLowerCase();
+        const hi = (url.searchParams.get("hi") || "fff").toLowerCase();
+        const loN = parseInt(lo, 16), hiN = parseInt(hi, 16);
+        if (isNaN(loN) || isNaN(hiN) || loN > hiN) return json({ ok: false, error: "bad lo/hi (3 hex each)" }, 400);
+        const db = await readMasterDb(env);
+        if (!db) return json({ ok: false, error: "could not read master db.json" }, 500);
+        // Bucket ONLY the in-range shards, to bound Worker memory on a big catalog.
+        const byShard = {};
+        for (const fid of Object.keys(db.avatars || {})) {
+          const sp = shardPrefix(fid);
+          const n = parseInt(sp, 16);
+          if (n < loN || n > hiN) continue;
+          (byShard[sp] ||= {})[fid] = db.avatars[fid];
+        }
+        let written = 0, entriesInRange = 0;
+        for (const sp of Object.keys(byShard)) {
+          entriesInRange += Object.keys(byShard[sp]).length;
+          await env.CATALOG.put(`shard/${sp}.json`, JSON.stringify({ v: 1, e: byShard[sp] }), {
+            httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + SHARD_TTL },
+          });
+          written++;
+        }
+        return json({ ok: true, range: `${lo}-${hi}`, shardsWritten: written, entriesInRange,
+          note: "re-run with the next lo/hi range until you reach fff" });
+      }
+
       if (req.method === "GET" && url.pathname === "/db") {
         // The current serialized catalog, served FRESH from KV (no GitHub CDN lag) so
         // the admin bots notice new avatars immediately. Empty until the first flush.
@@ -233,7 +307,18 @@ export default {
           rawUrl: `https://raw.githubusercontent.com/${env.GH_REPO || "?"}/${branch}/${env.DB_PATH || "?"}`,
           lastCommit: meta.lastCommit || "none",
           adminKeySet: !!env.ADMIN_KEY,
-          version: 4,
+          // R2 sharding: which backend the flush is writing + where clients should read
+          // the sharded catalog. `catalogBase` is what the app appends `/shard/<prefix>.json`
+          // (and later `/index/...`) to — learned from here so a serving change (workers.dev
+          // -> custom domain) needs no app update. Defaults to this Worker's /catalog route
+          // (edge-cached); set the CATALOG_BASE var to a custom domain to bypass the Worker.
+          r2: !!env.CATALOG,
+          r2WriteActive: r2WriteActive(env),
+          backend: r2WriteActive(env) ? "r2" : "github",
+          catalogBase: env.CATALOG_BASE || `https://${url.host}/catalog`,
+          shardScheme: "filehex3-full",
+          shardCount: 4096,
+          version: 5,
         });
       }
 
@@ -375,7 +460,168 @@ function serializeDb(db) {
     ',"count":' + keys.length + ',"avatars":{\n' + lines.join(",\n") + "\n}}";
 }
 
+// Flush dispatcher. The R2 per-shard path (never loads the whole catalog → no CPU/memory/
+// commit wall) activates ONLY when BOTH the R2 bucket binding is present AND the explicit
+// `R2_WRITE = "1"` var is set. The two-key gate is deliberate: creating the bucket + binding
+// lets you seed shards (/admin/migrate-r2) and serve them (/catalog) for testing WITHOUT
+// cutting over the flush — because flushR2 stops feeding the whole-file sources (GitHub
+// master + KV dbcache) that the admin sweep and un-updated clients still read, so cutover
+// must wait until the sharded-read side is ready. Flip R2_WRITE last.
+function r2WriteActive(env) { return !!(env.CATALOG && env.R2_WRITE === "1"); }
 async function flush(env) {
+  if (r2WriteActive(env)) return flushR2(env);
+  return flushGithub(env);
+}
+
+// Read + parse the whole GitHub master db.json (handles the >1 MB blob case). Returns
+// the parsed { version, avatars } or null on any read/parse failure. Used by the R2
+// migration endpoint; the R2 flush itself never reads the whole master.
+async function readMasterDb(env) {
+  const repo = env.GH_REPO, path = env.DB_PATH, branch = env.GH_BRANCH || "main";
+  if (!repo || !path || repo === "undefined" || path === "undefined") return null;
+  const headers = ghHeaders(env);
+  const apiUrl = `https://api.github.com/repos/${repo}/contents/${path}`;
+  const getRes = await fetch(apiUrl + "?ref=" + encodeURIComponent(branch), { headers });
+  if (getRes.status !== 200) return null;
+  const j = await getRes.json();
+  let b64 = j.content || "";
+  if (b64.replace(/\s/g, "").length === 0 && j.sha) {
+    const blobRes = await fetch(`https://api.github.com/repos/${repo}/git/blobs/${j.sha}`, { headers });
+    if (blobRes.status !== 200) return null;
+    b64 = ((await blobRes.json()).content) || "";
+  }
+  try {
+    const db = JSON.parse(b64decode(b64.replace(/\s/g, "")));
+    if (!db.avatars) db.avatars = {};
+    return db;
+  } catch (_) { return null; }
+}
+
+// The R2 per-shard flush: read only the shards touched by pending ops, merge, write them
+// back. The whole catalog is NEVER in memory at once, so there is no CPU/memory/commit
+// wall regardless of catalog size. Contributions/admin-upserts arrive already cleanEntry'd
+// (stamped by /contribute + /admin), so this path just merges + writes.
+async function flushR2(env) {
+  const prevMeta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+  const allNames = (await env.AVATAR_KV.list()).keys.map((k) => k.name);
+  const pendNames = allNames.filter((n) => n.startsWith("pend:"));
+  const repNames  = allNames.filter((n) => n.startsWith("rep:"));
+  const admuNames = allNames.filter((n) => n.startsWith("admu:"));
+  const admrNames = allNames.filter((n) => n.startsWith("admr:"));
+  const admkNames = allNames.filter((n) => n.startsWith("admk:"));
+
+  // Group every pending op by shard prefix so each shard is read + written ONCE.
+  const shardOps = {};
+  const S = (sp) => (shardOps[sp] ||= { adds: {}, upserts: {}, removes: new Set(), checked: new Set(), renames: {} });
+
+  const pendKeys = [];
+  for (const kn of pendNames) {
+    pendKeys.push(kn);
+    const val = await env.AVATAR_KV.get(kn);
+    if (!val) continue;
+    let batch; try { batch = JSON.parse(val); } catch (_) { continue; }
+    for (const fid of Object.keys(batch)) if (FILE_RE.test(fid)) S(shardPrefix(fid)).adds[fid] = batch[fid];
+  }
+  const admuKeys = [];
+  for (const kn of admuNames) {
+    admuKeys.push(kn);
+    const val = await env.AVATAR_KV.get(kn);
+    if (!val) continue;
+    let batch; try { batch = JSON.parse(val); } catch (_) { continue; }
+    for (const fid of Object.keys(batch)) if (FILE_RE.test(fid)) S(shardPrefix(fid)).upserts[fid] = batch[fid];
+  }
+  const admrKeys = [];
+  for (const kn of admrNames) {
+    admrKeys.push(kn);
+    const val = await env.AVATAR_KV.get(kn);
+    if (!val) continue;
+    let arr; try { arr = JSON.parse(val); } catch (_) { continue; }
+    for (const fid of arr) if (typeof fid === "string" && fid.startsWith("file_")) S(shardPrefix(fid)).removes.add(fid);
+  }
+  const admkKeys = [];
+  for (const kn of admkNames) {
+    admkKeys.push(kn);
+    const val = await env.AVATAR_KV.get(kn);
+    if (!val) continue;
+    let arr; try { arr = JSON.parse(val); } catch (_) { continue; }
+    for (const fid of arr) if (typeof fid === "string" && fid.startsWith("file_")) S(shardPrefix(fid)).checked.add(fid);
+  }
+  // Reports: rename immediately, remove on quorum; both clear their rep: key.
+  const repClear = [];
+  for (const kn of repNames) {
+    const fid = kn.slice(4);
+    if (!fid.startsWith("file_")) continue;
+    const val = await env.AVATAR_KV.get(kn);
+    if (!val) continue;
+    let r; try { r = JSON.parse(val); } catch (_) { continue; }
+    if (r.status === "renamed" && r.name) { S(shardPrefix(fid)).renames[fid] = String(r.name).slice(0, 100); repClear.push(kn); }
+    else if (r.status === "dead" && (r.count || 0) >= REMOVE_QUORUM) { S(shardPrefix(fid)).removes.add(fid); repClear.push(kn); }
+  }
+
+  const nowChecked = Date.now();
+  let added = 0, removed = 0, allShardsOk = true;
+  const prefixes = Object.keys(shardOps);
+  for (const sp of prefixes) {
+    const ops = shardOps[sp];
+    let cur;
+    try {
+      const obj = await env.CATALOG.get(`shard/${sp}.json`);
+      cur = obj ? await obj.json() : { v: 1, e: {} };
+      if (!cur || typeof cur !== "object" || typeof cur.e !== "object" || cur.e === null) cur = { v: 1, e: {} };
+    } catch (_) { allShardsOk = false; continue; } // read failed -> skip (never wipe), retry next flush
+    const e = cur.e;
+    for (const fid of Object.keys(ops.adds)) if (!e[fid]) { e[fid] = ops.adds[fid]; added++; }
+    for (const fid of Object.keys(ops.upserts)) {
+      const inc = ops.upserts[fid];
+      const prev = e[fid];
+      if (prev && typeof prev.added === "number") inc.added = prev.added; // `added` is immutable
+      else if (!prev) added++;
+      e[fid] = inc;
+    }
+    for (const fid of Object.keys(ops.renames)) if (e[fid]) e[fid].name = ops.renames[fid];
+    for (const fid of ops.checked) if (e[fid]) e[fid].checked = nowChecked;
+    for (const fid of ops.removes) if (e[fid]) { delete e[fid]; removed++; }
+    try {
+      await env.CATALOG.put(`shard/${sp}.json`, JSON.stringify({ v: 1, e }), {
+        httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + SHARD_TTL },
+      });
+    } catch (_) { allShardsOk = false; }
+  }
+
+  // Clear KV only when every touched shard wrote OK (idempotent retry otherwise — nothing lost).
+  if (allShardsOk) {
+    for (const n of pendKeys) await env.AVATAR_KV.delete(n);
+    for (const n of admuKeys) await env.AVATAR_KV.delete(n);
+    for (const n of admrKeys) await env.AVATAR_KV.delete(n);
+    for (const n of admkKeys) await env.AVATAR_KV.delete(n);
+    for (const n of repClear) await env.AVATAR_KV.delete(n);
+  }
+
+  const entries = Math.max(0, (prevMeta.entries || 0) + added - removed);
+  try {
+    await env.CATALOG.put("_manifest.json", JSON.stringify({
+      v: 1, shardScheme: "filehex3-full", shardCount: 4096, entryCount: entries,
+      lastUpdate: new Date().toISOString(),
+    }), { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + SHARD_TTL } });
+  } catch (_) {}
+
+  await env.AVATAR_KV.put("meta", JSON.stringify({
+    ...prevMeta,
+    lastFlush: new Date().toISOString(),
+    lastAdded: added, lastRemoved: removed,
+    totalAdded: (prevMeta.totalAdded || 0) + added,
+    totalRemoved: (prevMeta.totalRemoved || 0) + removed,
+    entries,
+    lastCommit: allShardsOk
+      ? `R2 +${added} -${removed} (${prefixes.length} shards)`
+      : `R2 partial: some shard IO failed, kept pending (+${added} -${removed})`,
+    pendingBatches: pendNames.length,
+    reports: repNames.length,
+    backend: "r2",
+  }));
+}
+
+async function flushGithub(env) {
   const repo = env.GH_REPO;
   const path = env.DB_PATH;
   const branch = env.GH_BRANCH || "main";
