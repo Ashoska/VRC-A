@@ -45,6 +45,15 @@ object BotVrchatSession {
     /** Session validity for a slot's stored cookie. */
     enum class Auth { AUTHED, EXPIRED, UNKNOWN }
 
+    // Wall-clock of the last API call that PROVED this slot's session is authed (any
+    // authenticated response: 200, or an avatar-level 403/404/410 — all require a valid
+    // cookie; only a 401 means expired). The Bots tab uses this to flip a bot from
+    // "Checking…" to "Authed" the moment it does real work, instead of waiting on the
+    // periodic validate (which can sit UNKNOWN on a transient 429/network blip).
+    private val authOkAt = java.util.concurrent.atomic.AtomicLongArray(SLOTS)
+    fun lastAuthOkMs(slot: Int): Long = if (slot in 0 until SLOTS) authOkAt.get(slot) else 0L
+    private fun noteAuthOk(slot: Int) { if (slot in 0 until SLOTS) authOkAt.set(slot, System.currentTimeMillis()) }
+
     private fun prefsName(slot: Int) = if (slot <= 0) "vrca_bot_vrchat" else "vrca_bot_vrchat_$slot"
 
     private fun prefs(context: Context, slot: Int): android.content.SharedPreferences? = try {
@@ -244,6 +253,7 @@ object BotVrchatSession {
             j.optString("displayName", "").takeIf { it.isNotBlank() }?.let {
                 prefs(context, slot)?.edit()?.putString(KEY_NAME, it)?.apply()
             }
+            noteAuthOk(slot)
             Auth.AUTHED
         } catch (e: Exception) { Auth.UNKNOWN }
         finally { runCatching { conn?.disconnect() } }
@@ -292,6 +302,9 @@ object BotVrchatSession {
                     connectTimeout = 15000; readTimeout = 15000
                 }
                 val code = conn.responseCode
+                // Any of these proves the cookie is valid (a bad cookie 401s), so mark the slot
+                // authed — this is what flips "Checking…" to "Authed" as soon as the bot works.
+                if (code == 200 || code == 403 || code == 404 || code == 410) noteAuthOk(slot)
                 if (code == 404 || code == 410 || code == 403)
                     return@withContext AvatarCheck(false, null, "", "", "", emptyList())
                 if (code != 200) return@withContext null

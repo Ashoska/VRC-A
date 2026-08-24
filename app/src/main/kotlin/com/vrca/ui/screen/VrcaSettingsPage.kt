@@ -3,6 +3,7 @@ package com.vrca.ui.screen
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -57,6 +58,7 @@ import com.vrca.ui.settings.ToggleRow
 import com.vrca.ui.viewmodel.VrcaViewModel
 import kotlinx.coroutines.launch
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 internal fun SettingsPage(
     vm: VrcaViewModel,
@@ -66,6 +68,19 @@ internal fun SettingsPage(
     val ctx = LocalContext.current
     var debugExpanded by rememberSaveable { mutableStateOf(false) }
     var showVrchatLogin by rememberSaveable { mutableStateOf(false) }
+
+    // Scroll target so another page (Media tab's missing-permission warning) can open
+    // Settings scrolled straight to the Permissions section — the user lands on the
+    // permission control with its live status, not in Android's raw settings list.
+    val settingsScroll = rememberScrollState()
+    val permsBring = remember { androidx.compose.foundation.relocation.BringIntoViewRequester() }
+    androidx.compose.runtime.LaunchedEffect(SettingsFocus.scrollToPermissions.value) {
+        if (SettingsFocus.scrollToPermissions.value) {
+            kotlinx.coroutines.delay(300)   // let the page lay out after the tab switch
+            runCatching { permsBring.bringIntoView() }
+            SettingsFocus.scrollToPermissions.value = false
+        }
+    }
 
     // Live permission statuses — re-checked whenever the user returns from a
     // system settings page (same ON_RESUME pattern as the onboarding step).
@@ -77,6 +92,16 @@ internal fun SettingsPage(
         }
         lifecycleOwner.lifecycle.addObserver(obs)
         onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+    }
+    // Belt-and-suspenders: some launchers/OEMs don't deliver a clean ON_RESUME when
+    // returning from a system-settings screen, so ALSO refresh whenever the window
+    // regains focus (which reliably fires on return from another Activity). Without this
+    // a just-granted permission stayed "Not granted" until the user left and reopened
+    // the tab (the reported "doesn't update until reopening Settings").
+    val windowInfo = androidx.compose.ui.platform.LocalWindowInfo.current
+    androidx.compose.runtime.LaunchedEffect(windowInfo) {
+        androidx.compose.runtime.snapshotFlow { windowInfo.isWindowFocused }
+            .collect { focused -> if (focused) permRefreshTick++ }
     }
     val notifGranted = remember(permRefreshTick) {
         android.os.Build.VERSION.SDK_INT < 33 ||
@@ -122,7 +147,7 @@ internal fun SettingsPage(
         return
     }
 
-    PageContainer {
+    PageContainer(scrollState = settingsScroll) {
         // -- Accounts --
         AccountsSection(vm, onSignInVrchat = { showVrchatLogin = true })
 
@@ -173,6 +198,7 @@ internal fun SettingsPage(
 
         // -- Permissions (every permission the app uses lives here, each with
         //    its live granted status) --
+        Box(Modifier.fillMaxWidth().bringIntoViewRequester(permsBring)) {
         SectionCard(title = "Permissions") {
             // POST_NOTIFICATIONS — not prompted on the headset (Quest doesn't surface
             // the app notifications the way a phone does).
@@ -294,6 +320,7 @@ internal fun SettingsPage(
                 }
             }
         }
+        } // Box(bringIntoViewRequester = permsBring)
 
         // -- About --
         SectionCard(title = "About") {
@@ -502,6 +529,27 @@ internal fun SettingsPage(
                         SelectionContainer {
                             Text(
                                 gdbDiag,
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+
+                        // Avatar clone/select tracker: proves whether VRC-A re-selects
+                        // an avatar on its own (count climbs with no tap) vs VRChat
+                        // restoring its saved current-avatar (count stays put).
+                        Text("Avatar clone/select (VRC-A)", style = MaterialTheme.typography.labelMedium)
+                        var selDiag by remember {
+                            mutableStateOf(com.vrca.vrchat.VrchatAuthManager.selectAvatarDiag(ctx))
+                        }
+                        androidx.compose.runtime.LaunchedEffect(Unit) {
+                            while (true) {
+                                selDiag = com.vrca.vrchat.VrchatAuthManager.selectAvatarDiag(ctx)
+                                kotlinx.coroutines.delay(1500)
+                            }
+                        }
+                        SelectionContainer {
+                            Text(
+                                selDiag,
                                 fontFamily = FontFamily.Monospace,
                                 style = MaterialTheme.typography.bodySmall
                             )

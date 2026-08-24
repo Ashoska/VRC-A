@@ -39,6 +39,11 @@
          reading avatar params over OSCQuery needs this. Headset-only (the phone/
          admin builds keep cleartext BLOCKED); it does NOT downgrade any existing
          https:// call — it only permits http when we explicitly use it. -->
+    <!-- No android:banner: the Quest library tile is NOT driven by the APK — QGO (Quest
+         Games Optimizer) and the stock Meta library use their OWN thumbnail databases (or
+         the square icon as fallback) and ignore a manifest banner. A proper QGO tile needs
+         a custom cover set in QGO / submitted to its database; a store tile needs the Meta
+         dashboard cover art. So the banner PNG was dropped to save headset APK space. -->
     <application
         android:resizeableActivity="true"
         android:usesCleartextTraffic="true"

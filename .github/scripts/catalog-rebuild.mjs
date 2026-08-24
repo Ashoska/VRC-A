@@ -1,0 +1,167 @@
+// VRC-A catalog rebuild — the heavy job the Worker can't do (128 MB / subrequest caps).
+// Runs on a GitHub Actions runner (7 GB RAM), reads every R2 lookup shard over the public
+// domain, and rebuilds — WRITING EVERYTHING TO R2 (no GitHub commit, no extra token):
+//   - fragments/<3hex>.json  (avatarId -> search summary)
+//   - index/<3hex>.json      (token -> [avatarId,...])
+//   - db.json                (full master, backup + the admin bots' whole-catalog source)
+//   - _manifest.json         (marks search ready + rebuild time)
+//
+// The Worker's flushR2 keeps the lookup shards fresh (clone path); this keeps SEARCH
+// (index/fragments) + the master fresh from those shards. Schedule every ~15-30 min.
+// Nothing here is on a user hot path.
+//
+// Bucket math MUST match the app (AvatarGlobalDb):
+//   index token bucket = (token.hashCode() & 0xfff) as 3 hex   (Java String.hashCode)
+//   fragment id bucket = the 3 hex after "avtr_"
+//
+// Env (GitHub Action secrets/vars):
+//   CATALOG_DOMAIN        e.g. cdn.gremlininc.app        (public read of shards)
+//   R2_ACCOUNT_ID         Cloudflare account id
+//   R2_ACCESS_KEY_ID      R2 API token access key id     (read+write objects)
+//   R2_SECRET_ACCESS_KEY  R2 API token secret
+//   R2_BUCKET             vrca-avatar-catalog
+import { AwsClient } from "aws4fetch";
+
+const {
+  CATALOG_DOMAIN, R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET,
+} = process.env;
+
+for (const [k, v] of Object.entries({ CATALOG_DOMAIN, R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET })) {
+  if (!v) { console.error(`Missing env ${k}`); process.exit(1); }
+}
+
+const R2_ENDPOINT = `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`;
+const HOT_TOKEN_CAP = 800;        // cap postings per token (bounds a hot bucket)
+const READ_CONCURRENCY = 48;      // parallel shard reads over the CDN
+const WRITE_CONCURRENCY = 24;     // parallel R2 puts
+const HEX = "0123456789abcdef";
+
+const aws = new AwsClient({
+  accessKeyId: R2_ACCESS_KEY_ID, secretAccessKey: R2_SECRET_ACCESS_KEY,
+  service: "s3", region: "auto",
+});
+
+// Java String.hashCode, replicated so token buckets match the app exactly.
+function hashCode(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0; return h; }
+function indexBucket(token) { return ((hashCode(token) & 0xfff) >>> 0).toString(16).padStart(3, "0"); }
+function fragBucket(avatarId) { return avatarId.slice(5, 8).toLowerCase(); }
+function platMask(platforms) {
+  let m = 0; const p = platforms || [];
+  if (p.includes("PC")) m |= 1; if (p.includes("Quest")) m |= 2; if (p.includes("iOS")) m |= 4; return m;
+}
+function tokenize(...fields) {
+  const set = new Set();
+  for (const f of fields) {
+    if (!f) continue;
+    for (const w of String(f).toLowerCase().split(/[^\p{L}\p{N}]+/u)) if (w.length >= 2) set.add(w);
+  }
+  return set;
+}
+
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length); let i = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (i < items.length) { const idx = i++; out[idx] = await fn(items[idx], idx); }
+  }));
+  return out;
+}
+
+const allPrefixes = [];
+for (const a of HEX) for (const b of HEX) for (const c of HEX) allPrefixes.push(a + b + c);
+
+async function fetchShard(prefix) {
+  const url = `https://${CATALOG_DOMAIN}/shard/${prefix}.json`;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(url, { headers: { "user-agent": "VRC-A-rebuild" } });
+      if (res.status === 404) return {};
+      if (res.status === 200) return (await res.json()).e || {};
+    } catch (_) {}
+    await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+  }
+  console.warn(`shard ${prefix}: read failed after retries (skipped)`);
+  return {};
+}
+
+async function r2Put(key, bodyStr) {
+  const url = `${R2_ENDPOINT}/${R2_BUCKET}/${key}`;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const res = await aws.fetch(url, {
+      method: "PUT", body: bodyStr,
+      headers: { "content-type": "application/json", "cache-control": "public, max-age=3600" },
+    });
+    if (res.ok) return true;
+    await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+  }
+  throw new Error(`R2 put ${key} failed`);
+}
+
+async function main() {
+  console.log(`Reading ${allPrefixes.length} shards from ${CATALOG_DOMAIN} ...`);
+  // 1. Read every lookup shard -> the full catalog (fileId -> record).
+  const avatars = {}; // fileId -> full record
+  let readCount = 0;
+  await mapLimit(allPrefixes, READ_CONCURRENCY, async (prefix) => {
+    const e = await fetchShard(prefix);
+    for (const fid of Object.keys(e)) avatars[fid] = e[fid];
+    if (++readCount % 512 === 0) console.log(`  read ${readCount}/${allPrefixes.length} shards`);
+  });
+  const fileIds = Object.keys(avatars);
+  console.log(`Loaded ${fileIds.length} avatars.`);
+  if (fileIds.length === 0) { console.error("0 avatars read — aborting (won't wipe)"); process.exit(1); }
+
+  // 2. Build fragments (id -> summary) and the token index (token -> ids), bucketed.
+  const fragBuckets = {};   // "<3hex>" -> { id -> {f,n,au,ai,p,pf} }
+  const idxBuckets = {};    // "<3hex>" -> { token -> Set(id) }
+  for (const fid of fileIds) {
+    const a = avatars[fid];
+    const id = a.id; if (!id || !id.startsWith("avtr_")) continue;
+    const fb = fragBucket(id);
+    (fragBuckets[fb] ||= {})[id] = {
+      f: fid, n: a.name || "", au: a.author || "", ai: a.authorId || "",
+      p: platMask(a.platforms),
+      pf: { pc: a.perfPc ?? 5, q: a.perfQuest ?? 5, i: a.perfIos ?? 5 },
+    };
+    const tokens = tokenize(a.name, a.author, a.desc);
+    if (a.authorId) tokens.add(a.authorId.toLowerCase());
+    for (const t of tokens) {
+      const ib = indexBucket(t);
+      const bucket = (idxBuckets[ib] ||= {});
+      (bucket[t] ||= new Set()).add(id);
+    }
+  }
+
+  // 3. Serialize + cull hot tokens, then write fragments + index to R2.
+  const fragEntries = Object.entries(fragBuckets).map(([b, e]) => [`fragments/${b}.json`, JSON.stringify({ v: 1, e })]);
+  const idxEntries = Object.entries(idxBuckets).map(([b, toks]) => {
+    const t = {};
+    for (const [tok, idset] of Object.entries(toks)) {
+      let ids = Array.from(idset);
+      if (ids.length > HOT_TOKEN_CAP) ids = ids.slice(0, HOT_TOKEN_CAP);
+      t[tok] = ids;
+    }
+    return [`index/${b}.json`, JSON.stringify({ v: 1, t })];
+  });
+  const writes = [...fragEntries, ...idxEntries];
+  console.log(`Writing ${fragEntries.length} fragment + ${idxEntries.length} index objects to R2 ...`);
+  let wrote = 0;
+  await mapLimit(writes, WRITE_CONCURRENCY, async ([key, body]) => {
+    await r2Put(key, body);
+    if (++wrote % 512 === 0) console.log(`  wrote ${wrote}/${writes.length}`);
+  });
+
+  // 4. Master db.json (full records, one avatar per line) -> R2. Backup + the admin bots'
+  //    whole-catalog source post-cutover (they read ${CATALOG_DOMAIN}/db.json).
+  const lines = fileIds.map((k) => JSON.stringify(k) + ":" + JSON.stringify(avatars[k]));
+  const master = `{"name":"VRC-A Avatar Store","version":1,"count":${fileIds.length},"avatars":{\n${lines.join(",\n")}\n}}`;
+  await r2Put("db.json", master);
+
+  // 5. Manifest (marks search ready + records the rebuild time).
+  await r2Put("_manifest.json", JSON.stringify({
+    v: 1, shardScheme: "filehex3-full", shardCount: 4096, indexScheme: "hash3", entryCount: fileIds.length,
+    searchReady: true, lastFullRebuild: new Date().toISOString(),
+  }));
+  console.log(`Done. ${fileIds.length} avatars, ${idxEntries.length} index buckets, ${fragEntries.length} fragment buckets, master + manifest.`);
+}
+
+main().catch((e) => { console.error(e); process.exit(1); });

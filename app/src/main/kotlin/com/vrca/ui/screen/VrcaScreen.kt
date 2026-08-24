@@ -833,6 +833,10 @@ fun VrcaScreen(
                         AppPage.Music -> NowPlayingPage(
                             vm = chatboxViewModel,
                             isBanned = isBannedEffective,
+                            onOpenPermissions = {
+                                SettingsFocus.scrollToPermissions.value = true
+                                page = AppPage.Settings
+                            },
                             onPersistSpotifyPreset = { UiPrefs.writeSpotifyPreset(ctx, it) }
                         )
 
@@ -1068,6 +1072,14 @@ private fun DrawerItem(
 /* =========================
    COMMON LAYOUT
    ========================= */
+
+/** One-shot cross-page signal: another page (e.g. the Media tab's missing-permission
+ *  warning) asks the Settings page to open scrolled to the Permissions section, so the
+ *  user lands ON the permission control (with its live granted status) instead of being
+ *  thrown straight into Android's system settings. Consumed + reset by SettingsPage. */
+internal object SettingsFocus {
+    val scrollToPermissions = androidx.compose.runtime.mutableStateOf(false)
+}
 
 @Composable
 internal fun PageContainer(

@@ -71,6 +71,7 @@ fun BotsTab() {
     var adminKey by remember { mutableStateOf(prefs.getString("avatar_admin_key", "") ?: "") }
     var roleSlots by remember { mutableStateOf(loadRoleSlots(prefs)) }
     var paused by remember { mutableStateOf(prefs.getBoolean("bots_paused", false)) }
+    var avtrdbCrawl by remember { mutableStateOf(prefs.getBoolean("avtrdb_crawl_enabled", false)) }
 
     LaunchedEffect(Unit) { BotController.start(ctx) }
     val bots by BotController.bots.collectAsState()
@@ -78,10 +79,12 @@ fun BotsTab() {
     val totalQueued by BotController.totalQueued.collectAsState()
     val blitz by BotController.blitz.collectAsState()
     val blitzViews by BotController.blitzViews.collectAsState()
+    val sweepAlive by BotController.sweepAlive.collectAsState()
+    val sweepAgoMs by BotController.sweepLastCycleAgoMs.collectAsState()
     // The sweep lifecycle is owned by BotController (reads the saved key/assignment/pause
     // every couple seconds), so it auto-runs from app launch. The UI just writes those
     // prefs; nudge it to re-apply immediately on a change.
-    LaunchedEffect(adminKey, roleSlots.joinToString(","), paused) { BotController.applySweepConfig(ctx) }
+    LaunchedEffect(adminKey, roleSlots.joinToString(","), paused, avtrdbCrawl) { BotController.applySweepConfig(ctx) }
 
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
@@ -95,8 +98,12 @@ fun BotsTab() {
                 onKeyChange = { adminKey = it; prefs.edit().putString("avatar_admin_key", it).apply() },
                 totalQueued = totalQueued,
                 blitz = blitz,
+                sweepAlive = sweepAlive,
+                sweepAgoMs = sweepAgoMs,
                 paused = paused,
                 onTogglePause = { paused = !paused; prefs.edit().putBoolean("bots_paused", paused).apply() },
+                avtrdbCrawl = avtrdbCrawl,
+                onToggleCrawl = { avtrdbCrawl = !avtrdbCrawl; prefs.edit().putBoolean("avtrdb_crawl_enabled", avtrdbCrawl).apply() },
                 roleSlots = roleSlots,
                 slotLabels = List(BotVrchatSession.SLOTS) { s -> bots.getOrNull(s)?.name ?: "" },
                 onRolePick = { roleOrdinal, slot ->
@@ -167,7 +174,9 @@ private fun CatalogHealthCard() {
 private fun MaintenanceCard(
     adminKey: String, onKeyChange: (String) -> Unit,
     totalQueued: Int, blitz: Boolean,
+    sweepAlive: Boolean, sweepAgoMs: Long,
     paused: Boolean, onTogglePause: () -> Unit,
+    avtrdbCrawl: Boolean, onToggleCrawl: () -> Unit,
     roleSlots: IntArray, slotLabels: List<String>, onRolePick: (Int, Int) -> Unit
 ) {
     AdminSectionCard(title = "Maintenance", icon = Icons.Filled.SportsEsports, tone = AdminTone.Warn) {
@@ -226,6 +235,50 @@ private fun MaintenanceCard(
             ) {
                 Text("To process", style = MaterialTheme.typography.bodyMedium)
                 StatusPill("$totalQueued", if (totalQueued == 0) AdminTone.Success else AdminTone.Warn)
+            }
+            // Proof-of-life: shows the sweep loop is alive even when the backlog is flat,
+            // so "caught up / idle" is distinguishable from "stopped". Updates every ~2s.
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Worker loop", style = MaterialTheme.typography.bodyMedium)
+                when {
+                    paused -> StatusPill("Paused", AdminTone.Neutral)
+                    sweepAlive -> {
+                        val ago = if (sweepAgoMs in 0..600_000) "${sweepAgoMs / 1000}s ago" else "active"
+                        val label = if (totalQueued == 0) "Running · idle · $ago" else "Running · $ago"
+                        StatusPill(label, AdminTone.Success)
+                    }
+                    else -> StatusPill("Stopped", AdminTone.Error)
+                }
+            }
+
+            Divider()
+
+            // avtrdb digestion crawl — OFF by default. Uses a BOT session to resolve + absorb
+            // avtrdb into the catalog. Keep OFF until the sharding migration lands (it's a
+            // volume firehose into the Worker flush).
+            Button(
+                onClick = onToggleCrawl,
+                modifier = Modifier.fillMaxWidth(),
+                colors = if (avtrdbCrawl) androidx.compose.material3.ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer,
+                    contentColor = MaterialTheme.colorScheme.onErrorContainer
+                ) else androidx.compose.material3.ButtonDefaults.buttonColors()
+            ) { Text(if (avtrdbCrawl) "Absorbing avtrdb — ON (tap to stop)" else "Absorb avtrdb (crawl) — OFF") }
+            Text(
+                "Crawl: ${AvatarCatalogSweep.avtrdbCrawlStatus}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (avtrdbCrawl) {
+                Text(
+                    "Warning: leave OFF until sharding — it firehoses the Worker flush.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
             }
         }
     }

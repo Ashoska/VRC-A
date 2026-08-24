@@ -44,8 +44,19 @@ object BotController {
     private val _blitzViews = MutableStateFlow<Map<Int, AvatarCatalogSweep.BlitzView>>(emptyMap())
     val blitzViews: StateFlow<Map<Int, AvatarCatalogSweep.BlitzView>> = _blitzViews
 
+    /** Proof-of-life for the sweep loop: true while it has cycled within the last minute
+     *  (alive even when idle/caught-up), and how many ms since the last cycle (-1 = never).
+     *  Lets the Bots tab show "running (idle)" vs "stopped" when the backlog is flat. */
+    private val _sweepAlive = MutableStateFlow(false)
+    val sweepAlive: StateFlow<Boolean> = _sweepAlive
+    private val _sweepLastCycleAgoMs = MutableStateFlow(-1L)
+    val sweepLastCycleAgoMs: StateFlow<Long> = _sweepLastCycleAgoMs
+
     private val started = AtomicBoolean(false)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // A bot that made a successful authed API call within this window is shown "Authed" even
+    // if the periodic validate hasn't run / returned UNKNOWN. Covers the slow-validate gap.
+    private const val AUTH_OK_WINDOW_MS = 5 * 60_000L
     @Volatile private var pendingReports = 0
     // While a manual login is in progress, the ALREADY-logged-in bots must "chill" —
     // stop the sweep AND validation — so their API traffic doesn't compete with the new
@@ -75,18 +86,29 @@ object BotController {
      *  here (not the UI) so the bots auto-start + resume on APP LAUNCH without opening
      *  the Bots tab, and self-include a bot as soon as it's logged in. Idempotent —
      *  ensureRunning only (re)starts when the live set / key / assignment actually change. */
-    fun applySweepConfig(context: Context) {
-        val app = context.applicationContext
-        val prefs = app.getSharedPreferences("vrca_admin_local", Context.MODE_PRIVATE)
-        // Paused (manual) or chilling (a login is in progress) → the working bots go silent.
-        if (silenced(app)) { AvatarCatalogSweep.stop(); return }
-        val key = prefs.getString("avatar_admin_key", "") ?: ""
+    /** Parse the saved manual role→slot picks (CSV of 4 ints, -1 = auto). */
+    private fun currentManual(prefs: android.content.SharedPreferences): Map<AvatarCatalogSweep.Role, Int> {
         val csv = prefs.getString("avatar_role_slots", null)
         val roleSlots = if (csv == null) IntArray(4) { -1 }
             else IntArray(4) { i -> csv.split(",").getOrNull(i)?.toIntOrNull() ?: -1 }
-        val manual = AvatarCatalogSweep.Role.values()
+        return AvatarCatalogSweep.Role.values()
             .mapIndexedNotNull { i, r -> roleSlots.getOrNull(i)?.takeIf { it >= 0 }?.let { r to it } }.toMap()
-        AvatarCatalogSweep.ensureRunning(app, key, manual)
+    }
+
+    fun applySweepConfig(context: Context) {
+        val app = context.applicationContext
+        val prefs = app.getSharedPreferences("vrca_admin_local", Context.MODE_PRIVATE)
+        // Keep the preview assignment fresh so the per-bot queued rows show what each bot
+        // WOULD process even before Start / while paused (independent of ensureRunning).
+        AvatarCatalogSweep.setAssignmentPreview(app, currentManual(prefs))
+        // avtrdb digestion crawl: driven by the saved toggle, but forced OFF while paused or
+        // a login is in progress (it uses a bot session, so it must chill with the rest).
+        AvatarCatalogSweep.setAvtrdbCrawl(app,
+            prefs.getBoolean("avtrdb_crawl_enabled", false) && !silenced(app))
+        // Paused (manual) or chilling (a login is in progress) → the working bots go silent.
+        if (silenced(app)) { AvatarCatalogSweep.stop(); return }
+        val key = prefs.getString("avatar_admin_key", "") ?: ""
+        AvatarCatalogSweep.ensureRunning(app, key, currentManual(prefs))
     }
 
     /** Idempotent — safe to call on every Bots-tab entry AND on admin app launch. */
@@ -139,12 +161,25 @@ object BotController {
                 _totalQueued.value = AvatarCatalogSweep.lastTotalBacklog
                 _blitz.value = AvatarCatalogSweep.blitzActive()
                 _blitzViews.value = bv
+                _sweepAlive.value = AvatarCatalogSweep.sweepAlive()
+                _sweepLastCycleAgoMs.value =
+                    if (AvatarCatalogSweep.lastCycleMs == 0L) -1L
+                    else System.currentTimeMillis() - AvatarCatalogSweep.lastCycleMs
                 _bots.value = _bots.value.map { b ->
                     val li = BotVrchatSession.isLoggedIn(app, b.slot)
+                    // Flip "Checking…" (UNKNOWN) to "Authed" the moment the bot proves auth via a
+                    // real successful API call — so a bot doing work never sits on "Checking"
+                    // waiting for the slow periodic validate (which can stall UNKNOWN on a 429).
+                    val provenAuthed = li && b.auth != BotVrchatSession.Auth.AUTHED &&
+                        System.currentTimeMillis() - BotVrchatSession.lastAuthOkMs(b.slot) < AUTH_OK_WINDOW_MS
                     b.copy(
                         loggedIn = li,
                         name = BotVrchatSession.accountLabel(app, b.slot),
-                        auth = if (!li) BotVrchatSession.Auth.UNKNOWN else b.auth
+                        auth = when {
+                            !li -> BotVrchatSession.Auth.UNKNOWN
+                            provenAuthed -> BotVrchatSession.Auth.AUTHED
+                            else -> b.auth
+                        }
                     )
                 }
                 i++; delay(2000)
@@ -182,7 +217,16 @@ object BotController {
     }
 
     private fun setAuth(slot: Int, a: BotVrchatSession.Auth) {
-        _bots.value = _bots.value.map { if (it.slot == slot) it.copy(auth = a) else it }
+        _bots.value = _bots.value.map {
+            if (it.slot == slot) {
+                // A transient UNKNOWN (network / 429 on the periodic validate) must NOT downgrade
+                // a bot already known AUTHED — that's the "flips back to Checking" flicker. Only a
+                // real EXPIRED (401) or a confirmed AUTHED changes a known-good state.
+                val next = if (a == BotVrchatSession.Auth.UNKNOWN && it.auth == BotVrchatSession.Auth.AUTHED)
+                    BotVrchatSession.Auth.AUTHED else a
+                it.copy(auth = next)
+            } else it
+        }
     }
 
     /** Refresh one slot immediately after a login/logout action in the UI. */

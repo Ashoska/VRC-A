@@ -424,6 +424,20 @@ object VrchatAuthManager {
         withContext(Dispatchers.IO) {
             val id = avatarId.trim()
             if (!id.startsWith("avtr_")) return@withContext InviteResult(false, "No avatar id yet")
+            // DIAGNOSTIC: record EVERY select VRC-A issues (id + wall-clock time + a
+            // running count, persisted). The user reports booting into a VRC-A-cloned
+            // avatar even after switching — this proves whether VRC-A is re-selecting on
+            // its own (count climbs with no tap) or the revert is VRChat's saved
+            // current-avatar (count stays put). Surfaced in Settings -> Debug.
+            runCatching {
+                val p = context.getSharedPreferences("vrca_diag", Context.MODE_PRIVATE)
+                p.edit()
+                    .putString("avatar_select_last_id", id)
+                    .putLong("avatar_select_last_at", System.currentTimeMillis())
+                    .putInt("avatar_select_count", p.getInt("avatar_select_count", 0) + 1)
+                    .commit()
+            }
+            Log.w(TAG, "selectAvatar CALLED for $id")
             val cookieHeader = getCookieHeader(context)
                 ?: return@withContext InviteResult(false, "Not signed in to VRChat")
             try {
@@ -440,6 +454,21 @@ object VrchatAuthManager {
                 InviteResult(false, "Network error")
             }
         }
+
+    /** Debug readout of the last avatar-select VRC-A performed (id, when, and a
+     *  running count that survives reboots). If the count climbs after a VRChat
+     *  reopen WITHOUT the user tapping a clone button, VRC-A is re-selecting on its
+     *  own; if it stays put, the boot avatar is VRChat's own saved current-avatar. */
+    fun selectAvatarDiag(context: Context): String {
+        val p = context.getSharedPreferences("vrca_diag", Context.MODE_PRIVATE)
+        val id = p.getString("avatar_select_last_id", null)
+        val at = p.getLong("avatar_select_last_at", 0L)
+        val n = p.getInt("avatar_select_count", 0)
+        if (id == null || at == 0L) return "no avatar clone/select this install yet"
+        val ago = "${(System.currentTimeMillis() - at) / 1000}s ago"
+        val clock = java.text.SimpleDateFormat("MMM d HH:mm:ss", java.util.Locale.US).format(java.util.Date(at))
+        return "last select: $id\n  at $clock ($ago) · total this install: $n"
+    }
 
     /**
      * Headers required to LOAD an auth-gated VRChat image (`api.vrchat.cloud`
@@ -852,6 +881,21 @@ object VrchatAuthManager {
         val trustRank: String = ""
     )
 
+    /**
+     * The CURRENT user's platform. Prefer the LIVE `platform` (the game-client presence
+     * platform) over `last_platform`: `last_platform` is the last *authenticated* platform,
+     * and VRC-A's own API re-logins (frequent on mobile as the IP-bound cookie invalidates)
+     * can make VRChat stamp it "standalonewindows" — which made a Quest user's OWN platform
+     * intermittently show PC. `platform` is set by the actual game client (and is blank /
+     * "offline" when not in-game), so use it when it's a real platform and fall back to
+     * `last_platform` only when the user isn't currently in VRChat. (Roster/other-user code
+     * still uses last_platform: a stranger's live `platform` is "offline" to us.)
+     */
+    private fun pickSelfPlatform(live: String, last: String): String {
+        val l = live.trim().lowercase()
+        return if (l.isNotBlank() && l != "offline") live else last
+    }
+
     suspend fun fetchPresence(context: Context): VrcUserPresence? = withContext(Dispatchers.IO) {
         val cookieHeader = getCookieHeader(context) ?: run {
             Log.w(TAG, "fetchPresence: no cookie header available")
@@ -872,7 +916,7 @@ object VrchatAuthManager {
             var location = json.optString("location", "offline")
             var status = json.optString("status", "offline")
             var statusDescription = json.optString("statusDescription", "")
-            var platform = json.optString("last_platform", "")
+            var platform = pickSelfPlatform(json.optString("platform", ""), json.optString("last_platform", ""))
             var displayName = json.optString("displayName")
             var avatarThumb = json.optString("currentAvatarThumbnailImageUrl", "")
             // VRChat+ images: userIcon is the round profile picture; the
@@ -915,7 +959,8 @@ object VrchatAuthManager {
                         }
                         if (uStatus.isNotBlank()) status = uStatus
                         uj.optString("statusDescription", "").let { if (it.isNotBlank()) statusDescription = it }
-                        uj.optString("last_platform", "").let { if (it.isNotBlank()) platform = it }
+                        pickSelfPlatform(uj.optString("platform", ""), uj.optString("last_platform", ""))
+                            .let { if (it.isNotBlank()) platform = it }
                         uj.optString("displayName", "").let { if (it.isNotBlank()) displayName = it }
                         uj.optString("currentAvatarThumbnailImageUrl", "").let { if (it.isNotBlank()) avatarThumb = it }
                         // The /users/{id} endpoint is the authoritative source for
@@ -1030,7 +1075,7 @@ object VrchatAuthManager {
                 status = status,
                 statusDescription = uj.optString("statusDescription", ""),
                 location = location,
-                platform = uj.optString("last_platform", ""),
+                platform = pickSelfPlatform(uj.optString("platform", ""), uj.optString("last_platform", "")),
                 worldName = "",
                 instancePlayerCount = 0,
                 instanceCapacity = 0,
@@ -1441,6 +1486,13 @@ object VrchatAuthManager {
             com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog"
             return@withContext WornAvatarResult(it.avatarId, it.platforms)
         }
+        // SHARDED catalog (R2) — one edge-cached shard GET keyed by the worn file id, so it
+        // catches avatars newer than this device's ~30-min whole-file map. Image-file-id-keyed
+        // (exact). Dormant until R2 is the live backend, so pre-cutover this is a no-op.
+        com.vrca.vrchat.AvatarGlobalDb.lookupSharded(context, wornFileId)?.let {
+            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog (shard)"
+            return@withContext WornAvatarResult(it.avatarId, it.platforms)
+        }
         // 0. EXACT, NAME-INDEPENDENT: look the avatar up by its worn IMAGE FILE ID.
         if (wornFileId != null) {
             val byFile = try { com.vrca.vrchat.AvatarSearch.searchCandidatesByImageFileId(wornFileId) }
@@ -1609,6 +1661,42 @@ object VrchatAuthManager {
                 j.optString("description", ""))
         } catch (e: Exception) { null }
     }
+
+    enum class AvatarFetch { FOUND, DEAD, PRIVATE, UNAVAILABLE }
+    data class AvatarFetchResult(val status: AvatarFetch, val entry: CatalogEntry? = null)
+
+    /** Like [avatarCatalogEntry] but reports WHY it failed so a favourites sweep can react:
+     *  FOUND(entry) on a public 200; DEAD on 404/410 (report it to the bots); PRIVATE on a
+     *  non-public 200 or 403 (skip, never report — not gone, just not shareable); UNAVAILABLE
+     *  on 429/5xx/network/no-cookie (RETRY later — must never be mistaken for dead). */
+    suspend fun avatarCatalogEntryDetailed(context: Context, avatarId: String): AvatarFetchResult =
+        withContext(Dispatchers.IO) {
+            val cookie = getCookieHeader(context) ?: return@withContext AvatarFetchResult(AvatarFetch.UNAVAILABLE)
+            try {
+                val (code, body, raw) = get("$BASE/avatars/$avatarId", null, cookie)
+                if (code == 200) captureRolledCookies(context, raw)
+                when {
+                    code == 404 || code == 410 -> AvatarFetchResult(AvatarFetch.DEAD)
+                    code == 403 -> AvatarFetchResult(AvatarFetch.PRIVATE)
+                    code != 200 || !body.startsWith("{") -> AvatarFetchResult(AvatarFetch.UNAVAILABLE)
+                    else -> {
+                        val j = org.json.JSONObject(body)
+                        if (j.optString("releaseStatus", "public") != "public")
+                            return@withContext AvatarFetchResult(AvatarFetch.PRIVATE)
+                        val fileId = fileIdOf(j.optString("thumbnailImageUrl", "").ifBlank { j.optString("imageUrl", "") })
+                            ?: return@withContext AvatarFetchResult(AvatarFetch.PRIVATE)
+                        val plats = j.optJSONArray("unityPackages")?.let { ups ->
+                            (0 until ups.length()).mapNotNull {
+                                ups.optJSONObject(it)?.optString("platform", "")?.takeIf { s -> s.isNotBlank() }
+                            }.map { prettyPlatform(it) }.filter { it.isNotBlank() }.distinct()
+                        } ?: emptyList()
+                        AvatarFetchResult(AvatarFetch.FOUND, CatalogEntry(fileId, avatarId,
+                            j.optString("name", ""), j.optString("authorName", ""),
+                            j.optString("authorId", ""), plats, j.optString("description", "")))
+                    }
+                }
+            } catch (e: Exception) { AvatarFetchResult(AvatarFetch.UNAVAILABLE) }
+        }
 
     /** The avatar ids the user has FAVOURITED, via the reliable `GET /favorites?
      *  type=avatar` (each record's `favoriteId` is the `avtr_` id). Paginated — most

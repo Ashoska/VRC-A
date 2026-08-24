@@ -9,6 +9,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * The admin catalog maintenance workers, using dedicated [BotVrchatSession] slots (so
@@ -61,7 +64,29 @@ object AvatarCatalogSweep {
     @Volatile var lastTotalBacklog = 0; private set
     @Volatile private var runningSig = ""
     @Volatile private var blitzUntilMs = 0L
+    // The instant the CURRENT blitz began. During a blitz the liveness cutoff is anchored
+    // HERE (not a rolling "now - 1h"), so an avatar checked during the blitz — checked > this
+    // — is never re-selected, and the blitz queue drains to ZERO instead of treadmilling.
+    // (The old rolling 1h window made a full-catalog sweep, which takes HOURS at 1.2s/avatar,
+    // re-queue avatars it had already checked this same blitz — the "did 17k, still 7.7k left"
+    // bug.) Anchored once per fresh blitz; a re-press only EXTENDS the window, keeping the anchor.
+    @Volatile private var blitzStartMs = 0L
     fun blitzActive(): Boolean = System.currentTimeMillis() < blitzUntilMs
+
+    /** The staleness cutoff for the liveness/blitz sweeps: during a blitz it's the blitz
+     *  START (each avatar checked at most once per blitz → the queue converges to 0);
+     *  otherwise the normal 7-day recheck interval. */
+    private fun livenessCutoff(): Long =
+        if (blitzActive()) blitzStartMs else System.currentTimeMillis() - RECHECK_INTERVAL_MS
+
+    // ---- process-lifetime proof-of-life -------------------------------------
+    // Unlike the per-role/blitz Progress counters (zeroed on every ensureRunning restart),
+    // this timestamp updates on EVERY slot-loop cycle — including idle cycles when there's
+    // no work — so the admin can tell "bots alive, just caught up" apart from "bots dead"
+    // even when the backlog numbers are flat. Surfaced in the Bots tab via BotController.
+    @Volatile var lastCycleMs = 0L; private set
+    /** True while the sweep loop has cycled within the last minute (alive, even if idle). */
+    fun sweepAlive(): Boolean = running && System.currentTimeMillis() - lastCycleMs < 60_000L
 
     // VRChat-OUTAGE guard: only REMOVE an avatar (dead-check) when VRChat has recently
     // confirmed SOMETHING alive (a real 200). If every check is failing (VRChat down / a
@@ -127,14 +152,13 @@ object AvatarCatalogSweep {
     private const val BATCH = 500                // ops per /admin push (effectively one/pass)
     private const val FILL_BATCH = 40            // entries per fill pass
     private const val LIVENESS_BATCH = 40        // entries per liveness pass
-    private const val RECHECK_INTERVAL_MS = 7L * 24 * 60 * 60 * 1000  // 7 days
-    private const val BLITZ_RECHECK_MS = 60L * 60 * 1000               // 1 h while blitzing
+    private const val RECHECK_INTERVAL_MS = 7L * 24 * 60 * 60 * 1000  // 7 days (steady-state recheck)
     private const val BLITZ_WINDOW_MS = 30L * 60 * 1000                // initial blitz window per press
     // While a blitz is actively doing work, keep its window rolling forward by this much, so a
     // full-catalog blitz that takes >30 min doesn't EXPIRE mid-way (the "blitz queue disappears
     // before it's complete" bug). Once every bot is caught up (no more work), no bot extends it,
-    // so it self-ends ~this long after the last work — it can't run forever (the 1h recheck
-    // cutoff means freshly-checked avatars aren't re-selected).
+    // so it self-ends ~this long after the last work — it can't run forever (the blitz-start
+    // cutoff means an avatar checked during the blitz is never re-selected, so it converges).
     private const val BLITZ_KEEPALIVE_MS = 5L * 60 * 1000
     // Short idle poll (no network / no writes when idle — just a local snapshot scan) so
     // a bot notices new work FAST: a blitz, freshly-loaded catalog, or new reports kick
@@ -144,12 +168,128 @@ object AvatarCatalogSweep {
     private const val ACTIVE_PAUSE_MS = 1_500L
 
     private const val BLITZ_BATCH = 40           // entries per blitz pass (per bot)
+    // An idle bot only LOANS to another role's backlog once that backlog is genuinely
+    // "in the red" — matches BotsTab's queued>500 red threshold. Below this, the idle
+    // bot stays idle and lets the dedicated bot handle its own small backlog, instead
+    // of every free bot piling onto a minor queue. (Keep in sync with BotsTab's red.)
+    private const val LOAN_RED_THRESHOLD = 500
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val jobs = mutableListOf<Job>()
 
+    // ---- time-based Worker flush (bounds Cloudflare KV writes) ----------------
+    // Every op is applied to the LOCAL catalog IMMEDIATELY (free, in-memory — this is
+    // what makes the backlog counters tick down smoothly per avatar instead of
+    // teleporting a whole batch at a time), and the Worker push is BUFFERED here. One
+    // timer drains the buffer to /admin every FLUSH_MS in size-capped chunks, so KV
+    // write volume is bounded by TIME, not by how many avatars are processed — a blitz
+    // can churn thousands/min and still cost only a few writes/min. Failed chunks are
+    // re-queued (eventual consistency); a buffer lost to process death self-heals on
+    // restart (the entry re-pulls unfilled/stale and is re-processed).
+    private const val FLUSH_MS = 60_000L
+    private const val FLUSH_CHUNK = 200            // ops per /admin push (≈ one KV write each)
+    private val pendingUpserts = java.util.concurrent.ConcurrentHashMap<String, AvatarGlobalDb.Entry>()
+    private val pendingRemoves = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val pendingClears = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val pendingChecked = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val flushMutex = Mutex()
+    private val flusherStarted = AtomicBoolean(false)
+    @Volatile private var flushCtx: Context? = null
+    @Volatile private var flushKey = ""
+
+    // ---- avtrdb digestion crawl (admin bots, OPT-IN, OFF by default) ----------
+    // ALL logged-in bots crawl TOGETHER: it's a MODE inside the per-slot loop (see slotLoop),
+    // so each bot does EITHER its role OR a crawl pass in a given cycle — never both, so a bot's
+    // session is never double-loaded (the role/crawl collision fix). Bots pull terms from a
+    // SHARED atomic cursor (no overlap, self-balancing) and share the `inFlight` claim set so
+    // no avatar is resolved twice. Resolution runs on the BOT session (never a public user's).
+    // OFF by default so the build ships BEFORE the sharding migration; flip on (Bots tab) after.
+    @Volatile var avtrdbCrawlEnabled = false
+    @Volatile var avtrdbCrawlStatus = "off"; private set
+    private val CRAWL_TERMS = (('a'..'z').map { it.toString() } + ('0'..'9').map { it.toString() })
+    private const val CRAWL_PAGE_GAP_MS = 1_500L   // pace avtrdb paging (polite to the DB)
+    private const val CRAWL_TERM_GAP_MS = 3_000L
+    private const val CRAWL_RL_BACKOFF = 5         // consecutive resolve failures => rate-limited
+    // Shared across all crawling bots: the next term to hand out (partitions the term space with
+    // zero overlap) + a cumulative "new avatars" counter for the status line.
+    private val crawlTermCursor = java.util.concurrent.atomic.AtomicInteger(0)
+    private val crawlNewTotal = java.util.concurrent.atomic.AtomicInteger(0)
+    @Volatile private var crawlCursorLoaded = false
+
+    /** Enable/disable the crawl (a mode the running per-slot loops pick up). No separate loop —
+     *  the bots' slotLoops switch between role work and crawling based on this flag, so there's
+     *  never a bot running a role AND a crawl at once. Called by BotController from the saved
+     *  pref (forced off while paused / a login is in progress). */
+    fun setAvtrdbCrawl(context: Context, enabled: Boolean) {
+        if (enabled && !crawlCursorLoaded) {
+            crawlCursorLoaded = true
+            runCatching {
+                crawlTermCursor.set(context.getSharedPreferences("vrca_admin_local", Context.MODE_PRIVATE)
+                    .getInt("avtrdb_crawl_idx", 0))
+            }
+        }
+        avtrdbCrawlEnabled = enabled
+        if (!enabled && avtrdbCrawlStatus != "off") avtrdbCrawlStatus = "off"
+    }
+
+    /** One crawl pass for ONE bot: take the next shared term, page avtrdb, resolve each NEW
+     *  avatar (deduped vs catalog by avatar id — zero VRChat call for known ones — and claimed
+     *  in `inFlight` so two bots never resolve the same one), contribute via the bot session. */
+    private suspend fun avtrdbCrawlPass(context: Context, slot: Int): Boolean {
+        val termN = crawlTermCursor.getAndIncrement()
+        // Persist the cursor occasionally so a restart resumes roughly where it left off.
+        if (termN % 4 == 0) runCatching {
+            context.getSharedPreferences("vrca_admin_local", Context.MODE_PRIVATE)
+                .edit().putInt("avtrdb_crawl_idx", termN).apply()
+        }
+        val term = CRAWL_TERMS[((termN % CRAWL_TERMS.size) + CRAWL_TERMS.size) % CRAWL_TERMS.size]
+        var new = 0; var nulls = 0; var page = 0
+        crawl@ while (avtrdbCrawlEnabled && running && scope.isActive) {
+            val pageResults = try { com.vrca.vrchat.AvatarSearch.searchPage(term, page) }
+                catch (e: Throwable) { emptyList() }
+            if (pageResults.isEmpty()) break
+            for (r in pageResults) {
+                if (!avtrdbCrawlEnabled || !running || !scope.isActive) break@crawl
+                if (AvatarGlobalDb.hasAvatarId(r.id)) continue   // already in catalog — no VRChat call
+                if (!inFlight.add(r.id)) continue                // another bot is resolving this one
+                try {
+                    val chk = BotVrchatSession.checkAvatar(context, slot, r.id)
+                    if (chk == null) {
+                        if (++nulls >= CRAWL_RL_BACKOFF) { avtrdbCrawlStatus = "bot ${slot + 1} rate-limited — pausing"; delay(30_000); break@crawl }
+                        delay(PACE_MS); continue
+                    }
+                    nulls = 0
+                    if (chk.alive && chk.fileId != null) {
+                        AvatarGlobalDb.contribute(context, chk.fileId, r.id, chk.name, chk.author, chk.authorId, chk.platforms, chk.description)
+                        new++
+                        avtrdbCrawlStatus = "'$term' (bot ${slot + 1}) p$page: +$new · total +${crawlNewTotal.incrementAndGet()}"
+                    }
+                } finally { inFlight.remove(r.id) }
+                delay(PACE_MS)
+            }
+            if (pageResults.size < com.vrca.vrchat.AvatarSearch.PAGE_SIZE) break   // last page
+            page++
+            delay(CRAWL_PAGE_GAP_MS)
+        }
+        return true
+    }
+
     /** A short human summary of which bot slot runs which roles (for the UI). */
     @Volatile var assignmentLabel = ""; private set
+
+    // Role->slot the bots WOULD run, computed from the currently logged-in bots + saved
+    // manual picks even while the sweep is STOPPED/paused — so the Bots tab can attribute
+    // each role's queued backlog to its bot BEFORE the admin presses Start (otherwise the
+    // per-bot queued rows only appeared once running, since progress[r].slot was -1).
+    @Volatile private var assignmentPreview: Map<Role, Int> = emptyMap()
+
+    /** Recompute the preview assignment from the current live bots + manual picks.
+     *  Called every UI tick by BotController, running or not. */
+    fun setAssignmentPreview(context: Context, manual: Map<Role, Int> = emptyMap()) {
+        val app = context.applicationContext
+        val live = (0 until BotVrchatSession.SLOTS).filter { BotVrchatSession.isLoggedIn(app, it) }
+        assignmentPreview = if (live.isEmpty()) emptyMap() else computeRoleSlot(live, manual)
+    }
 
     // The logged-in slots (in order) + a per-slot blitz progress, so during a blitz EVERY
     // bot chews its OWN partition of the whole catalog (fill + dead-check) instead of the
@@ -168,7 +308,7 @@ object AvatarCatalogSweep {
         val live = liveSlots; val count = live.size
         if (count == 0) return emptyMap()
         val snap = AvatarGlobalDb.snapshot()
-        val cutoff = System.currentTimeMillis() - BLITZ_RECHECK_MS
+        val cutoff = livenessCutoff()
         return live.withIndex().associate { (idx, slot) ->
             val queued = snap.count {
                 (it.fileId.hashCode() and 0x7fffffff) % count == idx && (needsFill(it) || it.checked < cutoff)
@@ -197,6 +337,18 @@ object AvatarCatalogSweep {
         }
         running = true; pushError = ""
         liveSlots = live
+        // Wire the time-based flusher (context + current admin key) and launch it ONCE.
+        // It lives on `scope` (NOT in `jobs`, which stop() cancels), so buffered ops still
+        // reach the Worker after the sweep is stopped/paused.
+        flushCtx = app; flushKey = adminKey.trim()
+        if (flusherStarted.compareAndSet(false, true)) {
+            scope.launch {
+                while (true) {
+                    try { flushPending() } catch (_: Throwable) { /* retry next tick */ }
+                    delay(FLUSH_MS)
+                }
+            }
+        }
         if (blitzActive()) {
             // Mid-blitz restart (watchdog / re-login): KEEP the running blitz counters instead
             // of wiping them (part of the "blitz queue randomly disappears" reset).
@@ -234,7 +386,14 @@ object AvatarCatalogSweep {
     /** Kick a bounded full-catalog blitz: for the next window, FILL targets every
      *  incomplete entry and LIVENESS re-checks anything older than 1h — so all bots
      *  catch up the whole catalog (bios + dead checks) from before. Re-press to extend. */
-    fun requestFullBlitz() { blitzUntilMs = System.currentTimeMillis() + BLITZ_WINDOW_MS }
+    fun requestFullBlitz() {
+        val now = System.currentTimeMillis()
+        // Fresh blitz → anchor the cutoff to NOW so every currently-stale avatar is swept
+        // exactly once. A re-press while one is already running only EXTENDS the window and
+        // KEEPS the anchor, so it keeps draining the remainder instead of restarting the sweep.
+        if (!blitzActive()) blitzStartMs = now
+        blitzUntilMs = now + BLITZ_WINDOW_MS
+    }
 
     fun progressLine(role: Role): String {
         val p = progress.getValue(role)
@@ -256,7 +415,7 @@ object AvatarCatalogSweep {
      *  backlogs are computed LOCALLY from the cached catalog (one cheap pass). */
     fun roleViews(pendingReports: Int): List<RoleView> {
         val snap = AvatarGlobalDb.snapshot()
-        val cutoff = System.currentTimeMillis() - (if (blitzActive()) BLITZ_RECHECK_MS else RECHECK_INTERVAL_MS)
+        val cutoff = livenessCutoff()
         var fill = 0; var la = 0; var lb = 0
         for (e in snap) {
             if (needsFill(e)) fill++
@@ -282,9 +441,12 @@ object AvatarCatalogSweep {
             val t = targetOf(r)
             val n = (workers[t] ?: 1).coerceAtLeast(1)
             val share = (backlogOf(t) + n - 1) / n   // ceil-split among the bots on this backlog
+            // While running, use the live progress slot; while stopped, fall back to the
+            // preview assignment so the per-bot queued rows show BEFORE Start.
+            val slot = p.slot.takeIf { it >= 0 } ?: assignmentPreview[r] ?: -1
             RoleView(
                 role = r,
-                bot = if (p.slot >= 0) "bot ${p.slot + 1}" else "—",
+                bot = if (slot >= 0) "bot ${slot + 1}" else "—",
                 queued = share,
                 checked = p.checked,
                 removed = p.removed,
@@ -302,6 +464,9 @@ object AvatarCatalogSweep {
     private suspend fun slotLoop(context: Context, adminKey: String, slot: Int, roles: List<Role>, liveIndex: Int, liveCount: Int) {
         val ownRole = roles.firstOrNull()
         while (running && scope.isActive) {
+            // Proof-of-life heartbeat: stamped every cycle (work or idle) so the UI can show
+            // the sweep is alive even when the backlog is 0 / nothing is moving.
+            lastCycleMs = System.currentTimeMillis()
             // Each cycle starts NOT helping; helpPass sets the marker if this bot loans.
             ownRole?.let { progress.getValue(it).helping = "" }
             // Per-cycle guard: ANY unexpected throw is logged + retried instead of ending
@@ -309,30 +474,44 @@ object AvatarCatalogSweep {
             // stayed true). A cancellation still propagates (that's a real stop). This is the
             // primary fix for "queue stuck, bot not checking"; the ensureRunning watchdog is
             // the backstop.
+            // Capture the two mode flags for THIS cycle. A cycle does EXACTLY ONE kind of
+            // work — crawl, blitz, or roles — so a bot never runs a role AND a crawl at once
+            // (the session double-load / collision fix). The responsive sleep below wakes the
+            // instant either flag flips, so toggling crawl kicks every bot into/out of it fast.
+            val crawling = avtrdbCrawlEnabled
             try {
                 var did = false
                 val blitzing = blitzActive()
-                for (role in roles) {
-                    if (!running) break
-                    // During a blitz, EVERY bot shares the fill+dead-check work (below), so
-                    // skip the assigned fill/liveness role here — but still run reports.
-                    if (blitzing && role != Role.REPORTS) continue
-                    did = runRole(context, adminKey, slot, role) || did
+                if (crawling) {
+                    // CRAWL MODE: this bot pulls the next shared avtrdb term and digests it.
+                    // Roles/blitz are skipped this cycle → no collision. All logged-in bots do
+                    // this in parallel (distinct terms via the shared cursor).
+                    did = avtrdbCrawlPass(context, slot)
+                    roles.forEach { progress.getValue(it).status = "crawling avtrdb" }
+                } else {
+                    for (role in roles) {
+                        if (!running) break
+                        // During a blitz, EVERY bot shares the fill+dead-check work (below), so
+                        // skip the assigned fill/liveness role here — but still run reports.
+                        if (blitzing && role != Role.REPORTS) continue
+                        did = runRole(context, adminKey, slot, role) || did
+                    }
+                    if (blitzing && running) did = blitzPass(context, adminKey, slot, liveIndex, liveCount) || did
+                    // LOAN: if this bot's own role(s) had no work and we're not blitzing, help the
+                    // biggest backlog (fill first, then stale liveness). The shared claim set means
+                    // no two bots ever touch the same avatar, and each bot is a SEPARATE VRChat
+                    // account, so loaning multiplies throughput without tripping one account's limit.
+                    if (!blitzing && running && !did && ownRole != null)
+                        did = helpPass(context, adminKey, slot, ownRole) || did
                 }
-                if (blitzing && running) did = blitzPass(context, adminKey, slot, liveIndex, liveCount) || did
-                // LOAN: if this bot's own role(s) had no work and we're not blitzing, help the
-                // biggest backlog (fill first, then stale liveness). The shared claim set means
-                // no two bots ever touch the same avatar, and each bot is a SEPARATE VRChat
-                // account, so loaning multiplies throughput without tripping one account's limit.
-                if (!blitzing && running && !did && ownRole != null)
-                    did = helpPass(context, adminKey, slot, ownRole) || did
                 if (!running) break
-                // Responsive sleep: wake IMMEDIATELY (within 500ms) if the blitz state flips,
-                // so clicking blitz kicks EVERY bot at once instead of each waiting out its
-                // idle sleep (the "blitz start is inconsistent" cause).
-                val target = if (did) ACTIVE_PAUSE_MS else IDLE_SLEEP_MS
+                // Responsive sleep: wake IMMEDIATELY (within 500ms) if the blitz OR crawl state
+                // flips, so toggling either kicks EVERY bot at once instead of each waiting out
+                // its idle sleep. Crawl uses the short term-gap (it always has work).
+                val target = if (crawling) CRAWL_TERM_GAP_MS else if (did) ACTIVE_PAUSE_MS else IDLE_SLEEP_MS
                 var slept = 0L
-                while (slept < target && running && scope.isActive && blitzActive() == blitzing) {
+                while (slept < target && running && scope.isActive &&
+                       blitzActive() == blitzing && avtrdbCrawlEnabled == crawling) {
                     delay(500); slept += 500
                 }
             } catch (c: kotlinx.coroutines.CancellationException) {
@@ -353,7 +532,7 @@ object AvatarCatalogSweep {
         if (liveCount <= 0) return false
         val p = blitzProgress.getOrPut(slot) { Progress().apply { this.slot = slot } }
         p.running = true
-        val cutoff = System.currentTimeMillis() - BLITZ_RECHECK_MS
+        val cutoff = livenessCutoff()
         val mine = AvatarGlobalDb.snapshot().filter { (it.fileId.hashCode() and 0x7fffffff) % liveCount == liveIndex }
         // Unfilled first, then stale — so bios/info fill fastest during a blitz.
         val batch = (mine.filter { needsFill(it) } + mine.filter { !needsFill(it) && it.checked < cutoff }).take(BLITZ_BATCH)
@@ -368,26 +547,31 @@ object AvatarCatalogSweep {
             if (!running) break
             val chk = BotVrchatSession.checkAvatar(context, slot, e.avatarId)
             p.checked++
-            if (chk == null) { delay(PACE_MS); continue }
+            if (chk == null) {
+                if (needsFill(e)) noteFillNull(slot, e.fileId)   // poison-entry strike (fill items only)
+                delay(PACE_MS); continue
+            }
+            clearFillAttempt(e.fileId)
             if (chk.alive) noteAlive()
             if (!chk.alive) {
-                if (canRemove()) { removes.add(e.fileId); p.removed++ }
+                if (canRemove()) { removes.add(e.fileId); p.removed++; applyItemLocal(remove = e.fileId) }
                 // else: suspected VRChat outage — defer the removal
             }
             else if (needsFill(e)) {
                 val upd = fillRefresh(e, chk)
                 if (upd.fileId != e.fileId) removes.add(e.fileId)
                 upserts.add(upd); p.filled++
+                applyItemLocal(upd = upd, rekeyFrom = if (upd.fileId != e.fileId) e.fileId else null)
             } else {
                 val upd = liveRefresh(e, chk)
                 if (upd != null) {
                     if (upd.fileId != e.fileId) removes.add(e.fileId)
                     upserts.add(upd); p.refreshed++
-                } else okChecked.add(e.fileId)
+                    applyItemLocal(upd = upd, rekeyFrom = if (upd.fileId != e.fileId) e.fileId else null)
+                } else { okChecked.add(e.fileId); applyItemLocal(checked = e.fileId) }
             }
             delay(PACE_MS)
         }
-        AvatarGlobalDb.markCheckedLocally(okChecked + upserts.map { it.fileId })
         if (removes.isNotEmpty() || upserts.isNotEmpty() || okChecked.isNotEmpty())
             pushOps(context, adminKey, upserts.toList(), removes.toList(), emptyList(), okChecked.toList())
         return true
@@ -406,6 +590,38 @@ object AvatarCatalogSweep {
     // dedicated Fill/Liveness roles AND any idle bots loaning in — never grab the same
     // avatar. Released when the pass finishes (in a finally).
     private val inFlight = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    // ---- poison-entry guard (fixes the "To process / queued stuck at N" bug) -----
+    // An avatar whose VRChat check keeps returning null — never a definitive alive (to
+    // fill) or 404/410 (to remove), e.g. a persistent 5xx/redirect/odd response — would
+    // sit in the Fill backlog FOREVER: filled never flips true, so needsFill stays true,
+    // so it pins "To process / queued" at a nonzero value even when every other entry is
+    // done. Count consecutive null checks per file id and, once past a threshold, drop it
+    // from the Fill queue for this process so the backlog drains. Strictly guarded:
+    //  - only counted while the bot SESSION is proven alive (a recent authenticated
+    //    success on this slot), so a global rate-limit / dead session never benches a
+    //    perfectly-good entry;
+    //  - cleared on ANY definitive result, so a transient blip never sticks;
+    //  - in-memory only, so the next admin restart retries the entry (and the 7-day
+    //    liveness sweep still covers it meanwhile).
+    private val fillAttempts = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    private val fillGaveUp = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private const val FILL_GIVEUP_ATTEMPTS = 6
+    private const val SESSION_ALIVE_WINDOW_MS = 6L * 60 * 1000
+    private fun sessionAlive(slot: Int): Boolean {
+        val t = BotVrchatSession.lastAuthOkMs(slot)
+        return t > 0 && System.currentTimeMillis() - t < SESSION_ALIVE_WINDOW_MS
+    }
+    /** Count a null check against a fill entry as a poison strike (only when the session
+     *  is proven alive); bench it once it exceeds the threshold. */
+    private fun noteFillNull(slot: Int, fileId: String) {
+        if (!sessionAlive(slot)) return
+        val n = (fillAttempts[fileId] ?: 0) + 1
+        if (n >= FILL_GIVEUP_ATTEMPTS) { fillGaveUp.add(fileId); fillAttempts.remove(fileId) }
+        else fillAttempts[fileId] = n
+    }
+    private fun clearFillAttempt(fileId: String) { fillAttempts.remove(fileId) }
+
     private fun claimBatch(candidates: List<AvatarGlobalDb.Entry>, max: Int): List<AvatarGlobalDb.Entry> {
         val out = ArrayList<AvatarGlobalDb.Entry>(max)
         for (e in candidates) { if (out.size >= max) break; if (inFlight.add(e.fileId)) out.add(e) }
@@ -413,17 +629,73 @@ object AvatarCatalogSweep {
     }
     private fun release(fileIds: Collection<String>) { inFlight.removeAll(fileIds.toSet()) }
 
-    private suspend fun pushOps(
+    // Buffer a pass's Worker ops for the time-based flush. The LOCAL catalog is applied
+    // PER ITEM in the loops (smooth counters), so this does NO local apply and NO network
+    // — it only queues the ops. context/adminKey are unused (the flusher holds them from
+    // start()) but kept so the call sites don't change.
+    private fun pushOps(
         context: Context, adminKey: String,
         upserts: List<AvatarGlobalDb.Entry>, removes: List<String>,
         clears: List<String> = emptyList(), checked: List<String> = emptyList()
-    ): Boolean {
-        val ok = AvatarGlobalDb.adminPush(context, adminKey, upserts, removes, clears, checked)
-        // Apply to the LOCAL catalog immediately so the backlog counts drop live (the
-        // authoritative copy is still the Worker's; this just avoids the ~15-min flush lag).
-        if (ok) AvatarGlobalDb.applyAdminLocal(upserts, removes)
-        pushError = if (ok) "" else "PUSH REJECTED — set ADMIN_KEY as a Secret on Cloudflare matching the app key"
-        return ok
+    ) {
+        enqueueOps(upserts, removes, clears, checked)
+    }
+
+    /** Add ops to the time-based flush buffer. Dedups by file id; a remove supersedes a
+     *  pending upsert of the same id (and clears its pending checked-bump), and an upsert
+     *  cancels a pending remove — so re-keys and rapid re-processing can't leave stale
+     *  buffered ops. NO network here; the flusher drains it. */
+    private fun enqueueOps(
+        upserts: List<AvatarGlobalDb.Entry>, removes: List<String>,
+        clears: List<String> = emptyList(), checked: List<String> = emptyList()
+    ) {
+        for (e in upserts) { pendingRemoves.remove(e.fileId); pendingUpserts[e.fileId] = e }
+        for (fid in removes) { pendingUpserts.remove(fid); pendingChecked.remove(fid); pendingRemoves.add(fid) }
+        for (fid in clears) pendingClears.add(fid)
+        for (fid in checked) if (!pendingUpserts.containsKey(fid) && !pendingRemoves.contains(fid)) pendingChecked.add(fid)
+    }
+
+    /** Drain the buffered ops to the Worker in size-capped chunks (≈ one KV write each),
+     *  re-queuing anything that fails so nothing is lost. Called on the FLUSH_MS timer,
+     *  so KV writes scale with TIME, not with how fast the bots process avatars. */
+    private suspend fun flushPending() {
+        val ctx = flushCtx ?: return
+        if (flushKey.isBlank()) return
+        flushMutex.withLock {
+            val upserts = ArrayDeque(pendingUpserts.values.toList()); pendingUpserts.clear()
+            val removes = ArrayDeque(pendingRemoves.toList()); pendingRemoves.clear()
+            val clears = ArrayDeque(pendingClears.toList()); pendingClears.clear()
+            val checked = ArrayDeque(pendingChecked.toList()); pendingChecked.clear()
+            if (upserts.isEmpty() && removes.isEmpty() && clears.isEmpty() && checked.isEmpty()) { pushError = ""; return }
+            var failed = false
+            while (upserts.isNotEmpty() || removes.isNotEmpty() || clears.isNotEmpty() || checked.isNotEmpty()) {
+                val u = ArrayList<AvatarGlobalDb.Entry>(); repeat(FLUSH_CHUNK) { upserts.removeFirstOrNull()?.let(u::add) }
+                val r = ArrayList<String>(); repeat(FLUSH_CHUNK) { removes.removeFirstOrNull()?.let(r::add) }
+                val c = ArrayList<String>(); repeat(FLUSH_CHUNK) { clears.removeFirstOrNull()?.let(c::add) }
+                val k = ArrayList<String>(); repeat(FLUSH_CHUNK) { checked.removeFirstOrNull()?.let(k::add) }
+                if (u.isEmpty() && r.isEmpty() && c.isEmpty() && k.isEmpty()) break
+                if (!AvatarGlobalDb.adminPush(ctx, flushKey, u, r, c, k)) {
+                    // Re-queue this chunk + everything still pending, retry next flush.
+                    (u + upserts).forEach { pendingUpserts.putIfAbsent(it.fileId, it) }
+                    (r + removes).forEach { pendingRemoves.add(it) }
+                    (c + clears).forEach { pendingClears.add(it) }
+                    (k + checked).forEach { if (!pendingUpserts.containsKey(it) && !pendingRemoves.contains(it)) pendingChecked.add(it) }
+                    failed = true; break
+                }
+            }
+            pushError = if (failed) "PUSH REJECTED — set ADMIN_KEY as a Secret on Cloudflare matching the app key" else ""
+        }
+    }
+
+    /** Reflect ONE processed avatar in the LOCAL catalog right away (free, in-memory) so
+     *  the backlog counters tick down per avatar instead of jumping a whole batch at once.
+     *  The Worker push is buffered separately (pushOps → enqueueOps). */
+    private fun applyItemLocal(upd: AvatarGlobalDb.Entry? = null, rekeyFrom: String? = null,
+                              remove: String? = null, checked: String? = null) {
+        val ups = if (upd != null) listOf(upd) else emptyList()
+        val rems = listOfNotNull(rekeyFrom, remove)
+        if (ups.isNotEmpty() || rems.isNotEmpty()) AvatarGlobalDb.applyAdminLocal(ups, rems)
+        if (checked != null) AvatarGlobalDb.markCheckedLocally(listOf(checked))
     }
 
     /** LIVENESS/REPORTS refresh: on a CONFIRMED-alive check (HTTP 200), pick up the
@@ -470,7 +742,9 @@ object AvatarCatalogSweep {
     // (filled=true but still "needs fill"), so the Fill queue plateaued and never drained
     // while the bot re-checked the same un-satisfiable entries. Once filled=true it's done;
     // any later owner edit (new platform/name/bio) is picked up by the liveness refresh.
-    private fun needsFill(e: AvatarGlobalDb.Entry): Boolean = !e.filled
+    // Also excludes benched poison entries (see the poison-entry guard) so one perpetually
+    // null-checking avatar can't pin the Fill backlog at a nonzero value forever.
+    private fun needsFill(e: AvatarGlobalDb.Entry): Boolean = !e.filled && !fillGaveUp.contains(e.fileId)
 
     private fun partitionOf(fileId: String): Int = (fileId.hashCode() and 0x7fffffff) % 2
 
@@ -496,7 +770,7 @@ object AvatarCatalogSweep {
                 // Don't remove on a report during a suspected VRChat outage — a 404 could be
                 // false. Skip clearing too, so the report stays pending and is re-verified once
                 // VRChat is back (don't mark a maybe-alive avatar's report resolved).
-                if (canRemove()) { removes.add(r.fileId); p.removed++ }
+                if (canRemove()) { removes.add(r.fileId); p.removed++; applyItemLocal(remove = r.fileId) }
             }
             else {
                 clears.add(r.fileId)  // alive → false positive
@@ -504,7 +778,8 @@ object AvatarCatalogSweep {
                     liveRefresh(cur, chk)?.let { upd ->
                         if (upd.fileId != cur.fileId) removes.add(cur.fileId)
                         upserts.add(upd); p.refreshed++
-                    }
+                        applyItemLocal(upd = upd, rekeyFrom = if (upd.fileId != cur.fileId) cur.fileId else null)
+                    } ?: applyItemLocal(checked = r.fileId)  // alive + identical → bump last-checked
                 }
             }
             if (upserts.size + removes.size + clears.size >= BATCH) {
@@ -526,7 +801,7 @@ object AvatarCatalogSweep {
     }
 
     private suspend fun livenessPass(context: Context, adminKey: String, slot: Int, role: Role, partition: Int): Boolean {
-        val cutoff = System.currentTimeMillis() - (if (blitzActive()) BLITZ_RECHECK_MS else RECHECK_INTERVAL_MS)
+        val cutoff = livenessCutoff()
         val cand = AvatarGlobalDb.snapshot()
             .filter { partitionOf(it.fileId) == partition && it.checked < cutoff }
             .sortedBy { it.checked }
@@ -543,18 +818,30 @@ object AvatarCatalogSweep {
         // Attribute the loaned work to the BOT'S OWN role progress (+ a `helping` marker) so
         // each bot's card shows what IT is doing, instead of all the loaned work vanishing into
         // the Fill card and the idle bots looking like they do nothing.
-        val fillBatch = claimBatch(AvatarGlobalDb.snapshot().filter { needsFill(it) }, FILL_BATCH)
-        if (fillBatch.isNotEmpty()) {
-            progress.getValue(ownRole).helping = "Fill"
-            return processFillBatch(context, adminKey, slot, fillBatch, ownRole)
+        //
+        // GATE: only loan when the target backlog is genuinely "in the red"
+        // (> LOAN_RED_THRESHOLD, matching the UI). Below that, the idle bot stays idle and
+        // leaves the dedicated bot to work its own small backlog — no piling onto a minor
+        // queue. Blitz is unaffected (it uses every bot regardless and never calls helpPass).
+        val snap = AvatarGlobalDb.snapshot()
+        val fillItems = snap.filter { needsFill(it) }
+        if (fillItems.size > LOAN_RED_THRESHOLD) {
+            val fillBatch = claimBatch(fillItems, FILL_BATCH)
+            if (fillBatch.isNotEmpty()) {
+                progress.getValue(ownRole).helping = "Fill"
+                return processFillBatch(context, adminKey, slot, fillBatch, ownRole)
+            }
         }
-        val cutoff = System.currentTimeMillis() - (if (blitzActive()) BLITZ_RECHECK_MS else RECHECK_INTERVAL_MS)
-        val staleBatch = claimBatch(
-            AvatarGlobalDb.snapshot().filter { it.checked < cutoff }.sortedBy { it.checked }, LIVENESS_BATCH
-        )
-        if (staleBatch.isEmpty()) return false
-        progress.getValue(ownRole).helping = "Liveness"
-        return processLivenessBatch(context, adminKey, slot, staleBatch, ownRole)
+        val cutoff = livenessCutoff()
+        val staleItems = snap.filter { it.checked < cutoff }
+        if (staleItems.size > LOAN_RED_THRESHOLD) {
+            val staleBatch = claimBatch(staleItems.sortedBy { it.checked }, LIVENESS_BATCH)
+            if (staleBatch.isNotEmpty()) {
+                progress.getValue(ownRole).helping = "Liveness"
+                return processLivenessBatch(context, adminKey, slot, staleBatch, ownRole)
+            }
+        }
+        return false
     }
 
     /** Process a PRE-CLAIMED fill batch (used by the FILL role AND by loaning bots). Backs
@@ -575,18 +862,21 @@ object AvatarCatalogSweep {
                 val chk = BotVrchatSession.checkAvatar(context, slot, e.avatarId)
                 p.checked++
                 if (chk == null) {
+                    noteFillNull(slot, e.fileId)   // poison-entry strike (only if session is alive)
                     if (++nulls >= 3) { p.status = "rate-limited — backing off"; break }
                     delay(PACE_MS); continue
                 }
                 nulls = 0
+                clearFillAttempt(e.fileId)         // definitive result → reset the poison strike
                 if (chk.alive) noteAlive()
                 if (!chk.alive) {
-                    if (canRemove()) { removes.add(e.fileId); p.removed++ }
+                    if (canRemove()) { removes.add(e.fileId); p.removed++; applyItemLocal(remove = e.fileId) }
                     // else: suspected VRChat outage — defer the removal, retry next pass
                 } else {
                     val upd = fillRefresh(e, chk)
                     if (upd.fileId != e.fileId) removes.add(e.fileId)  // re-key on image change (safe on a 200)
                     upserts.add(upd); p.filled++
+                    applyItemLocal(upd = upd, rekeyFrom = if (upd.fileId != e.fileId) e.fileId else null)
                 }
                 if (upserts.size + removes.size >= BATCH) {
                     pushOps(context, adminKey, upserts.toList(), removes.toList())
@@ -623,18 +913,18 @@ object AvatarCatalogSweep {
                 nulls = 0
                 if (chk.alive) noteAlive()
                 if (!chk.alive) {
-                    if (canRemove()) { removes.add(e.fileId); p.removed++ }
+                    if (canRemove()) { removes.add(e.fileId); p.removed++; applyItemLocal(remove = e.fileId) }
                     // else: suspected VRChat outage — defer the removal, retry next pass
                 } else {
                     val upd = liveRefresh(e, chk)
                     if (upd != null) {
                         if (upd.fileId != e.fileId) removes.add(e.fileId)
                         upserts.add(upd); p.refreshed++
-                    } else okChecked.add(e.fileId)  // alive + identical → just bump last-checked
+                        applyItemLocal(upd = upd, rekeyFrom = if (upd.fileId != e.fileId) e.fileId else null)
+                    } else { okChecked.add(e.fileId); applyItemLocal(checked = e.fileId) }  // alive + identical → bump last-checked
                 }
                 delay(PACE_MS)
             }
-            AvatarGlobalDb.markCheckedLocally(okChecked + upserts.map { it.fileId })
             if (removes.isNotEmpty() || upserts.isNotEmpty() || okChecked.isNotEmpty())
                 pushOps(context, adminKey, upserts.toList(), removes.toList(), emptyList(), okChecked.toList())
             p.status = "checked=${p.checked} removed=${p.removed} refreshed=${p.refreshed}"

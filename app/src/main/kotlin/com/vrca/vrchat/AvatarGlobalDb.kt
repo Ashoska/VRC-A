@@ -3,16 +3,21 @@ package com.vrca.vrchat
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import android.util.JsonReader
+import android.util.JsonToken
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.Reader
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
@@ -52,6 +57,8 @@ object AvatarGlobalDb {
     private const val KEY_RAWURL = "rawurl"       // exact file URL learned from the Worker /health
     private const val KEY_QUEUE = "queue"        // pending contributions (JSON array)
     private const val KEY_REPORTS = "reports"    // pending reports (JSON array)
+    private const val KEY_FAV_PROCESSED = "fav_processed"  // favourite ids resolved once (persistent)
+    private const val KEY_SEED_QUEUE = "seed_queue"        // pending seed-search names (persistent)
     private const val CACHE_FILE = "avatar_db.json"
     private const val REFRESH_MS = 30 * 60_000L  // every 30 min (+ once on open)
     // Push queued contributions to the Worker every 5 min — frequent enough that each
@@ -60,6 +67,24 @@ object AvatarGlobalDb {
     // this many entries (the Worker caps a single POST) so a big harvest isn't lost.
     private const val FLUSH_MS = 2 * 60_000L
     private const val CONTRIBUTE_CHUNK = 200
+    // Paced DB-search seeding from favourites / worn avatars. Each name runs ONE
+    // AvatarSearch.searchAll (avtrdb + 2 VRCX mirrors + our catalog), which contributes
+    // any file-id-bearing result back — so it grows the catalog with OTHER avatars indexed
+    // under that name, with ZERO VRChat REST (searchAll never resolves file ids itself).
+    // Drained one name per SEARCH_SEED_PACE_MS so a big favourites list can't rate-limit
+    // the DBs; names deduped per session; queue capped.
+    private const val SEARCH_SEED_PACE_MS = 6_000L
+    private const val SEARCH_SEED_QUEUE_CAP = 1500   // favourite lists can be ~1000
+    private const val SEARCH_SEED_MIN_LEN = 3
+    private const val SEED_YIELD_MS = 1_000L         // re-check the roster this often while paused
+    private const val SEED_MAX_YIELD_MS = 90_000L    // never starve the seed longer than this
+    private const val HARVEST_RL_BACKOFF = 5         // consecutive resolve failures => stop (rate-limited)
+    // Favourites can be up to ~1000. Resolving each via VRChat REST would rate-limit, so:
+    // skip any already in the catalog (no call), cap NEW resolves per 30-min sweep (spread
+    // 1000 across sweeps), and back off on a run of nulls (a 429 burst).
+    private const val FAV_RESOLVE_PER_SWEEP = 120
+    private const val FAV_PACE_MS = 600L
+    private const val FAV_RL_BACKOFF = 5             // consecutive nulls => assume rate-limited, stop this sweep
 
     data class Entry(
         val fileId: String,
@@ -84,11 +109,44 @@ object AvatarGlobalDb {
     )
 
     private val map = ConcurrentHashMap<String, Entry>()   // fileId -> entry
+    // Mirror of every avatarId in `map`, for O(1) "do we already have this avatar?" checks
+    // (the avtrdb crawler / search harvest dedup by avatarId to skip a VRChat resolve for
+    // avatars we already hold). Kept in sync in parseStream/contribute/applyAdminLocal.
+    private val avatarIds = ConcurrentHashMap.newKeySet<String>()
+    /** True if this `avtr_` id is already in the catalog (any file id). O(1). */
+    fun hasAvatarId(avatarId: String): Boolean = avatarIds.contains(avatarId)
     private val started = AtomicBoolean(false)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     // Serializes all read-modify-write of the persisted contribution queue so a flush
     // (which drains it) can't race a concurrent contribute (which appends) and lose it.
     private val queueMutex = Mutex()
+
+    // Paced DB-search seed queue: names from favourites / worn avatars, drained one at a
+    // time by a slow timer so a big favourites list can't rate-limit the DBs. Deduped so the
+    // same name is never re-searched. PERSISTED to disk so a big backlog (a ~1000-favourite
+    // list takes ~100 min to drain) resumes across app reopens instead of being lost.
+    private val searchSeedQueue = java.util.concurrent.ConcurrentLinkedQueue<String>()
+    private val seededSearchNames = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+    @Volatile private var seedQueueLoaded = false
+
+    private fun loadSeedQueue(context: Context) {
+        if (seedQueueLoaded) return
+        seedQueueLoaded = true
+        try {
+            val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_SEED_QUEUE, "") ?: ""
+            raw.split('\n').forEach { n ->
+                val name = n.trim()
+                if (name.length >= SEARCH_SEED_MIN_LEN && seededSearchNames.add(name.lowercase())) searchSeedQueue.add(name)
+            }
+        } catch (e: Exception) { Log.w(TAG, "load seed queue failed", e) }
+    }
+
+    private fun saveSeedQueue(context: Context) {
+        try {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .putString(KEY_SEED_QUEUE, searchSeedQueue.joinToString("\n")).apply()
+        } catch (e: Exception) { Log.w(TAG, "save seed queue failed", e) }
+    }
 
     private val FILE_RE = Regex("""file_[0-9a-fA-F-]{36}""")
     private val AVTR_RE = Regex("""avtr_[0-9a-fA-F-]{36}""")
@@ -96,8 +154,12 @@ object AvatarGlobalDb {
     @Volatile private var lastPull = "never"
     @Volatile private var lastPost = "none"
     @Volatile private var ownAvatar = "not harvested yet"
+    @Volatile private var lastSwitch = "no avatar switch seen yet"
+    @Volatile private var lastFav = "no favourites sweep yet"
     @Volatile private var lastContributed = "none"
     @Volatile private var contributedCount = 0
+    @Volatile private var lastOwnHarvestMs = 0L
+    @Volatile private var lastSeedSearch = "none"
 
     // ---- lifecycle -----------------------------------------------------------
 
@@ -112,6 +174,8 @@ object AvatarGlobalDb {
         }
         scope.launch {
             loadLocalCache(app)
+            loadProcessedFavourites(app)
+            loadSeedQueue(app)
             refresh(app)
             flushQueue(app)
             harvestOwnAvatar(app)
@@ -132,6 +196,37 @@ object AvatarGlobalDb {
             while (isActive) {
                 delay(FLUSH_MS)
                 flushQueue(app)
+            }
+        }
+        // Paced DB-search seeder: drain ONE queued name per SEARCH_SEED_PACE_MS. searchAll
+        // hits avtrdb + 2 VRCX mirrors + our catalog and contributes any file-id-bearing
+        // result back — growing the catalog with other avatars indexed under that name, with
+        // ZERO VRChat REST (searchAll never resolves file ids). One name/10s keeps the DBs
+        // well under any rate limit no matter how many favourites are queued.
+        scope.launch {
+            var yieldStart = 0L
+            while (isActive) {
+                // YIELD to the instance roster: its clone-id resolution hits the SAME
+                // avtrdb/VRCX mirrors, so running the seed search during the roster's initial
+                // load starves it + rate-limits the DBs (the roster takes forever). Pause the
+                // seed while the roster is resolving; resume the instant it goes idle. A hard
+                // SEED_MAX_YIELD_MS cap lets one name trickle through so a perpetually-busy
+                // instance can't starve the seed forever. (Always idle on non-headset builds.)
+                if (com.vrca.vrchat.InstanceRosterManager.isResolvingRoster()) {
+                    if (yieldStart == 0L) yieldStart = System.currentTimeMillis()
+                    if (System.currentTimeMillis() - yieldStart < SEED_MAX_YIELD_MS) {
+                        if (searchSeedQueue.isNotEmpty())
+                            lastSeedSearch = "paused — roster loading (${searchSeedQueue.size} queued)"
+                        delay(SEED_YIELD_MS); continue
+                    }
+                }
+                yieldStart = 0L
+                val name = searchSeedQueue.poll()
+                if (name == null) { delay(SEARCH_SEED_PACE_MS); continue }
+                runCatching { AvatarSearch.searchAll(app, name) }
+                saveSeedQueue(app)   // persist the shrunk queue so a reopen resumes here
+                lastSeedSearch = "'$name' (${searchSeedQueue.size} queued) ${nowShort()}"
+                delay(SEARCH_SEED_PACE_MS)
             }
         }
     }
@@ -231,8 +326,8 @@ object AvatarGlobalDb {
      *  Worker flush + re-pull. The authoritative copy is still the Worker's. */
     fun applyAdminLocal(upserts: List<Entry>, removes: Collection<String>) {
         val now = System.currentTimeMillis()
-        for (fid in removes) map.remove(fid)
-        for (e in upserts) map[e.fileId] = e.copy(checked = now)
+        for (fid in removes) map.remove(fid)?.let { avatarIds.remove(it.avatarId) }
+        for (e in upserts) { map[e.fileId] = e.copy(checked = now); avatarIds.add(e.avatarId) }
     }
 
     /** Cheap pending-report count from /health (a single KV read on the Worker, no
@@ -308,6 +403,239 @@ object AvatarGlobalDb {
             .map { it.first }.distinctBy { it.avatarId }.take(limit)
     }
 
+    // ---- sharded reads (R2, learned from /health) ----------------------------
+    // The clone path can resolve a worn avatar by fetching ONLY its shard from the R2
+    // catalog (edge-cached CDN GET), instead of relying on this device's up-to-~30-min
+    // whole-file map. This is what keeps memory flat + clone-resolution fresh at scale.
+    //
+    // DORMANT until R2 is the LIVE write backend: `refreshCatalogBase` only enables shard
+    // fetches when /health reports backend=="r2" (post-cutover). Before cutover the shards
+    // are a frozen migration snapshot, so we don't waste requests on them — lookupSharded
+    // is a no-op and the existing whole-map + DB-stack paths are unchanged.
+    private const val KEY_CATALOG_BASE = "catalog_base" // persisted for cold-start recovery
+    private const val KEY_R2 = "r2_serving"
+    private const val HEALTH_TTL_MS = 5 * 60_000L
+    private const val SHARD_LRU_MAX = 48                 // bounded; evicted on instance leave + overflow
+
+    @Volatile private var catalogBase: String? = null    // e.g. https://cdn.gremlininc.app
+    @Volatile private var r2Serving = false              // true only when R2 is the live backend
+    @Volatile private var catalogBaseLoaded = false
+    @Volatile private var lastHealthMs = 0L
+
+    // Memory-only LRU of recently-fetched shards (prefix -> fileId -> Entry). Access-ordered
+    // so the least-recently-used shard falls off past the cap. Cleared on instance leave.
+    private val shardLru = object : LinkedHashMap<String, Map<String, Entry>>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Map<String, Entry>>): Boolean = size > SHARD_LRU_MAX
+    }
+    // Single-flight: a roster resolves many members at once and several can share a shard;
+    // coalesce concurrent fetches of the same prefix into one request.
+    private val shardFetches = ConcurrentHashMap<String, Deferred<Map<String, Entry>?>>()
+
+    /** Resolve a worn avatar by its image file id from the R2 shard (post-cutover). Checks
+     *  the local map + shard LRU first (both instant), else one edge-cached shard GET.
+     *  Returns null when R2 isn't the live backend yet, on a miss, or on any error — so the
+     *  caller falls through to its existing paths. Image-file-id-keyed, so a hit is exact
+     *  (satisfies the "only an image-confirmed match" resolver invariant by construction). */
+    suspend fun lookupSharded(context: Context, fileId: String?): Entry? {
+        if (fileId == null || !FILE_RE.matches(fileId)) return null
+        map[fileId]?.let { return it }                    // own/whole-map (instant)
+        ensureCatalogBase(context)
+        if (!r2Serving) return null                       // dormant pre-cutover
+        val base = catalogBase ?: return null
+        val prefix = fileId.substring(5, 8).lowercase()
+        synchronized(shardLru) { shardLru[prefix] }?.let { return it[fileId] }
+        val shard = fetchShardSingleFlight(base, prefix) ?: return null
+        synchronized(shardLru) { shardLru[prefix] = shard }
+        return shard[fileId]
+    }
+
+    /** Drop the in-memory shard cache — called on instance leave (presence-scoped
+     *  eviction), alongside the roster's own cache clears. The persisted contribution
+     *  queue + catalogBase are untouched (separate stores). */
+    fun evictShardCache() { synchronized(shardLru) { shardLru.clear() } }
+
+    // ---- sharded SEARCH (token index + fragment store) -----------------------
+    // Search is served by two R2 object types (built by the rebuild job from the shards):
+    //   index/<3hex>.json      = { v, t: { "<token>": ["avtr_..", ...] } }   (token -> ids)
+    //   fragments/<3hex>.json  = { v, e: { "avtr_..": { f, n, au, ai, p, pf } } } (id -> summary)
+    // A query fetches the buckets for its tokens (AND-intersect the id lists), then the
+    // fragments for the top ids — a handful of edge-cached GETs, never the whole catalog.
+    // Bucket keys are computed IDENTICALLY here and in the rebuild job:
+    //   index token bucket   = (token.hashCode() & 0xfff)   -> 3 hex   (JS replicates hashCode)
+    //   fragment id bucket   = the 3 hex after "avtr_"                  (even, matches shards)
+    private const val SEARCH_CACHE_MAX = 96
+    private val searchCache = object : LinkedHashMap<String, JSONObject>(128, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, JSONObject>): Boolean = size > SEARCH_CACHE_MAX
+    }
+
+    /** True when the sharded search index is the live source (post-cutover). Callers use
+     *  the whole-map [searchByName] when this is false (pre-cutover / R2 off). */
+    fun r2SearchActive(context: Context): Boolean { ensureCatalogBase(context); return r2Serving }
+
+    /** Context-free read of the same flag (for the sync search entry points that don't
+     *  carry a Context). False until /health has been learned once, so it safely defaults
+     *  to the whole-map path on a cold start. */
+    fun isR2SearchLive(): Boolean = r2Serving
+
+    private fun indexBucketOf(token: String): String = (token.hashCode() and 0xfff).toString(16).padStart(3, '0')
+    private fun fragBucketOf(avatarId: String): String =
+        if (avatarId.length >= 8) avatarId.substring(5, 8).lowercase() else "000"
+
+    /**
+     * Search the sharded index (token buckets + fragments). Tokenize the query, AND-intersect
+     * the token posting lists, fetch the fragments for the survivors, rank (name > author >
+     * desc-absent), return as [Entry]s. Empty when R2 search isn't live or nothing matches —
+     * the caller then keeps its existing behaviour (whole-map / mirrors).
+     */
+    suspend fun searchSharded(context: Context, query: String, limit: Int = 60): List<Entry> {
+        ensureCatalogBase(context)
+        if (!r2Serving) return emptyList()
+        val base = catalogBase ?: return emptyList()
+        val ql = query.trim().lowercase()
+        val tokens = ql.split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length >= 2 }.distinct()
+        if (tokens.isEmpty()) return emptyList()
+        var acc: MutableSet<String>? = null
+        for (t in tokens) {
+            val ids = fetchTokenIds(base, t)
+            if (ids.isEmpty()) return emptyList()          // AND — a token with no postings kills the match
+            acc = if (acc == null) ids.toMutableSet() else acc.apply { retainAll(ids) }
+            if (acc.isEmpty()) return emptyList()
+        }
+        val idList = (acc ?: return emptyList()).toList().take(limit * 4)
+        val out = ArrayList<Entry>(idList.size)
+        for ((bucket, ids) in idList.groupBy { fragBucketOf(it) }) {
+            val frags = fetchFragments(base, bucket) ?: continue
+            for (id in ids) frags[id]?.let { out.add(it) }
+        }
+        return out.sortedByDescending { e ->
+            val name = e.name.lowercase(); val author = e.author.lowercase()
+            var s = 0
+            for (t in tokens) s += when { name.contains(t) -> 5; author.contains(t) -> 2; else -> 1 }
+            if (name == ql) s += 20 else if (name.startsWith(tokens.first())) s += 3
+            s
+        }.distinctBy { it.avatarId }.take(limit)
+    }
+
+    private suspend fun fetchTokenIds(base: String, token: String): List<String> {
+        val obj = fetchSearchJson("$base/index/${indexBucketOf(token)}.json") ?: return emptyList()
+        val arr = obj.optJSONObject("t")?.optJSONArray(token) ?: return emptyList()
+        return (0 until arr.length()).mapNotNull { arr.optString(it, "").takeIf { s -> s.startsWith("avtr_") } }
+    }
+
+    private suspend fun fetchFragments(base: String, bucket: String): Map<String, Entry>? {
+        val obj = fetchSearchJson("$base/fragments/$bucket.json") ?: return null
+        val e = obj.optJSONObject("e") ?: return emptyMap()
+        val out = HashMap<String, Entry>()
+        val keys = e.keys()
+        while (keys.hasNext()) {
+            val id = keys.next(); if (!id.startsWith("avtr_")) continue
+            val o = e.optJSONObject(id) ?: continue
+            val mask = o.optInt("p", 0)
+            val plats = buildList { if (mask and 1 != 0) add("PC"); if (mask and 2 != 0) add("Quest"); if (mask and 4 != 0) add("iOS") }
+            val pf = o.optJSONObject("pf")
+            out[id] = Entry(
+                o.optString("f", ""), id, o.optString("n", ""), o.optString("au", ""), o.optString("ai", ""),
+                plats, 0L, "",
+                pf?.optInt("pc", 5) ?: 5, pf?.optInt("q", 5) ?: 5, pf?.optInt("i", 5) ?: 5, filled = true
+            )
+        }
+        return out
+    }
+
+    /** GET a small index/fragment JSON object, memory-cached (bounded, size-evicted — search
+     *  results aren't instance-scoped, so this is a plain LRU, not presence-evicted). */
+    private suspend fun fetchSearchJson(url: String): JSONObject? {
+        synchronized(searchCache) { searchCache[url] }?.let { return it }
+        val obj = kotlinx.coroutines.withContext(Dispatchers.IO) {
+            var conn: HttpURLConnection? = null
+            try {
+                conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                    connectTimeout = 10_000; readTimeout = 10_000
+                }
+                if (conn.responseCode != 200) null else JSONObject(conn.inputStream.bufferedReader().readText())
+            } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
+        } ?: return null
+        synchronized(searchCache) { searchCache[url] = obj }
+        return obj
+    }
+
+    private suspend fun fetchShardSingleFlight(base: String, prefix: String): Map<String, Entry>? {
+        val deferred = shardFetches.computeIfAbsent(prefix) { scope.async { fetchShard(base, prefix) } }
+        return try { deferred.await() } finally { shardFetches.remove(prefix, deferred) }
+    }
+
+    private fun fetchShard(base: String, prefix: String): Map<String, Entry>? {
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL("$base/shard/$prefix.json").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                connectTimeout = 10_000; readTimeout = 10_000
+            }
+            if (conn.responseCode != 200) return null      // 404 = empty prefix; treat as miss
+            parseShard(conn.inputStream.bufferedReader().readText())
+        } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
+    }
+
+    private fun parseShard(text: String): Map<String, Entry> {
+        val out = HashMap<String, Entry>()
+        val e = JSONObject(text).optJSONObject("e") ?: return out
+        val keys = e.keys()
+        while (keys.hasNext()) {
+            val fid = keys.next()
+            val o = e.optJSONObject(fid) ?: continue
+            val id = o.optString("id", "")
+            if (!id.startsWith("avtr_")) continue
+            val plats = o.optJSONArray("platforms")?.let { pa ->
+                (0 until pa.length()).mapNotNull { pa.optString(it, "").takeIf { s -> s.isNotBlank() } }
+            } ?: emptyList()
+            out[fid] = Entry(
+                fid, id, o.optString("name", ""), o.optString("author", ""), o.optString("authorId", ""),
+                plats, o.optLong("checked", o.optLong("added", 0L)),
+                o.optString("desc", o.optString("description", "")),
+                o.optInt("perfPc", 5), o.optInt("perfQuest", 5), o.optInt("perfIos", 5),
+                o.optBoolean("filled", false)
+            )
+        }
+        return out
+    }
+
+    /** Learn `catalogBase` + whether R2 is the live backend from /health (TTL'd, off-thread).
+     *  Loads persisted values first so a cold start can resolve shards immediately, before
+     *  /health responds (crash-recovery). */
+    private fun ensureCatalogBase(context: Context) {
+        if (!catalogBaseLoaded) {
+            catalogBaseLoaded = true
+            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            catalogBase = prefs.getString(KEY_CATALOG_BASE, null)
+            r2Serving = prefs.getBoolean(KEY_R2, false)
+        }
+        val now = System.currentTimeMillis()
+        if (now - lastHealthMs < HEALTH_TTL_MS) return
+        lastHealthMs = now
+        scope.launch { refreshCatalogBase(context.applicationContext) }
+    }
+
+    private fun refreshCatalogBase(context: Context) {
+        var conn: HttpURLConnection? = null
+        try {
+            conn = (URL("$WORKER_URL/health").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                connectTimeout = 10_000; readTimeout = 10_000
+            }
+            if (conn.responseCode != 200) return
+            val j = JSONObject(conn.inputStream.bufferedReader().readText())
+            val base = j.optString("catalogBase", "").takeIf { it.startsWith("https://") } ?: return
+            // Only trust shards once R2 is the live write backend — before cutover they're a
+            // frozen snapshot, so we stay dormant (no wasted requests).
+            val r2 = j.optBoolean("r2", false) && j.optString("backend", "") == "r2"
+            catalogBase = base
+            r2Serving = r2
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .putString(KEY_CATALOG_BASE, base).putBoolean(KEY_R2, r2).apply()
+        } catch (e: Exception) { /* keep last-known */ } finally { runCatching { conn?.disconnect() } }
+    }
+
     // ---- contribute / report -------------------------------------------------
 
     /** Queue a newly-learned mapping and try to send it. No-op if we already have
@@ -316,17 +644,21 @@ object AvatarGlobalDb {
         context: Context, fileId: String, avatarId: String,
         name: String, author: String, authorId: String = "", platforms: List<String> = emptyList(),
         description: String = ""
-    ) {
+    ): Boolean {
         // Only add entries we ACTUALLY have a valid avatar id + file id for.
-        if (!FILE_RE.matches(fileId)) return
-        if (!AVTR_RE.matches(avatarId)) return
-        if (map.containsKey(fileId)) return
+        // Returns TRUE only when this call adds a genuinely NEW entry — so harvest
+        // callers can report "new" vs "already in catalog" (the common case for a
+        // mature catalog, where a worn/favourited avatar is usually already present).
+        if (!FILE_RE.matches(fileId)) return false
+        if (!AVTR_RE.matches(avatarId)) return false
+        if (map.containsKey(fileId)) return false
         // Insert into the LOCAL catalog immediately so the contributing device can see
         // its own new avatars (own uploads, favourites, resolved strangers) in search /
         // clone RIGHT AWAY — no waiting for the Worker flush + next 30-min pull. Zero
         // extra KV cost (this is a purely in-memory local add).
         map[fileId] = Entry(fileId, avatarId, name, author, authorId, platforms,
             System.currentTimeMillis(), description, filled = false)
+        avatarIds.add(avatarId)
         val app = context.applicationContext
         scope.launch {
             queueMutex.withLock {
@@ -349,6 +681,7 @@ object AvatarGlobalDb {
                 lastContributed = "${name.ifBlank { avatarId }} (${nowShort()})"
             }
         }
+        return true
     }
 
     /** Report an entry as dead (404/private) or renamed so the file self-heals. The
@@ -444,11 +777,17 @@ object AvatarGlobalDb {
     private fun loadLocalCache(context: Context) {
         try {
             val f = File(context.filesDir, CACHE_FILE)
-            if (f.exists()) parseInto(f.readText())
-        } catch (e: Exception) { Log.w(TAG, "cache load failed", e) }
+            if (f.exists()) parseFile(f)   // STREAMING — never reads the whole file into memory
+        } catch (e: Throwable) { Log.w(TAG, "cache load failed", e) }
     }
 
     private fun refresh(context: Context, cacheBust: String? = null) {
+        ensureCatalogBase(context)   // keep r2Serving current for the source decision below
+        // POST-CUTOVER, the PUBLIC build no longer holds the whole catalog — clone goes
+        // through lookupSharded and search through searchSharded, so skip the ~25 MB
+        // whole-file pull entirely (this is the memory-flat-at-scale win). The ADMIN build
+        // still loads it (the bots iterate the whole map).
+        if (r2Serving && !com.vrca.BuildConfig.IS_ADMIN_BUILD) return
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         // Read the file from EXACTLY where the Worker writes it — learn the URL from
         // /health (echoes rawUrl), so no repo/branch/path mismatch is possible.
@@ -460,8 +799,18 @@ object AvatarGlobalDb {
         // from KV) — GitHub's raw CDN caches ~5 min and ignores cache-busting query
         // params, which delayed the admin bots seeing new avatars. The normal (public)
         // refresh still uses the CDN with an ETag (free, fine at 30-min cadence).
-        val rawUrl = if (cacheBust != null) "$WORKER_URL/db" else baseUrl
-        val etag = if (cacheBust == null) prefs.getString(KEY_ETAG, null) else null
+        // Post-cutover the Worker /db (KV dbcache) is FROZEN (flushR2 doesn't rebuild it) —
+        // the ADMIN reads the master from R2 instead (`${catalogBase}/db.json`), which the
+        // rebuild Action keeps fresh from the shards. It only changes every ~20 min, so use
+        // the ETag (conditional GET) even on the freshness poll = cheap 304s until it moves.
+        // Pre-cutover, keep the fast KV /db path for the poll and the CDN+ETag otherwise.
+        val r2Master = r2Serving && catalogBase != null
+        val rawUrl = when {
+            r2Master -> "${catalogBase}/db.json"
+            cacheBust != null -> "$WORKER_URL/db"
+            else -> baseUrl
+        }
+        val etag = if (cacheBust == null || r2Master) prefs.getString(KEY_ETAG, null) else null
         var conn: HttpURLConnection? = null
         try {
             conn = (URL(rawUrl).openConnection() as HttpURLConnection).apply {
@@ -473,15 +822,30 @@ object AvatarGlobalDb {
             when (conn.responseCode) {
                 304 -> lastPull = "304 (unchanged) ${nowShort()}"
                 200 -> {
-                    val text = conn.inputStream.bufferedReader().readText()
-                    parseInto(text)
-                    File(context.filesDir, CACHE_FILE).writeText(text)
-                    conn.getHeaderField("ETag")?.let { prefs.edit().putString(KEY_ETAG, it).apply() }
-                    lastPull = "pulled ${map.size} at ${nowShort()}"
+                    // Stream the body straight to a temp file (NEVER hold the whole ~20 MB+
+                    // response as one String — that whole-file read is what OOM'd the Quest's
+                    // ~268 MB heap on boot), then STREAM-PARSE it with JsonReader.
+                    val tmp = File(context.filesDir, "$CACHE_FILE.tmp")
+                    conn.inputStream.use { input ->
+                        tmp.outputStream().buffered(64 * 1024).use { out -> input.copyTo(out, 64 * 1024) }
+                    }
+                    val applied = parseFile(tmp)
+                    if (applied >= 0) {
+                        // Good parse — promote tmp to the cache file atomically.
+                        val cache = File(context.filesDir, CACHE_FILE)
+                        if (cache.exists()) cache.delete()
+                        if (!tmp.renameTo(cache)) { runCatching { tmp.copyTo(cache, overwrite = true) }; tmp.delete() }
+                        conn.getHeaderField("ETag")?.let { prefs.edit().putString(KEY_ETAG, it).apply() }
+                        lastPull = "pulled ${map.size} at ${nowShort()}"
+                    } else {
+                        // Empty/bad read — keep the existing cache + catalog.
+                        tmp.delete()
+                        lastPull = "parse skipped (kept ${map.size}) at ${nowShort()}"
+                    }
                 }
                 else -> lastPull = "http ${conn.responseCode} at ${nowShort()} ($rawUrl)"
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             lastPull = "error ${e.javaClass.simpleName} ${nowShort()}"
         } finally { runCatching { conn?.disconnect() } }
     }
@@ -500,34 +864,115 @@ object AvatarGlobalDb {
         } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
     }
 
-    private fun parseInto(text: String) {
-        try {
-            val avatars = JSONObject(text).optJSONObject("avatars") ?: return
-            // SAFETY: never replace a populated local catalog with an empty one (a blank
-            // /db before the first flush, a truncated read, etc.) — that would wipe it.
-            if (avatars.length() == 0 && map.isNotEmpty()) return
-            val fresh = HashMap<String, Entry>(avatars.length())
-            val keys = avatars.keys()
-            while (keys.hasNext()) {
-                val fileId = keys.next()
-                val o = avatars.optJSONObject(fileId) ?: continue
-                val id = o.optString("id", "")
-                if (!id.startsWith("avtr_")) continue
-                val plats = o.optJSONArray("platforms")?.let { pa ->
-                    (0 until pa.length()).mapNotNull { pa.optString(it, "").takeIf { s -> s.isNotBlank() } }
-                } ?: emptyList()
-                val fileEntry = Entry(
-                    fileId, id, o.optString("name", ""),
-                    o.optString("author", ""), o.optString("authorId", ""), plats,
-                    o.optLong("checked", o.optLong("added", 0L)),
-                    o.optString("desc", o.optString("description", "")),
-                    o.optInt("perfPc", 5), o.optInt("perfQuest", 5), o.optInt("perfIos", 5),
-                    o.optBoolean("filled", false)
-                )
-                fresh[fileId] = mergeWithLocal(fileEntry, map[fileId])
+    /**
+     * STREAMING parse of the catalog file. Returns the number of entries applied to
+     * `map` (>= 0), or -1 if it declined to swap (empty/bad read over a populated
+     * catalog, or a parse error) so the caller keeps the existing cache.
+     *
+     * Memory-bounded on purpose: the file is read through Android's pull-based
+     * [JsonReader], so the whole ~20 MB+ document is NEVER materialised as a single
+     * String or a full `JSONObject` tree. Peak heap is roughly (result map + one
+     * entry at a time), instead of (file String + full JSON tree + map) — the old
+     * whole-file read is what OOM-crashed the Quest 3's ~268 MB growth-limit heap on
+     * every boot. Catches `Throwable` (incl. OutOfMemoryError) so a pathological file
+     * degrades to "keep the old catalog" rather than crashing the app.
+     */
+    private fun parseFile(file: File): Int = try {
+        file.bufferedReader().use { br -> parseStream(br) }
+    } catch (e: Throwable) { Log.w(TAG, "parse failed", e); -1 }
+
+    private fun parseStream(reader: Reader): Int {
+        val fresh = HashMap<String, Entry>(1 shl 16)
+        val jr = JsonReader(reader)
+        jr.isLenient = true
+        jr.beginObject()
+        while (jr.hasNext()) {
+            if (jr.nextName() == "avatars" && jr.peek() == JsonToken.BEGIN_OBJECT) {
+                jr.beginObject()
+                while (jr.hasNext()) {
+                    val fileId = jr.nextName()
+                    val e = readEntry(jr, fileId)
+                    // Merge local progress (filled/checked ahead of the file) as we go, so
+                    // we never hold a third full map just to merge.
+                    if (e != null) fresh[fileId] = mergeWithLocal(e, map[fileId])
+                }
+                jr.endObject()
+            } else jr.skipValue()
+        }
+        jr.endObject()
+        // SAFETY: never replace a populated catalog with an empty parse (a blank /db
+        // before the first flush, a truncated read, etc.).
+        if (fresh.isEmpty() && map.isNotEmpty()) return -1
+        map.clear(); map.putAll(fresh)
+        avatarIds.clear(); fresh.values.forEach { avatarIds.add(it.avatarId) }
+        return fresh.size
+    }
+
+    /** Read one `"file_...": { ... }` catalog entry from the stream. Consumes exactly
+     *  the value token for [fileId]. Returns null (still consuming the value) for a
+     *  malformed / non-object / non-avatar entry. */
+    private fun readEntry(jr: JsonReader, fileId: String): Entry? {
+        if (jr.peek() != JsonToken.BEGIN_OBJECT) { jr.skipValue(); return null }
+        var id = ""; var name = ""; var author = ""; var authorId = ""; var desc = ""
+        var checked = 0L; var added = 0L
+        var perfPc = 5; var perfQuest = 5; var perfIos = 5
+        var filled = false
+        val plats = ArrayList<String>(3)
+        jr.beginObject()
+        while (jr.hasNext()) {
+            when (jr.nextName()) {
+                "id" -> id = jr.readStringSafe()
+                "name" -> name = jr.readStringSafe()
+                "author" -> author = jr.readStringSafe()
+                "authorId" -> authorId = jr.readStringSafe()
+                "desc", "description" -> { val d = jr.readStringSafe(); if (d.isNotBlank()) desc = d }
+                "checked" -> checked = jr.readLongSafe()
+                "added" -> added = jr.readLongSafe()
+                "perfPc" -> perfPc = jr.readIntSafe(5)
+                "perfQuest" -> perfQuest = jr.readIntSafe(5)
+                "perfIos" -> perfIos = jr.readIntSafe(5)
+                "filled" -> filled = jr.readBoolSafe()
+                "platforms" -> {
+                    if (jr.peek() == JsonToken.BEGIN_ARRAY) {
+                        jr.beginArray()
+                        while (jr.hasNext()) { val s = jr.readStringSafe(); if (s.isNotBlank()) plats.add(s) }
+                        jr.endArray()
+                    } else jr.skipValue()
+                }
+                else -> jr.skipValue()
             }
-            map.clear(); map.putAll(fresh)
-        } catch (e: Exception) { Log.w(TAG, "parse failed", e) }
+        }
+        jr.endObject()
+        if (!FILE_RE.matches(fileId)) return null
+        if (!id.startsWith("avtr_")) return null
+        return Entry(
+            fileId, id, name, author, authorId, plats,
+            if (checked != 0L) checked else added, desc, perfPc, perfQuest, perfIos, filled
+        )
+    }
+
+    // Defensive token readers — tolerate null / type-mismatched values without throwing
+    // (a bad field degrades to a default instead of aborting the whole streaming parse).
+    private fun JsonReader.readStringSafe(): String = when (peek()) {
+        JsonToken.NULL -> { nextNull(); "" }
+        JsonToken.BOOLEAN -> nextBoolean().toString()
+        else -> try { nextString() } catch (e: Exception) { runCatching { skipValue() }; "" }
+    }
+    private fun JsonReader.readLongSafe(): Long = when (peek()) {
+        JsonToken.NULL -> { nextNull(); 0L }
+        JsonToken.STRING -> nextString().toLongOrNull() ?: 0L
+        else -> try { nextLong() } catch (e: Exception) { runCatching { skipValue() }; 0L }
+    }
+    private fun JsonReader.readIntSafe(def: Int): Int = when (peek()) {
+        JsonToken.NULL -> { nextNull(); def }
+        JsonToken.STRING -> nextString().toIntOrNull() ?: def
+        else -> try { nextInt() } catch (e: Exception) { runCatching { skipValue() }; def }
+    }
+    private fun JsonReader.readBoolSafe(): Boolean = when (peek()) {
+        JsonToken.NULL -> { nextNull(); false }
+        JsonToken.BOOLEAN -> nextBoolean()
+        JsonToken.STRING -> nextString().equals("true", true)
+        else -> { runCatching { skipValue() }; false }
     }
 
     /** When re-pulling the file, PRESERVE local progress that's ahead of it — the bot
@@ -573,9 +1018,18 @@ object AvatarGlobalDb {
 
     private suspend fun harvestAvatarId(context: Context, avatarId: String) {
         try {
-            val e = VrchatAuthManager.avatarCatalogEntry(context, avatarId) ?: return
-            ownAvatar = "${e.name.ifBlank { e.avatarId }} (changed) ${nowShort()}"
-            contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
+            val e = VrchatAuthManager.avatarCatalogEntry(context, avatarId)
+            if (e == null) {
+                lastSwitch = "switched to a non-public avatar (not contributed) ${nowShort()}"
+                AvatarSearch.Diag.record("you worn -> non-public avatar (not contributed)")
+                return
+            }
+            val added = contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
+            lastSwitch = "switched -> ${e.name.ifBlank { e.avatarId }} — " +
+                "${if (added) "CONTRIBUTED (new)" else "already in catalog"} ${nowShort()}"
+            AvatarSearch.Diag.record("you worn -> ${e.name.ifBlank { e.avatarId }}: " +
+                if (added) "contributed (new)" else "already in catalog")
+            seedSearchFromName(e.name)   // grow the catalog from this worn avatar's name
         } catch (ex: Exception) { Log.w(TAG, "avatar-change harvest failed", ex) }
     }
 
@@ -585,15 +1039,22 @@ object AvatarGlobalDb {
     fun harvestSearchResults(context: Context, results: List<AvatarSearch.Result>) {
         val app = context.applicationContext
         scope.launch {
-            var n = 0
+            // NO count cap — an avtrdb query matches name/author only (no bios), so a term's
+            // result set is bounded; resolve them all. Dedup by avatar id against the catalog
+            // FIRST (zero VRChat call for ones we already have), and back off if VRChat starts
+            // rate-limiting (HARVEST_RL_BACKOFF consecutive failures) so a broad search can't
+            // hammer the user's session.
+            val knownIds = HashSet<String>(map.size); for (e in map.values) knownIds.add(e.avatarId)
+            var nulls = 0
             for (r in results) {
-                if (n >= 300) break                           // generous bound for a huge search
                 if (r.imageFileId != null) continue           // already contributed in searchAll
+                if (knownIds.contains(r.id)) continue          // already in catalog — no VRChat call
                 val fid = try { VrchatAuthManager.avatarCatalogEntry(app, r.id)?.fileId }
-                    catch (e: Exception) { null } ?: continue // null also = private/dead (skipped)
+                    catch (e: Exception) { null }
+                if (fid == null) { if (++nulls >= HARVEST_RL_BACKOFF) break; delay(600); continue }
+                nulls = 0
                 if (map.containsKey(fid)) continue
                 contribute(app, fid, r.id, r.name, r.author, r.authorId, r.platforms)
-                n++
                 delay(600)  // pace VRChat REST
             }
         }
@@ -628,21 +1089,39 @@ object AvatarGlobalDb {
     }
 
     /** Seed the catalog from the user's OWN uploaded + favourited avatars (all
-     *  readable with ids). Once per app open — a big free coverage boost. */
-    // Favourite avatar ids we've already resolved this session (avoids re-resolving
-    // the whole favourites list every 30-min cycle). Resets on restart.
-    private val resolvedFavourites = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+     *  readable with ids). Each favourite is resolved EXACTLY ONCE, ever. */
+    // Favourite ids already resolved (contributed / confirmed dead / private). PERSISTED to
+    // disk so a favourite is never re-resolved across restarts — the whole point of "run each
+    // favourite once and then not again" at ~1000-favourite scale. Loaded on start.
+    private val processedFavourites = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+    @Volatile private var processedFavLoaded = false
+
+    private fun loadProcessedFavourites(context: Context) {
+        if (processedFavLoaded) return
+        processedFavLoaded = true
+        try {
+            val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_FAV_PROCESSED, "") ?: ""
+            if (raw.isNotBlank()) raw.split('\n').forEach { if (it.startsWith("avtr_")) processedFavourites.add(it) }
+        } catch (e: Exception) { Log.w(TAG, "load processed favourites failed", e) }
+    }
+
+    private fun saveProcessedFavourites(context: Context) {
+        try {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .putString(KEY_FAV_PROCESSED, processedFavourites.joinToString("\n")).apply()
+        } catch (e: Exception) { Log.w(TAG, "save processed favourites failed", e) }
+    }
 
     private suspend fun harvestLibrary(context: Context) {
         try {
             // 1. Own UPLOADS (with local public<->private detection).
             val lib = VrchatAuthManager.ownAvatarLibrary(context)
-            var added = 0; var privateRemoved = 0
+            var libNew = 0; var libKnown = 0; var privateRemoved = 0
             for (a in lib) {
                 val e = a.entry
                 if (a.isPublic) {
-                    contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
-                    added++
+                    if (contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description))
+                        libNew++ else libKnown++
                 } else if (a.ownUpload && map.containsKey(e.fileId)) {
                     // The user made their own PUBLIC avatar private -> report removal
                     // (the admin bot confirms via a 404 on the now-private avatar).
@@ -650,28 +1129,103 @@ object AvatarGlobalDb {
                     privateRemoved++
                 }
             }
-            // 2. FAVOURITES — resolve each new one (public-only via avatarCatalogEntry).
+            // 2. FAVOURITES — up to ~1000, each resolved EXACTLY ONCE, ever (processedFavourites
+            //    is persistent). That one pass IS the dead-check: a favourite already in our
+            //    catalog that now 404s is REPORTED to the admin bots to double-check + remove;
+            //    a public one not yet in the catalog is contributed. Capped per sweep + backs
+            //    off on a run of UNAVAILABLE (429) so ~1000 favourites spread across sweeps
+            //    without rate-limiting VRChat; UNAVAILABLE ids are NOT marked, so they retry.
+            //    After a favourite is processed once it's never fetched again (the admin bots'
+            //    7-day liveness sweep covers ongoing death of catalog entries).
             val favs = VrchatAuthManager.favouriteAvatarIds(context)
-            var favAdded = 0
+            val knownById = HashMap<String, AvatarGlobalDb.Entry>(map.size)
+            for (e in map.values) knownById[e.avatarId] = e
+            var favNew = 0; var favKnown = 0; var favSkipped = 0; var favDead = 0; var favProcessed = 0
+            var consecutiveUnavail = 0; var rateLimited = false
             for (id in favs) {
-                if (resolvedFavourites.contains(id)) continue
-                resolvedFavourites.add(id) // mark attempted (retries on next app launch)
-                val e = try { VrchatAuthManager.avatarCatalogEntry(context, id) } catch (ex: Exception) { null }
-                    ?: continue // null = private/dead/transient — skipped
-                contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
-                favAdded++
-                delay(400) // pace VRChat REST
+                if (processedFavourites.contains(id)) continue
+                if (favProcessed >= FAV_RESOLVE_PER_SWEEP) continue   // cap per sweep; rest next sweep
+                val known = knownById[id]
+                val res = VrchatAuthManager.avatarCatalogEntryDetailed(context, id)
+                when (res.status) {
+                    VrchatAuthManager.AvatarFetch.UNAVAILABLE -> {
+                        // 429/network — don't mark; a run of these = rate-limited, stop the sweep.
+                        if (++consecutiveUnavail >= FAV_RL_BACKOFF) { rateLimited = true; break }
+                        delay(FAV_PACE_MS); continue
+                    }
+                    VrchatAuthManager.AvatarFetch.DEAD -> {
+                        consecutiveUnavail = 0; processedFavourites.add(id); favProcessed++
+                        // Only reportable if it's in our catalog (report is keyed by file id);
+                        // an unknown dead favourite was never in the catalog, so nothing to remove.
+                        if (known != null) { report(context, known.fileId, known.avatarId, "dead"); favDead++ }
+                        AvatarSearch.Diag.record("fav -> ${known?.name ?: id}: DEAD${if (known != null) " (reported)" else ""}")
+                    }
+                    VrchatAuthManager.AvatarFetch.PRIVATE -> {
+                        consecutiveUnavail = 0; processedFavourites.add(id); favProcessed++; favSkipped++
+                        known?.let { seedSearchFromName(it.name) }
+                    }
+                    VrchatAuthManager.AvatarFetch.FOUND -> {
+                        consecutiveUnavail = 0; processedFavourites.add(id); favProcessed++
+                        val e = res.entry!!
+                        val favNewOne = contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
+                        if (favNewOne) favNew++ else favKnown++
+                        AvatarSearch.Diag.record("fav -> ${e.name.ifBlank { e.avatarId }}: " +
+                            if (favNewOne) "contributed (new)" else "already in catalog")
+                        seedSearchFromName(e.name)
+                    }
+                }
+                delay(FAV_PACE_MS)
             }
-            ownAvatar = "lib +$added, fav +$favAdded/${favs.size}, ${privateRemoved} now-private ${nowShort()}"
+            if (favProcessed > 0) saveProcessedFavourites(context)
+            saveSeedQueue(context)   // persist the names this sweep queued (favourites seed the queue)
+            lastFav = "favourites ${favs.size}: $favNew new / $favKnown known" +
+                (if (favDead > 0) " / $favDead dead-reported" else "") +
+                (if (favSkipped > 0) " / $favSkipped private" else "") +
+                (if (rateLimited) " · rate-limited, resuming next sweep" else "") +
+                " · ${processedFavourites.size} done all-time · uploads +$libNew" +
+                (if (privateRemoved > 0) " · $privateRemoved now-private" else "") +
+                " ${nowShort()}"
         } catch (ex: Exception) { Log.w(TAG, "library harvest failed", ex) }
+    }
+
+    /** Harvest the user's CURRENTLY-WORN avatar RIGHT NOW (public-only). Called when
+     *  the pipeline detects the user changed their own avatar, so a newly-worn PUBLIC
+     *  avatar is contributed within seconds instead of waiting for the next 30-min
+     *  cycle / app reopen. Debounced (>=8s apart) so the 10s presence loop can't spam
+     *  it; a PRIVATE avatar is still skipped by avatarCatalogEntry (privacy). */
+    /** Queue a name (from a favourite / worn avatar) for a paced DB search that grows the
+     *  catalog with OTHER avatars indexed under it. Deduped per session; capped; drained one
+     *  name per SEARCH_SEED_PACE_MS by the loop in [start] — so it never bursts the DBs. */
+    fun seedSearchFromName(name: String) {
+        val n = name.trim()
+        if (n.length < SEARCH_SEED_MIN_LEN) return
+        if (!seededSearchNames.add(n.lowercase())) return          // already seeded this session
+        if (searchSeedQueue.size >= SEARCH_SEED_QUEUE_CAP) return   // bounded
+        searchSeedQueue.add(n)
+    }
+
+    fun harvestOwnAvatarNow(context: Context) {
+        val now = System.currentTimeMillis()
+        if (now - lastOwnHarvestMs < 8_000) return
+        lastOwnHarvestMs = now
+        val app = context.applicationContext
+        scope.launch { harvestOwnAvatar(app) }
     }
 
     private suspend fun harvestOwnAvatar(context: Context) {
         try {
             val e = VrchatAuthManager.currentAvatarCatalogEntry(context)
-            if (e == null) { ownAvatar = "no current avatar (not logged in?) ${nowShort()}"; return }
-            ownAvatar = "${e.name.ifBlank { e.avatarId }} ${nowShort()}"
-            contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
+            if (e == null) {
+                ownAvatar = "current avatar not public / not logged in (not contributed) ${nowShort()}"
+                return
+            }
+            val added = contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description)
+            ownAvatar = "${e.name.ifBlank { e.avatarId }} — " +
+                "${if (added) "CONTRIBUTED (new)" else "already in catalog"} ${nowShort()}"
+            // Only record NEW contributions here — this runs every 30 min, so logging an
+            // "already in catalog" line each cycle would flood the resolves log.
+            if (added) AvatarSearch.Diag.record("you current -> ${e.name.ifBlank { e.avatarId }}: contributed (new)")
+            seedSearchFromName(e.name)   // grow the catalog from this avatar's name
         } catch (ex: Exception) {
             ownAvatar = "error ${ex.javaClass.simpleName}"
             Log.w(TAG, "own-avatar harvest failed", ex)
@@ -685,8 +1239,11 @@ object AvatarGlobalDb {
         val q = try { JSONArray(prefs.getString(KEY_QUEUE, "[]")).length() } catch (e: Exception) { 0 }
         val r = try { JSONArray(prefs.getString(KEY_REPORTS, "[]")).length() } catch (e: Exception) { 0 }
         return "entries=${map.size}\npull=$lastPull\n" +
-            "ownAvatar=$ownAvatar\n" +
-            "contributed=$contributedCount last=$lastContributed\n" +
+            "current avatar: $ownAvatar\n" +
+            "last switch: $lastSwitch\n" +
+            "favourites/uploads: $lastFav\n" +
+            "seed search: $lastSeedSearch (${searchSeedQueue.size} queued)\n" +
+            "contributed (new this run)=$contributedCount last=$lastContributed\n" +
             "queue=$q reports=$r\nlastPost=$lastPost"
     }
 
