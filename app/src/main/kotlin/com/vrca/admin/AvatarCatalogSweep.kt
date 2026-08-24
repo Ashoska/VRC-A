@@ -229,8 +229,13 @@ object AvatarCatalogSweep {
             }
         }
         avtrdbCrawlEnabled = enabled
-        if (!enabled && avtrdbCrawlStatus != "off") avtrdbCrawlStatus = "off"
+        if (!enabled) { if (avtrdbCrawlStatus != "off") avtrdbCrawlStatus = "off"; crawlSeen.clear() }
     }
+
+    // Avatar ids this crawl session already ATTEMPTED (resolved or skipped) — cross-page dedup
+    // that also covers ids just contributed but not yet in the ~20-min avtar-id index. Cleared
+    // when the crawl is turned off. Bounded implicitly by avtrdb's size.
+    private val crawlSeen = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     /** One crawl pass for ONE bot: take the next shared term, page avtrdb, resolve each NEW
      *  avatar (deduped vs catalog by avatar id — zero VRChat call for known ones — and claimed
@@ -250,7 +255,12 @@ object AvatarCatalogSweep {
             if (pageResults.isEmpty()) break
             for (r in pageResults) {
                 if (!avtrdbCrawlEnabled || !running || !scope.isActive) break@crawl
-                if (AvatarGlobalDb.hasAvatarId(r.id)) continue   // already in catalog — no VRChat call
+                if (!crawlSeen.add(r.id)) continue               // already attempted this session (any bot)
+                // Already in the catalog? Post-cutover use the memory-flat sharded avatar-id
+                // index (no whole map); pre-cutover the in-RAM set. Either way: no VRChat call.
+                val known = if (AvatarGlobalDb.shardWalkLive()) AvatarGlobalDb.isAvatarKnownSharded(context, r.id)
+                            else AvatarGlobalDb.hasAvatarId(r.id)
+                if (known) continue
                 if (!inFlight.add(r.id)) continue                // another bot is resolving this one
                 try {
                     val chk = BotVrchatSession.checkAvatar(context, slot, r.id)
@@ -260,7 +270,9 @@ object AvatarCatalogSweep {
                     }
                     nulls = 0
                     if (chk.alive && chk.fileId != null) {
-                        AvatarGlobalDb.contribute(context, chk.fileId, r.id, chk.name, chk.author, chk.authorId, chk.platforms, chk.description)
+                        // localInsert=false: the crawler bulk-adds thousands of OTHER avatars —
+                        // keep them out of the local map so the admin stays memory-flat.
+                        AvatarGlobalDb.contribute(context, chk.fileId, r.id, chk.name, chk.author, chk.authorId, chk.platforms, chk.description, localInsert = false)
                         new++
                         avtrdbCrawlStatus = "'$term' (bot ${slot + 1}) p$page: +$new · total +${crawlNewTotal.incrementAndGet()}"
                     }

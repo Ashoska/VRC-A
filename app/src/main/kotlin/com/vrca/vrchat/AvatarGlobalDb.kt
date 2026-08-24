@@ -504,6 +504,22 @@ object AvatarGlobalDb {
      *  the whole-map [searchByName] when this is false (pre-cutover / R2 off). */
     fun r2SearchActive(context: Context): Boolean { ensureCatalogBase(context); return r2Serving }
 
+    /** Is this avatar id already in the catalog? Checked against the sharded avatar-id presence
+     *  index (`avtr/<prefix>.json`, built by the rebuild Action) — the memory-flat replacement
+     *  for the whole-map [hasAvatarId], so the crawler can skip a VRChat resolve for avatars we
+     *  already have without holding the catalog. Cheap + edge-cached. Only fresh to the last
+     *  rebuild (~20 min), so the crawler pairs it with a session-set for newly-added ids. */
+    suspend fun isAvatarKnownSharded(context: Context, avatarId: String): Boolean {
+        if (!avatarId.startsWith("avtr_") || avatarId.length < 8) return false
+        ensureCatalogBase(context)
+        if (!r2Serving) return false
+        val base = catalogBase ?: return false
+        val obj = fetchSearchJson("$base/avtr/${avatarId.substring(5, 8).lowercase()}.json") ?: return false
+        val arr = obj.optJSONArray("ids") ?: return false
+        for (i in 0 until arr.length()) if (arr.optString(i) == avatarId) return true
+        return false
+    }
+
     /** Context-free read of the same flag (for the sync search entry points that don't
      *  carry a Context). False until /health has been learned once, so it safely defaults
      *  to the whole-map path on a cold start. */
@@ -675,7 +691,7 @@ object AvatarGlobalDb {
     fun contribute(
         context: Context, fileId: String, avatarId: String,
         name: String, author: String, authorId: String = "", platforms: List<String> = emptyList(),
-        description: String = ""
+        description: String = "", localInsert: Boolean = true
     ): Boolean {
         // Only add entries we ACTUALLY have a valid avatar id + file id for.
         // Returns TRUE only when this call adds a genuinely NEW entry — so harvest
@@ -687,10 +703,14 @@ object AvatarGlobalDb {
         // Insert into the LOCAL catalog immediately so the contributing device can see
         // its own new avatars (own uploads, favourites, resolved strangers) in search /
         // clone RIGHT AWAY — no waiting for the Worker flush + next 30-min pull. Zero
-        // extra KV cost (this is a purely in-memory local add).
-        map[fileId] = Entry(fileId, avatarId, name, author, authorId, platforms,
-            System.currentTimeMillis(), description, filled = false)
-        avatarIds.add(avatarId)
+        // extra KV cost (this is a purely in-memory local add). BULK contributors (the
+        // admin avtrdb crawler — thousands of OTHER avatars) pass localInsert=false so
+        // they never bloat the local map / break the post-cutover memory-flat model.
+        if (localInsert) {
+            map[fileId] = Entry(fileId, avatarId, name, author, authorId, platforms,
+                System.currentTimeMillis(), description, filled = false)
+            avatarIds.add(avatarId)
+        }
         val app = context.applicationContext
         scope.launch {
             queueMutex.withLock {
