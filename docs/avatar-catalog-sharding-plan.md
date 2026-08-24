@@ -6,14 +6,50 @@
 > "(shipped)".
 >
 > **STATUS (2026-08-23): the triggers in §2 are HIT — implement now.** The catalog is at
-> **~57k entries (~18 MB `db.json`)** and the single-file git-commit flush is actively
-> FAILING: cron flushes take ~11.5s and intermittently hit the Worker CPU/time limit (the
-> "repo stopped updating" / error-1102 reports). The in-RAM + whole-file-commit design is no
-> longer "strictly better" — it's breaking. Execution order agreed with the user (2026-08-24):
+> **~64k entries (~18 MB `db.json`)** and the single-file git-commit flush is actively
+> FAILING (the "repo stopped updating" reports; whole-file CPU/memory/large-commit wall).
+> Execution order agreed with the user (2026-08-24):
 > **Stage A (streaming parse) → R2 write path (per-shard `bucket.put`, kills the flush) →
 > client `lookupSharded` + `searchSharded` → then enable the avtrdb crawler.** The user is
-> standing up the **custom domain tomorrow** (go toward §5b.3 directly, or §5b.2 then flip),
+> standing up the **custom domain** (go toward §5b.3, or §5b.2 then flip),
 > and will enable **Workers Paid + create the R2 bucket** (prerequisites, account-owner only).
+>
+> **SHIPPED 2026-08-24 (this session):**
+> - **Stage A streaming parse — DONE.** `AvatarGlobalDb` now reads the catalog via
+>   `android.util.JsonReader` (streaming) in `parseFile`/`parseStream`/`readEntry`; the
+>   download streams to a temp file then stream-parses (never a whole-file String / full JSON
+>   tree). Catches `Throwable` (incl. OOM). This un-bricked the **Quest**, which was hard-OOM
+>   crashing on boot (315 MB single-String allocation vs the ~268 MB Quest heap). Also fixes
+>   the admin parse-wall so closed-period contributions load + reach the FILL bot.
+> - **Worker R2 write path — FOUNDATION DONE, gated OFF.** `worker.js`: `flushR2` writes
+>   per-shard `shard/<3hex>.json` (full records, 4096 shards) reading/merging ONLY touched
+>   shards (no whole-catalog in memory → no wall); `GET /catalog/<key>` edge-cached R2 serving
+>   (§5b.2); `GET /admin/migrate-r2?key&lo&hi` resumable master→shards seed; `/health` adds
+>   `r2`/`r2WriteActive`/`backend`/`catalogBase`/`shardScheme`. `wrangler.toml`: `CATALOG` R2
+>   binding + `CATALOG_BASE`/`R2_WRITE` (commented). **Two-key cutover gate:** the R2 flush
+>   activates ONLY when the binding is present AND `R2_WRITE="1"` — so the bucket can be seeded
+>   (`/admin/migrate-r2`) + served (`/catalog`) + verified with the binding alone, WITHOUT
+>   cutting over the flush (flushR2 stops feeding the whole-file master + KV `dbcache` that the
+>   admin sweep and un-updated clients still read — so cutover must wait for the sharded-read
+>   side). **Shard v1 = FULL records** (`{v:1,e:{fileId:{...cleanEntry}}}`), not the slim
+>   lookup rec — simpler/correct first; slim `{a,p,pf}` (§3.2) is a later optimization.
+>
+> **REMAINING (next sessions), in order:**
+> 1. **Client `lookupSharded`** in `AvatarGlobalDb`: learn `catalogBase`+`r2` from `/health`;
+>    `suspend lookupSharded(fileId)` → in-memory shard LRU (evicted on instance-leave with the
+>    roster caches) → else GET `${catalogBase}/shard/<prefix>.json`, parse, cache. Wire as an
+>    ADDITIVE step after the sync `lookup` miss in `VrchatAuthManager.resolveWornAvatarId`
+>    (safe when shards are empty/absent → null → existing DB stack). Gate the fetch on `r2`
+>    true so it makes no requests pre-cutover.
+> 2. **Admin whole-catalog source under R2:** the sweep iterates `snapshot()` (whole map). Once
+>    `R2_WRITE` is on, the master/`dbcache` freeze, so the admin needs the whole catalog from
+>    shards — either an Action that rebuilds the master from shards (§5.3, lives in the
+>    image-store repo the app can't push to → hand the user the workflow) OR the admin app
+>    iterates all 4096 `/catalog/shard/*` (edge-cached). Resolve BEFORE flipping `R2_WRITE`.
+> 3. **Cutover:** create bucket → deploy → `/admin/migrate-r2` (chunk lo/hi) → verify
+>    `/catalog/shard/xxx.json` + `/health` entryCount → ship client #1 → flip `R2_WRITE="1"`.
+> 4. **Search sharding** (index/fragment buckets + client `searchSharded`), then retire the
+>    whole-file client read, then flip the avtrdb crawler on.
 
 ---
 
