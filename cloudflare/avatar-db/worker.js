@@ -250,38 +250,20 @@ export default {
         const hi = (url.searchParams.get("hi") || "fff").toLowerCase();
         const loN = parseInt(lo, 16), hiN = parseInt(hi, 16);
         if (isNaN(loN) || isNaN(hiN) || loN > hiN) return json({ ok: false, error: "bad lo/hi (3 hex each)" }, 400);
-        // Process a FIXED prefix span per call (<= SPAN shard puts, and only that span's
-        // entries held in memory). Two limits are respected: R2 puts are subrequests
-        // (~1000 cap) and the Worker has 128 MB — so we (a) LINE-parse the master (never
-        // JSON.parse the whole ~25 MB file into one object graph) and (b) keep only the
-        // in-span entries. This is what makes migration work at any catalog size.
-        const SPAN = 512;
-        const endN = Math.min(loN + SPAN - 1, hiN);
-        const text = await readMasterText(env);
-        if (!text) return json({ ok: false, error: "could not read master db.json" }, 500);
-        const byShard = {};
-        let entriesInRange = 0;
-        for (const raw of text.split("\n")) {
-          const line = raw.trim().replace(/,$/, "");
-          if (!line.startsWith('"file_')) continue;      // skip header / closing braces
-          const idx = line.indexOf('":');
-          if (idx < 0) continue;
-          const fid = line.slice(1, idx);
-          if (!FILE_RE.test(fid)) continue;
-          const sp = shardPrefix(fid);
-          const n = parseInt(sp, 16);
-          if (n < loN || n > endN) continue;             // only this call's span
-          let val; try { val = JSON.parse(line.slice(idx + 2)); } catch (_) { continue; }
-          (byShard[sp] ||= {})[fid] = val;
-          entriesInRange++;
+        // AUTO (recommended): schedule a background migration. The cron migrates one span
+        // (~512 shards) every 2 min until done — no browser holding a long request open (no
+        // page hang / mobile-tab crash). Kick it once, close the page, watch /health .migrate.
+        if (url.searchParams.get("auto") === "1") {
+          await env.AVATAR_KV.put("migcur", lo);
+          await env.AVATAR_KV.put("mighi", hi);
+          await env.AVATAR_KV.put("migactive", "1");
+          return json({ ok: true, scheduled: true, from: lo, to: hi,
+            note: "Migration scheduled. The cron writes ~512 shards every 2 min until done; the GitHub flush pauses meanwhile (contributions just queue). Close this page — watch progress at /health under `migrate`." });
         }
-        let written = 0;
-        for (const sp of Object.keys(byShard)) {
-          await env.CATALOG.put(`shard/${sp}.json`, JSON.stringify({ v: 1, e: byShard[sp] }), {
-            httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + SHARD_TTL },
-          });
-          written++;
-        }
+        // MANUAL (one-off): process a single fixed span synchronously and hand back nextUrl.
+        const endN = Math.min(loN + 511, hiN);
+        const res = await migrateSpan(env, loN, endN);
+        if (!res) return json({ ok: false, error: "could not read master db.json" }, 500);
         const nextN = endN + 1;
         const done = nextN > hiN;
         const nextLo = done ? null : nextN.toString(16).padStart(3, "0");
@@ -289,7 +271,7 @@ export default {
         const nextUrl = done ? null
           : `${origin}/admin/migrate-r2?key=${encodeURIComponent(url.searchParams.get("key"))}&lo=${nextLo}&hi=${hi}`;
         return json({ ok: true, range: `${lo}-${endN.toString(16).padStart(3, "0")}`,
-          shardsWritten: written, entriesInRange, done, nextLo, nextUrl,
+          shardsWritten: res.written, entriesInRange: res.entries, done, nextLo, nextUrl,
           note: done ? "migration complete" : "open nextUrl to continue (tap it)" });
       }
 
@@ -339,7 +321,9 @@ export default {
           catalogBase: env.CATALOG_BASE || `https://${url.host}/catalog`,
           shardScheme: "filehex3-full",
           shardCount: 4096,
-          version: 5,
+          // Background R2 migration progress (present while/after an ?auto=1 migration runs).
+          migrate: meta.migrate || null,
+          version: 6,
         });
       }
 
@@ -439,7 +423,13 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(flush(env));
+    // While a background R2 migration is active, the cron does a migration STEP instead of
+    // the flush (so the two don't stack subrequests in one invocation). Contributions just
+    // queue in KV during the ~16 min migration and flush normally once it finishes.
+    ctx.waitUntil((async () => {
+      if (await migrationActive(env)) await migrateStep(env);
+      else await flush(env);
+    })());
   },
 };
 
@@ -492,6 +482,68 @@ function r2WriteActive(env) { return !!(env.CATALOG && env.R2_WRITE === "1"); }
 async function flush(env) {
   if (r2WriteActive(env)) return flushR2(env);
   return flushGithub(env);
+}
+
+// Migrate ONE prefix span [loN..endN] from the master into R2 shards. Line-parses the
+// master (never a whole-file JSON.parse) and holds only the span's entries, so memory +
+// subrequests stay bounded. Returns { written, entries } or null (master read failed).
+async function migrateSpan(env, loN, endN) {
+  const text = await readMasterText(env);
+  if (!text) return null;
+  const byShard = {};
+  let entries = 0;
+  for (const raw of text.split("\n")) {
+    const line = raw.trim().replace(/,$/, "");
+    if (!line.startsWith('"file_')) continue;
+    const idx = line.indexOf('":');
+    if (idx < 0) continue;
+    const fid = line.slice(1, idx);
+    if (!FILE_RE.test(fid)) continue;
+    const sp = shardPrefix(fid);
+    const n = parseInt(sp, 16);
+    if (n < loN || n > endN) continue;
+    let val; try { val = JSON.parse(line.slice(idx + 2)); } catch (_) { continue; }
+    (byShard[sp] ||= {})[fid] = val;
+    entries++;
+  }
+  let written = 0;
+  for (const sp of Object.keys(byShard)) {
+    await env.CATALOG.put(`shard/${sp}.json`, JSON.stringify({ v: 1, e: byShard[sp] }), {
+      httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + SHARD_TTL },
+    });
+    written++;
+  }
+  return { written, entries };
+}
+
+async function migrationActive(env) {
+  return (await env.AVATAR_KV.get("migactive")) === "1";
+}
+
+// One background migration step, run by the cron while a migration is active. Advances a
+// KV cursor by one 512-prefix span each tick until it passes `mighi`, then clears active.
+async function migrateStep(env) {
+  const lo = await env.AVATAR_KV.get("migcur");
+  if (!lo) { await env.AVATAR_KV.put("migactive", "0"); return; }
+  const hi = (await env.AVATAR_KV.get("mighi")) || "fff";
+  const loN = parseInt(lo, 16), hiN = parseInt(hi, 16);
+  if (isNaN(loN) || isNaN(hiN)) { await env.AVATAR_KV.delete("migcur"); await env.AVATAR_KV.put("migactive", "0"); return; }
+  const endN = Math.min(loN + 511, hiN);
+  const res = await migrateSpan(env, loN, endN);
+  if (!res) return; // master read failed — leave the cursor, retry next tick
+  const spanLabel = `${lo}-${endN.toString(16).padStart(3, "0")}`;
+  const nextN = endN + 1;
+  const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+  if (nextN > hiN) {
+    await env.AVATAR_KV.delete("migcur");
+    await env.AVATAR_KV.put("migactive", "0");
+    meta.migrate = { active: false, done: new Date().toISOString(), lastSpan: spanLabel, lastWritten: res.written };
+  } else {
+    const nextLo = nextN.toString(16).padStart(3, "0");
+    await env.AVATAR_KV.put("migcur", nextLo);
+    meta.migrate = { active: true, cursor: nextLo, hi, lastSpan: spanLabel, lastWritten: res.written };
+  }
+  await env.AVATAR_KV.put("meta", JSON.stringify(meta));
 }
 
 // Read the GitHub master db.json as RAW TEXT (handles the >1 MB blob case). Returns the
