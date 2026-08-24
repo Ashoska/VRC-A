@@ -310,6 +310,8 @@ export default {
           rawUrl: `https://raw.githubusercontent.com/${env.GH_REPO || "?"}/${branch}/${env.DB_PATH || "?"}`,
           lastCommit: meta.lastCommit || "none",
           adminKeySet: !!env.ADMIN_KEY,
+          // Purge-on-write is wired up (both secrets present) — the ~1s propagation bonus.
+          purgeConfigured: !!(env.CF_PURGE_TOKEN && env.CF_ZONE_ID),
           // R2 sharding: which backend the flush is writing + where clients should read
           // the sharded catalog. `catalogBase` is what the app appends `/shard/<prefix>.json`
           // (and later `/index/...`) to — learned from here so a serving change (workers.dev
@@ -681,6 +683,11 @@ async function flushR2(env) {
     } catch (_) { allShardsOk = false; }
   }
 
+  // Purge just the changed shards from the edge cache so the new versions go live within
+  // ~seconds instead of waiting out the cache TTL — the "avatars available in ~1s" bonus.
+  // No-op unless a purge token is configured, so freshness falls back to the TTL otherwise.
+  if (allShardsOk && prefixes.length > 0) await purgeShards(env, prefixes);
+
   // Clear KV only when every touched shard wrote OK (idempotent retry otherwise — nothing lost).
   if (allShardsOk) {
     for (const n of pendKeys) await env.AVATAR_KV.delete(n);
@@ -712,6 +719,26 @@ async function flushR2(env) {
     reports: repNames.length,
     backend: "r2",
   }));
+}
+
+// Purge specific changed shard URLs from Cloudflare's edge cache so a new avatar is live
+// for everyone within ~seconds (instead of the TTL). Graceful no-op unless CF_PURGE_TOKEN
+// + CF_ZONE_ID are set (then freshness is just the ~5-min cache TTL). Batches of 30 (the
+// free-plan per-request file cap). CATALOG_BASE must be the custom domain the app reads.
+async function purgeShards(env, prefixes) {
+  if (!env.CF_PURGE_TOKEN || !env.CF_ZONE_ID || !env.CATALOG_BASE) return;
+  const base = env.CATALOG_BASE.replace(/\/$/, "");
+  const files = prefixes.map((p) => `${base}/shard/${p}.json`);
+  const url = `https://api.cloudflare.com/client/v4/zones/${env.CF_ZONE_ID}/purge_cache`;
+  for (let i = 0; i < files.length; i += 30) {
+    try {
+      await fetch(url, {
+        method: "POST",
+        headers: { authorization: `Bearer ${env.CF_PURGE_TOKEN}`, "content-type": "application/json" },
+        body: JSON.stringify({ files: files.slice(i, i + 30) }),
+      });
+    } catch (_) { /* freshness falls back to the TTL */ }
+  }
 }
 
 async function flushGithub(env) {
