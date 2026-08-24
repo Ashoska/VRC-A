@@ -113,9 +113,11 @@ async function main() {
   // 2. Build fragments (id -> summary) and the token index (token -> ids), bucketed.
   const fragBuckets = {};   // "<3hex>" -> { id -> {f,n,au,ai,p,pf} }
   const idxBuckets = {};    // "<3hex>" -> { token -> Set(id) }
+  let unfilled = 0;         // entries the fill bot still needs to enrich (for the Bots-tab backlog)
   for (const fid of fileIds) {
     const a = avatars[fid];
     const id = a.id; if (!id || !id.startsWith("avtr_")) continue;
+    if (a.filled !== true) unfilled++;
     const fb = fragBucket(id);
     (fragBuckets[fb] ||= {})[id] = {
       f: fid, n: a.name || "", au: a.author || "", ai: a.authorId || "",
@@ -159,9 +161,9 @@ async function main() {
   // 5. Manifest (marks search ready + records the rebuild time).
   await r2Put("_manifest.json", JSON.stringify({
     v: 1, shardScheme: "filehex3-full", shardCount: 4096, indexScheme: "hash3", entryCount: fileIds.length,
-    searchReady: true, lastFullRebuild: new Date().toISOString(),
+    unfilled, searchReady: true, lastFullRebuild: new Date().toISOString(),
   }));
-  console.log(`Done. ${fileIds.length} avatars, ${idxEntries.length} index buckets, ${fragEntries.length} fragment buckets, master + manifest.`);
+  console.log(`Done. ${fileIds.length} avatars (${unfilled} unfilled), ${idxEntries.length} index buckets, ${fragEntries.length} fragment buckets, master + manifest.`);
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

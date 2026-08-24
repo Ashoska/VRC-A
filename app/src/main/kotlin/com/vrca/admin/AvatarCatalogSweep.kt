@@ -305,6 +305,9 @@ object AvatarCatalogSweep {
     /** Per-bot blitz progress + remaining backlog (empty when not blitzing). */
     fun blitzViews(): Map<Int, BlitzView> {
         if (!blitzActive()) return emptyMap()
+        // Shard-walk mode has no whole-map to partition/count — the per-bot walk progress
+        // (roleViews) is the live view during a blitz, so skip the map-scan blitz view.
+        if (AvatarGlobalDb.shardWalkLive()) return emptyMap()
         val live = liveSlots; val count = live.size
         if (count == 0) return emptyMap()
         val snap = AvatarGlobalDb.snapshot()
@@ -414,14 +417,22 @@ object AvatarCatalogSweep {
     /** `pendingReports` = the Worker's live report count (from /health). Fill + liveness
      *  backlogs are computed LOCALLY from the cached catalog (one cheap pass). */
     fun roleViews(pendingReports: Int): List<RoleView> {
-        val snap = AvatarGlobalDb.snapshot()
-        val cutoff = livenessCutoff()
-        var fill = 0; var la = 0; var lb = 0
-        for (e in snap) {
-            if (needsFill(e)) fill++
-            if (e.checked < cutoff) { if (partitionOf(e.fileId) == 0) la++ else lb++ }
+        var fill = 0; var liveness = 0
+        if (AvatarGlobalDb.shardWalkLive()) {
+            // SHARD-WALK MODE: no whole-map to scan. The unfilled backlog comes from the tiny
+            // manifest the rebuild Action writes; liveness is time-based (the walk covers it),
+            // so there's no cheap live count — show it as walk progress, not a queued number.
+            fill = manifestUnfilled.coerceAtLeast(0)
+        } else {
+            val snap = AvatarGlobalDb.snapshot()
+            val cutoff = livenessCutoff()
+            var la = 0; var lb = 0
+            for (e in snap) {
+                if (needsFill(e)) fill++
+                if (e.checked < cutoff) { if (partitionOf(e.fileId) == 0) la++ else lb++ }
+            }
+            liveness = la + lb
         }
-        val liveness = la + lb
         lastTotalBacklog = fill + liveness + pendingReports
 
         // Which backlog each role is consuming RIGHT NOW — its own role, or the one it's
@@ -488,6 +499,15 @@ object AvatarCatalogSweep {
                     // this in parallel (distinct terms via the shared cursor).
                     did = avtrdbCrawlPass(context, slot)
                     roles.forEach { progress.getValue(it).status = "crawling avtrdb" }
+                } else if (AvatarGlobalDb.shardWalkLive()) {
+                    // SHARD-WALK MODE (post-cutover): memory-flat, no whole-master grab. Every
+                    // bot pulls the next shard from a shared cursor and fills unfilled + rechecks
+                    // stale entries in it; reports stay real-time (one bot polls). Blitz just
+                    // widens the recheck cutoff (livenessCutoff()), so the same walk catches up
+                    // everything. This is the future-proof path — it never loads the whole catalog.
+                    val r = ownRole ?: Role.FILL
+                    if (roles.contains(Role.REPORTS)) did = reportsPass(context, adminKey, slot, r) || did
+                    did = walkPass(context, adminKey, slot, r) || did
                 } else {
                     for (role in roles) {
                         if (!running) break
@@ -621,6 +641,87 @@ object AvatarCatalogSweep {
         else fillAttempts[fileId] = n
     }
     private fun clearFillAttempt(fileId: String) { fillAttempts.remove(fileId) }
+
+    // ---- shard-walk (memory-flat bots, post-cutover) -------------------------
+    private const val WALK_BATCH = 40
+    // Shared cursor over the 4096 shard prefixes: every bot getAndIncrement()s it, so the
+    // bots naturally partition the shards with zero overlap and full coverage per cycle —
+    // no explicit role/partition assignment or loaning needed.
+    private val shardCursor = java.util.concurrent.atomic.AtomicInteger(0)
+    private fun nextShardPrefix(): String = (shardCursor.getAndIncrement() and 0xfff).toString(16).padStart(3, '0')
+    // Skip re-checking an avatar within the flush-lag window: the bot's fill/check reaches the
+    // shard ~1 flush cycle later, so without this a fast re-walk of the same shard would re-do
+    // the same VRChat call. Bounded + TTL'd.
+    private val processedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private const val PROCESSED_TTL_MS = 4 * 60_000L
+    private fun wasRecentlyProcessed(fileId: String): Boolean {
+        val t = processedAt[fileId] ?: return false
+        if (System.currentTimeMillis() - t < PROCESSED_TTL_MS) return true
+        processedAt.remove(fileId); return false
+    }
+    private fun markProcessed(fileId: String) {
+        processedAt[fileId] = System.currentTimeMillis()
+        if (processedAt.size > 5000) {
+            val cut = System.currentTimeMillis() - PROCESSED_TTL_MS
+            processedAt.entries.removeAll { it.value < cut }
+        }
+    }
+    /** Total unfilled backlog from the rebuild Action's `_manifest.json` (set by BotController).
+     *  -1 = not read yet. Used for the Bots-tab backlog in shard-walk mode (no whole-map scan). */
+    @Volatile var manifestUnfilled = -1; private set
+    fun setManifestUnfilled(n: Int) { manifestUnfilled = n }
+
+    /** WALK one shard (post-cutover): read it, fill the unfilled + recheck the stale, push ops.
+     *  Memory holds only this shard. Dead-checks obey the same VRChat-outage guard as the
+     *  master-based passes. Returns true if it did VRChat work. */
+    private suspend fun walkPass(context: Context, adminKey: String, slot: Int, role: Role): Boolean {
+        val p = progress.getValue(role)
+        val prefix = nextShardPrefix()
+        val entries = AvatarGlobalDb.fetchCatalogShard(context, prefix)
+        if (entries == null) { p.status = "walk $prefix: shard read failed"; return false }
+        val cutoff = livenessCutoff()
+        val work = entries.filter { (needsFill(it) || it.checked < cutoff) && !wasRecentlyProcessed(it.fileId) }
+        if (work.isEmpty()) { p.status = "walking ($prefix clear)"; return false }
+        val batch = claimBatch(work, WALK_BATCH)
+        if (batch.isEmpty()) return false
+        if (blitzActive()) blitzUntilMs = maxOf(blitzUntilMs, System.currentTimeMillis() + BLITZ_KEEPALIVE_MS)
+        p.status = "walk $prefix: ${batch.size}"
+        val upserts = mutableListOf<AvatarGlobalDb.Entry>()
+        val removes = mutableListOf<String>()
+        val okChecked = mutableListOf<String>()
+        try {
+            var nulls = 0
+            for (e in batch) {
+                if (!running) break
+                val chk = BotVrchatSession.checkAvatar(context, slot, e.avatarId)
+                p.checked++
+                if (chk == null) {
+                    if (needsFill(e)) noteFillNull(slot, e.fileId)
+                    if (++nulls >= 3) { p.status = "rate-limited — backing off"; break }
+                    delay(PACE_MS); continue
+                }
+                nulls = 0; clearFillAttempt(e.fileId); markProcessed(e.fileId)
+                if (chk.alive) noteAlive()
+                if (!chk.alive) {
+                    if (canRemove()) { removes.add(e.fileId); p.removed++ }
+                    // else: suspected VRChat outage — defer the removal, next walk retries
+                } else if (needsFill(e)) {
+                    val upd = fillRefresh(e, chk)
+                    if (upd.fileId != e.fileId) removes.add(e.fileId)   // re-key on image change
+                    upserts.add(upd); p.filled++
+                } else {
+                    val upd = liveRefresh(e, chk)
+                    if (upd != null) { if (upd.fileId != e.fileId) removes.add(e.fileId); upserts.add(upd); p.refreshed++ }
+                    else okChecked.add(e.fileId)
+                }
+                delay(PACE_MS)
+            }
+            if (upserts.isNotEmpty() || removes.isNotEmpty() || okChecked.isNotEmpty())
+                pushOps(context, adminKey, upserts.toList(), removes.toList(), emptyList(), okChecked.toList())
+            p.status = "walk $prefix: filled=${p.filled} checked=${p.checked} removed=${p.removed}"
+            return true
+        } finally { release(batch.map { it.fileId }) }
+    }
 
     private fun claimBatch(candidates: List<AvatarGlobalDb.Entry>, max: Int): List<AvatarGlobalDb.Entry> {
         val out = ArrayList<AvatarGlobalDb.Entry>(max)

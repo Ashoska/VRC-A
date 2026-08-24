@@ -136,7 +136,13 @@ object BotController {
                     val sig = AvatarGlobalDb.workerContentSignal()
                     if (sig != null && sig != seenSignal) {
                         seenSignal = sig
-                        AvatarGlobalDb.forceRefresh(app, cacheBust = sig)
+                        AvatarGlobalDb.forceRefresh(app, cacheBust = sig)   // no-op post-cutover (memory-flat)
+                    }
+                    // Post-cutover: read the tiny manifest for the Bots-tab unfilled backlog —
+                    // no whole-catalog scan (the bots walk shards; the count comes from the Action).
+                    if (AvatarGlobalDb.shardWalkLive()) {
+                        runCatching { AvatarGlobalDb.fetchManifest(app)?.optInt("unfilled", -1) }
+                            .getOrNull()?.let { if (it >= 0) AvatarCatalogSweep.setManifestUnfilled(it) }
                     }
                 } catch (_: Throwable) { /* transient — retry next tick */ }
                 delay(30_000)
