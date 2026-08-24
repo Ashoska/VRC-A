@@ -51,9 +51,9 @@ CATALOG_BASE = "https://cdn.gremlininc.app"
 # bucket + binding exist — so you can seed + serve + verify shards first. Flip it to "1"
 # (and redeploy) ONLY once the sharded-read side is live; before that, flipping it would
 # freeze the admin sweep + un-updated clients (they still read the whole-file master).
-# R2_WRITE = "1"
+R2_WRITE = "1"
 
 [triggers]
-# Flush pending contributions/reports into the file every 2 min (paid tier) so new
-# avatars + reports reach the bots quickly, not up to 10 min later.
-crons = ["*/2 * * * *"]
+# Post-cutover the flush is cheap per-shard R2 writes (not a whole-file commit), so run it
+# every minute — paired with purge-on-write this makes a new avatar live for everyone in ~1s.
+crons = ["* * * * *"]
