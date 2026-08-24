@@ -310,6 +310,8 @@ export default {
           rawUrl: `https://raw.githubusercontent.com/${env.GH_REPO || "?"}/${branch}/${env.DB_PATH || "?"}`,
           lastCommit: meta.lastCommit || "none",
           adminKeySet: !!env.ADMIN_KEY,
+          // Purge-on-write is wired up (both secrets present) — the ~1s propagation bonus.
+          purgeConfigured: !!(env.CF_PURGE_TOKEN && env.CF_ZONE_ID),
           // R2 sharding: which backend the flush is writing + where clients should read
           // the sharded catalog. `catalogBase` is what the app appends `/shard/<prefix>.json`
           // (and later `/index/...`) to — learned from here so a serving change (workers.dev
