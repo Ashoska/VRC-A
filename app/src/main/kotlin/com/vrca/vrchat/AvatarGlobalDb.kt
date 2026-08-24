@@ -454,6 +454,38 @@ object AvatarGlobalDb {
      *  queue + catalogBase are untouched (separate stores). */
     fun evictShardCache() { synchronized(shardLru) { shardLru.clear() } }
 
+    // ---- admin shard-walk source (memory-flat bots, no whole-master grab) -----
+    /** Fetch ONE lookup shard's entries directly from R2 (admin catalog sweep). No LRU/no
+     *  presence eviction — the sweep walks shards one at a time so memory stays flat at any
+     *  catalog size. Returns null if R2 serving isn't known yet or the read fails. */
+    suspend fun fetchCatalogShard(context: Context, prefix: String): List<Entry>? {
+        ensureCatalogBase(context)
+        val base = catalogBase ?: return null
+        val shard = kotlinx.coroutines.withContext(Dispatchers.IO) { fetchShard(base, prefix) } ?: return emptyList()
+        return shard.values.toList()
+    }
+
+    /** Read the tiny `_manifest.json` (entry/unfilled counts the rebuild Action writes) for
+     *  the admin Bots-tab backlog display — no whole-catalog scan. */
+    suspend fun fetchManifest(context: Context): JSONObject? {
+        ensureCatalogBase(context)
+        val base = catalogBase ?: return null
+        return kotlinx.coroutines.withContext(Dispatchers.IO) {
+            var conn: HttpURLConnection? = null
+            try {
+                conn = (URL("$base/_manifest.json").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                    connectTimeout = 10_000; readTimeout = 10_000
+                }
+                if (conn.responseCode != 200) null else JSONObject(conn.inputStream.bufferedReader().readText())
+            } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
+        }
+    }
+
+    /** True once the sharded catalog is the live source — the sweep uses the shard-walk
+     *  (memory-flat) instead of the whole-master read. Same signal as search. */
+    fun shardWalkLive(): Boolean = r2Serving
+
     // ---- sharded SEARCH (token index + fragment store) -----------------------
     // Search is served by two R2 object types (built by the rebuild job from the shards):
     //   index/<3hex>.json      = { v, t: { "<token>": ["avtr_..", ...] } }   (token -> ids)
@@ -471,6 +503,22 @@ object AvatarGlobalDb {
     /** True when the sharded search index is the live source (post-cutover). Callers use
      *  the whole-map [searchByName] when this is false (pre-cutover / R2 off). */
     fun r2SearchActive(context: Context): Boolean { ensureCatalogBase(context); return r2Serving }
+
+    /** Is this avatar id already in the catalog? Checked against the sharded avatar-id presence
+     *  index (`avtr/<prefix>.json`, built by the rebuild Action) — the memory-flat replacement
+     *  for the whole-map [hasAvatarId], so the crawler can skip a VRChat resolve for avatars we
+     *  already have without holding the catalog. Cheap + edge-cached. Only fresh to the last
+     *  rebuild (~20 min), so the crawler pairs it with a session-set for newly-added ids. */
+    suspend fun isAvatarKnownSharded(context: Context, avatarId: String): Boolean {
+        if (!avatarId.startsWith("avtr_") || avatarId.length < 8) return false
+        ensureCatalogBase(context)
+        if (!r2Serving) return false
+        val base = catalogBase ?: return false
+        val obj = fetchSearchJson("$base/avtr/${avatarId.substring(5, 8).lowercase()}.json") ?: return false
+        val arr = obj.optJSONArray("ids") ?: return false
+        for (i in 0 until arr.length()) if (arr.optString(i) == avatarId) return true
+        return false
+    }
 
     /** Context-free read of the same flag (for the sync search entry points that don't
      *  carry a Context). False until /health has been learned once, so it safely defaults
@@ -643,7 +691,7 @@ object AvatarGlobalDb {
     fun contribute(
         context: Context, fileId: String, avatarId: String,
         name: String, author: String, authorId: String = "", platforms: List<String> = emptyList(),
-        description: String = ""
+        description: String = "", localInsert: Boolean = true
     ): Boolean {
         // Only add entries we ACTUALLY have a valid avatar id + file id for.
         // Returns TRUE only when this call adds a genuinely NEW entry — so harvest
@@ -655,10 +703,14 @@ object AvatarGlobalDb {
         // Insert into the LOCAL catalog immediately so the contributing device can see
         // its own new avatars (own uploads, favourites, resolved strangers) in search /
         // clone RIGHT AWAY — no waiting for the Worker flush + next 30-min pull. Zero
-        // extra KV cost (this is a purely in-memory local add).
-        map[fileId] = Entry(fileId, avatarId, name, author, authorId, platforms,
-            System.currentTimeMillis(), description, filled = false)
-        avatarIds.add(avatarId)
+        // extra KV cost (this is a purely in-memory local add). BULK contributors (the
+        // admin avtrdb crawler — thousands of OTHER avatars) pass localInsert=false so
+        // they never bloat the local map / break the post-cutover memory-flat model.
+        if (localInsert) {
+            map[fileId] = Entry(fileId, avatarId, name, author, authorId, platforms,
+                System.currentTimeMillis(), description, filled = false)
+            avatarIds.add(avatarId)
+        }
         val app = context.applicationContext
         scope.launch {
             queueMutex.withLock {
@@ -783,11 +835,12 @@ object AvatarGlobalDb {
 
     private fun refresh(context: Context, cacheBust: String? = null) {
         ensureCatalogBase(context)   // keep r2Serving current for the source decision below
-        // POST-CUTOVER, the PUBLIC build no longer holds the whole catalog — clone goes
-        // through lookupSharded and search through searchSharded, so skip the ~25 MB
-        // whole-file pull entirely (this is the memory-flat-at-scale win). The ADMIN build
-        // still loads it (the bots iterate the whole map).
-        if (r2Serving && !com.vrca.BuildConfig.IS_ADMIN_BUILD) return
+        // POST-CUTOVER, NEITHER build holds the whole catalog. The public build resolves clone
+        // via lookupSharded + search via searchSharded; the ADMIN bots walk shards directly
+        // (AvatarCatalogSweep). So skip the ~25 MB whole-file pull entirely — memory-flat at
+        // any catalog size. (contribute() still seeds own new avatars into `map` for instant
+        // local visibility; the map just never holds the whole catalog.)
+        if (r2Serving) return
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         // Read the file from EXACTLY where the Worker writes it — learn the URL from
         // /health (echoes rawUrl), so no repo/branch/path mismatch is possible.
@@ -799,18 +852,10 @@ object AvatarGlobalDb {
         // from KV) — GitHub's raw CDN caches ~5 min and ignores cache-busting query
         // params, which delayed the admin bots seeing new avatars. The normal (public)
         // refresh still uses the CDN with an ETag (free, fine at 30-min cadence).
-        // Post-cutover the Worker /db (KV dbcache) is FROZEN (flushR2 doesn't rebuild it) —
-        // the ADMIN reads the master from R2 instead (`${catalogBase}/db.json`), which the
-        // rebuild Action keeps fresh from the shards. It only changes every ~20 min, so use
-        // the ETag (conditional GET) even on the freshness poll = cheap 304s until it moves.
-        // Pre-cutover, keep the fast KV /db path for the poll and the CDN+ETag otherwise.
-        val r2Master = r2Serving && catalogBase != null
-        val rawUrl = when {
-            r2Master -> "${catalogBase}/db.json"
-            cacheBust != null -> "$WORKER_URL/db"
-            else -> baseUrl
-        }
-        val etag = if (cacheBust == null || r2Master) prefs.getString(KEY_ETAG, null) else null
+        // Pre-cutover only (post-cutover returned above): freshness poll reads the KV /db,
+        // otherwise the GitHub CDN with an ETag.
+        val rawUrl = if (cacheBust != null) "$WORKER_URL/db" else baseUrl
+        val etag = if (cacheBust == null) prefs.getString(KEY_ETAG, null) else null
         var conn: HttpURLConnection? = null
         try {
             conn = (URL(rawUrl).openConnection() as HttpURLConnection).apply {

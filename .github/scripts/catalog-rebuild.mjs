@@ -21,6 +21,7 @@
 //   R2_SECRET_ACCESS_KEY  R2 API token secret
 //   R2_BUCKET             vrca-avatar-catalog
 import { AwsClient } from "aws4fetch";
+import crypto from "crypto";
 
 const {
   CATALOG_DOMAIN, R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET,
@@ -96,6 +97,23 @@ async function r2Put(key, bodyStr) {
   throw new Error(`R2 put ${key} failed`);
 }
 
+// Read a single object via the S3 API (authoritative, uncached — unlike the public CDN).
+async function r2Get(key) {
+  const url = `${R2_ENDPOINT}/${R2_BUCKET}/${key}`;
+  try {
+    const res = await aws.fetch(url, { method: "GET" });
+    if (res.status === 404) return null;
+    if (res.ok) return await res.text();
+  } catch (_) {}
+  return null;
+}
+
+async function r2Delete(key) {
+  try { await aws.fetch(`${R2_ENDPOINT}/${R2_BUCKET}/${key}`, { method: "DELETE" }); } catch (_) {}
+}
+
+function hashStr(s) { return crypto.createHash("sha1").update(s).digest("base64").slice(0, 20); }
+
 async function main() {
   console.log(`Reading ${allPrefixes.length} shards from ${CATALOG_DOMAIN} ...`);
   // 1. Read every lookup shard -> the full catalog (fileId -> record).
@@ -113,10 +131,14 @@ async function main() {
   // 2. Build fragments (id -> summary) and the token index (token -> ids), bucketed.
   const fragBuckets = {};   // "<3hex>" -> { id -> {f,n,au,ai,p,pf} }
   const idxBuckets = {};    // "<3hex>" -> { token -> Set(id) }
+  const avtrBuckets = {};   // "<3hex>" -> Set(avatarId)  — presence index for the crawler dedup
+  let unfilled = 0;         // entries the fill bot still needs to enrich (for the Bots-tab backlog)
   for (const fid of fileIds) {
     const a = avatars[fid];
     const id = a.id; if (!id || !id.startsWith("avtr_")) continue;
+    if (a.filled !== true) unfilled++;
     const fb = fragBucket(id);
+    (avtrBuckets[fb] ||= new Set()).add(id);   // avatar-id presence (same prefix as fragments)
     (fragBuckets[fb] ||= {})[id] = {
       f: fid, n: a.name || "", au: a.author || "", ai: a.authorId || "",
       p: platMask(a.platforms),
@@ -131,7 +153,7 @@ async function main() {
     }
   }
 
-  // 3. Serialize + cull hot tokens, then write fragments + index to R2.
+  // 3. Serialize all buckets (fragments + token index + avatar-id presence) + the master.
   const fragEntries = Object.entries(fragBuckets).map(([b, e]) => [`fragments/${b}.json`, JSON.stringify({ v: 1, e })]);
   const idxEntries = Object.entries(idxBuckets).map(([b, toks]) => {
     const t = {};
@@ -142,26 +164,40 @@ async function main() {
     }
     return [`index/${b}.json`, JSON.stringify({ v: 1, t })];
   });
-  const writes = [...fragEntries, ...idxEntries];
-  console.log(`Writing ${fragEntries.length} fragment + ${idxEntries.length} index objects to R2 ...`);
-  let wrote = 0;
-  await mapLimit(writes, WRITE_CONCURRENCY, async ([key, body]) => {
-    await r2Put(key, body);
-    if (++wrote % 512 === 0) console.log(`  wrote ${wrote}/${writes.length}`);
-  });
-
-  // 4. Master db.json (full records, one avatar per line) -> R2. Backup + the admin bots'
-  //    whole-catalog source post-cutover (they read ${CATALOG_DOMAIN}/db.json).
+  const avtrEntries = Object.entries(avtrBuckets).map(([b, s]) => [`avtr/${b}.json`, JSON.stringify({ v: 1, ids: Array.from(s) })]);
   const lines = fileIds.map((k) => JSON.stringify(k) + ":" + JSON.stringify(avatars[k]));
   const master = `{"name":"VRC-A Avatar Store","version":1,"count":${fileIds.length},"avatars":{\n${lines.join(",\n")}\n}}`;
-  await r2Put("db.json", master);
+  const allObjects = [...fragEntries, ...idxEntries, ...avtrEntries, ["db.json", master]];
 
-  // 5. Manifest (marks search ready + records the rebuild time).
+  // 4. Hash-DIFF write: only PUT objects whose content changed since the last run, tracked in
+  //    `_hashes.json`. This is what keeps R2 writes cheap — a steady catalog writes a handful
+  //    of buckets per run instead of all ~16k every time. Delete buckets that vanished.
+  let prevHashes = {};
+  try { const h = await r2Get("_hashes.json"); if (h) prevHashes = JSON.parse(h); } catch (_) {}
+  const newHashes = {};
+  const toWrite = [];
+  for (const [key, body] of allObjects) {
+    const h = hashStr(body);
+    newHashes[key] = h;
+    if (prevHashes[key] !== h) toWrite.push([key, body]);
+  }
+  const staleKeys = Object.keys(prevHashes).filter((k) => !(k in newHashes));
+  console.log(`Changed: ${toWrite.length}/${allObjects.length} objects; stale to delete: ${staleKeys.length}.`);
+  let wrote = 0;
+  await mapLimit(toWrite, WRITE_CONCURRENCY, async ([key, body]) => {
+    await r2Put(key, body);
+    if (++wrote % 256 === 0) console.log(`  wrote ${wrote}/${toWrite.length}`);
+  });
+  await mapLimit(staleKeys, WRITE_CONCURRENCY, async (key) => { await r2Delete(key); });
+
+  // 5. Manifest + hash-manifest (always written — tiny). Manifest carries the counts; hashes
+  //    feed the next run's diff.
   await r2Put("_manifest.json", JSON.stringify({
     v: 1, shardScheme: "filehex3-full", shardCount: 4096, indexScheme: "hash3", entryCount: fileIds.length,
-    searchReady: true, lastFullRebuild: new Date().toISOString(),
+    unfilled, searchReady: true, lastFullRebuild: new Date().toISOString(),
   }));
-  console.log(`Done. ${fileIds.length} avatars, ${idxEntries.length} index buckets, ${fragEntries.length} fragment buckets, master + manifest.`);
+  await r2Put("_hashes.json", JSON.stringify(newHashes));
+  console.log(`Done. ${fileIds.length} avatars (${unfilled} unfilled); wrote ${toWrite.length} changed, deleted ${staleKeys.length}.`);
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
