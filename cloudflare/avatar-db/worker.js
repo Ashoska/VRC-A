@@ -260,16 +260,26 @@ export default {
           if (n < loN || n > hiN) continue;
           (byShard[sp] ||= {})[fid] = db.avatars[fid];
         }
-        let written = 0, entriesInRange = 0;
-        for (const sp of Object.keys(byShard)) {
+        // Each R2 put is a subrequest; a Worker invocation is capped (~1000). Write at
+        // most MAX_MIGRATE_SHARDS per call and hand back the next range so a big catalog
+        // migrates over a few taps instead of blowing the limit (Error 1102).
+        const MAX_MIGRATE_SHARDS = 500;
+        const prefixes = Object.keys(byShard).sort(); // 3-char lowercase hex sorts numerically
+        let written = 0, entriesInRange = 0, nextLo = null;
+        for (const sp of prefixes) {
+          if (written >= MAX_MIGRATE_SHARDS) { nextLo = sp; break; }
           entriesInRange += Object.keys(byShard[sp]).length;
           await env.CATALOG.put(`shard/${sp}.json`, JSON.stringify({ v: 1, e: byShard[sp] }), {
             httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + SHARD_TTL },
           });
           written++;
         }
-        return json({ ok: true, range: `${lo}-${hi}`, shardsWritten: written, entriesInRange,
-          note: "re-run with the next lo/hi range until you reach fff" });
+        const done = nextLo === null;
+        const origin = `${url.protocol}//${url.host}`;
+        const nextUrl = done ? null
+          : `${origin}/admin/migrate-r2?key=${encodeURIComponent(url.searchParams.get("key"))}&lo=${nextLo}&hi=${hi}`;
+        return json({ ok: true, range: `${lo}-${hi}`, shardsWritten: written, entriesInRange, done, nextLo, nextUrl,
+          note: done ? "migration complete for this range" : "open nextUrl to continue (tap it)" });
       }
 
       if (req.method === "GET" && url.pathname === "/db") {
