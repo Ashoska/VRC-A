@@ -1,0 +1,38 @@
+# Rebuilds the avatar SEARCH index (index/ + fragments/) and the master db.json from the
+# R2 lookup shards, writing everything back to R2. Runs on a GitHub runner (real RAM), so
+# there's no Worker memory/subrequest limit. Nothing here is on a user hot path.
+#
+# Scheduled runs only fire once this workflow is on the DEFAULT branch (main), so merge the
+# branch first; then it runs every 20 min and the "Run workflow" button appears.
+#
+# Required repo secrets (Settings -> Secrets and variables -> Actions):
+#   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
+# (Create the R2 API token in Cloudflare -> R2 -> Manage R2 API Tokens, Object Read & Write
+#  on the vrca-avatar-catalog bucket.)
+name: catalog-rebuild
+on:
+  schedule:
+    - cron: "*/20 * * * *"   # every 20 min; = search freshness (clone freshness is separate)
+  workflow_dispatch: {}       # manual "Run workflow" button (only on the default branch)
+
+concurrency:
+  group: catalog-rebuild
+  cancel-in-progress: false
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm init -y && npm i aws4fetch@1
+      - run: node .github/scripts/catalog-rebuild.mjs
+        env:
+          CATALOG_DOMAIN: cdn.gremlininc.app
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: vrca-avatar-catalog

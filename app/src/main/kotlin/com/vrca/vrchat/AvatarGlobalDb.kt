@@ -800,10 +800,17 @@ object AvatarGlobalDb {
         // params, which delayed the admin bots seeing new avatars. The normal (public)
         // refresh still uses the CDN with an ETag (free, fine at 30-min cadence).
         // Post-cutover the Worker /db (KV dbcache) is FROZEN (flushR2 doesn't rebuild it) —
-        // the ADMIN reads the GitHub master instead, which the rebuild Action keeps fresh
-        // from the shards. Pre-cutover, keep the fast KV /db path for the freshness poll.
-        val rawUrl = if (cacheBust != null && !r2Serving) "$WORKER_URL/db" else baseUrl
-        val etag = if (cacheBust == null) prefs.getString(KEY_ETAG, null) else null
+        // the ADMIN reads the master from R2 instead (`${catalogBase}/db.json`), which the
+        // rebuild Action keeps fresh from the shards. It only changes every ~20 min, so use
+        // the ETag (conditional GET) even on the freshness poll = cheap 304s until it moves.
+        // Pre-cutover, keep the fast KV /db path for the poll and the CDN+ETag otherwise.
+        val r2Master = r2Serving && catalogBase != null
+        val rawUrl = when {
+            r2Master -> "${catalogBase}/db.json"
+            cacheBust != null -> "$WORKER_URL/db"
+            else -> baseUrl
+        }
+        val etag = if (cacheBust == null || r2Master) prefs.getString(KEY_ETAG, null) else null
         var conn: HttpURLConnection? = null
         try {
             conn = (URL(rawUrl).openConnection() as HttpURLConnection).apply {

@@ -1,13 +1,14 @@
 // VRC-A catalog rebuild — the heavy job the Worker can't do (128 MB / subrequest caps).
 // Runs on a GitHub Actions runner (7 GB RAM), reads every R2 lookup shard over the public
-// domain, and rebuilds:
-//   - fragments/<3hex>.json  (avatarId -> search summary)   -> written to R2
-//   - index/<3hex>.json      (token -> [avatarId,...])       -> written to R2
-//   - avatars/db.json        (full master, backup only)      -> committed to GitHub
+// domain, and rebuilds — WRITING EVERYTHING TO R2 (no GitHub commit, no extra token):
+//   - fragments/<3hex>.json  (avatarId -> search summary)
+//   - index/<3hex>.json      (token -> [avatarId,...])
+//   - db.json                (full master, backup + the admin bots' whole-catalog source)
+//   - _manifest.json         (marks search ready + rebuild time)
 //
-// The Worker's flushR2 keeps the lookup shards fresh (clone path); this job keeps SEARCH
-// (index/fragments) + the master backup fresh from those shards. Schedule it every ~15-30
-// min. Nothing here is on a user hot path.
+// The Worker's flushR2 keeps the lookup shards fresh (clone path); this keeps SEARCH
+// (index/fragments) + the master fresh from those shards. Schedule every ~15-30 min.
+// Nothing here is on a user hot path.
 //
 // Bucket math MUST match the app (AvatarGlobalDb):
 //   index token bucket = (token.hashCode() & 0xfff) as 3 hex   (Java String.hashCode)
@@ -16,21 +17,16 @@
 // Env (GitHub Action secrets/vars):
 //   CATALOG_DOMAIN        e.g. cdn.gremlininc.app        (public read of shards)
 //   R2_ACCOUNT_ID         Cloudflare account id
-//   R2_ACCESS_KEY_ID      R2 API token access key id     (write index/fragments)
+//   R2_ACCESS_KEY_ID      R2 API token access key id     (read+write objects)
 //   R2_SECRET_ACCESS_KEY  R2 API token secret
 //   R2_BUCKET             vrca-avatar-catalog
-//   GH_TOKEN              token with contents:write on the image-store repo (master commit)
-//   GH_REPO               Ashoska/VRC-A-Image-store
-//   DB_PATH               avatars/db.json
-//   GH_BRANCH             main
 import { AwsClient } from "aws4fetch";
 
 const {
   CATALOG_DOMAIN, R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET,
-  GH_TOKEN, GH_REPO, DB_PATH = "avatars/db.json", GH_BRANCH = "main",
 } = process.env;
 
-for (const [k, v] of Object.entries({ CATALOG_DOMAIN, R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET, GH_TOKEN, GH_REPO })) {
+for (const [k, v] of Object.entries({ CATALOG_DOMAIN, R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET })) {
   if (!v) { console.error(`Missing env ${k}`); process.exit(1); }
 }
 
@@ -120,14 +116,12 @@ async function main() {
   for (const fid of fileIds) {
     const a = avatars[fid];
     const id = a.id; if (!id || !id.startsWith("avtr_")) continue;
-    // fragment
     const fb = fragBucket(id);
     (fragBuckets[fb] ||= {})[id] = {
       f: fid, n: a.name || "", au: a.author || "", ai: a.authorId || "",
       p: platMask(a.platforms),
       pf: { pc: a.perfPc ?? 5, q: a.perfQuest ?? 5, i: a.perfIos ?? 5 },
     };
-    // index tokens (name + author + authorId + description)
     const tokens = tokenize(a.name, a.author, a.desc);
     if (a.authorId) tokens.add(a.authorId.toLowerCase());
     for (const t of tokens) {
@@ -143,7 +137,7 @@ async function main() {
     const t = {};
     for (const [tok, idset] of Object.entries(toks)) {
       let ids = Array.from(idset);
-      if (ids.length > HOT_TOKEN_CAP) ids = ids.slice(0, HOT_TOKEN_CAP); // bound a hot token
+      if (ids.length > HOT_TOKEN_CAP) ids = ids.slice(0, HOT_TOKEN_CAP);
       t[tok] = ids;
     }
     return [`index/${b}.json`, JSON.stringify({ v: 1, t })];
@@ -156,31 +150,18 @@ async function main() {
     if (++wrote % 512 === 0) console.log(`  wrote ${wrote}/${writes.length}`);
   });
 
-  // 4. Master db.json backup -> GitHub (one commit). One avatar per line (browsable).
+  // 4. Master db.json (full records, one avatar per line) -> R2. Backup + the admin bots'
+  //    whole-catalog source post-cutover (they read ${CATALOG_DOMAIN}/db.json).
   const lines = fileIds.map((k) => JSON.stringify(k) + ":" + JSON.stringify(avatars[k]));
   const master = `{"name":"VRC-A Avatar Store","version":1,"count":${fileIds.length},"avatars":{\n${lines.join(",\n")}\n}}`;
-  await commitMaster(master, fileIds.length);
+  await r2Put("db.json", master);
 
-  // 5. Manifest (marks search as ready + records the rebuild time).
+  // 5. Manifest (marks search ready + records the rebuild time).
   await r2Put("_manifest.json", JSON.stringify({
     v: 1, shardScheme: "filehex3-full", shardCount: 4096, indexScheme: "hash3", entryCount: fileIds.length,
     searchReady: true, lastFullRebuild: new Date().toISOString(),
   }));
-  console.log(`Done. ${fileIds.length} avatars, ${idxEntries.length} index buckets, ${fragEntries.length} fragment buckets.`);
-}
-
-async function commitMaster(content, count) {
-  const api = `https://api.github.com/repos/${GH_REPO}/contents/${DB_PATH}`;
-  const headers = { authorization: `Bearer ${GH_TOKEN}`, "user-agent": "VRC-A-rebuild", accept: "application/vnd.github+json" };
-  let sha;
-  const cur = await fetch(`${api}?ref=${encodeURIComponent(GH_BRANCH)}`, { headers });
-  if (cur.status === 200) sha = (await cur.json()).sha;
-  const b64 = Buffer.from(content, "utf-8").toString("base64");
-  const body = { message: `catalog: rebuild master (${count} avatars)`, content: b64, branch: GH_BRANCH };
-  if (sha) body.sha = sha;
-  const put = await fetch(api, { method: "PUT", headers, body: JSON.stringify(body) });
-  if (!put.ok) console.warn(`master commit failed: http ${put.status} ${(await put.text()).slice(0, 200)}`);
-  else console.log(`Master committed (${count} avatars).`);
+  console.log(`Done. ${fileIds.length} avatars, ${idxEntries.length} index buckets, ${fragEntries.length} fragment buckets, master + manifest.`);
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

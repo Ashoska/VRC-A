@@ -1,49 +1,51 @@
 # Catalog rebuild Action (search index + master backup)
 
 The Worker keeps the **lookup shards** fresh (the clone path). This Action keeps **search**
-(the token index + fragments) and the **master `db.json` backup** fresh, by reading all the
-R2 lookup shards and rebuilding — on a runner with real RAM, so there's no Worker
-memory/subrequest limit. It's the only thing GitHub does once cutover happens; it's never on
-a user hot path.
+(the token index + fragments) and the **master `db.json`** fresh, by reading all the R2 lookup
+shards and rebuilding — on a runner with real RAM, so there's no Worker memory/subrequest
+limit. Everything is written back to **R2** (no GitHub commit, no extra token). It's never on a
+user hot path.
 
-## What it produces (from the R2 shards)
-- `index/<3hex>.json` — token → `[avatarId,…]` (bucket = `token.hashCode() & 0xfff`) → R2
-- `fragments/<3hex>.json` — avatarId → `{f,n,au,ai,p,pf}` summary → R2
-- `avatars/db.json` — full master, one avatar per line → committed to the image-store repo
+## Where it lives
+It's already in **this** repo (no file-copying):
+- `.github/workflows/catalog-rebuild.yml` — the workflow (cron every 20 min + manual button)
+- `.github/scripts/catalog-rebuild.mjs` — the rebuild script
 
-The app (`AvatarGlobalDb`) computes the exact same bucket keys, so its `searchSharded`
-reads these directly.
+## What it produces (to R2, from the R2 shards)
+- `fragments/<3hex>.json` — avatarId → `{f,n,au,ai,p,pf}` summary
+- `index/<3hex>.json` — token → `[avatarId,…]` (bucket = `token.hashCode() & 0xfff`)
+- `db.json` — full master (the admin bots' whole-catalog source post-cutover) + backup
+- `_manifest.json` — search-ready marker + rebuild time
+
+The app (`AvatarGlobalDb`) computes the same bucket keys, so `searchSharded` reads these
+directly, and the admin reads `${CATALOG_DOMAIN}/db.json`.
 
 ## Setup (one time)
-1. **Copy two files into the image-store repo** (`Ashoska/VRC-A-Image-store`):
-   - `rebuild.mjs` → repo root
-   - `catalog-rebuild.yml` → `.github/workflows/catalog-rebuild.yml`
-2. **Create an R2 API token** (Cloudflare → R2 → *Manage R2 API Tokens* → *Create API Token*,
-   Object Read & Write on the `vrca-avatar-catalog` bucket). It gives you an **Access Key ID**
-   and **Secret Access Key**. Note your **Account ID** (R2 overview page).
-3. **Add repo secrets** (image-store repo → Settings → Secrets and variables → Actions):
-   - `R2_ACCOUNT_ID`
-   - `R2_ACCESS_KEY_ID`
-   - `R2_SECRET_ACCESS_KEY`
-   (`GITHUB_TOKEN` is provided automatically; it commits the master to the same repo.)
+1. **Create an R2 API token** — Cloudflare → R2 → *Manage R2 API Tokens* → *Create API Token*,
+   **Object Read & Write** on the `vrca-avatar-catalog` bucket. Note the **Access Key ID**,
+   **Secret Access Key**, and your **Account ID** (R2 overview page).
+2. **Add three repo secrets** (this repo → Settings → Secrets and variables → Actions):
+   `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`.
+3. **Merge to the default branch (main).** Scheduled + manual runs only work once the workflow
+   is on `main`. After merging, the Actions tab shows `catalog-rebuild` with a *Run workflow*
+   button.
 4. If your domain isn't `cdn.gremlininc.app`, edit `CATALOG_DOMAIN` in the workflow.
 
 ## Running it
-- Runs automatically every 20 min (the cron), and you can trigger it from the Actions tab
-  (*Run workflow*). Search freshness = the cron cadence (20 min); clone freshness is separate
-  (the shards, ~1–5 min via the Worker).
-- **Enable it only at/after cutover** — before `R2_WRITE="1"` the shards are the frozen
-  migration snapshot, so a rebuild would just reproduce that. After cutover the Worker keeps
-  the shards live and this reflects real changes.
+- Runs automatically every 20 min once on `main`; trigger manually from the Actions tab.
+- Search freshness = the cron cadence (20 min); clone freshness is separate (the shards,
+  ~1–5 min via the Worker).
+- **Enable it at/after cutover** — before `R2_WRITE="1"` the shards are the frozen migration
+  snapshot, so a rebuild just reproduces that (harmless, and it does build the initial index so
+  you can verify search serves). After cutover it reflects real changes.
 
 ## Safety
 - Aborts (non-zero exit, no writes) if it reads 0 avatars, so a transient CDN failure can't
-  wipe the index or master.
-- Hot tokens are capped at `HOT_TOKEN_CAP` (800) postings so a bucket can't balloon.
-- Idempotent: every run fully rebuilds from the shards (renames/removals self-heal — no stale
-  postings), so it's safe to re-run any time.
+  wipe the index/master.
+- Hot tokens capped at 800 postings so a bucket can't balloon.
+- Idempotent — every run fully rebuilds from the shards, so renames/removals self-heal (no
+  stale postings). Safe to re-run any time.
 
 ## Scale note
-At millions of avatars, bump the shard read to 4-hex (matching a client `shardPrefix` change)
-and consider sharding the index further; the runner RAM (7 GB) comfortably covers well into
-the millions before that's needed.
+At millions, bump the shard read to 4-hex (matching a client `shardPrefix` change) and consider
+sharding the index further; 7 GB runner RAM comfortably covers well into the millions first.
