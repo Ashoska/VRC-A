@@ -46,7 +46,7 @@ GH_BRANCH = "main"
 # bucket, set CATALOG_BASE to it (e.g. "https://cdn.yourdomain.com") so reads hit the pure
 # CDN and bypass the Worker — /health echoes catalogBase, so the app picks it up with NO
 # app-store update.
-# CATALOG_BASE = "https://cdn.yourdomain.com"
+CATALOG_BASE = "https://cdn.gremlininc.app"
 # CUTOVER SWITCH. The R2 per-shard flush stays OFF until this is set to "1", even after the
 # bucket + binding exist — so you can seed + serve + verify shards first. Flip it to "1"
 # (and redeploy) ONLY once the sharded-read side is live; before that, flipping it would
