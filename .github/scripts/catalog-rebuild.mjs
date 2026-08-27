@@ -32,7 +32,9 @@ for (const [k, v] of Object.entries({ CATALOG_DOMAIN, R2_ACCOUNT_ID, R2_ACCESS_K
 }
 
 const R2_ENDPOINT = `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`;
-const HOT_TOKEN_CAP = 800;        // cap postings per token (bounds a hot bucket)
+const HOT_TOKEN_CAP = 5000;       // cap postings per token — high enough for deep paging
+                                  // (~250 pages of 20) while keeping an index bucket small
+                                  // (~5000 bare ids ≈ 30 KB gzipped). Ordered-by-rank later.
 const READ_CONCURRENCY = 48;      // parallel shard reads over the CDN
 const WRITE_CONCURRENCY = 24;     // parallel R2 puts
 const HEX = "0123456789abcdef";

@@ -570,6 +570,77 @@ object AvatarGlobalDb {
         }.distinctBy { it.avatarId }.take(limit)
     }
 
+    // ---- PAGED search (Google-style pages, infinite avatars) ------------------
+    // A query's AND-intersected candidate id list is computed ONCE (parallel token fetch)
+    // and cached per-query; each page then fetches ONLY that page's fragment buckets. Because
+    // the full candidate count is known up-front, `hasMore` is exact (no need to prefetch a
+    // page to discover the end) — the UI still prefetches page+1 purely for latency. The
+    // candidate order is the index posting order (rank-ordered by the rebuild job), so pages
+    // are stable across a session. Evicted on tab-away / new search / close via evictSearchCache.
+    data class SearchPage(
+        val results: List<Entry>, val page: Int, val pageSize: Int, val total: Int, val hasMore: Boolean,
+    )
+
+    private const val CANDIDATE_CACHE_MAX = 8
+    private val candidateCache = object : LinkedHashMap<String, List<String>>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<String>>): Boolean = size > CANDIDATE_CACHE_MAX
+    }
+
+    private fun queryKey(query: String): String = query.trim().lowercase()
+
+    /** Compute (or reuse) the ordered AND-intersected candidate id list for a query. The order
+     *  is preserved from the first (rarest) token's posting list so pages don't shuffle. */
+    private suspend fun candidatesFor(base: String, query: String): List<String> = coroutineScope {
+        val key = queryKey(query)
+        synchronized(candidateCache) { candidateCache[key] }?.let { return@coroutineScope it }
+        val tokens = key.split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length >= 2 }.distinct()
+        if (tokens.isEmpty()) return@coroutineScope emptyList<String>().also {
+            synchronized(candidateCache) { candidateCache[key] = it }
+        }
+        val postings = tokens.map { t -> async { fetchTokenIds(base, t) } }.awaitAll()
+        // Order-preserving intersection: keep the first token's order, drop ids missing from any other.
+        val result: List<String> = run {
+            if (postings.any { it.isEmpty() }) return@run emptyList()
+            val ordered = postings[0]
+            if (postings.size == 1) ordered
+            else {
+                val others = postings.drop(1).map { it.toHashSet() }
+                ordered.filter { id -> others.all { it.contains(id) } }
+            }
+        }
+        synchronized(candidateCache) { candidateCache[key] = result }
+        result
+    }
+
+    /**
+     * One page of sharded search results (page is 0-based). Fetches ONLY this page's fragment
+     * buckets, so cost is bounded regardless of how many avatars match — the "infinite avatars"
+     * path. `hasMore` is exact (candidate count known). Empty page when R2 search isn't live.
+     */
+    suspend fun searchShardedPage(context: Context, query: String, page: Int, pageSize: Int = 20): SearchPage = coroutineScope {
+        ensureCatalogBase(context)
+        if (!r2Serving) return@coroutineScope SearchPage(emptyList(), page, pageSize, 0, false)
+        val base = catalogBase ?: return@coroutineScope SearchPage(emptyList(), page, pageSize, 0, false)
+        val candidates = candidatesFor(base, query)
+        val total = candidates.size
+        val from = (page * pageSize).coerceAtLeast(0)
+        if (from >= total) return@coroutineScope SearchPage(emptyList(), page, pageSize, total, false)
+        val slice = candidates.subList(from, minOf(from + pageSize, total))
+        val byBucket = slice.groupBy { fragBucketOf(it) }
+        val fetched = byBucket.keys.map { b -> async { b to (fetchFragments(base, b) ?: emptyMap()) } }
+            .awaitAll().toMap()
+        val out = ArrayList<Entry>(slice.size)
+        for (id in slice) { val frags = fetched[fragBucketOf(id)] ?: continue; frags[id]?.let { out.add(it) } }
+        SearchPage(out, page, pageSize, total, from + pageSize < total)
+    }
+
+    /** Drop the sharded-search caches (token/fragment JSON + per-query candidate lists). Called
+     *  on tab-away from VRChat / a new search / app close so a query's shards don't linger. */
+    fun evictSearchCache() {
+        synchronized(searchCache) { searchCache.clear() }
+        synchronized(candidateCache) { candidateCache.clear() }
+    }
+
     private suspend fun fetchTokenIds(base: String, token: String): List<String> {
         val obj = fetchSearchJson("$base/index/${indexBucketOf(token)}.json") ?: return emptyList()
         val arr = obj.optJSONObject("t")?.optJSONArray(token) ?: return emptyList()

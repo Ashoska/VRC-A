@@ -764,33 +764,70 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
     // Avatar ids confirmed dead (image 404 + existence check) — hidden from results.
     val deadIds = remember { androidx.compose.runtime.mutableStateListOf<String>() }
 
+    // Paged (Google-style) search over the sharded catalog. `pageCache` holds each fetched
+    // page's rows for this query; `pageTotal` is the exact candidate count (so Next is exact
+    // and we always know when to stop). Page 0 fetches page 0 AND prefetches page 1 (the "40
+    // on the first search"); each Next shows the prefetched page and prefetches the next.
+    val paged = com.vrca.vrchat.AvatarSearch.pagedSearchLive()
+    val pageSize = 20
+    var pageIndex by remember { mutableStateOf(0) }
+    val pageCache = remember { androidx.compose.runtime.mutableStateMapOf<Int, List<com.vrca.vrchat.AvatarSearch.Result>>() }
+    var pageTotal by remember { mutableStateOf(0) }
+
+    // Silently absorb avatars from the external sources (avtrdb/mirrors) so the sharded
+    // catalog fills over time — NOT shown inline (the paged view is our catalog only, to keep
+    // pages stable). No UI gating; contribute-back happens in the background.
+    fun backgroundContribute(seq: Int, q: String) {
+        scope.launch {
+            val remote = com.vrca.vrchat.AvatarSearch.remoteFill(ctx, q)
+            if (seq != searchSeq) return@launch
+            com.vrca.vrchat.AvatarGlobalDb.harvestSearchResults(ctx, remote)
+        }
+    }
+
+    // Fetch one page into the cache (idempotent); returns its total so Next-enable is exact.
+    suspend fun fetchPage(seq: Int, q: String, p: Int) {
+        if (seq != searchSeq || pageCache.containsKey(p)) return
+        val rp = com.vrca.vrchat.AvatarSearch.searchPage(ctx, q, p, pageSize)
+        if (seq != searchSeq) return
+        pageCache[p] = rp.results
+        pageTotal = rp.total
+    }
+
     fun runSearch() {
         if (query.isBlank()) return
         searched = true; shown = 12; deadIds.clear()
         searchSeq += 1
         val seq = searchSeq
         val q = query
+        // New search ⇒ drop the previous query's shard/candidate caches from the app.
+        com.vrca.vrchat.AvatarSearch.evictSearchCache()
+        pageCache.clear(); pageIndex = 0; pageTotal = 0
+
+        if (paged) {
+            scope.launch {
+                searching = true; results = emptyList()
+                fetchPage(seq, q, 0)                       // page 0 (shown)
+                if (seq != searchSeq) return@launch
+                results = pageCache[0] ?: emptyList()
+                searching = false
+                backgroundContribute(seq, q)               // absorb avtrdb extras silently
+                fetchPage(seq, q, 1)                        // prefetch page 1 (the "40 on first search")
+            }
+            return
+        }
+
         scope.launch {
-            // LOCAL FIRST: show our crowdsourced catalog INSTANTLY (in-memory, no
-            // network), then fold in the external sources. Once our DB covers a query
-            // the results are immediate and avtrdb/mirrors no longer gate the search —
-            // they still run (each with a timeout) only to catch avatars we don't have
-            // and contribute them back.
+            // LEGACY (pre-cutover) path: LOCAL FIRST from the in-memory whole-map, then fold
+            // in the external sources, single list with a "See more" button.
             val local = com.vrca.vrchat.AvatarSearch.localResults(q)
             if (seq != searchSeq) return@launch
             results = local
-            // "Enough" = a full first page (matches `shown`). When our catalog already
-            // covers the query, the search is DONE from the user's view — show the
-            // results instantly with NO loading indicator and let the external sources
-            // run SILENTLY in the background only to catch avatars we're missing +
-            // contribute them back. Only when local is sparse/empty do we visibly wait.
             val enough = local.size >= 12
             searching = local.isEmpty()
             loadingMore = local.isNotEmpty() && !enough
             val remote = com.vrca.vrchat.AvatarSearch.remoteFill(ctx, q)
             if (seq != searchSeq) return@launch
-            // Merge: our catalog wins, dedup by normalized avatar id. When we already
-            // had "enough", any remote-only extras just append quietly beneath them.
             val merged = LinkedHashMap<String, com.vrca.vrchat.AvatarSearch.Result>()
             for (r in local + remote) {
                 val k = r.id.trim().lowercase()
@@ -798,9 +835,28 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
             }
             results = merged.values.toList()
             searching = false; loadingMore = false
-            // Fill our catalog from results that lacked a file id (avtrdb).
             com.vrca.vrchat.AvatarGlobalDb.harvestSearchResults(ctx, results)
         }
+    }
+
+    // Move to a page: show its cached rows instantly (fetch if missing), then prefetch the next.
+    fun goToPage(p: Int) {
+        if (p < 0) return
+        val seq = searchSeq
+        val q = query
+        scope.launch {
+            if (!pageCache.containsKey(p)) { searching = true; fetchPage(seq, q, p) }
+            if (seq != searchSeq) return@launch
+            pageIndex = p
+            results = pageCache[p] ?: emptyList()
+            searching = false
+            fetchPage(seq, q, p + 1)                        // always keep one page ahead
+        }
+    }
+
+    // Evict the sharded-search caches when the card leaves composition (tab-away / close).
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose { com.vrca.vrchat.AvatarSearch.evictSearchCache() }
     }
 
     ElevatedCard(Modifier.fillMaxWidth()) {
@@ -839,14 +895,43 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
                 )
             }
             val visible = results.filter { it.id !in deadIds }
-            visible.take(shown).forEach { r ->
-                AvatarResultRow(ctx, r, onDead = { if (it !in deadIds) deadIds.add(it) })
-            }
-            if (visible.size > shown) {
-                androidx.compose.material3.TextButton(
-                    onClick = { shown += 12 },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("See more (${visible.size - shown} more)") }
+            if (paged) {
+                visible.forEach { r ->
+                    AvatarResultRow(ctx, r, onDead = { if (it !in deadIds) deadIds.add(it) })
+                }
+                // Google-style page bar: Prev / "Page N of M" / Next. Next is exact (candidate
+                // count known); the next page is already prefetched so it appears instantly.
+                if (searched && pageTotal > 0) {
+                    val totalPages = (pageTotal + pageSize - 1) / pageSize
+                    val hasNext = (pageIndex + 1) * pageSize < pageTotal
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        androidx.compose.material3.TextButton(
+                            onClick = { goToPage(pageIndex - 1) },
+                            enabled = pageIndex > 0 && !searching
+                        ) { Text("Previous") }
+                        Spacer(Modifier.weight(1f))
+                        Text(
+                            "Page ${pageIndex + 1} of $totalPages",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.weight(1f))
+                        androidx.compose.material3.TextButton(
+                            onClick = { goToPage(pageIndex + 1) },
+                            enabled = hasNext && !searching
+                        ) { Text("Next") }
+                    }
+                }
+            } else {
+                visible.take(shown).forEach { r ->
+                    AvatarResultRow(ctx, r, onDead = { if (it !in deadIds) deadIds.add(it) })
+                }
+                if (visible.size > shown) {
+                    androidx.compose.material3.TextButton(
+                        onClick = { shown += 12 },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("See more (${visible.size - shown} more)") }
+                }
             }
 
             androidx.compose.material3.Divider()
