@@ -126,6 +126,91 @@ function cleanEntry(e) {
   return out;
 }
 
+// ---- incremental search index (add-only) -----------------------------------
+// These MUST match .github/scripts/catalog-rebuild.mjs EXACTLY so the buckets the Worker patches
+// are the same ones the app reads and the daily rebuild regenerates. Add-only: the flush indexes
+// new/updated avatars immediately (search ~1 min fresh); the periodic full rebuild is the backstop
+// that removes dead/renamed entries and compacts. A stale index entry is harmless — the app
+// 404-hides a dead avatar's search result anyway.
+function hashCode(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0; return h; }
+function indexBucketFor(token) { return ((hashCode(token) & 0xfff) >>> 0).toString(16).padStart(3, "0"); }
+function fragBucketFor(avatarId) { return avatarId.slice(5, 8).toLowerCase(); }
+function platMask(platforms) {
+  let m = 0; const p = platforms || [];
+  if (p.includes("PC")) m |= 1; if (p.includes("Quest")) m |= 2; if (p.includes("iOS")) m |= 4; return m;
+}
+function tokenizeFields(...fields) {
+  const set = new Set();
+  for (const f of fields) {
+    if (!f) continue;
+    for (const w of String(f).toLowerCase().split(/[^\p{L}\p{N}]+/u)) if (w.length >= 2) set.add(w);
+  }
+  return set;
+}
+const INDEX_HOT_TOKEN_CAP = 5000;   // must match the Action's HOT_TOKEN_CAP
+// Bound subrequests per flush (the shard writes already use some of the ~1000/invocation budget).
+// 80 new avatars ≈ ~80 fragment + ~160 index buckets ×2 read/write ≈ ~480, leaving headroom.
+// Overflow avatars are cloneable immediately and become searchable on the next full rebuild.
+const MAX_INDEX_PER_FLUSH = 80;
+
+// Patch fragments/<b>.json (id -> summary) + index/<b>.json (token -> [ids]) for the given avatar
+// entries. Groups by bucket so each bucket is read+written ONCE. Returns the changed bucket URLs
+// for purge. `entries` are cleanEntry'd objects ({id, name, author, authorId, platforms, desc, ...}).
+async function updateSearchIndex(env, entries) {
+  if (!entries.length) return [];
+  const capped = entries.slice(0, MAX_INDEX_PER_FLUSH);
+  // Group the work by bucket.
+  const fragWork = {};   // fragBucket -> { id -> summary }
+  const idxWork = {};    // indexBucket -> { token -> Set(id) }
+  for (const a of capped) {
+    const id = a.id; if (!id || !id.startsWith("avtr_")) continue;
+    const fb = fragBucketFor(id);
+    (fragWork[fb] ||= {})[id] = {
+      f: a.fileId, n: a.name || "", au: a.author || "", ai: a.authorId || "",
+      p: platMask(a.platforms),
+      pf: { pc: a.perfPc ?? 5, q: a.perfQuest ?? 5, i: a.perfIos ?? 5 },
+    };
+    const tokens = tokenizeFields(a.name, a.author, a.desc);
+    if (a.authorId) tokens.add(a.authorId.toLowerCase());
+    for (const t of tokens) {
+      const ib = indexBucketFor(t);
+      ((idxWork[ib] ||= {})[t] ||= new Set()).add(id);
+    }
+  }
+  const changed = [];
+  // Fragments: merge new summaries into each touched bucket.
+  for (const [b, add] of Object.entries(fragWork)) {
+    let cur = { v: 1, e: {} };
+    try { const o = await env.CATALOG.get(`fragments/${b}.json`); if (o) cur = await o.json(); } catch (_) {}
+    if (!cur || typeof cur !== "object" || typeof cur.e !== "object") cur = { v: 1, e: {} };
+    Object.assign(cur.e, add);
+    try {
+      await env.CATALOG.put(`fragments/${b}.json`, JSON.stringify({ v: 1, e: cur.e }),
+        { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + SHARD_TTL } });
+      if (env.CATALOG_BASE) changed.push(env.CATALOG_BASE.replace(/\/$/, "") + `/fragments/${b}.json`);
+    } catch (_) {}
+  }
+  // Index: union the new ids into each token's list (cap, dedup).
+  for (const [b, toks] of Object.entries(idxWork)) {
+    let cur = { v: 1, t: {} };
+    try { const o = await env.CATALOG.get(`index/${b}.json`); if (o) cur = await o.json(); } catch (_) {}
+    if (!cur || typeof cur !== "object" || typeof cur.t !== "object") cur = { v: 1, t: {} };
+    for (const [tok, idset] of Object.entries(toks)) {
+      const merged = new Set(Array.isArray(cur.t[tok]) ? cur.t[tok] : []);
+      for (const id of idset) merged.add(id);
+      let ids = Array.from(merged);
+      if (ids.length > INDEX_HOT_TOKEN_CAP) ids = ids.slice(0, INDEX_HOT_TOKEN_CAP);
+      cur.t[tok] = ids;
+    }
+    try {
+      await env.CATALOG.put(`index/${b}.json`, JSON.stringify({ v: 1, t: cur.t }),
+        { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + SHARD_TTL } });
+      if (env.CATALOG_BASE) changed.push(env.CATALOG_BASE.replace(/\/$/, "") + `/index/${b}.json`);
+    } catch (_) {}
+  }
+  return changed;
+}
+
 export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
@@ -443,6 +528,7 @@ async function flushR2(env) {
   const S = (sp) => (shardOps[sp] ||= { adds: {}, upserts: {}, removes: new Set(), checked: new Set(), renames: {} });
 
   const pendKeys = [];
+  const searchEntries = [];   // avatars to patch into the incremental search index (add-only)
   const recentBatches = [];   // admin "recent contributions" view (free: built from data already read)
   for (const kn of pendNames) {
     pendKeys.push(kn);
@@ -450,7 +536,7 @@ async function flushR2(env) {
     if (!val) continue;
     let batch; try { batch = JSON.parse(val); } catch (_) { continue; }
     const fids = Object.keys(batch).filter((fid) => FILE_RE.test(fid));
-    for (const fid of fids) S(shardPrefix(fid)).adds[fid] = batch[fid];
+    for (const fid of fids) { S(shardPrefix(fid)).adds[fid] = batch[fid]; searchEntries.push({ ...batch[fid], fileId: fid }); }
     if (fids.length) recentBatches.push({
       ts: typeof batch.__ts === "number" ? batch.__ts : Date.now(),
       by: typeof batch.__by === "string" ? batch.__by : "",
@@ -467,7 +553,7 @@ async function flushR2(env) {
     const val = await env.AVATAR_KV.get(kn);
     if (!val) continue;
     let batch; try { batch = JSON.parse(val); } catch (_) { continue; }
-    for (const fid of Object.keys(batch)) if (FILE_RE.test(fid)) S(shardPrefix(fid)).upserts[fid] = batch[fid];
+    for (const fid of Object.keys(batch)) if (FILE_RE.test(fid)) { S(shardPrefix(fid)).upserts[fid] = batch[fid]; searchEntries.push({ ...batch[fid], fileId: fid }); }
   }
   const admrKeys = [];
   for (const kn of admrNames) {
@@ -530,6 +616,17 @@ async function flushR2(env) {
   // Purge just the changed shards from the edge cache so a new avatar goes live within
   // ~seconds instead of the TTL. No-op unless a purge token is configured.
   if (allShardsOk && prefixes.length > 0) await purgeShards(env, prefixes);
+
+  // Incremental search index (add-only): patch fragments/ + index/ for the new/updated avatars so
+  // search is ~1 min fresh (not 20 min via the Action). Gated on the shards writing OK (the pend
+  // keys are then deleted, so we index exactly what persisted; re-index is idempotent otherwise).
+  // The daily rebuild remains the backstop that removes dead/renamed entries.
+  if (allShardsOk && searchEntries.length) {
+    try {
+      const idxUrls = await updateSearchIndex(env, searchEntries);
+      if (idxUrls.length) await purgeCatalogUrls(env, idxUrls);
+    } catch (_) { /* index patch is best-effort; the daily rebuild reconciles */ }
+  }
 
   // Clear KV only when every touched shard wrote OK (idempotent retry otherwise — nothing lost).
   if (allShardsOk) {
