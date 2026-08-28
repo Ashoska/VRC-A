@@ -476,18 +476,18 @@ object AvatarCatalogSweep {
                 val p = progress.getValue(r)
                 val slot = p.slot.takeIf { it >= 0 } ?: assignmentPreview[r] ?: -1
                 val rep = onReports(r)
-                val helpLabel = if (rep) "" else if (r == Role.REPORTS)
-                    p.helping.ifBlank { if (manifestUnfilled >= manifestStale) "Fill" else "Liveness" } else p.helping
                 RoleView(
                     role = r,
                     bot = if (slot >= 0) "bot ${slot + 1}" else "—",
                     queued = if (rep) pendingReports else share,
                     checked = p.checked,
                     removed = p.removed,
-                    refreshedOrFilled = if (r == Role.FILL || helpLabel == "Fill") p.filled else p.refreshed,
+                    refreshedOrFilled = if (r == Role.FILL) p.filled else p.refreshed,
                     status = p.status,
                     running = p.running,
-                    helping = helpLabel
+                    // No "helping" label in walk mode: every bot shares the same pool equally, so the
+                    // even queued share already shows they're all working — the tag was noise.
+                    helping = ""
                 )
             }
         }
@@ -846,11 +846,14 @@ object AvatarCatalogSweep {
     private val filledSinceManifest = java.util.concurrent.atomic.AtomicInteger(0)
     private val recheckedSinceManifest = java.util.concurrent.atomic.AtomicInteger(0)
     @Volatile var manifestUnfilled = -1; private set
-    fun setManifestUnfilled(n: Int) { manifestUnfilled = n; filledSinceManifest.set(0) }
+    // Reset the optimistic decrement ONLY when the value actually CHANGES (a fresh Action rebuild),
+    // not on every 30s poll of the same value — otherwise each poll snapped the live-decremented
+    // queue back up to the manifest number (the "keeps jumping to ~8200" sawtooth).
+    fun setManifestUnfilled(n: Int) { if (n != manifestUnfilled) { manifestUnfilled = n; filledSinceManifest.set(0) } }
     /** Liveness backlog (entries due a recheck) from the manifest — so the Liveness bots show a
      *  real "queued" number in shard-walk mode instead of a confusing 0 while they're working. */
     @Volatile var manifestStale = -1; private set
-    fun setManifestStale(n: Int) { manifestStale = n; recheckedSinceManifest.set(0) }
+    fun setManifestStale(n: Int) { if (n != manifestStale) { manifestStale = n; recheckedSinceManifest.set(0) } }
 
     /** WALK one shard (post-cutover): read it, fill the unfilled + recheck the stale, push ops.
      *  Memory holds only this shard. Dead-checks obey the same VRChat-outage guard as the
