@@ -78,6 +78,7 @@ fun BotsTab() {
     val views by BotController.views.collectAsState()
     val totalQueued by BotController.totalQueued.collectAsState()
     val added24h by BotController.added24h.collectAsState()
+    val lastPush by BotController.lastPush.collectAsState()
     val blitz by BotController.blitz.collectAsState()
     val blitzViews by BotController.blitzViews.collectAsState()
     val blitzShards by BotController.blitzShards.collectAsState()
@@ -93,7 +94,7 @@ fun BotsTab() {
         verticalArrangement = Arrangement.spacedBy(12.dp),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp)
     ) {
-        item { CatalogHealthCard(added24h) }
+        item { CatalogHealthCard(added24h, lastPush) }
         item {
             MaintenanceCard(
                 adminKey = adminKey,
@@ -122,7 +123,7 @@ fun BotsTab() {
 // ---- catalog health ---------------------------------------------------------
 
 @Composable
-private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null) {
+private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null, lastPush: Pair<String, Long>? = null) {
     var status by remember { mutableStateOf("loading…") }
     var entries by remember { mutableStateOf("—") }
     var pending by remember { mutableStateOf("—") }
@@ -171,6 +172,12 @@ private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null) {
             AdminLabeledRow("Pending", pending)
             AdminLabeledRow("Last flush", lastFlush)
             AdminLabeledRow("Admin key", adminKeySet)
+            lastPush?.let { (info, atMs) ->
+                val agoS = ((System.currentTimeMillis() - atMs) / 1000).coerceAtLeast(0)
+                Text("Last bot push (${agoS}s ago)", style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(info, style = MaterialTheme.typography.bodySmall)
+            }
         }
     }
 }
