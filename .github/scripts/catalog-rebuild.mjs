@@ -72,18 +72,23 @@ async function mapLimit(items, limit, fn) {
 const allPrefixes = [];
 for (const a of HEX) for (const b of HEX) for (const c of HEX) allPrefixes.push(a + b + c);
 
+// Returns the shard's entries object {} (200), an EMPTY object for a real 404 (shard never
+// created — legitimately empty), or NULL when the read FAILED after all retries. The null case
+// is critical: a failed read must NOT be treated as "empty" (that silently drops the shard's
+// avatars from the rebuilt master/search/count and deletes their buckets — the "manifest
+// randomly regressed to a lower number" bug). The caller aborts the whole rebuild on any null.
 async function fetchShard(prefix) {
   const url = `https://${CATALOG_DOMAIN}/shard/${prefix}.json`;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 5; attempt++) {
     try {
       const res = await fetch(url, { headers: { "user-agent": "VRC-A-rebuild" } });
-      if (res.status === 404) return {};
+      if (res.status === 404) return {};                      // legitimately empty
       if (res.status === 200) return (await res.json()).e || {};
     } catch (_) {}
-    await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+    await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
   }
-  console.warn(`shard ${prefix}: read failed after retries (skipped)`);
-  return {};
+  console.warn(`shard ${prefix}: read FAILED after retries`);
+  return null;                                                 // unknown contents — do NOT drop
 }
 
 async function r2Put(key, bodyStr, ttl = 300) {
@@ -130,8 +135,10 @@ async function main() {
   // Must match the bot's RECHECK_INTERVAL_MS (7 days) so `stale` == what the bot would recheck.
   const STALE_CUTOFF = Date.now() - 7 * 24 * 60 * 60 * 1000;
   let readCount = 0;
+  let failedReads = 0;
   await mapLimit(allPrefixes, READ_CONCURRENCY, async (prefix) => {
     const e = await fetchShard(prefix);
+    if (e === null) { failedReads++; return; }   // read failed — counted, guarded below
     for (const fid of Object.keys(e)) {
       const a = e[fid];
       avatars[fid] = a;
@@ -141,8 +148,23 @@ async function main() {
     if (++readCount % 512 === 0) console.log(`  read ${readCount}/${allPrefixes.length} shards`);
   });
   const fileIds = Object.keys(avatars);
-  console.log(`Loaded ${fileIds.length} avatars.`);
+  console.log(`Loaded ${fileIds.length} avatars.` + (failedReads ? `  (${failedReads} shard reads FAILED)` : ""));
   if (fileIds.length === 0) { console.error("0 avatars read — aborting (won't wipe)"); process.exit(1); }
+  // SAFETY: never publish a SHRUNKEN catalog from an incomplete read. A failed shard read means
+  // we don't know that shard's contents, so writing the rebuilt master/search/count + deleting
+  // "missing" buckets would drop real avatars (the manifest-regression bug). Read the previous
+  // authoritative count and abort (keep everything, retry next run) if any read failed OR the
+  // count dropped more than 10% — genuine growth and small bot culls pass through fine.
+  let prevCount = 0;
+  try { const m = await r2Get("_manifest.json"); if (m) prevCount = JSON.parse(m).entryCount || 0; } catch (_) {}
+  if (failedReads > 0) {
+    console.error(`ABORT: ${failedReads} shard read(s) failed — not publishing an incomplete catalog (prev ${prevCount}, this run ${fileIds.length}). Retrying next run.`);
+    process.exit(1);
+  }
+  if (prevCount > 500 && fileIds.length < prevCount * 0.9) {
+    console.error(`ABORT: count would drop ${prevCount} -> ${fileIds.length} (>10%). Refusing to shrink the catalog; retrying next run.`);
+    process.exit(1);
+  }
 
   // 2. Build fragments (id -> summary) and the token index (token -> ids), bucketed.
   const fragBuckets = {};   // "<3hex>" -> { id -> {f,n,au,ai,p,pf} }
