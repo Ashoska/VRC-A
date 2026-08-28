@@ -43,6 +43,11 @@ object BotController {
     private val _added24h = MutableStateFlow<Pair<Int, Int>?>(null)
     val added24h: StateFlow<Pair<Int, Int>?> = _added24h
 
+    // What the bots most recently pushed to the Worker (counts + sample names) + how long ago.
+    // Free — read straight from the flush buffer, no network.
+    private val _lastPush = MutableStateFlow<Pair<String, Long>?>(null)
+    val lastPush: StateFlow<Pair<String, Long>?> = _lastPush
+
     private val _blitz = MutableStateFlow(false)
     val blitz: StateFlow<Boolean> = _blitz
 
@@ -67,6 +72,14 @@ object BotController {
     // if the periodic validate hasn't run / returned UNKNOWN. Covers the slow-validate gap.
     private const val AUTH_OK_WINDOW_MS = 5 * 60_000L
     @Volatile private var pendingReports = 0
+    // Wedge watchdog state (see the 2s loop): progress signal + cooldowns.
+    @Volatile private var lastCheckedSum = -1
+    @Volatile private var lastProgressMs = 0L
+    @Volatile private var lastKickMs = 0L
+    private const val STUCK_MS = 120_000L        // no checked-counter progress this long → wedged
+    private const val KICK_COOLDOWN_MS = 180_000L // min gap between auto-kicks (self-limits)
+    private fun prefs0(app: Context) =
+        app.getSharedPreferences("vrca_admin_local", Context.MODE_PRIVATE)
     // While a manual login is in progress, the ALREADY-logged-in bots must "chill" —
     // stop the sweep AND validation — so their API traffic doesn't compete with the new
     // login for VRChat's per-IP rate limit (the "3rd/4th bot won't log in" wall).
@@ -178,6 +191,25 @@ object BotController {
                 // Keep the sweep running per the saved config (auto-starts on launch,
                 // self-includes a bot once it's logged in). Idempotent.
                 applySweepConfig(app)
+                // WEDGE WATCHDOG: after an app reopen (or a rare stuck state) the loops can stay
+                // "running" but stop progressing — the counters freeze and pause+start was the only
+                // fix. If the sweep is running (not paused/chilling) with real backlog but no bot's
+                // checked counter has advanced for a while, do a clean kick() automatically. Keyed on
+                // `checked` (which still ticks even while rate-limited, since it counts each null
+                // attempt), so this fires ONLY on a true freeze, never on a legit backoff or a
+                // caught-up (pool==0) idle. Cooldown-bounded so it can never churn.
+                if (!silenced(app) && AvatarCatalogSweep.running) {
+                    val checked = AvatarCatalogSweep.totalChecked()
+                    val pool = AvatarCatalogSweep.lastTotalBacklog
+                    val now = System.currentTimeMillis()
+                    if (checked != lastCheckedSum) { lastCheckedSum = checked; lastProgressMs = now }
+                    else if (pool > 0 && lastProgressMs > 0L &&
+                             now - lastProgressMs > STUCK_MS && now - lastKickMs > KICK_COOLDOWN_MS) {
+                        lastKickMs = now; lastProgressMs = now
+                        val key = prefs0(app).getString("avatar_admin_key", "") ?: ""
+                        runCatching { AvatarCatalogSweep.kick(app, key, currentManual(prefs0(app))) }
+                    }
+                } else { lastProgressMs = 0L; lastCheckedSum = -1 }
                 if (i % 6 == 0) pendingReports =
                     runCatching { AvatarGlobalDb.pendingReportCount() }.getOrDefault(pendingReports)
                 val vs = withContext(Dispatchers.Default) { AvatarCatalogSweep.roleViews(pendingReports) }
@@ -190,6 +222,8 @@ object BotController {
                 _blitzViews.value = bv
                 _blitzShards.value = AvatarCatalogSweep.blitzShardProgress()
                 _sweepAlive.value = AvatarCatalogSweep.sweepAlive()
+                _lastPush.value = AvatarCatalogSweep.lastFlushInfo.takeIf { it.isNotBlank() }
+                    ?.let { it to AvatarCatalogSweep.lastFlushAtMs }
                 _sweepLastCycleAgoMs.value =
                     if (AvatarCatalogSweep.lastCycleMs == 0L) -1L
                     else System.currentTimeMillis() - AvatarCatalogSweep.lastCycleMs

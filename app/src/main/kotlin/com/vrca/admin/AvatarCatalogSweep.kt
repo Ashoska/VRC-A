@@ -407,6 +407,19 @@ object AvatarCatalogSweep {
         blitzProgress.values.forEach { it.running = false }
     }
 
+    /** Total avatars checked across all roles this session — the watchdog's progress signal. */
+    fun totalChecked(): Int = progress.values.sumOf { it.checked }
+
+    /** Force a CLEAN restart when the sweep is wedged (alive jobs that stopped progressing — e.g.
+     *  after an app reopen, or a leaked claim). Unlike ensureRunning (which only restarts DEAD
+     *  jobs), this rebuilds the loops AND clears the recently-processed guard so the fresh walk
+     *  actually finds work. Cheap; the caller gates it behind a cooldown. */
+    fun kick(context: Context, adminKey: String, manual: Map<Role, Int> = emptyMap()) {
+        stop()                 // cancels jobs, clears inFlight (the "pause+start fixes it" reset)
+        processedAt.clear()    // let the fresh loops re-evaluate work instead of skipping it
+        start(context, adminKey, manual)
+    }
+
     /** Kick a bounded full-catalog blitz: for the next window, FILL targets every
      *  incomplete entry and LIVENESS re-checks anything older than 1h — so all bots
      *  catch up the whole catalog (bios + dead checks) from before. Re-press to extend. */
@@ -968,6 +981,10 @@ object AvatarCatalogSweep {
             val checkedKeys = pendingChecked.toList(); pendingChecked.removeAll(checkedKeys.toSet())
             val checked = ArrayDeque(checkedKeys)
             if (upserts.isEmpty() && removes.isEmpty() && clears.isEmpty() && checked.isEmpty()) { pushError = ""; return }
+            // FREE batch-contents readout: capture the counts + a few names BEFORE the deques are
+            // drained, so the admin can see what just went up (no network — it's already in hand).
+            val flAdd = upserts.size; val flRem = removes.size; val flChk = checked.size
+            val flNames = upserts.mapNotNull { it.name.takeIf { n -> n.isNotBlank() } }.take(4)
             var failed = false
             while (upserts.isNotEmpty() || removes.isNotEmpty() || clears.isNotEmpty() || checked.isNotEmpty()) {
                 val u = ArrayList<AvatarGlobalDb.Entry>(); repeat(FLUSH_CHUNK) { upserts.removeFirstOrNull()?.let(u::add) }
@@ -985,8 +1002,18 @@ object AvatarCatalogSweep {
                 }
             }
             pushError = if (failed) "PUSH REJECTED — set ADMIN_KEY as a Secret on Cloudflare matching the app key" else ""
+            if (!failed) {
+                val names = if (flNames.isEmpty()) "" else " · " + flNames.joinToString(", ") +
+                    (if (flAdd > flNames.size) " +${flAdd - flNames.size} more" else "")
+                lastFlushInfo = "+$flAdd new  ✓$flChk checked  −$flRem removed$names"
+                lastFlushAtMs = System.currentTimeMillis()
+            }
         }
     }
+    /** FREE readout of the bots' most recent push to the Worker (counts + sample names) — the
+     *  admin can see WHAT just went up without any extra network/cost (it's the flush buffer). */
+    @Volatile var lastFlushInfo = ""; private set
+    @Volatile var lastFlushAtMs = 0L; private set
 
     /** Reflect ONE processed avatar in the LOCAL catalog right away (free, in-memory) so
      *  the backlog counters tick down per avatar instead of jumping a whole batch at once.

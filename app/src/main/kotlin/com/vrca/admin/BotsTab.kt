@@ -2,6 +2,7 @@ package com.vrca.admin
 
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -78,6 +79,7 @@ fun BotsTab() {
     val views by BotController.views.collectAsState()
     val totalQueued by BotController.totalQueued.collectAsState()
     val added24h by BotController.added24h.collectAsState()
+    val lastPush by BotController.lastPush.collectAsState()
     val blitz by BotController.blitz.collectAsState()
     val blitzViews by BotController.blitzViews.collectAsState()
     val blitzShards by BotController.blitzShards.collectAsState()
@@ -93,7 +95,7 @@ fun BotsTab() {
         verticalArrangement = Arrangement.spacedBy(12.dp),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp)
     ) {
-        item { CatalogHealthCard(added24h) }
+        item { CatalogHealthCard(added24h, lastPush, adminKey) }
         item {
             MaintenanceCard(
                 adminKey = adminKey,
@@ -121,14 +123,18 @@ fun BotsTab() {
 
 // ---- catalog health ---------------------------------------------------------
 
+private data class RecentBatch(val by: String, val n: Int, val ago: String, val names: List<String>)
+
 @Composable
-private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null) {
+private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null, lastPush: Pair<String, Long>? = null, adminKey: String = "") {
     var status by remember { mutableStateOf("loading…") }
     var entries by remember { mutableStateOf("—") }
     var pending by remember { mutableStateOf("—") }
     var totals by remember { mutableStateOf("—") }
     var lastFlush by remember { mutableStateOf("—") }
     var adminKeySet by remember { mutableStateOf("—") }
+    var recent by remember { mutableStateOf<List<RecentBatch>>(emptyList()) }
+    var expanded by remember { mutableStateOf<Int?>(null) }
     var tick by remember { mutableIntStateOf(0) }
     LaunchedEffect(tick) {
         while (true) {
@@ -153,6 +159,38 @@ private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null) {
             delay(15_000)   // auto-refreshes every 15s
         }
     }
+    // Recent USER contributions — fetched from the admin-gated /admin/recent (NOT /health, so the
+    // bot/client health polls stay tiny). One cheap KV read per 15s while this card is on screen.
+    LaunchedEffect(tick, adminKey) {
+        if (adminKey.isBlank()) { recent = emptyList(); return@LaunchedEffect }
+        while (true) {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    val conn = (java.net.URL("${com.vrca.vrchat.AvatarGlobalDb.WORKER_URL}/admin/recent?key=" +
+                        java.net.URLEncoder.encode(adminKey, "UTF-8"))
+                        .openConnection() as java.net.HttpURLConnection).apply {
+                        connectTimeout = 10_000; readTimeout = 10_000
+                        setRequestProperty("User-Agent", "VRC-A")
+                    }
+                    if (conn.responseCode != 200) null else conn.inputStream.bufferedReader().readText()
+                }
+            }.getOrNull()?.let { body ->
+                val ra = JSONObject(body).optJSONArray("recent")
+                val now = System.currentTimeMillis()
+                recent = if (ra == null) emptyList() else (0 until ra.length()).mapNotNull { idx ->
+                    ra.optJSONObject(idx)?.let { o ->
+                        val names = o.optJSONArray("names")?.let { na ->
+                            (0 until na.length()).mapNotNull { na.optString(it, null) }.filter { it.isNotBlank() }
+                        }.orEmpty()
+                        val ageMin = ((now - o.optLong("ts", now)) / 60_000L).coerceAtLeast(0)
+                        RecentBatch(o.optString("by", "").ifBlank { "someone" }, o.optInt("n", names.size),
+                            if (ageMin < 1) "just now" else "${ageMin}m ago", names)
+                    }
+                }
+            }
+            delay(15_000)
+        }
+    }
     AdminSectionCard(
         title = "Avatar catalog",
         icon = Icons.Filled.Storage,
@@ -171,6 +209,38 @@ private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null) {
             AdminLabeledRow("Pending", pending)
             AdminLabeledRow("Last flush", lastFlush)
             AdminLabeledRow("Admin key", adminKeySet)
+            lastPush?.let { (info, atMs) ->
+                val agoS = ((System.currentTimeMillis() - atMs) / 1000).coerceAtLeast(0)
+                Text("Last bot push (${agoS}s ago)", style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(info, style = MaterialTheme.typography.bodySmall)
+            }
+            if (recent.isNotEmpty()) {
+                androidx.compose.material3.Divider(Modifier.padding(vertical = 4.dp))
+                Text("Recent user contributions", style = MaterialTheme.typography.labelMedium)
+                recent.forEachIndexed { i, b ->
+                    val isOpen = expanded == i
+                    Text(
+                        "${if (isOpen) "▾" else "▸"} ${b.by} · ${b.n} avatars · ${b.ago}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { expanded = if (isOpen) null else i }
+                            .padding(vertical = 2.dp)
+                    )
+                    if (isOpen) {
+                        Text(
+                            if (b.names.isEmpty()) "(names unavailable)"
+                            else b.names.joinToString(", ") +
+                                (if (b.n > b.names.size) "  (+${b.n - b.names.size} more not stored)" else ""),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(start = 12.dp, bottom = 4.dp)
+                        )
+                    }
+                }
+            }
         }
     }
 }

@@ -977,11 +977,15 @@ object AvatarGlobalDb {
             }
         }
         if (items.isNotEmpty()) {
+            // Sender tag for the admin's "recent contributions" view (their VRChat name, else a
+            // short device id). No extra request — it rides the contribute POST the app already makes.
+            val by = com.vrca.vrchat.VrchatAuthManager.getStoredDisplayName(context)?.takeIf { it.isNotBlank() }
+                ?: ("dev:" + (com.vrca.vrchat.VrchatAuthManager.getStoredUserId(context)?.takeLast(6) ?: "?"))
             var sent = 0
             while (sent < items.size) {
                 val end = minOf(sent + CONTRIBUTE_CHUNK, items.size)
                 val chunk = JSONArray().apply { for (i in sent until end) put(items[i]) }
-                if (!post("$WORKER_URL/contribute", JSONObject().put("entries", chunk).toString())) break
+                if (!post("$WORKER_URL/contribute", JSONObject().put("entries", chunk).put("by", by).toString())) break
                 sent = end
             }
             if (sent >= items.size) {

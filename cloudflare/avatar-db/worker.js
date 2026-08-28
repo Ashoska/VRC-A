@@ -164,6 +164,10 @@ export default {
         if (good.length === 0) return json({ ok: false, error: "no valid entries" }, 400);
         const payload = {};
         for (const e of good) payload[e.fileId] = cleanEntry(e);
+        // Sender tag + time for the admin "recent contributions" view. Stored as reserved non-fileId
+        // keys so the flush merge (which filters on FILE_RE) ignores them; surfaced free at flush time.
+        if (typeof body.by === "string" && body.by) payload.__by = body.by.slice(0, 40);
+        payload.__ts = Date.now();
         // One KV write per POST (batch). Dedup happens at merge time (keyed by file id).
         await env.AVATAR_KV.put("pend:" + crypto.randomUUID(), JSON.stringify(payload), {
           expirationTtl: 7 * 86400,
@@ -258,6 +262,16 @@ export default {
           } catch (_) {}
         }
         return json({ ok: true, reports: out });
+      }
+
+      if (req.method === "GET" && url.pathname === "/admin/recent") {
+        // Full recent USER contribution batches (who + every avatar name) for the admin's expandable
+        // view. Admin-key gated; ONE cheap KV read, only when the admin is looking (not polled by bots).
+        if (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY) {
+          return json({ ok: false, error: "unauthorized" }, 401);
+        }
+        let recent = []; try { const r = await env.AVATAR_KV.get("recent"); if (r) recent = JSON.parse(r); } catch (_) {}
+        return json({ ok: true, recent: Array.isArray(recent) ? recent : [] });
       }
 
       if (req.method === "GET" && url.pathname === "/admin/reshard") {
@@ -372,12 +386,23 @@ async function flushR2(env) {
   const S = (sp) => (shardOps[sp] ||= { adds: {}, upserts: {}, removes: new Set(), checked: new Set(), renames: {} });
 
   const pendKeys = [];
+  const recentBatches = [];   // admin "recent contributions" view (free: built from data already read)
   for (const kn of pendNames) {
     pendKeys.push(kn);
     const val = await env.AVATAR_KV.get(kn);
     if (!val) continue;
     let batch; try { batch = JSON.parse(val); } catch (_) { continue; }
-    for (const fid of Object.keys(batch)) if (FILE_RE.test(fid)) S(shardPrefix(fid)).adds[fid] = batch[fid];
+    const fids = Object.keys(batch).filter((fid) => FILE_RE.test(fid));
+    for (const fid of fids) S(shardPrefix(fid)).adds[fid] = batch[fid];
+    if (fids.length) recentBatches.push({
+      ts: typeof batch.__ts === "number" ? batch.__ts : Date.now(),
+      by: typeof batch.__by === "string" ? batch.__by : "",
+      n: fids.length,
+      // Keep ALL names in the batch (a batch is already capped at 200 by /contribute) so the admin
+      // can EXPAND a row to see every avatar. Stored in a DEDICATED `recent` key, not meta, so the
+      // frequently-polled /health stays tiny.
+      names: fids.map((fid) => (batch[fid] && batch[fid].name) || "").filter(Boolean),
+    });
   }
   const admuKeys = [];
   for (const kn of admuNames) {
@@ -501,6 +526,15 @@ async function flushR2(env) {
     reports: repNames.length,
     backend: "r2",
   }));
+
+  // Rolling log of the most recent USER contribution batches (newest first) with FULL names, in a
+  // DEDICATED key so it never bloats meta/health. Only rewritten when batches were processed this
+  // flush → +1 small KV write per flush at most, nothing when idle. Capped at 20 batches.
+  if (recentBatches.length) {
+    let prev = []; try { const r = await env.AVATAR_KV.get("recent"); if (r) prev = JSON.parse(r); } catch (_) {}
+    const next = [...recentBatches.reverse(), ...(Array.isArray(prev) ? prev : [])].slice(0, 20);
+    await env.AVATAR_KV.put("recent", JSON.stringify(next));
+  }
 }
 
 // Purge a list of absolute catalog URLs from Cloudflare's edge cache (batches of 30, the
