@@ -259,12 +259,15 @@ object AvatarCatalogSweep {
             val pageResults = try { com.vrca.vrchat.AvatarSearch.searchPage(term, page) }
                 catch (e: Throwable) { emptyList() }
             if (pageResults.isEmpty()) break
+            // Batch the "already in catalog?" check for the WHOLE page at once (exact, parallel —
+            // one edge GET per distinct bucket) instead of one serial check per candidate. No
+            // VRChat call for known ones; only the genuinely-new get resolved below.
+            val knownBatch = if (AvatarGlobalDb.shardWalkLive())
+                AvatarGlobalDb.filterKnownSharded(context, pageResults.map { it.id }) else emptySet()
             for (r in pageResults) {
                 if (!avtrdbCrawlEnabled || !running || paused || !scope.isActive) break@crawl
                 if (!crawlSeen.add(r.id)) continue               // already attempted this session (any bot)
-                // Already in the catalog? Post-cutover use the memory-flat sharded avatar-id
-                // index (no whole map); pre-cutover the in-RAM set. Either way: no VRChat call.
-                val known = if (AvatarGlobalDb.shardWalkLive()) AvatarGlobalDb.isAvatarKnownSharded(context, r.id)
+                val known = if (AvatarGlobalDb.shardWalkLive()) knownBatch.contains(r.id)
                             else AvatarGlobalDb.hasAvatarId(r.id)
                 if (known) continue
                 if (!inFlight.add(r.id)) continue                // another bot is resolving this one
@@ -412,7 +415,7 @@ object AvatarCatalogSweep {
         // Fresh blitz → anchor the cutoff to NOW so every currently-stale avatar is swept
         // exactly once. A re-press while one is already running only EXTENDS the window and
         // KEEPS the anchor, so it keeps draining the remainder instead of restarting the sweep.
-        if (!blitzActive()) blitzStartMs = now
+        if (!blitzActive()) { blitzStartMs = now; blitzWalked.clear() }   // reset shard coverage on a fresh blitz
         blitzUntilMs = now + BLITZ_WINDOW_MS
     }
 
@@ -437,10 +440,11 @@ object AvatarCatalogSweep {
     fun roleViews(pendingReports: Int): List<RoleView> {
         var fill = 0; var liveness = 0
         if (AvatarGlobalDb.shardWalkLive()) {
-            // SHARD-WALK MODE: no whole-map to scan. The unfilled backlog comes from the tiny
-            // manifest the rebuild Action writes; liveness is time-based (the walk covers it),
-            // so there's no cheap live count — show it as walk progress, not a queued number.
+            // SHARD-WALK MODE: no whole-map to scan. Both backlogs come from the tiny manifest
+            // the rebuild Action writes (unfilled = Fill, staleCount = Liveness) — so the bots
+            // show real queued numbers instead of a confusing 0 while they're clearly working.
             fill = manifestUnfilled.coerceAtLeast(0)
+            liveness = manifestStale.coerceAtLeast(0)
         } else {
             val snap = AvatarGlobalDb.snapshot()
             val cutoff = livenessCutoff()
@@ -554,7 +558,7 @@ object AvatarCatalogSweep {
                 // given shard turned out clear (already filled by another bot / stale worklist),
                 // so the backlog is chewed through in minutes instead of one shard per 20s.
                 val target = if (crawling) CRAWL_TERM_GAP_MS
-                    else if (did || (AvatarGlobalDb.shardWalkLive() && workRemaining())) ACTIVE_PAUSE_MS
+                    else if (did || blitzActive() || (AvatarGlobalDb.shardWalkLive() && workRemaining())) ACTIVE_PAUSE_MS
                     else IDLE_SLEEP_MS
                 var slept = 0L
                 while (slept < target && running && scope.isActive &&
@@ -688,9 +692,18 @@ object AvatarCatalogSweep {
      *  (keep moving through the backlog) instead of the 20s idle sleep. */
     fun workRemaining(): Boolean = workQueue.isNotEmpty()
 
-    /** Next shard prefix to walk, or null when there is genuinely no backlog (idle). Refills
-     *  the shared queue from `_worklist.json` when empty (single-flight, TTL-throttled). */
+    // Distinct shard prefixes walked during the CURRENT blitz — so the Bots tab can show
+    // "N / 4096 shards checked" (done + left). Cleared on a fresh blitz.
+    private val blitzWalked = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    /** Blitz shard coverage (done, total=4096) while a blitz is active, else null. */
+    fun blitzShardProgress(): Pair<Int, Int>? = if (blitzActive()) blitzWalked.size to 4096 else null
+
+    /** Next shard prefix to walk, or null when there is genuinely no backlog (idle). During a
+     *  BLITZ, walk ALL 4096 shards (blind cursor) so "check entire catalog" actually covers it —
+     *  the work-list only lists steady-state work shards. Otherwise refill the shared queue from
+     *  `_worklist.json` when empty (single-flight, TTL-throttled). */
     private suspend fun nextWorkPrefix(context: Context): String? {
+        if (blitzActive()) return blindNextPrefix()   // whole-catalog coverage during a blitz
         workQueue.poll()?.let { return it }
         return worklistMutex.withLock {
             workQueue.poll()?.let { return@withLock it }   // another bot refilled while we waited
@@ -727,6 +740,10 @@ object AvatarCatalogSweep {
      *  -1 = not read yet. Used for the Bots-tab backlog in shard-walk mode (no whole-map scan). */
     @Volatile var manifestUnfilled = -1; private set
     fun setManifestUnfilled(n: Int) { manifestUnfilled = n }
+    /** Liveness backlog (entries due a recheck) from the manifest — so the Liveness bots show a
+     *  real "queued" number in shard-walk mode instead of a confusing 0 while they're working. */
+    @Volatile var manifestStale = -1; private set
+    fun setManifestStale(n: Int) { manifestStale = n }
 
     /** WALK one shard (post-cutover): read it, fill the unfilled + recheck the stale, push ops.
      *  Memory holds only this shard. Dead-checks obey the same VRChat-outage guard as the
@@ -735,6 +752,7 @@ object AvatarCatalogSweep {
         if (paused) return false
         val p = progress.getValue(role)
         val prefix = nextWorkPrefix(context) ?: run { p.status = "no backlog — idle"; return false }
+        if (blitzActive()) blitzWalked.add(prefix)   // track blitz shard coverage (done/left)
         val entries = AvatarGlobalDb.fetchCatalogShard(context, prefix)
         if (entries == null) { p.status = "walk $prefix: shard read failed"; return false }
         val cutoff = livenessCutoff()
@@ -933,12 +951,27 @@ object AvatarCatalogSweep {
             }
             else {
                 clears.add(r.fileId)  // alive → false positive
-                AvatarGlobalDb.lookup(r.fileId)?.let { cur ->
+                val cur = AvatarGlobalDb.lookup(r.fileId)
+                if (cur != null) {
+                    // In the local map (pre-cutover / rare): diff-refresh only if something changed.
                     liveRefresh(cur, chk)?.let { upd ->
                         if (upd.fileId != cur.fileId) removes.add(cur.fileId)
                         upserts.add(upd); p.refreshed++
                         applyItemLocal(upd = upd, rekeyFrom = if (upd.fileId != cur.fileId) cur.fileId else null)
                     } ?: applyItemLocal(checked = r.fileId)  // alive + identical → bump last-checked
+                } else if (chk.name.isNotBlank()) {
+                    // MEMORY-FLAT (post-cutover): we don't hold the old entry, so push the FRESH
+                    // VRChat data directly — a RENAMED reported avatar gets its new name/author/
+                    // platforms/bio updated (was silently dropped when lookup returned null).
+                    // Gated on a real name so a blank public-avatar response can't blank a good name.
+                    val fresh = AvatarGlobalDb.Entry(
+                        fileId = chk.fileId ?: r.fileId, avatarId = r.avatarId, name = chk.name,
+                        author = chk.author, authorId = chk.authorId, platforms = chk.platforms,
+                        checked = System.currentTimeMillis(), description = chk.description,
+                        perfPc = chk.perfPc, perfQuest = chk.perfQuest, perfIos = chk.perfIos, filled = true
+                    )
+                    if (chk.fileId != null && chk.fileId != r.fileId) removes.add(r.fileId)  // image re-keyed
+                    upserts.add(fresh); p.refreshed++
                 }
             }
             if (upserts.size + removes.size + clears.size >= BATCH) {

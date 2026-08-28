@@ -170,11 +170,13 @@ async function main() {
   const fragBuckets = {};   // "<3hex>" -> { id -> {f,n,au,ai,p,pf} }
   const idxBuckets = {};    // "<3hex>" -> { token -> Set(id) }
   const avtrBuckets = {};   // "<3hex>" -> Set(avatarId)  — presence index for the crawler dedup
-  let unfilled = 0;         // entries the fill bot still needs to enrich (for the Bots-tab backlog)
+  let unfilled = 0;         // entries the fill bot still needs to enrich (Fill backlog)
+  let staleCount = 0;       // entries due a liveness recheck (Liveness backlog)
   for (const fid of fileIds) {
     const a = avatars[fid];
     const id = a.id; if (!id || !id.startsWith("avtr_")) continue;
     if (a.filled !== true) unfilled++;
+    if (typeof a.checked === "number" && a.checked < STALE_CUTOFF) staleCount++;
     const fb = fragBucket(id);
     (avtrBuckets[fb] ||= new Set()).add(id);   // avatar-id presence (same prefix as fragments)
     (fragBuckets[fb] ||= {})[id] = {
@@ -232,7 +234,7 @@ async function main() {
   //    feed the next run's diff.
   await r2Put("_manifest.json", JSON.stringify({
     v: 1, shardScheme: "filehex3-full", shardCount: 4096, indexScheme: "hash3", entryCount: fileIds.length,
-    unfilled, searchReady: true, lastFullRebuild: new Date().toISOString(),
+    unfilled, staleCount, searchReady: true, lastFullRebuild: new Date().toISOString(),
   }), 60);   // tiny TTL: the Bots-tab backlog count reads this and should track the rebuild closely
   await r2Put("_hashes.json", JSON.stringify(newHashes), 60);
   // Work-list: the exact shard prefixes the bots should walk (fill first, then stale). Bots

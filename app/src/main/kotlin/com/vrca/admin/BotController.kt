@@ -44,6 +44,10 @@ object BotController {
     private val _blitzViews = MutableStateFlow<Map<Int, AvatarCatalogSweep.BlitzView>>(emptyMap())
     val blitzViews: StateFlow<Map<Int, AvatarCatalogSweep.BlitzView>> = _blitzViews
 
+    // Blitz shard coverage (done, total) while a blitz is active — the "shards finished / left" readout.
+    private val _blitzShards = MutableStateFlow<Pair<Int, Int>?>(null)
+    val blitzShards: StateFlow<Pair<Int, Int>?> = _blitzShards
+
     /** Proof-of-life for the sweep loop: true while it has cycled within the last minute
      *  (alive even when idle/caught-up), and how many ms since the last cycle (-1 = never).
      *  Lets the Bots tab show "running (idle)" vs "stopped" when the backlog is flat. */
@@ -146,8 +150,10 @@ object BotController {
                     // Post-cutover: read the tiny manifest for the Bots-tab unfilled backlog —
                     // no whole-catalog scan (the bots walk shards; the count comes from the Action).
                     if (AvatarGlobalDb.shardWalkLive()) {
-                        runCatching { AvatarGlobalDb.fetchManifest(app)?.optInt("unfilled", -1) }
-                            .getOrNull()?.let { if (it >= 0) AvatarCatalogSweep.setManifestUnfilled(it) }
+                        runCatching { AvatarGlobalDb.fetchManifest(app) }.getOrNull()?.let { man ->
+                            man.optInt("unfilled", -1).let { if (it >= 0) AvatarCatalogSweep.setManifestUnfilled(it) }
+                            man.optInt("staleCount", -1).let { if (it >= 0) AvatarCatalogSweep.setManifestStale(it) }
+                        }
                     }
                 } catch (_: Throwable) { /* transient — retry next tick */ }
                 delay(30_000)
@@ -176,6 +182,7 @@ object BotController {
                 _totalQueued.value = AvatarCatalogSweep.lastTotalBacklog
                 _blitz.value = AvatarCatalogSweep.blitzActive()
                 _blitzViews.value = bv
+                _blitzShards.value = AvatarCatalogSweep.blitzShardProgress()
                 _sweepAlive.value = AvatarCatalogSweep.sweepAlive()
                 _sweepLastCycleAgoMs.value =
                     if (AvatarCatalogSweep.lastCycleMs == 0L) -1L

@@ -79,6 +79,7 @@ fun BotsTab() {
     val totalQueued by BotController.totalQueued.collectAsState()
     val blitz by BotController.blitz.collectAsState()
     val blitzViews by BotController.blitzViews.collectAsState()
+    val blitzShards by BotController.blitzShards.collectAsState()
     val sweepAlive by BotController.sweepAlive.collectAsState()
     val sweepAgoMs by BotController.sweepLastCycleAgoMs.collectAsState()
     // The sweep lifecycle is owned by BotController (reads the saved key/assignment/pause
@@ -97,7 +98,7 @@ fun BotsTab() {
                 adminKey = adminKey,
                 onKeyChange = { adminKey = it; prefs.edit().putString("avatar_admin_key", it).apply() },
                 totalQueued = totalQueued,
-                blitz = blitz,
+                blitz = blitz, blitzShards = blitzShards,
                 sweepAlive = sweepAlive,
                 sweepAgoMs = sweepAgoMs,
                 paused = paused,
@@ -173,7 +174,7 @@ private fun CatalogHealthCard() {
 @Composable
 private fun MaintenanceCard(
     adminKey: String, onKeyChange: (String) -> Unit,
-    totalQueued: Int, blitz: Boolean,
+    totalQueued: Int, blitz: Boolean, blitzShards: Pair<Int, Int>? = null,
     sweepAlive: Boolean, sweepAgoMs: Long,
     paused: Boolean, onTogglePause: () -> Unit,
     avtrdbCrawl: Boolean, onToggleCrawl: () -> Unit,
@@ -227,6 +228,21 @@ private fun MaintenanceCard(
                 Icon(Icons.Filled.Bolt, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.size(6.dp))
                 Text(if (blitz) "Blitz running — extend" else "Check entire catalog (blitz)")
+            }
+            // Blitz shard coverage — "N / 4096 shards checked (M left)".
+            blitzShards?.let { (done, total) ->
+                val left = (total - done).coerceAtLeast(0)
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    androidx.compose.material3.LinearProgressIndicator(
+                        progress = if (total > 0) done.toFloat() / total else 0f,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Text(
+                        "Blitz: $done / $total shards checked · $left left",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
             Row(
                 Modifier.fillMaxWidth(),

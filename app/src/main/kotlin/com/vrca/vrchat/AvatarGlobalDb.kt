@@ -582,15 +582,50 @@ object AvatarGlobalDb {
      *  for the whole-map [hasAvatarId], so the crawler can skip a VRChat resolve for avatars we
      *  already have without holding the catalog. Cheap + edge-cached. Only fresh to the last
      *  rebuild (~20 min), so the crawler pairs it with a session-set for newly-added ids. */
+    // Avatar ids contributed THIS session, so a not-yet-rebuilt avtr index never makes us
+    // re-resolve/re-contribute an id we just added. Bounded (cleared if it grows very large —
+    // mainly the admin crawler); session-scoped, resets on process restart.
+    private val sessionContributed = ConcurrentHashMap.newKeySet<String>()
+
+    /** EXACT membership: is this avatar already in the DB? Reads the avtr-id presence index
+     *  (`avtr/<prefix>.json`) — no false positives, no missed contributions. Cheap: one
+     *  edge-cached GET per DISTINCT prefix (the searchCache dedups repeats within a prefix).
+     *  Use [filterKnownSharded] for a big candidate set (parallel, one fetch per bucket). */
     suspend fun isAvatarKnownSharded(context: Context, avatarId: String): Boolean {
         if (!avatarId.startsWith("avtr_") || avatarId.length < 8) return false
+        if (sessionContributed.contains(avatarId)) return true    // added this session
         ensureCatalogBase(context)
         if (!r2Serving) return false
         val base = catalogBase ?: return false
-        val obj = fetchSearchJson("$base/avtr/${avatarId.substring(5, 8).lowercase()}.json") ?: return false
-        val arr = obj.optJSONArray("ids") ?: return false
-        for (i in 0 until arr.length()) if (arr.optString(i) == avatarId) return true
-        return false
+        return avtrBucketIds(base, avatarId.substring(5, 8).lowercase())?.contains(avatarId) == true
+    }
+
+    /** Batch EXACT membership for a big candidate set (search/clone can surface 100s). Groups by
+     *  avtr prefix, fetches each DISTINCT bucket ONCE in PARALLEL (edge-cached + searchCache), and
+     *  returns the subset already in the DB. So 100s of candidates cost one cheap GET per distinct
+     *  bucket, done concurrently — exact (no misses), and the caller only VRChat-resolves the rest. */
+    suspend fun filterKnownSharded(context: Context, avatarIds: Collection<String>): Set<String> = coroutineScope {
+        ensureCatalogBase(context)
+        val valid = avatarIds.filter { it.startsWith("avtr_") && it.length >= 8 }
+        if (valid.isEmpty()) return@coroutineScope emptySet()
+        val known = HashSet<String>()
+        val toCheck = ArrayList<String>(valid.size)
+        for (id in valid) { if (sessionContributed.contains(id)) known.add(id) else toCheck.add(id) }
+        if (toCheck.isEmpty() || !r2Serving) return@coroutineScope known
+        val base = catalogBase ?: return@coroutineScope known
+        val byBucket = toCheck.groupBy { it.substring(5, 8).lowercase() }
+        val buckets = byBucket.keys.map { b -> async { b to (avtrBucketIds(base, b) ?: emptySet()) } }.awaitAll().toMap()
+        for ((b, ids) in byBucket) { val present = buckets[b] ?: continue; for (id in ids) if (present.contains(id)) known.add(id) }
+        known
+    }
+
+    /** The set of avatar ids in one avtr bucket (`avtr/<prefix>.json`), edge-cached + searchCached. */
+    private suspend fun avtrBucketIds(base: String, prefix: String): Set<String>? {
+        val obj = fetchSearchJson("$base/avtr/$prefix.json") ?: return null
+        val arr = obj.optJSONArray("ids") ?: return emptySet()
+        val out = HashSet<String>(arr.length())
+        for (i in 0 until arr.length()) arr.optString(i).takeIf { it.startsWith("avtr_") }?.let { out.add(it) }
+        return out
     }
 
     /** Context-free read of the same flag (for the sync search entry points that don't
@@ -849,6 +884,10 @@ object AvatarGlobalDb {
         if (!FILE_RE.matches(fileId)) return false
         if (!AVTR_RE.matches(avatarId)) return false
         if (map.containsKey(fileId)) return false
+        // Remember it for THIS session so the avtr index (rebuilt ~every 20 min) not yet having
+        // it can't make us re-resolve/re-contribute it. Bounded to avoid unbounded growth.
+        if (sessionContributed.size > 40_000) sessionContributed.clear()
+        sessionContributed.add(avatarId)
         // Insert into the LOCAL catalog immediately so the contributing device can see
         // its own new avatars (own uploads, favourites, resolved strangers) in search /
         // clone RIGHT AWAY — no waiting for the Worker flush + next 30-min pull. Zero
@@ -1264,15 +1303,16 @@ object AvatarGlobalDb {
             // FIRST (zero VRChat call for ones we already have), and back off if VRChat starts
             // rate-limiting (HARVEST_RL_BACKOFF consecutive failures) so a broad search can't
             // hammer the user's session.
-            // Dedup "already in catalog" WITHOUT a VRChat call: post-cutover use the sharded
-            // avatar-id index (memory-flat), pre-cutover the local map. Without this, a purged
-            // map would make every result hit VRChat REST → rate-limit → fewer contributions.
-            val knownIds = if (r2Serving) HashSet() else HashSet<String>(map.size).apply { for (e in map.values) add(e.avatarId) }
+            // Dedup "already in catalog" WITHOUT a VRChat call, in ONE cheap BATCH: post-cutover
+            // the EXACT sharded avatar-id index (parallel, one edge GET per distinct bucket — no
+            // misses), pre-cutover the local map. This is what stops re-resolving/re-contributing
+            // avatars already in the DB (and stops a purged map from hammering VRChat REST).
+            val candidates = results.filter { it.imageFileId == null }   // ones needing resolution
+            val knownIds: Set<String> = if (r2Serving) filterKnownSharded(app, candidates.map { it.id })
+                else HashSet<String>(map.size).apply { for (e in map.values) add(e.avatarId) }
             var nulls = 0
-            for (r in results) {
-                if (r.imageFileId != null) continue           // already contributed in searchAll
-                val known = if (r2Serving) isAvatarKnownSharded(app, r.id) else knownIds.contains(r.id)
-                if (known) continue                            // already in catalog — no VRChat call
+            for (r in candidates) {
+                if (knownIds.contains(r.id)) continue          // already in catalog — no VRChat call
                 val fid = try { VrchatAuthManager.avatarCatalogEntry(app, r.id)?.fileId }
                     catch (e: Exception) { null }
                 if (fid == null) { if (++nulls >= HARVEST_RL_BACKOFF) break; delay(600); continue }
@@ -1297,12 +1337,16 @@ object AvatarGlobalDb {
     fun harvestAvatarIds(context: Context, avatarIds: List<String>) {
         val app = context.applicationContext
         scope.launch {
+            // Session-dedup + validity first, then ONE batch "already in DB?" check (exact,
+            // parallel) so we only VRChat-resolve the genuinely-new ones — 100s of clone/search
+            // candidates cost one cheap GET per distinct bucket instead of 100s of VRChat calls.
+            val fresh = avatarIds.filter { AVTR_RE.matches(it) && harvestedCandidates.add(it) }
+            if (fresh.isEmpty()) return@launch
+            val known = if (r2Serving) filterKnownSharded(app, fresh) else emptySet()
             var n = 0
-            for (id in avatarIds) {
-                if (n >= 300) break                           // generous per-call bound (session dedup covers the rest)
-                if (!AVTR_RE.matches(id)) continue
-                if (!harvestedCandidates.add(id)) continue    // already attempted this session
-                if (r2Serving && isAvatarKnownSharded(app, id)) continue   // known — skip the VRChat resolve
+            for (id in fresh) {
+                if (n >= 300) break                           // bound VRChat resolves per call
+                if (known.contains(id)) continue              // already in catalog — no VRChat call
                 val e = try { VrchatAuthManager.avatarCatalogEntry(app, id) } catch (ex: Exception) { null }
                     ?: continue                               // null = private/dead/transient (skipped)
                 if (map.containsKey(e.fileId)) continue
@@ -1342,12 +1386,18 @@ object AvatarGlobalDb {
             // 1. Own UPLOADS (with local public<->private detection).
             val lib = VrchatAuthManager.ownAvatarLibrary(context)
             var libNew = 0; var libKnown = 0; var privateRemoved = 0
+            // Which of my uploads are ALREADY in the DB — exact, one cheap batch (post-cutover the
+            // memory-flat map can't answer this, which is why a known upload like "Kipfel" was
+            // being re-contributed every open). Pre-cutover falls back to the local map.
+            val libKnownSet: Set<String> = if (r2Serving) filterKnownSharded(context, lib.map { it.entry.avatarId })
+                else lib.filter { map.containsKey(it.entry.fileId) }.map { it.entry.avatarId }.toSet()
             for (a in lib) {
                 val e = a.entry
                 if (a.isPublic) {
+                    if (libKnownSet.contains(e.avatarId)) { libKnown++; continue }   // already in DB — don't re-contribute
                     if (contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description))
                         libNew++ else libKnown++
-                } else if (a.ownUpload && map.containsKey(e.fileId)) {
+                } else if (a.ownUpload && libKnownSet.contains(e.avatarId)) {
                     // The user made their own PUBLIC avatar private -> report removal
                     // (the admin bot confirms via a 404 on the now-private avatar).
                     report(context, e.fileId, e.avatarId, "dead")
