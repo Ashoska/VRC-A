@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -822,6 +823,8 @@ internal fun UsersTab(
                     // users got logged out accidentally).
                     var showLogoutVrcConfirm by remember(selectedDocId) { mutableStateOf(false) }
                     var showLogoutDiscordConfirm by remember(selectedDocId) { mutableStateOf(false) }
+                    var showTransferPicker by remember(selectedDocId) { mutableStateOf(false) }
+                    var transferTarget by remember(selectedDocId) { mutableStateOf<UserRow?>(null) }
                     val targetName = row.vrchatDisplayName.ifBlank { row.displayName }.ifBlank { "this user" }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         OutlinedButton(
@@ -833,6 +836,73 @@ internal fun UsersTab(
                             onClick = { showLogoutDiscordConfirm = true },
                             modifier = Modifier.weight(1f)
                         ) { Text("Log out Discord") }
+                    }
+
+                    // Move this device's VRChat login to another (not-logged-in) device — for a
+                    // user who's still authed here but can't sign in elsewhere (forgot password).
+                    // Only offered when THIS device actually has a VRChat session to move.
+                    if (row.vrchatUserId.isNotBlank()) {
+                        OutlinedButton(
+                            onClick = { showTransferPicker = true },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("Move VRChat login to another device") }
+                    }
+
+                    val transferState by com.vrca.admin.AuthTransferCoordinator.state.collectAsState()
+                    transferState?.let { st ->
+                        Card(
+                            colors = CardDefaults.cardColors(
+                                containerColor = when {
+                                    st.error -> MaterialTheme.colorScheme.errorContainer
+                                    st.done  -> MaterialTheme.colorScheme.primaryContainer
+                                    else     -> MaterialTheme.colorScheme.surfaceVariant
+                                }
+                            ),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                if (!st.done && !st.error) {
+                                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                                    Spacer(Modifier.width(10.dp))
+                                }
+                                Text(st.message, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                                if (st.done || st.error) {
+                                    TextButton(onClick = { com.vrca.admin.AuthTransferCoordinator.clear() }) { Text("Dismiss") }
+                                }
+                            }
+                        }
+                    }
+
+                    if (showTransferPicker) {
+                        TransferTargetPicker(
+                            sourceDocId = row.docId,
+                            users = users,
+                            onPick = { picked -> transferTarget = picked; showTransferPicker = false },
+                            onDismiss = { showTransferPicker = false }
+                        )
+                    }
+
+                    transferTarget?.let { tgt ->
+                        val tgtLabel = tgt.vrchatDisplayName.ifBlank { tgt.displayName }
+                            .ifBlank { "device ${tgt.docId.take(8)}" }
+                        com.vrca.ui.common.VrcaConfirmDialog(
+                            title = "Move VRChat login?",
+                            body = "This moves $targetName's VRChat login from this device to " +
+                                "“$tgtLabel”. Both apps must be open and online. It's " +
+                                "encrypted end-to-end — the server never sees the password. " +
+                                "On success $targetName is signed OUT here (only one device can " +
+                                "hold the login). If the target still needs a 2FA code, nothing " +
+                                "changes on this device.",
+                            confirmLabel = "Move login",
+                            onConfirm = {
+                                val t = tgt; transferTarget = null
+                                com.vrca.admin.AuthTransferCoordinator.start(
+                                    sourceDocId = row.docId, targetDocId = t.docId,
+                                    sourceLabel = targetName, targetLabel = tgtLabel
+                                )
+                            },
+                            onDismiss = { transferTarget = null }
+                        )
                     }
 
                     if (showLogoutVrcConfirm) {
@@ -1147,6 +1217,86 @@ internal fun UsersTab(
         }
 
         item { Spacer(Modifier.height(12.dp)) }
+    }
+}
+
+@Composable
+private fun TransferTargetPicker(
+    sourceDocId: String,
+    users: List<UserRow>,
+    onPick: (UserRow) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var q by remember { mutableStateOf("") }
+    val candidates = remember(users, sourceDocId, q) {
+        val ql = q.trim().lowercase()
+        users.filter { it.docId != sourceDocId }
+            .filter {
+                ql.isBlank() ||
+                    it.displayName.lowercase().contains(ql) ||
+                    it.vrchatDisplayName.lowercase().contains(ql) ||
+                    it.docId.lowercase().contains(ql)
+            }
+            .sortedByDescending { it.isOnlineInApp }
+    }
+    com.vrca.ui.common.VrcaCardDialog(onDismiss = onDismiss) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("Move login to…", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Pick the device to receive the VRChat login. It must have VRC-A installed and open.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            OutlinedTextField(
+                value = q, onValueChange = { q = it },
+                modifier = Modifier.fillMaxWidth(), singleLine = true,
+                label = { Text("Search devices") }
+            )
+            if (candidates.isEmpty()) {
+                Text(
+                    "No other devices found.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                LazyColumn(
+                    Modifier.fillMaxWidth().heightIn(max = 340.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    items(candidates, key = { it.docId }) { u ->
+                        val name = u.displayName.ifBlank { u.vrchatDisplayName }.ifBlank { "device ${u.docId.take(8)}" }
+                        val build = when {
+                            u.appId.contains("gremlin") -> "Quest headset"
+                            u.appId.contains("admin") -> "Admin build"
+                            u.appId.isNotBlank() -> "Mobile"
+                            else -> ""
+                        }
+                        val linked = if (u.vrchatUserId.isBlank()) "Not linked to VRChat"
+                        else "VRChat: ${u.vrchatDisplayName.ifBlank { "linked" }}"
+                        Card(
+                            onClick = { onPick(u) },
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(Modifier.padding(12.dp)) {
+                                Text(name, style = MaterialTheme.typography.bodyMedium)
+                                Text(
+                                    listOfNotNull(
+                                        build.ifBlank { null }, linked,
+                                        if (u.isOnlineInApp) "online" else "offline"
+                                    ).joinToString(" · "),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+            }
+        }
     }
 }
 

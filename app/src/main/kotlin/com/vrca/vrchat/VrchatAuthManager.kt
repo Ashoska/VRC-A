@@ -2152,6 +2152,67 @@ object VrchatAuthManager {
         editor.apply()
     }
 
+    // ------------------------------------------------------------------
+    // Admin-mediated session HANDOFF ("move VRChat login to another device")
+    // ------------------------------------------------------------------
+    /** Serialize this device's VRChat session to a plaintext JSON bundle so it can be sealed +
+     *  transferred to another device. Returns null when there's nothing usable to move — no
+     *  session, or (the common forgot-password case) NO saved password: the target is on a
+     *  different IP so the auth cookie alone is dead there; it MUST be able to relogin, which
+     *  needs the saved username+password plus the trusted-device (2FA) cookie. The caller SEALS
+     *  this (AuthTransferCrypto) to the target's one-time key; it never leaves the device raw. */
+    fun exportSessionBundle(context: Context): String? {
+        val prefs = getPrefs(context) ?: return null
+        val userId = prefs.getString(KEY_USER_ID, null)?.takeIf { it.isNotBlank() } ?: return null
+        val username = prefs.getString(KEY_USERNAME, null)?.takeIf { it.isNotBlank() } ?: return null
+        val password = prefs.getString(KEY_PASSWORD, null)?.takeIf { it.isNotBlank() } ?: return null
+        return org.json.JSONObject().apply {
+            put("v", 1)
+            put("uid", userId)
+            put("u", username)
+            put("p", password)
+            put("tfa", prefs.getString(KEY_2FA_COOKIE, null) ?: "")
+            put("dn", prefs.getString(KEY_DISPLAY_NAME, null) ?: "")
+        }.toString()
+    }
+
+    /** Import a session bundle exported by another device and log in with it. Seeds the creds +
+     *  trusted-device cookie, then does a Basic-auth login — VRChat recognizes the trusted
+     *  device and skips 2FA, minting a fresh IP-bound auth cookie for THIS device. Returns true
+     *  ONLY when the login actually succeeds (so the admin never signs the source out on a bad
+     *  transfer). A false here == VRChat still wanted 2FA / rejected the creds. */
+    suspend fun importSessionBundle(context: Context, bundleJson: String): Boolean = withContext(Dispatchers.IO) {
+        val o = try { org.json.JSONObject(bundleJson) } catch (e: Exception) { return@withContext false }
+        val username = o.optString("u", ""); val password = o.optString("p", "")
+        if (username.isBlank() || password.isBlank()) return@withContext false
+        val prefs = getPrefs(context) ?: return@withContext false
+        val now = System.currentTimeMillis()
+        prefs.edit().apply {
+            putString(KEY_USERNAME, username)
+            putString(KEY_PASSWORD, password)
+            val tfa = o.optString("tfa", "")
+            if (tfa.isNotBlank()) { putString(KEY_2FA_COOKIE, tfa); putLong(KEY_2FA_COOKIE_STORED_AT, now) }
+            val uid = o.optString("uid", ""); if (uid.isNotBlank()) putString(KEY_USER_ID, uid)
+            val dn = o.optString("dn", ""); if (dn.isNotBlank()) putString(KEY_DISPLAY_NAME, dn)
+        }.commit()
+        when (login(context, username, password)) {
+            is AuthResult.Success -> true
+            else -> false
+        }
+    }
+
+    // Transient store for the TARGET device's one-time transfer private key (in the encrypted
+    // prefs, keyed by the transfer id; cleared the moment the import finishes).
+    private fun transferPrivKeyName(reqId: String) = "transfer_priv_$reqId"
+    fun stashTransferPrivateKey(context: Context, reqId: String, privB64: String) {
+        getPrefs(context)?.edit()?.putString(transferPrivKeyName(reqId), privB64)?.commit()
+    }
+    fun readTransferPrivateKey(context: Context, reqId: String): String? =
+        getPrefs(context)?.getString(transferPrivKeyName(reqId), null)?.takeIf { it.isNotBlank() }
+    fun clearTransferPrivateKey(context: Context, reqId: String) {
+        getPrefs(context)?.edit()?.remove(transferPrivKeyName(reqId))?.commit()
+    }
+
     fun diagnoseAuthState(context: Context) {
         val prefs = getPrefs(context)
         if (prefs == null) {

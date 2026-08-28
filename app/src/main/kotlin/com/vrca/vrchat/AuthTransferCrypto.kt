@@ -1,6 +1,5 @@
 package com.vrca.vrchat
 
-import android.util.Base64
 import org.json.JSONObject
 import java.security.KeyFactory
 import java.security.KeyPair
@@ -37,8 +36,9 @@ object AuthTransferCrypto {
     private const val AES_GCM = "AES/GCM/NoPadding"
     private const val GCM_TAG_BITS = 128
 
-    private fun b64(bytes: ByteArray): String = Base64.encodeToString(bytes, Base64.NO_WRAP)
-    private fun unb64(s: String): ByteArray = Base64.decode(s, Base64.NO_WRAP)
+    // java.util.Base64 (API 26+, our minSdk) — no line wrapping, and works in plain JVM tests.
+    private fun b64(bytes: ByteArray): String = java.util.Base64.getEncoder().encodeToString(bytes)
+    private fun unb64(s: String): ByteArray = java.util.Base64.getDecoder().decode(s)
 
     /** Fresh RSA-2048 keypair for one transfer. */
     fun generateKeyPair(): KeyPair =
