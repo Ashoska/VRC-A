@@ -10,6 +10,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
@@ -69,6 +70,14 @@ object AvatarGlobalDb {
     // this many entries (the Worker caps a single POST) so a big harvest isn't lost.
     private const val FLUSH_MS = 2 * 60_000L
     private const val CONTRIBUTE_CHUNK = 200
+    // A USER contribution (own upload / favourite / resolved stranger) quick-flushes within
+    // this window instead of waiting out the 2-min periodic loop — so it reaches the Worker,
+    // gets merged on the next 1-min cron, and shows in the manifest within ~1 min. Debounced
+    // (cancel+reschedule) so a burst still batches into one POST. NOT used by the bulk avtrdb
+    // crawler (localInsert=false) — that stays on the 2-min loop so a continuous crawl can't
+    // keep resetting the debounce and starve the flush.
+    private const val QUICK_FLUSH_MS = 15_000L
+    @Volatile private var quickFlushJob: Job? = null
     // Paced DB-search seeding from favourites / worn avatars. Each name runs ONE
     // AvatarSearch.searchAll (avtrdb + 2 VRCX mirrors + our catalog), which contributes
     // any file-id-bearing result back — so it grows the catalog with OTHER avatars indexed
@@ -810,7 +819,19 @@ object AvatarGlobalDb {
                 lastContributed = "${name.ifBlank { avatarId }} (${nowShort()})"
             }
         }
+        // User contributions get a debounced quick-flush so they reach the Worker in ~15s
+        // (then the 1-min cron merges them) instead of waiting up to 2 min for the periodic
+        // loop. Bulk crawler contributions (localInsert=false) skip this and ride the 2-min loop.
+        if (localInsert) scheduleQuickFlush(app)
         return true
+    }
+
+    /** Debounced quick-flush of the contribution queue (cancel+reschedule), so a burst of
+     *  user contributions batches into one POST ~[QUICK_FLUSH_MS] after the last one. */
+    private fun scheduleQuickFlush(context: Context) {
+        val app = context.applicationContext
+        quickFlushJob?.cancel()
+        quickFlushJob = scope.launch { delay(QUICK_FLUSH_MS); flushQueue(app) }
     }
 
     /** Report an entry as dead (404/private) or renamed so the file self-heals. The

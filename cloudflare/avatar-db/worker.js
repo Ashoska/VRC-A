@@ -697,13 +697,34 @@ async function flushR2(env) {
     for (const n of repClear) await env.AVATAR_KV.delete(n);
   }
 
-  const entries = Math.max(0, (prevMeta.entries || 0) + added - removed);
-  try {
-    await env.CATALOG.put("_manifest.json", JSON.stringify({
-      v: 1, shardScheme: "filehex3-full", shardCount: 4096, entryCount: entries,
-      lastUpdate: new Date().toISOString(),
-    }), { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + SHARD_TTL } });
-  } catch (_) {}
+  // Manifest: write it ONLY when the count actually moved, and MERGE so the fields the 20-min
+  // rebuild Action owns (unfilled/searchReady/indexScheme/lastFullRebuild) are preserved instead
+  // of being clobbered to undefined every minute (that was the "To process" wiping bug). Short
+  // TTL + an explicit purge so the fresh count/`lastUpdate` is live in ~1s (not the 5-min shard
+  // TTL) — the "contributed avatars show in the manifest within ~1 min" fix.
+  const countMoved = added > 0 || removed > 0;
+  let entries = Math.max(0, (prevMeta.entries || 0) + added - removed);
+  let adoptedRebuild = prevMeta.adoptedRebuild || null;
+  if (countMoved) {
+    let man = {};
+    try { const m = await env.CATALOG.get("_manifest.json"); if (m) man = await m.json(); } catch (_) {}
+    if (!man || typeof man !== "object") man = {};
+    // Adopt the Action's AUTHORITATIVE entryCount whenever it has done a fresh full rebuild —
+    // self-heals the running counter's slow drift (~every 20 min) without a whole-catalog scan.
+    if (man.lastFullRebuild && man.lastFullRebuild !== adoptedRebuild && typeof man.entryCount === "number") {
+      entries = Math.max(0, man.entryCount + added - removed);
+      adoptedRebuild = man.lastFullRebuild;
+    }
+    man = { ...man, v: 1, shardScheme: "filehex3-full", shardCount: 4096, entryCount: entries, lastUpdate: new Date().toISOString() };
+    try {
+      await env.CATALOG.put("_manifest.json", JSON.stringify(man), {
+        httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=30" },
+      });
+    } catch (_) {}
+    if (allShardsOk && env.CATALOG_BASE) {
+      await purgeCatalogUrls(env, [env.CATALOG_BASE.replace(/\/$/, "") + "/_manifest.json"]);
+    }
+  }
 
   await env.AVATAR_KV.put("meta", JSON.stringify({
     ...prevMeta,
@@ -712,6 +733,7 @@ async function flushR2(env) {
     totalAdded: (prevMeta.totalAdded || 0) + added,
     totalRemoved: (prevMeta.totalRemoved || 0) + removed,
     entries,
+    adoptedRebuild,
     lastCommit: allShardsOk
       ? `R2 +${added} -${removed} (${prefixes.length} shards)`
       : `R2 partial: some shard IO failed, kept pending (+${added} -${removed})`,
@@ -725,20 +747,27 @@ async function flushR2(env) {
 // for everyone within ~seconds (instead of the TTL). Graceful no-op unless CF_PURGE_TOKEN
 // + CF_ZONE_ID are set (then freshness is just the ~5-min cache TTL). Batches of 30 (the
 // free-plan per-request file cap). CATALOG_BASE must be the custom domain the app reads.
-async function purgeShards(env, prefixes) {
-  if (!env.CF_PURGE_TOKEN || !env.CF_ZONE_ID || !env.CATALOG_BASE) return;
-  const base = env.CATALOG_BASE.replace(/\/$/, "");
-  const files = prefixes.map((p) => `${base}/shard/${p}.json`);
-  const url = `https://api.cloudflare.com/client/v4/zones/${env.CF_ZONE_ID}/purge_cache`;
-  for (let i = 0; i < files.length; i += 30) {
+// Purge a list of absolute catalog URLs from Cloudflare's edge cache (batches of 30, the
+// free-plan per-request file cap). Graceful no-op unless the purge secrets + CATALOG_BASE
+// are set (then freshness is just the cache TTL).
+async function purgeCatalogUrls(env, urls) {
+  if (!env.CF_PURGE_TOKEN || !env.CF_ZONE_ID || !env.CATALOG_BASE || !urls || urls.length === 0) return;
+  const api = `https://api.cloudflare.com/client/v4/zones/${env.CF_ZONE_ID}/purge_cache`;
+  for (let i = 0; i < urls.length; i += 30) {
     try {
-      await fetch(url, {
+      await fetch(api, {
         method: "POST",
         headers: { authorization: `Bearer ${env.CF_PURGE_TOKEN}`, "content-type": "application/json" },
-        body: JSON.stringify({ files: files.slice(i, i + 30) }),
+        body: JSON.stringify({ files: urls.slice(i, i + 30) }),
       });
     } catch (_) { /* freshness falls back to the TTL */ }
   }
+}
+
+async function purgeShards(env, prefixes) {
+  if (!env.CATALOG_BASE) return;
+  const base = env.CATALOG_BASE.replace(/\/$/, "");
+  await purgeCatalogUrls(env, prefixes.map((p) => `${base}/shard/${p}.json`));
 }
 
 async function flushGithub(env) {
