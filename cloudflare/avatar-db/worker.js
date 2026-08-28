@@ -50,6 +50,25 @@ const REMOVE_QUORUM = 2; // independent "dead" reports needed before a hard remo
 // file->avatar id mapping is stable, so cloning is unaffected).
 const SHARD_TTL = 21600; // 6h (was 5 min); purge-on-write keeps it fresh
 
+// The AUTHORITATIVE catalog size lives in _manifest.json (the Action rewrites entryCount every
+// ~20 min). meta.entries in KV only moves on a flush, so between rebuilds — and whenever
+// contributions are idle — it drifts stale (e.g. 86k while the manifest says 105k). /health
+// returns the manifest number so the app + admin card always match the manifest. One cheap R2
+// GET, memoized per warm isolate for 60s so 15s polls don't each hit R2.
+let _manCountCache = { v: -1, at: 0 };
+async function manifestEntryCount(env) {
+  const now = Date.now();
+  if (_manCountCache.v >= 0 && now - _manCountCache.at < 60_000) return _manCountCache.v;
+  try {
+    const m = await env.CATALOG.get("_manifest.json");
+    if (m) {
+      const j = await m.json();
+      if (typeof j.entryCount === "number") { _manCountCache = { v: j.entryCount, at: now }; return j.entryCount; }
+    }
+  } catch (_) {}
+  return -1;
+}
+
 // file id = "file_" + UUID (8-4-4-4-12 hex). The 3 hex after "file_" (index 5..7) are the
 // shard prefix. Guarded: fall back to "000" if the format ever differs. 4096 shards.
 function shardPrefix(fileId) {
@@ -271,9 +290,13 @@ export default {
         // ONE cheap KV read (no list ops — those have a tight free-tier limit and this is
         // polled every 15s). Counts come from meta (set at flush).
         const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+        // Prefer the manifest's authoritative entryCount (Action-maintained); fall back to the
+        // KV counter. max() so a fresh contribution that bumped KV past the last rebuild still shows.
+        const manCount = await manifestEntryCount(env);
+        const liveEntries = manCount >= 0 ? Math.max(manCount, meta.entries || 0) : (meta.entries || 0);
         return json({
           ok: true,
-          entries: meta.entries || 0,
+          entries: liveEntries,
           pendingBatches: meta.pendingBatches || 0,
           reports: meta.reports || 0,
           lastFlush: meta.lastFlush || null,
