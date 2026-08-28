@@ -33,6 +33,14 @@ bucket_name = "vrca-avatar-catalog"
 # (e.g. a new domain) needs no app update. Points at the R2 bucket's custom domain.
 CATALOG_BASE = "https://cdn.gremlininc.app"
 
+# Reliable search-index rebuild: the Worker triggers the catalog-rebuild GitHub Action itself
+# (GitHub's own `schedule:` cron drops most runs). Set these + a GH_DISPATCH_TOKEN secret
+# (`wrangler secret put GH_DISPATCH_TOKEN` — a fine-grained PAT with Actions: write on the repo).
+# Unset → falls back to GitHub's flaky cron. GH_REF is the default branch the workflow runs from.
+GH_OWNER = "Ashoska"
+GH_REPO = "VRC-A"
+GH_REF = "VRC-A-Official"
+
 [triggers]
 # Cheap per-shard R2 writes, so run every minute — paired with purge-on-write this makes a
 # new avatar live for everyone in ~1s.
