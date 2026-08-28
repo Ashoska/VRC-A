@@ -259,12 +259,15 @@ object AvatarCatalogSweep {
             val pageResults = try { com.vrca.vrchat.AvatarSearch.searchPage(term, page) }
                 catch (e: Throwable) { emptyList() }
             if (pageResults.isEmpty()) break
+            // Batch the "already in catalog?" check for the WHOLE page at once (exact, parallel —
+            // one edge GET per distinct bucket) instead of one serial check per candidate. No
+            // VRChat call for known ones; only the genuinely-new get resolved below.
+            val knownBatch = if (AvatarGlobalDb.shardWalkLive())
+                AvatarGlobalDb.filterKnownSharded(context, pageResults.map { it.id }) else emptySet()
             for (r in pageResults) {
                 if (!avtrdbCrawlEnabled || !running || paused || !scope.isActive) break@crawl
                 if (!crawlSeen.add(r.id)) continue               // already attempted this session (any bot)
-                // Already in the catalog? Post-cutover use the memory-flat sharded avatar-id
-                // index (no whole map); pre-cutover the in-RAM set. Either way: no VRChat call.
-                val known = if (AvatarGlobalDb.shardWalkLive()) AvatarGlobalDb.isAvatarKnownSharded(context, r.id)
+                val known = if (AvatarGlobalDb.shardWalkLive()) knownBatch.contains(r.id)
                             else AvatarGlobalDb.hasAvatarId(r.id)
                 if (known) continue
                 if (!inFlight.add(r.id)) continue                // another bot is resolving this one
