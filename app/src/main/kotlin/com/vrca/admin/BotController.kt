@@ -38,6 +38,11 @@ object BotController {
     private val _totalQueued = MutableStateFlow(0)
     val totalQueued: StateFlow<Int> = _totalQueued
 
+    // Net catalog growth over ~24h (added − removed), from local entryCount snapshots. Pair =
+    // (delta, windowHours); null until we have a snapshot. windowHours < 24 while history is short.
+    private val _added24h = MutableStateFlow<Pair<Int, Int>?>(null)
+    val added24h: StateFlow<Pair<Int, Int>?> = _added24h
+
     private val _blitz = MutableStateFlow(false)
     val blitz: StateFlow<Boolean> = _blitz
 
@@ -153,6 +158,7 @@ object BotController {
                         runCatching { AvatarGlobalDb.fetchManifest(app) }.getOrNull()?.let { man ->
                             man.optInt("unfilled", -1).let { if (it >= 0) AvatarCatalogSweep.setManifestUnfilled(it) }
                             man.optInt("staleCount", -1).let { if (it >= 0) AvatarCatalogSweep.setManifestStale(it) }
+                            man.optInt("entryCount", -1).let { if (it >= 0) recordCatalogGrowth(app, it) }
                         }
                     }
                 } catch (_: Throwable) { /* transient — retry next tick */ }
@@ -248,6 +254,37 @@ object BotController {
                     BotVrchatSession.Auth.AUTHED else a
                 it.copy(auth = next)
             } else it
+        }
+    }
+
+    /** Snapshot the catalog entryCount locally (ts,count) and publish the ~24h net growth
+     *  (added − removed). Cheap: one small prefs string, pruned to ~25h. */
+    private fun recordCatalogGrowth(app: Context, entryCount: Int) {
+        runCatching {
+            val prefs = app.getSharedPreferences("vrca_admin_local", Context.MODE_PRIVATE)
+            val now = System.currentTimeMillis()
+            val arr = org.json.JSONArray(prefs.getString("catalog_count_history", "[]") ?: "[]")
+            val keep = org.json.JSONArray()
+            val cut = now - 25L * 60 * 60_000L
+            var oldestTs = now; var oldestCount = entryCount
+            for (i in 0 until arr.length()) {
+                val e = arr.optJSONArray(i) ?: continue
+                val ts = e.optLong(0); if (ts < cut) continue
+                keep.put(e)
+                if (ts < oldestTs) { oldestTs = ts; oldestCount = e.optInt(1) }
+            }
+            // Pick the snapshot closest to 24h ago (fall back to the oldest we have).
+            val target = now - 24L * 60 * 60_000L
+            var baseTs = oldestTs; var baseCount = oldestCount; var bestGap = Long.MAX_VALUE
+            for (i in 0 until keep.length()) {
+                val e = keep.optJSONArray(i) ?: continue
+                val gap = kotlin.math.abs(e.optLong(0) - target)
+                if (gap < bestGap) { bestGap = gap; baseTs = e.optLong(0); baseCount = e.optInt(1) }
+            }
+            keep.put(org.json.JSONArray().put(now).put(entryCount))
+            prefs.edit().putString("catalog_count_history", keep.toString()).apply()
+            val windowH = ((now - baseTs) / (60L * 60_000L)).toInt().coerceAtLeast(0)
+            _added24h.value = (entryCount - baseCount) to windowH
         }
     }
 

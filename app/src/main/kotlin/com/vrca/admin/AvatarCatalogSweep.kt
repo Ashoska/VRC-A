@@ -438,13 +438,17 @@ object AvatarCatalogSweep {
     /** `pendingReports` = the Worker's live report count (from /health). Fill + liveness
      *  backlogs are computed LOCALLY from the cached catalog (one cheap pass). */
     fun roleViews(pendingReports: Int): List<RoleView> {
+        lastPendingReports = pendingReports   // cached for the slot loop's Reports-bot loan decision
         var fill = 0; var liveness = 0
         if (AvatarGlobalDb.shardWalkLive()) {
             // SHARD-WALK MODE: no whole-map to scan. Both backlogs come from the tiny manifest
             // the rebuild Action writes (unfilled = Fill, staleCount = Liveness) — so the bots
             // show real queued numbers instead of a confusing 0 while they're clearly working.
-            fill = manifestUnfilled.coerceAtLeast(0)
-            liveness = manifestStale.coerceAtLeast(0)
+            // Subtract the work done since the last manifest read so the numbers drop LIVE
+            // (the manifest itself only refreshes every ~20 min). Clamped ≥0; the next manifest
+            // read resets the baseline to the truth.
+            fill = (manifestUnfilled - filledSinceManifest.get()).coerceAtLeast(0)
+            liveness = (manifestStale - recheckedSinceManifest.get()).coerceAtLeast(0)
         } else {
             val snap = AvatarGlobalDb.snapshot()
             val cutoff = livenessCutoff()
@@ -457,10 +461,39 @@ object AvatarCatalogSweep {
         }
         lastTotalBacklog = fill + liveness + pendingReports
 
-        // Which backlog each role is consuming RIGHT NOW — its own role, or the one it's
-        // loaning to. Then split that backlog EVENLY across all the bots on it, so the UI shows
-        // "6181 split 4 ways = ~1546 each" and re-splits the instant a bot returns to its own
-        // field (e.g. reports arrive → 3 bots left on fill → each share jumps).
+        // SHARD-WALK MODE: every bot pulls from ONE shared work-list (fill shards, then stale), so
+        // they all chew the SAME combined pool together — the Fill/Liveness role labels are just
+        // identity. Split the combined pool EVENLY across all the bots actually walking, so loaning
+        // is distributed evenly (a Reports bot with pending reports is on its own queue instead;
+        // everyone else — including a loaning Reports bot — gets an equal share).
+        if (AvatarGlobalDb.shardWalkLive()) {
+            val pool = fill + liveness
+            fun assigned(r: Role) = progress.getValue(r).slot >= 0 || assignmentPreview[r] != null
+            fun onReports(r: Role) = r == Role.REPORTS && pendingReports > 0
+            val walkers = Role.values().count { assigned(it) && !onReports(it) }.coerceAtLeast(1)
+            val share = (pool + walkers - 1) / walkers   // ceil-split evenly across every walking bot
+            return Role.values().map { r ->
+                val p = progress.getValue(r)
+                val slot = p.slot.takeIf { it >= 0 } ?: assignmentPreview[r] ?: -1
+                val rep = onReports(r)
+                val helpLabel = if (rep) "" else if (r == Role.REPORTS)
+                    p.helping.ifBlank { if (manifestUnfilled >= manifestStale) "Fill" else "Liveness" } else p.helping
+                RoleView(
+                    role = r,
+                    bot = if (slot >= 0) "bot ${slot + 1}" else "—",
+                    queued = if (rep) pendingReports else share,
+                    checked = p.checked,
+                    removed = p.removed,
+                    refreshedOrFilled = if (r == Role.FILL || helpLabel == "Fill") p.filled else p.refreshed,
+                    status = p.status,
+                    running = p.running,
+                    helping = helpLabel
+                )
+            }
+        }
+
+        // PRE-CUTOVER (local-map) mode: each role consumes its own backlog (or the one it's loaning
+        // to), split evenly across the bots on that backlog.
         fun targetOf(r: Role): String = when (progress.getValue(r).helping) {
             "Fill" -> "Fill"
             "Liveness" -> "Liveness"
@@ -532,7 +565,15 @@ object AvatarCatalogSweep {
                     // widens the recheck cutoff (livenessCutoff()), so the same walk catches up
                     // everything. This is the future-proof path — it never loads the whole catalog.
                     val r = ownRole ?: Role.FILL
-                    if (roles.contains(Role.REPORTS)) did = reportsPass(context, adminKey, slot, r) || did
+                    var didReports = false
+                    if (roles.contains(Role.REPORTS)) { didReports = reportsPass(context, adminKey, slot, r); did = didReports || did }
+                    // The Reports bot has no queue of its own most of the time (reports are rare),
+                    // so it LOANS itself to the shared catalog walk. Reflect that so its row shows a
+                    // real share of the backlog it's helping (not a confusing "queued 0") and re-splits
+                    // the moment reports arrive. Fill/Liveness bots stay on their own field.
+                    if (r == Role.REPORTS) progress.getValue(r).helping =
+                        if (didReports || lastPendingReports > 0) ""
+                        else if (manifestUnfilled >= manifestStale) "Fill" else "Liveness"
                     did = walkPass(context, adminKey, slot, r) || did
                 } else {
                     for (role in roles) {
@@ -595,7 +636,7 @@ object AvatarCatalogSweep {
         val removes = mutableListOf<String>()
         val okChecked = mutableListOf<String>()
         for (e in batch) {
-            if (!running) break
+            if (!running || paused) break
             val chk = BotVrchatSession.checkAvatar(context, slot, e.avatarId)
             p.checked++
             if (chk == null) {
@@ -686,8 +727,57 @@ object AvatarCatalogSweep {
     @Volatile private var worklistFetchedMs = 0L
     @Volatile private var worklistEmpty = false        // read OK but no work → idle (don't blind-walk)
     private const val WORKLIST_TTL_MS = 60_000L
-    private val blindCursor = java.util.concurrent.atomic.AtomicInteger(0)
-    private fun blindNextPrefix(): String = (blindCursor.getAndIncrement() and 0xfff).toString(16).padStart(3, '0')
+
+    // ---- per-shard "last swept" ordering (local, persisted) ------------------
+    // The Action's work-list drives FILL + known-stale promptly; this drives an even LIVENESS
+    // cadence. Each shard remembers when a bot last walked it; the idle/fallback picks the
+    // OLDEST-swept shard whose sweep is older than the weekly interval, so shards come due on
+    // staggered cycles (no Action-driven wave) — and the per-avatar `checked` gate still means a
+    // freshly-verified shard costs only a cheap edge-cached read, no VRChat calls.
+    private val sweptAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    @Volatile private var sweptLoaded = false
+    private val sweptPersistCounter = java.util.concurrent.atomic.AtomicInteger(0)
+    private const val LIVENESS_SHARD_INTERVAL_MS = 7L * 24 * 60 * 60_000L  // re-sweep a shard ~weekly
+    private fun loadSwept(context: Context) {
+        if (sweptLoaded) return
+        sweptLoaded = true
+        runCatching {
+            val s = context.getSharedPreferences("vrca_admin_local", Context.MODE_PRIVATE)
+                .getString("shard_swept", "{}") ?: "{}"
+            val j = org.json.JSONObject(s)
+            val it = j.keys()
+            while (it.hasNext()) { val k = it.next(); sweptAt[k] = j.optLong(k, 0L) }
+        }
+    }
+    private fun stampSwept(context: Context, prefix: String) {
+        sweptAt[prefix] = System.currentTimeMillis()
+        if (sweptPersistCounter.incrementAndGet() % 16 == 0) runCatching {
+            val j = org.json.JSONObject(); for ((k, v) in sweptAt) j.put(k, v)
+            context.getSharedPreferences("vrca_admin_local", Context.MODE_PRIVATE)
+                .edit().putString("shard_swept", j.toString()).apply()
+        }
+    }
+    /** Oldest-swept shard prefix (unswept counts as oldest). `dueOnly` skips shards swept within
+     *  the weekly interval (returns null when nothing is due → idle). Stamps the pick to claim it,
+     *  so two bots rarely grab the same shard (the per-avatar claim/dedup covers any overlap). */
+    private val sweptSelectLock = Any()
+    private fun oldestSweptPrefix(context: Context, dueOnly: Boolean): String? {
+        loadSwept(context)
+        // Scan + claim under a lock so two bots (esp. all 4 during a blitz, which calls this
+        // OUTSIDE worklistMutex) can't pick the SAME oldest shard and duplicate its fetch.
+        synchronized(sweptSelectLock) {
+            val now = System.currentTimeMillis()
+            var best: String? = null; var bestT = Long.MAX_VALUE
+            for (i in 0 until 4096) {
+                val p = i.toString(16).padStart(3, '0')
+                val t = sweptAt[p] ?: 0L
+                if (dueOnly && now - t < LIVENESS_SHARD_INTERVAL_MS) continue
+                if (t < bestT) { bestT = t; best = p }
+            }
+            best?.let { sweptAt[it] = now }   // claim immediately
+            return best
+        }
+    }
     /** True while there are still queued shards to walk — slotLoop uses a SHORT pause then
      *  (keep moving through the backlog) instead of the 20s idle sleep. */
     fun workRemaining(): Boolean = workQueue.isNotEmpty()
@@ -703,27 +793,37 @@ object AvatarCatalogSweep {
      *  the work-list only lists steady-state work shards. Otherwise refill the shared queue from
      *  `_worklist.json` when empty (single-flight, TTL-throttled). */
     private suspend fun nextWorkPrefix(context: Context): String? {
-        if (blitzActive()) return blindNextPrefix()   // whole-catalog coverage during a blitz
+        // BLITZ: cover the WHOLE catalog, oldest-swept first (still hits all 4096, just in
+        // staleness order → the parts checked longest ago go first).
+        if (blitzActive()) return oldestSweptPrefix(context, dueOnly = false)
         workQueue.poll()?.let { return it }
         return worklistMutex.withLock {
             workQueue.poll()?.let { return@withLock it }   // another bot refilled while we waited
-            // If we recently learned the worklist is empty, stay idle until the TTL lapses
-            // (don't hammer the CDN or fall back to a pointless blind walk).
-            if (worklistEmpty && System.currentTimeMillis() - worklistFetchedMs < WORKLIST_TTL_MS) return@withLock null
+            // If we recently learned the worklist is empty, don't re-hit the CDN this cycle — but
+            // instead of idling, do a paced oldest-swept LIVENESS trickle so the catalog stays
+            // evenly fresh (a due shard, or null when everything is within the weekly interval).
+            if (worklistEmpty && System.currentTimeMillis() - worklistFetchedMs < WORKLIST_TTL_MS)
+                return@withLock oldestSweptPrefix(context, dueOnly = true)
             val wl = AvatarGlobalDb.fetchWorklist(context)
             worklistFetchedMs = System.currentTimeMillis()
-            if (wl == null) { worklistEmpty = false; return@withLock blindNextPrefix() }  // read failed → blind fallback
+            if (wl == null) { worklistEmpty = false; return@withLock oldestSweptPrefix(context, dueOnly = false) }  // read failed → oldest-swept fallback
             val (fill, stale) = wl
             worklistEmpty = fill.isEmpty() && stale.isEmpty()
             workQueue.addAll(fill); workQueue.addAll(stale)   // fill first, then stale (liveness)
-            workQueue.poll()   // null when the worklist is empty → idle
+            // Worklist empty → oldest-swept liveness trickle instead of idle.
+            workQueue.poll() ?: oldestSweptPrefix(context, dueOnly = true)
         }
     }
     // Skip re-checking an avatar within the flush-lag window: the bot's fill/check reaches the
     // shard ~1 flush cycle later, so without this a fast re-walk of the same shard would re-do
     // the same VRChat call. Bounded + TTL'd.
     private val processedAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
-    private const val PROCESSED_TTL_MS = 4 * 60_000L
+    // Must SPAN the rebuild Action cadence (~20 min): a re-verified entry's fresh `checked` only
+    // reaches the shards on the next rebuild, so until then `fetchCatalogShard` still reports it
+    // stale. At 4 min the bots re-issued the SAME checkAvatar every cycle for ~16 min (and a blitz
+    // on a caught-up catalog re-swept it ~5×). 25 min covers the whole window so each avatar is
+    // re-checked at most once per rebuild. Cap raised to hold a busy/blitz window without evicting early.
+    private const val PROCESSED_TTL_MS = 25 * 60_000L
     private fun wasRecentlyProcessed(fileId: String): Boolean {
         val t = processedAt[fileId] ?: return false
         if (System.currentTimeMillis() - t < PROCESSED_TTL_MS) return true
@@ -731,19 +831,26 @@ object AvatarCatalogSweep {
     }
     private fun markProcessed(fileId: String) {
         processedAt[fileId] = System.currentTimeMillis()
-        if (processedAt.size > 5000) {
+        if (processedAt.size > 60000) {
             val cut = System.currentTimeMillis() - PROCESSED_TTL_MS
             processedAt.entries.removeAll { it.value < cut }
         }
     }
     /** Total unfilled backlog from the rebuild Action's `_manifest.json` (set by BotController).
      *  -1 = not read yet. Used for the Bots-tab backlog in shard-walk mode (no whole-map scan). */
+    @Volatile private var lastPendingReports = 0   // last /health report count (from roleViews), for the loan decision
+    // Optimistic real-time backlog decrement: the manifest counts only refresh every ~20 min (Action
+    // cadence), so the raw queued numbers sat flat between rebuilds even while bots were working.
+    // These count work done SINCE the last manifest read and are subtracted from the displayed
+    // backlog, so "queued"/"to process" drop live; each manifest refresh resets them to the truth.
+    private val filledSinceManifest = java.util.concurrent.atomic.AtomicInteger(0)
+    private val recheckedSinceManifest = java.util.concurrent.atomic.AtomicInteger(0)
     @Volatile var manifestUnfilled = -1; private set
-    fun setManifestUnfilled(n: Int) { manifestUnfilled = n }
+    fun setManifestUnfilled(n: Int) { manifestUnfilled = n; filledSinceManifest.set(0) }
     /** Liveness backlog (entries due a recheck) from the manifest — so the Liveness bots show a
      *  real "queued" number in shard-walk mode instead of a confusing 0 while they're working. */
     @Volatile var manifestStale = -1; private set
-    fun setManifestStale(n: Int) { manifestStale = n }
+    fun setManifestStale(n: Int) { manifestStale = n; recheckedSinceManifest.set(0) }
 
     /** WALK one shard (post-cutover): read it, fill the unfilled + recheck the stale, push ops.
      *  Memory holds only this shard. Dead-checks obey the same VRChat-outage guard as the
@@ -755,6 +862,7 @@ object AvatarCatalogSweep {
         if (blitzActive()) blitzWalked.add(prefix)   // track blitz shard coverage (done/left)
         val entries = AvatarGlobalDb.fetchCatalogShard(context, prefix)
         if (entries == null) { p.status = "walk $prefix: shard read failed"; return false }
+        stampSwept(context, prefix)   // record the sweep (even if clean) so the oldest-swept cadence advances
         val cutoff = livenessCutoff()
         val work = entries.filter { (needsFill(it) || it.checked < cutoff) && !wasRecentlyProcessed(it.fileId) }
         if (work.isEmpty()) { p.status = "walking ($prefix clear)"; return false }
@@ -767,35 +875,41 @@ object AvatarCatalogSweep {
         val okChecked = mutableListOf<String>()
         try {
             var nulls = 0
+            var rateLimited = false
             for (e in batch) {
                 if (!running || paused) break
                 val chk = BotVrchatSession.checkAvatar(context, slot, e.avatarId)
                 p.checked++
                 if (chk == null) {
                     if (needsFill(e)) noteFillNull(slot, e.fileId)
-                    if (++nulls >= 3) { p.status = "rate-limited — backing off"; break }
+                    if (++nulls >= 3) { p.status = "rate-limited — backing off"; rateLimited = true; break }
                     delay(PACE_MS); continue
                 }
                 nulls = 0; clearFillAttempt(e.fileId); markProcessed(e.fileId)
                 if (chk.alive) noteAlive()
                 if (!chk.alive) {
-                    if (canRemove()) { removes.add(e.fileId); p.removed++ }
+                    if (canRemove()) { removes.add(e.fileId); p.removed++
+                        if (needsFill(e)) filledSinceManifest.incrementAndGet() else recheckedSinceManifest.incrementAndGet() }
                     // else: suspected VRChat outage — defer the removal, next walk retries
                 } else if (needsFill(e)) {
                     val upd = fillRefresh(e, chk)
                     if (upd.fileId != e.fileId) removes.add(e.fileId)   // re-key on image change
-                    upserts.add(upd); p.filled++
+                    upserts.add(upd); p.filled++; filledSinceManifest.incrementAndGet()
                 } else {
                     val upd = liveRefresh(e, chk)
                     if (upd != null) { if (upd.fileId != e.fileId) removes.add(e.fileId); upserts.add(upd); p.refreshed++ }
                     else okChecked.add(e.fileId)
+                    recheckedSinceManifest.incrementAndGet()   // a stale entry got re-verified either way
                 }
                 delay(PACE_MS)
             }
             if (upserts.isNotEmpty() || removes.isNotEmpty() || okChecked.isNotEmpty())
                 pushOps(context, adminKey, upserts.toList(), removes.toList(), emptyList(), okChecked.toList())
             p.status = "walk $prefix: filled=${p.filled} checked=${p.checked} removed=${p.removed}"
-            return true
+            // On a rate-limit break, return false so slotLoop takes the IDLE sleep (not the 1.5s
+            // active pause) — otherwise all 4 bots keep firing 3-call bursts every ~5s into an
+            // already-throttled endpoint and the throttle never clears.
+            return !rateLimited
         } finally { release(batch.map { it.fileId }) }
     }
 
@@ -839,10 +953,17 @@ object AvatarCatalogSweep {
         val ctx = flushCtx ?: return
         if (flushKey.isBlank()) return
         flushMutex.withLock {
-            val upserts = ArrayDeque(pendingUpserts.values.toList()); pendingUpserts.clear()
-            val removes = ArrayDeque(pendingRemoves.toList()); pendingRemoves.clear()
-            val clears = ArrayDeque(pendingClears.toList()); pendingClears.clear()
-            val checked = ArrayDeque(pendingChecked.toList()); pendingChecked.clear()
+            // Snapshot the keys, then remove EXACTLY those — never clear() — so ops enqueued
+            // concurrently (enqueueOps runs on the bot threads, without this mutex) aren't wiped
+            // between the snapshot and a clear and silently dropped from the Worker push.
+            val upsertKeys = pendingUpserts.keys.toList()
+            val upserts = ArrayDeque(upsertKeys.mapNotNull { pendingUpserts.remove(it) })
+            val removeKeys = pendingRemoves.toList(); pendingRemoves.removeAll(removeKeys.toSet())
+            val removes = ArrayDeque(removeKeys)
+            val clearKeys = pendingClears.toList(); pendingClears.removeAll(clearKeys.toSet())
+            val clears = ArrayDeque(clearKeys)
+            val checkedKeys = pendingChecked.toList(); pendingChecked.removeAll(checkedKeys.toSet())
+            val checked = ArrayDeque(checkedKeys)
             if (upserts.isEmpty() && removes.isEmpty() && clears.isEmpty() && checked.isEmpty()) { pushError = ""; return }
             var failed = false
             while (upserts.isNotEmpty() || removes.isNotEmpty() || clears.isNotEmpty() || checked.isNotEmpty()) {
@@ -929,7 +1050,10 @@ object AvatarCatalogSweep {
 
     private suspend fun reportsPass(context: Context, adminKey: String, slot: Int, role: Role): Boolean {
         val p = progress.getValue(role)
-        if (AvatarGlobalDb.pendingReportCount() <= 0) { p.status = "no reports — idle"; return false }
+        // Use the count BotController already polls (cached in lastPendingReports) instead of a
+        // fresh /health GET every cycle — the reports bot idle-walks clear shards ~every 1.5–20s,
+        // so this avoided a steady stream of redundant /health reads for a value we already have.
+        if (lastPendingReports <= 0) { p.status = "no reports — idle"; return false }
         val reports = AvatarGlobalDb.fetchReports(adminKey)
         if (reports.isEmpty()) { p.status = "no reports — idle"; return false }
         p.status = "verifying ${reports.size} report(s)"
@@ -937,7 +1061,7 @@ object AvatarCatalogSweep {
         val removes = mutableListOf<String>()
         val clears = mutableListOf<String>()
         for (r in reports) {
-            if (!running) break
+            if (!running || paused) break
             if (r.avatarId.isBlank()) { clears.add(r.fileId); continue }
             val chk = BotVrchatSession.checkAvatar(context, slot, r.avatarId)
             p.checked++

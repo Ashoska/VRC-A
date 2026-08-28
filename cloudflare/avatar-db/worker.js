@@ -224,8 +224,20 @@ export default {
         const clearReports = Array.isArray(body.clearReports)
           ? body.clearReports.filter((f) => typeof f === "string" && f.startsWith("file_")).slice(0, 200)
           : [];
-        for (const fid of clearReports) await env.AVATAR_KV.delete("rep:" + fid);
-        for (const fid of removes) await env.AVATAR_KV.delete("rep:" + fid);
+        // Delete resolved report keys, counting only those that ACTUALLY existed — a walk-discovered
+        // dead avatar in `removes` was never reported, so it must not decrement the report counter.
+        let repsResolved = 0;
+        const toClear = new Set([...clearReports, ...removes]);
+        for (const fid of toClear) {
+          if ((await env.AVATAR_KV.get("rep:" + fid)) !== null) { await env.AVATAR_KV.delete("rep:" + fid); repsResolved++; }
+        }
+        // Decrement the live report counter so /health (and the admin "queued" number) drops as
+        // reports are resolved, instead of sticking high until the next flush recomputes it.
+        if (repsResolved) {
+          const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+          meta.reports = Math.max(0, (meta.reports || 0) - repsResolved);
+          await env.AVATAR_KV.put("meta", JSON.stringify(meta));
+        }
         return json({ ok: true, upserts: upserts.length, removes: removes.length, cleared: clearReports.length });
       }
 
