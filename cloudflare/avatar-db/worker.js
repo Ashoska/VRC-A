@@ -365,8 +365,42 @@ export default {
 
   async scheduled(event, env, ctx) {
     ctx.waitUntil(flushR2(env));
+    ctx.waitUntil(maybeDispatchRebuild(env));
   },
 };
+
+// GitHub's own `schedule:` cron is best-effort — it drops/delays most runs (observed 10–12h
+// gaps), so the search index went stale. Cloudflare's cron IS reliable, so the Worker triggers
+// the rebuild itself via workflow_dispatch every REBUILD_INTERVAL_MS. Needs a fine-grained GitHub
+// token (Actions: write on the repo) as the GH_DISPATCH_TOKEN secret + GH_OWNER/GH_REPO/GH_REF
+// vars. Unset → no-op (falls back to GitHub's flaky cron). Cost: 1 KV read/min + 1 KV write +
+// 1 GitHub API call per interval.
+const REBUILD_INTERVAL_MS = 20 * 60_000;
+async function maybeDispatchRebuild(env) {
+  if (!env.GH_DISPATCH_TOKEN || !env.GH_OWNER || !env.GH_REPO) return;
+  let last = 0;
+  try { last = parseInt((await env.AVATAR_KV.get("last_rebuild_ms")) || "0", 10) || 0; } catch (_) {}
+  const now = Date.now();
+  if (now - last < REBUILD_INTERVAL_MS) return;
+  await env.AVATAR_KV.put("last_rebuild_ms", String(now));   // claim the slot so we don't double-fire
+  const ref = env.GH_REF || "main";
+  try {
+    const r = await fetch(
+      `https://api.github.com/repos/${env.GH_OWNER}/${env.GH_REPO}/actions/workflows/catalog-rebuild.yml/dispatches`,
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${env.GH_DISPATCH_TOKEN}`,
+          "Accept": "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
+          "User-Agent": "vrca-worker",
+        },
+        body: JSON.stringify({ ref }),
+      }
+    );
+    if (!r.ok) await env.AVATAR_KV.put("last_rebuild_ms", String(last));   // failed → retry next minute
+  } catch (_) { await env.AVATAR_KV.put("last_rebuild_ms", String(last)); }
+}
 
 // ---- R2 per-shard flush -----------------------------------------------------
 // Read only the shards touched by pending ops, merge, write them back. The whole catalog is
@@ -380,6 +414,12 @@ async function flushR2(env) {
   const admuNames = allNames.filter((n) => n.startsWith("admu:"));
   const admrNames = allNames.filter((n) => n.startsWith("admr:"));
   const admkNames = allNames.filter((n) => n.startsWith("admk:"));
+
+  // Nothing to do → skip the whole flush (no shard reads, no meta write). This stops the
+  // every-minute cron from writing `meta` ~1440×/day while the catalog is idle. Reports keep
+  // the flush active only while any exist (rare); the live /report + /admin counters handle
+  // the count in the meantime, so a fully-idle catalog costs just one KV list per minute.
+  if (!pendNames.length && !admuNames.length && !admrNames.length && !admkNames.length && !repNames.length) return;
 
   // Group every pending op by shard prefix so each shard is read + written ONCE.
   const shardOps = {};
