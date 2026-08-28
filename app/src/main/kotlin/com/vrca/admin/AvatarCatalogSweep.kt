@@ -437,10 +437,11 @@ object AvatarCatalogSweep {
     fun roleViews(pendingReports: Int): List<RoleView> {
         var fill = 0; var liveness = 0
         if (AvatarGlobalDb.shardWalkLive()) {
-            // SHARD-WALK MODE: no whole-map to scan. The unfilled backlog comes from the tiny
-            // manifest the rebuild Action writes; liveness is time-based (the walk covers it),
-            // so there's no cheap live count — show it as walk progress, not a queued number.
+            // SHARD-WALK MODE: no whole-map to scan. Both backlogs come from the tiny manifest
+            // the rebuild Action writes (unfilled = Fill, staleCount = Liveness) — so the bots
+            // show real queued numbers instead of a confusing 0 while they're clearly working.
             fill = manifestUnfilled.coerceAtLeast(0)
+            liveness = manifestStale.coerceAtLeast(0)
         } else {
             val snap = AvatarGlobalDb.snapshot()
             val cutoff = livenessCutoff()
@@ -727,6 +728,10 @@ object AvatarCatalogSweep {
      *  -1 = not read yet. Used for the Bots-tab backlog in shard-walk mode (no whole-map scan). */
     @Volatile var manifestUnfilled = -1; private set
     fun setManifestUnfilled(n: Int) { manifestUnfilled = n }
+    /** Liveness backlog (entries due a recheck) from the manifest — so the Liveness bots show a
+     *  real "queued" number in shard-walk mode instead of a confusing 0 while they're working. */
+    @Volatile var manifestStale = -1; private set
+    fun setManifestStale(n: Int) { manifestStale = n }
 
     /** WALK one shard (post-cutover): read it, fill the unfilled + recheck the stale, push ops.
      *  Memory holds only this shard. Dead-checks obey the same VRChat-outage guard as the

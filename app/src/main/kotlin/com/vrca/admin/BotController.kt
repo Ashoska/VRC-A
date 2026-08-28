@@ -146,8 +146,10 @@ object BotController {
                     // Post-cutover: read the tiny manifest for the Bots-tab unfilled backlog —
                     // no whole-catalog scan (the bots walk shards; the count comes from the Action).
                     if (AvatarGlobalDb.shardWalkLive()) {
-                        runCatching { AvatarGlobalDb.fetchManifest(app)?.optInt("unfilled", -1) }
-                            .getOrNull()?.let { if (it >= 0) AvatarCatalogSweep.setManifestUnfilled(it) }
+                        runCatching { AvatarGlobalDb.fetchManifest(app) }.getOrNull()?.let { man ->
+                            man.optInt("unfilled", -1).let { if (it >= 0) AvatarCatalogSweep.setManifestUnfilled(it) }
+                            man.optInt("staleCount", -1).let { if (it >= 0) AvatarCatalogSweep.setManifestStale(it) }
+                        }
                     }
                 } catch (_: Throwable) { /* transient — retry next tick */ }
                 delay(30_000)
