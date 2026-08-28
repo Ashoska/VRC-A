@@ -461,10 +461,39 @@ object AvatarCatalogSweep {
         }
         lastTotalBacklog = fill + liveness + pendingReports
 
-        // Which backlog each role is consuming RIGHT NOW — its own role, or the one it's
-        // loaning to. Then split that backlog EVENLY across all the bots on it, so the UI shows
-        // "6181 split 4 ways = ~1546 each" and re-splits the instant a bot returns to its own
-        // field (e.g. reports arrive → 3 bots left on fill → each share jumps).
+        // SHARD-WALK MODE: every bot pulls from ONE shared work-list (fill shards, then stale), so
+        // they all chew the SAME combined pool together — the Fill/Liveness role labels are just
+        // identity. Split the combined pool EVENLY across all the bots actually walking, so loaning
+        // is distributed evenly (a Reports bot with pending reports is on its own queue instead;
+        // everyone else — including a loaning Reports bot — gets an equal share).
+        if (AvatarGlobalDb.shardWalkLive()) {
+            val pool = fill + liveness
+            fun assigned(r: Role) = progress.getValue(r).slot >= 0 || assignmentPreview[r] != null
+            fun onReports(r: Role) = r == Role.REPORTS && pendingReports > 0
+            val walkers = Role.values().count { assigned(it) && !onReports(it) }.coerceAtLeast(1)
+            val share = (pool + walkers - 1) / walkers   // ceil-split evenly across every walking bot
+            return Role.values().map { r ->
+                val p = progress.getValue(r)
+                val slot = p.slot.takeIf { it >= 0 } ?: assignmentPreview[r] ?: -1
+                val rep = onReports(r)
+                val helpLabel = if (rep) "" else if (r == Role.REPORTS)
+                    p.helping.ifBlank { if (manifestUnfilled >= manifestStale) "Fill" else "Liveness" } else p.helping
+                RoleView(
+                    role = r,
+                    bot = if (slot >= 0) "bot ${slot + 1}" else "—",
+                    queued = if (rep) pendingReports else share,
+                    checked = p.checked,
+                    removed = p.removed,
+                    refreshedOrFilled = if (r == Role.FILL || helpLabel == "Fill") p.filled else p.refreshed,
+                    status = p.status,
+                    running = p.running,
+                    helping = helpLabel
+                )
+            }
+        }
+
+        // PRE-CUTOVER (local-map) mode: each role consumes its own backlog (or the one it's loaning
+        // to), split evenly across the bots on that backlog.
         fun targetOf(r: Role): String = when (progress.getValue(r).helping) {
             "Fill" -> "Fill"
             "Liveness" -> "Liveness"
