@@ -862,11 +862,6 @@ private fun AvatarToolsCard(vm: VrcaViewModel) {
     ElevatedCard(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("Avatar tools", style = MaterialTheme.typography.titleMedium)
-            Text(
-                "Temporary — search the avatar database, and set your avatar size.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
 
             // --- avatar search (avtrdb) ---
             androidx.compose.material3.OutlinedTextField(
