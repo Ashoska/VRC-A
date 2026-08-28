@@ -432,6 +432,7 @@ object AvatarGlobalDb {
     // is a no-op and the existing whole-map + DB-stack paths are unchanged.
     private const val KEY_CATALOG_BASE = "catalog_base" // persisted for cold-start recovery
     private const val KEY_R2 = "r2_serving"
+    private const val KEY_SHARDED_COUNT = "sharded_count" // last /health entry count (debug panel, cold-start)
     private const val HEALTH_TTL_MS = 5 * 60_000L
     private const val SHARD_LRU_MAX = 48                 // bounded; evicted on instance leave + overflow
 
@@ -840,6 +841,7 @@ object AvatarGlobalDb {
             val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             catalogBase = prefs.getString(KEY_CATALOG_BASE, null)
             r2Serving = prefs.getBoolean(KEY_R2, false)
+            prefs.getInt(KEY_SHARDED_COUNT, -1).takeIf { it >= 0 }?.let { shardedCount = it }
         }
         val now = System.currentTimeMillis()
         if (now - lastHealthMs < HEALTH_TTL_MS) return
@@ -862,9 +864,10 @@ object AvatarGlobalDb {
             val r2 = j.optBoolean("r2", false) && j.optString("backend", "") == "r2"
             catalogBase = base
             r2Serving = r2
-            j.optInt("entries", -1).takeIf { it >= 0 }?.let { shardedCount = it }   // real catalog size for the debug panel
+            val entries = j.optInt("entries", -1).also { if (it >= 0) shardedCount = it }   // real catalog size for the debug panel
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-                .putString(KEY_CATALOG_BASE, base).putBoolean(KEY_R2, r2).apply()
+                .putString(KEY_CATALOG_BASE, base).putBoolean(KEY_R2, r2)
+                .apply { if (entries >= 0) putInt(KEY_SHARDED_COUNT, entries) }.apply()
         } catch (e: Exception) { /* keep last-known */ } finally { runCatching { conn?.disconnect() } }
     }
 
@@ -1510,10 +1513,12 @@ object AvatarGlobalDb {
     // ---- diagnostics ---------------------------------------------------------
 
     fun diag(context: Context): String {
+        ensureCatalogBase(context)   // primes an off-thread /health refresh so the count stays live (free, TTL'd)
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val q = try { JSONArray(prefs.getString(KEY_QUEUE, "[]")).length() } catch (e: Exception) { 0 }
         val r = try { JSONArray(prefs.getString(KEY_REPORTS, "[]")).length() } catch (e: Exception) { 0 }
-        return "entries=${map.size}\npull=$lastPull\n" +
+        val backend = if (r2Serving) "R2 live" else "pre-cutover"
+        return "entries=${catalogCount()}  ($backend)\npull=$lastPull\n" +
             "current avatar: $ownAvatar\n" +
             "last switch: $lastSwitch\n" +
             "favourites/uploads: $lastFav\n" +
