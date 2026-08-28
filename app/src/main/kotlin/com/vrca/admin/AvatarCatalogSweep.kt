@@ -57,6 +57,12 @@ object AvatarCatalogSweep {
     fun progressOf(role: Role): Progress = progress.getValue(role)
 
     @Volatile var running = false; private set
+    // HARD pause gate, driven directly by BotController.applySweepConfig every ~2s from the
+    // saved bots_paused pref (independent of stop()/job cancellation). Checked at the top of
+    // every worker cycle + before every counter-touching batch, so a paused sweep does ZERO
+    // work and can NEVER advance a counter even if a coroutine somehow survived or restarted.
+    @Volatile var paused = false; private set
+    fun setPaused(v: Boolean) { paused = v }
     @Volatile var pushError = ""; private set
     /** The TRUE total backlog (fill + liveness + reports), set on each roleViews() pass.
      *  The per-bot queued numbers are SPLIT shares of a backlog; this is the real total for
@@ -249,12 +255,12 @@ object AvatarCatalogSweep {
         }
         val term = CRAWL_TERMS[((termN % CRAWL_TERMS.size) + CRAWL_TERMS.size) % CRAWL_TERMS.size]
         var new = 0; var nulls = 0; var page = 0
-        crawl@ while (avtrdbCrawlEnabled && running && scope.isActive) {
+        crawl@ while (avtrdbCrawlEnabled && running && !paused && scope.isActive) {
             val pageResults = try { com.vrca.vrchat.AvatarSearch.searchPage(term, page) }
                 catch (e: Throwable) { emptyList() }
             if (pageResults.isEmpty()) break
             for (r in pageResults) {
-                if (!avtrdbCrawlEnabled || !running || !scope.isActive) break@crawl
+                if (!avtrdbCrawlEnabled || !running || paused || !scope.isActive) break@crawl
                 if (!crawlSeen.add(r.id)) continue               // already attempted this session (any bot)
                 // Already in the catalog? Post-cutover use the memory-flat sharded avatar-id
                 // index (no whole map); pre-cutover the in-RAM set. Either way: no VRChat call.
@@ -487,6 +493,10 @@ object AvatarCatalogSweep {
     private suspend fun slotLoop(context: Context, adminKey: String, slot: Int, roles: List<Role>, liveIndex: Int, liveCount: Int) {
         val ownRole = roles.firstOrNull()
         while (running && scope.isActive) {
+            // HARD PAUSE: do nothing (no VRChat call, no counter touch, no alive-stamp) while
+            // paused, so the counters stay frozen the instant the admin pauses — regardless of
+            // whether stop()/cancellation has landed yet. Resumes the moment pause clears.
+            if (paused) { delay(1000); continue }
             // Proof-of-life heartbeat: stamped every cycle (work or idle) so the UI can show
             // the sweep is alive even when the backlog is 0 / nothing is moving.
             lastCycleMs = System.currentTimeMillis()
@@ -722,6 +732,7 @@ object AvatarCatalogSweep {
      *  Memory holds only this shard. Dead-checks obey the same VRChat-outage guard as the
      *  master-based passes. Returns true if it did VRChat work. */
     private suspend fun walkPass(context: Context, adminKey: String, slot: Int, role: Role): Boolean {
+        if (paused) return false
         val p = progress.getValue(role)
         val prefix = nextWorkPrefix(context) ?: run { p.status = "no backlog — idle"; return false }
         val entries = AvatarGlobalDb.fetchCatalogShard(context, prefix)
@@ -739,7 +750,7 @@ object AvatarCatalogSweep {
         try {
             var nulls = 0
             for (e in batch) {
-                if (!running) break
+                if (!running || paused) break
                 val chk = BotVrchatSession.checkAvatar(context, slot, e.avatarId)
                 p.checked++
                 if (chk == null) {
@@ -1006,7 +1017,7 @@ object AvatarCatalogSweep {
         try {
             var nulls = 0
             for (e in batch) {
-                if (!running) break
+                if (!running || paused) break
                 val chk = BotVrchatSession.checkAvatar(context, slot, e.avatarId)
                 p.checked++
                 if (chk == null) {
@@ -1051,7 +1062,7 @@ object AvatarCatalogSweep {
         try {
             var nulls = 0
             for (e in batch) {
-                if (!running) break
+                if (!running || paused) break
                 val chk = BotVrchatSession.checkAvatar(context, slot, e.avatarId)
                 p.checked++
                 if (chk == null) {

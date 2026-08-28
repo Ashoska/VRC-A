@@ -105,8 +105,13 @@ object BotController {
         // a login is in progress (it uses a bot session, so it must chill with the rest).
         AvatarCatalogSweep.setAvtrdbCrawl(app,
             prefs.getBoolean("avtrdb_crawl_enabled", false) && !silenced(app))
+        // Drive the HARD pause gate every tick from the saved state, so a paused sweep freezes
+        // its counters instantly + stays frozen even if stop()/cancellation races (the "counters
+        // keep climbing after I pause" fix). Cleared here the moment pause/chill lifts.
+        val paused = silenced(app)
+        AvatarCatalogSweep.setPaused(paused)
         // Paused (manual) or chilling (a login is in progress) → the working bots go silent.
-        if (silenced(app)) { AvatarCatalogSweep.stop(); return }
+        if (paused) { AvatarCatalogSweep.stop(); return }
         val key = prefs.getString("avatar_admin_key", "") ?: ""
         AvatarCatalogSweep.ensureRunning(app, key, currentManual(prefs))
     }
