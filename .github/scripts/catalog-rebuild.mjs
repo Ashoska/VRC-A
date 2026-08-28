@@ -120,12 +120,24 @@ function hashStr(s) { return crypto.createHash("sha1").update(s).digest("base64"
 
 async function main() {
   console.log(`Reading ${allPrefixes.length} shards from ${CATALOG_DOMAIN} ...`);
-  // 1. Read every lookup shard -> the full catalog (fileId -> record).
+  // 1. Read every lookup shard -> the full catalog (fileId -> record). While reading, record
+  //    WHICH shard prefixes contain bot work (unfilled entries, or entries due a liveness
+  //    recheck) so the bots can walk ONLY those shards instead of blindly stepping through all
+  //    4096 (most of which have no work — that blind scan is why the bot counters "don't move").
   const avatars = {}; // fileId -> full record
+  const fillShards = new Set();   // prefixes with >=1 unfilled entry
+  const staleShards = new Set();  // prefixes with >=1 entry due a recheck
+  // Must match the bot's RECHECK_INTERVAL_MS (7 days) so `stale` == what the bot would recheck.
+  const STALE_CUTOFF = Date.now() - 7 * 24 * 60 * 60 * 1000;
   let readCount = 0;
   await mapLimit(allPrefixes, READ_CONCURRENCY, async (prefix) => {
     const e = await fetchShard(prefix);
-    for (const fid of Object.keys(e)) avatars[fid] = e[fid];
+    for (const fid of Object.keys(e)) {
+      const a = e[fid];
+      avatars[fid] = a;
+      if (a && a.filled !== true) fillShards.add(prefix);
+      if (a && typeof a.checked === "number" && a.checked < STALE_CUTOFF) staleShards.add(prefix);
+    }
     if (++readCount % 512 === 0) console.log(`  read ${readCount}/${allPrefixes.length} shards`);
   });
   const fileIds = Object.keys(avatars);
@@ -201,6 +213,15 @@ async function main() {
     unfilled, searchReady: true, lastFullRebuild: new Date().toISOString(),
   }), 60);   // tiny TTL: the Bots-tab backlog count reads this and should track the rebuild closely
   await r2Put("_hashes.json", JSON.stringify(newHashes), 60);
+  // Work-list: the exact shard prefixes the bots should walk (fill first, then stale). Bots
+  // read this and walk ONLY these instead of all 4096 blindly, so the sparse backlog gets
+  // processed in minutes and the counters visibly move. Tiny TTL so it tracks the rebuild.
+  const fillList = Array.from(fillShards).sort();
+  const staleList = Array.from(staleShards).filter((p) => !fillShards.has(p)).sort();
+  await r2Put("_worklist.json", JSON.stringify({
+    v: 1, ts: new Date().toISOString(), fill: fillList, stale: staleList,
+  }), 60);
+  console.log(`Work-list: ${fillList.length} fill shards, ${staleList.length} stale shards.`);
   console.log(`Done. ${fileIds.length} avatars (${unfilled} unfilled); wrote ${toWrite.length} changed, deleted ${staleKeys.length}.`);
 }
 

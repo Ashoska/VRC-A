@@ -493,6 +493,29 @@ object AvatarGlobalDb {
         }
     }
 
+    /** Read `_worklist.json` (the shard prefixes with fill/stale work the rebuild Action
+     *  publishes) so the bots walk ONLY those shards. Returns (fillPrefixes, stalePrefixes),
+     *  or null on failure (the sweep then falls back to a blind walk). */
+    suspend fun fetchWorklist(context: Context): Pair<List<String>, List<String>>? {
+        ensureCatalogBase(context)
+        val base = catalogBase ?: return null
+        return kotlinx.coroutines.withContext(Dispatchers.IO) {
+            var conn: HttpURLConnection? = null
+            try {
+                conn = (URL("$base/_worklist.json").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                    connectTimeout = 10_000; readTimeout = 10_000
+                }
+                if (conn.responseCode != 200) return@withContext null
+                val o = JSONObject(conn.inputStream.bufferedReader().readText())
+                fun arr(k: String): List<String> = o.optJSONArray(k)?.let { a ->
+                    (0 until a.length()).mapNotNull { a.optString(it, "").takeIf { s -> s.length == 3 } }
+                } ?: emptyList()
+                arr("fill") to arr("stale")
+            } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
+        }
+    }
+
     /** True once the sharded catalog is the live source — the sweep uses the shard-walk
      *  (memory-flat) instead of the whole-master read. Same signal as search. */
     fun shardWalkLive(): Boolean = r2Serving
