@@ -77,6 +77,7 @@ fun BotsTab() {
     val bots by BotController.bots.collectAsState()
     val views by BotController.views.collectAsState()
     val totalQueued by BotController.totalQueued.collectAsState()
+    val added24h by BotController.added24h.collectAsState()
     val blitz by BotController.blitz.collectAsState()
     val blitzViews by BotController.blitzViews.collectAsState()
     val blitzShards by BotController.blitzShards.collectAsState()
@@ -92,7 +93,7 @@ fun BotsTab() {
         verticalArrangement = Arrangement.spacedBy(12.dp),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp)
     ) {
-        item { CatalogHealthCard() }
+        item { CatalogHealthCard(added24h) }
         item {
             MaintenanceCard(
                 adminKey = adminKey,
@@ -121,7 +122,7 @@ fun BotsTab() {
 // ---- catalog health ---------------------------------------------------------
 
 @Composable
-private fun CatalogHealthCard() {
+private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null) {
     var status by remember { mutableStateOf("loading…") }
     var entries by remember { mutableStateOf("—") }
     var pending by remember { mutableStateOf("—") }
@@ -161,6 +162,11 @@ private fun CatalogHealthCard() {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             AdminLabeledRow("Worker", status)
             AdminLabeledRow("Avatars", entries)
+            added24h?.let { (delta, windowH) ->
+                val sign = if (delta >= 0) "＋" else "－"
+                val label = if (windowH >= 23) "Added (24h)" else if (windowH >= 1) "Added (${windowH}h)" else "Added"
+                AdminLabeledRow(label, "$sign${kotlin.math.abs(delta)}")
+            }
             AdminLabeledRow("Totals", totals)
             AdminLabeledRow("Pending", pending)
             AdminLabeledRow("Last flush", lastFlush)
