@@ -1,59 +1,39 @@
-# Cloudflare Worker config for the VRC-A avatar catalog.
+# Cloudflare Worker config for the VRC-A avatar catalog (R2-only).
 # Used by Workers Builds (Git integration) to auto-deploy on every push, so the
 # Worker never has to be pasted into the dashboard by hand again.
 #
-# The GH_TOKEN secret is NOT here (secrets are set in the dashboard and persist
-# across deploys). Everything else — KV binding, vars, cron — is declared here so a
-# Git deploy reproduces the exact working config.
+# Secrets (set in the dashboard, persist across deploys):
+#   ADMIN_KEY       gate for /admin, /admin/reports, /admin/reshard
+#   CF_PURGE_TOKEN  + CF_ZONE_ID  (optional) — purge-on-write for ~1s propagation
+# GitHub is GONE: the catalog lives entirely in R2, both apps AND bots read the shards
+# from the CDN, and the rebuild Action (R2-only) builds search+master+manifest+worklist.
+# The old GH_TOKEN secret is unused now and can be deleted from the dashboard.
 
 name = "vrca-avatar-db"
 main = "worker.js"
 compatibility_date = "2026-08-18"
 
-# The flush re-parses + re-serializes the whole catalog (a ~13MB JSON file at ~35k
-# entries). On the paid Standard plan the default CPU limit is 30s; a big flush that
-# crept over it returned Cloudflare error 1102 and stopped committing to GitHub. Give
-# it generous headroom (max is 300000ms / 5 min) so growth toward the sharding-migration
-# point can't silently break the pipeline again. Pairs with the flush CPU fixes in
-# worker.js (chunked b64encode + serialize-once).
-[limits]
-cpu_ms = 300000
-
-# The pending-queue KV store. Replace the id with YOUR namespace id
-# (Cloudflare -> Storage & databases -> KV -> vrca-avatar-kv -> ID).
+# The pending-queue KV store (Cloudflare -> Storage & databases -> KV).
 [[kv_namespaces]]
 binding = "AVATAR_KV"
 id = "e72fc7074f9f44c3b9cde9f6ac7a646b"
 
-# R2 bucket for the SHARDED catalog (per-shard `shard/<3hex>.json` objects). Create the
-# bucket in Cloudflare -> R2 -> "Create bucket" named vrca-avatar-catalog, then this
-# binding activates the R2 write path (flushR2) automatically — no whole-file commit, so
-# the CPU/memory/large-commit wall is gone. Until this bucket exists the Worker keeps the
-# old GitHub whole-file flush (env.CATALOG absent -> flushGithub), so deploying is safe
-# before you create it. After creating it: seed the existing catalog into shards via
-# GET /admin/migrate-r2?key=ADMIN_KEY&lo=000&hi=fff (chunk lo/hi if it times out).
+# R2 bucket holding the sharded catalog (shard/<3hex>.json + fragments/index/avtr + db.json
+# master + _manifest.json + _worklist.json). This is the ONLY store now.
+# BACKUP: enable R2 object versioning on this bucket (R2 -> the bucket -> Settings ->
+# Object versioning) for point-in-time recovery; db.json is the full-master snapshot the
+# rebuild Action writes each run, and GET /admin/reshard re-shards from it if ever needed.
 [[r2_buckets]]
 binding = "CATALOG"
 bucket_name = "vrca-avatar-catalog"
 
 [vars]
-GH_REPO = "Ashoska/VRC-A-Image-store"
-DB_PATH = "avatars/db.json"
-GH_BRANCH = "main"
-# Where the app reads the sharded catalog from (it appends /shard/<prefix>.json etc.).
-# Leave this line commented to serve via the Worker's own edge-cached /catalog route
-# (works today on *.workers.dev, no domain). Once you attach a custom domain to the R2
-# bucket, set CATALOG_BASE to it (e.g. "https://cdn.yourdomain.com") so reads hit the pure
-# CDN and bypass the Worker — /health echoes catalogBase, so the app picks it up with NO
-# app-store update.
+# Where the apps + bots read the sharded catalog from (they append /shard/<prefix>.json,
+# /fragments/..., /_manifest.json, /_worklist.json). /health echoes this so a serving change
+# (e.g. a new domain) needs no app update. Points at the R2 bucket's custom domain.
 CATALOG_BASE = "https://cdn.gremlininc.app"
-# CUTOVER SWITCH. The R2 per-shard flush stays OFF until this is set to "1", even after the
-# bucket + binding exist — so you can seed + serve + verify shards first. Flip it to "1"
-# (and redeploy) ONLY once the sharded-read side is live; before that, flipping it would
-# freeze the admin sweep + un-updated clients (they still read the whole-file master).
-R2_WRITE = "1"
 
 [triggers]
-# Post-cutover the flush is cheap per-shard R2 writes (not a whole-file commit), so run it
-# every minute — paired with purge-on-write this makes a new avatar live for everyone in ~1s.
+# Cheap per-shard R2 writes, so run every minute — paired with purge-on-write this makes a
+# new avatar live for everyone in ~1s.
 crons = ["* * * * *"]
