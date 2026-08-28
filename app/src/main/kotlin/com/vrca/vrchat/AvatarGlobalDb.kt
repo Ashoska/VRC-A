@@ -126,6 +126,11 @@ object AvatarGlobalDb {
     private val avatarIds = ConcurrentHashMap.newKeySet<String>()
     /** True if this `avtr_` id is already in the catalog (any file id). O(1). */
     fun hasAvatarId(avatarId: String): Boolean = avatarIds.contains(avatarId)
+    // The catalog's REAL size from /health (post-cutover the local `map` is memory-flat and no
+    // longer the whole catalog, so map.size would misleadingly show the old cutover snapshot).
+    @Volatile private var shardedCount = -1
+    /** Catalog size for debug panels: the sharded total when R2 is live, else the local map. */
+    fun catalogCount(): Int = if (r2Serving && shardedCount >= 0) shardedCount else map.size
     private val started = AtomicBoolean(false)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     // Serializes all read-modify-write of the persisted contribution queue so a flush
@@ -184,7 +189,9 @@ object AvatarGlobalDb {
             return
         }
         scope.launch {
-            loadLocalCache(app)
+            // Post-cutover: purge the legacy GitHub-era whole-catalog disk cache (memory-flat).
+            // Pre-cutover: load it as before. purge returns true only when R2 is the live backend.
+            if (!purgeLegacyCacheIfCutover(app)) loadLocalCache(app)
             loadProcessedFavourites(app)
             loadSeedQueue(app)
             refresh(app)
@@ -788,6 +795,7 @@ object AvatarGlobalDb {
             val r2 = j.optBoolean("r2", false) && j.optString("backend", "") == "r2"
             catalogBase = base
             r2Serving = r2
+            j.optInt("entries", -1).takeIf { it >= 0 }?.let { shardedCount = it }   // real catalog size for the debug panel
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
                 .putString(KEY_CATALOG_BASE, base).putBoolean(KEY_R2, r2).apply()
         } catch (e: Exception) { /* keep last-known */ } finally { runCatching { conn?.disconnect() } }
@@ -952,6 +960,20 @@ object AvatarGlobalDb {
             val f = File(context.filesDir, CACHE_FILE)
             if (f.exists()) parseFile(f)   // STREAMING — never reads the whole file into memory
         } catch (e: Throwable) { Log.w(TAG, "cache load failed", e) }
+    }
+
+    /** Post-cutover the app is MEMORY-FLAT (clone via lookupSharded, search via searchSharded),
+     *  so the legacy whole-catalog disk cache from the GitHub big-file era is dead weight — it's
+     *  ~25 MB on disk, loads ~80k rows into RAM (defeats memory-flat + risks the Quest OOM), and
+     *  skews contribute()'s dedup + the debug count. Delete the file + clear the in-memory map so
+     *  it never sticks. Own new avatars still seed `map` live via contribute(localInsert=true).
+     *  Returns true when it purged (R2 live), false when it left the pre-cutover cache in place. */
+    private fun purgeLegacyCacheIfCutover(context: Context): Boolean {
+        ensureCatalogBase(context)
+        if (!r2Serving) return false
+        runCatching { File(context.filesDir, CACHE_FILE).delete() }
+        map.clear(); avatarIds.clear()
+        return true
     }
 
     private fun refresh(context: Context, cacheBust: String? = null) {
@@ -1210,11 +1232,15 @@ object AvatarGlobalDb {
             // FIRST (zero VRChat call for ones we already have), and back off if VRChat starts
             // rate-limiting (HARVEST_RL_BACKOFF consecutive failures) so a broad search can't
             // hammer the user's session.
-            val knownIds = HashSet<String>(map.size); for (e in map.values) knownIds.add(e.avatarId)
+            // Dedup "already in catalog" WITHOUT a VRChat call: post-cutover use the sharded
+            // avatar-id index (memory-flat), pre-cutover the local map. Without this, a purged
+            // map would make every result hit VRChat REST → rate-limit → fewer contributions.
+            val knownIds = if (r2Serving) HashSet() else HashSet<String>(map.size).apply { for (e in map.values) add(e.avatarId) }
             var nulls = 0
             for (r in results) {
                 if (r.imageFileId != null) continue           // already contributed in searchAll
-                if (knownIds.contains(r.id)) continue          // already in catalog — no VRChat call
+                val known = if (r2Serving) isAvatarKnownSharded(app, r.id) else knownIds.contains(r.id)
+                if (known) continue                            // already in catalog — no VRChat call
                 val fid = try { VrchatAuthManager.avatarCatalogEntry(app, r.id)?.fileId }
                     catch (e: Exception) { null }
                 if (fid == null) { if (++nulls >= HARVEST_RL_BACKOFF) break; delay(600); continue }
@@ -1244,6 +1270,7 @@ object AvatarGlobalDb {
                 if (n >= 300) break                           // generous per-call bound (session dedup covers the rest)
                 if (!AVTR_RE.matches(id)) continue
                 if (!harvestedCandidates.add(id)) continue    // already attempted this session
+                if (r2Serving && isAvatarKnownSharded(app, id)) continue   // known — skip the VRChat resolve
                 val e = try { VrchatAuthManager.avatarCatalogEntry(app, id) } catch (ex: Exception) { null }
                     ?: continue                               // null = private/dead/transient (skipped)
                 if (map.containsKey(e.fileId)) continue

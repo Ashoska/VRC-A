@@ -373,7 +373,7 @@ object AvatarSearch {
         val probes = targets.map { (name, url) ->
             async { val (ok, info) = httpProbe(url); "$name: ${if (ok) "OK" else "FAIL"} $info" }
         }
-        (probes.awaitAll() + "catalog(local): ${AvatarGlobalDb.entryCount()} entries").joinToString("\n")
+        (probes.awaitAll() + "catalog: ${AvatarGlobalDb.catalogCount()} entries").joinToString("\n")
     }
 
     private suspend fun httpProbe(url: String): Pair<Boolean, String> = withContext(Dispatchers.IO) {
