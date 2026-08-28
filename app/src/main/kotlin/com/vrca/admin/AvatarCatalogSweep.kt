@@ -438,6 +438,7 @@ object AvatarCatalogSweep {
     /** `pendingReports` = the Worker's live report count (from /health). Fill + liveness
      *  backlogs are computed LOCALLY from the cached catalog (one cheap pass). */
     fun roleViews(pendingReports: Int): List<RoleView> {
+        lastPendingReports = pendingReports   // cached for the slot loop's Reports-bot loan decision
         var fill = 0; var liveness = 0
         if (AvatarGlobalDb.shardWalkLive()) {
             // SHARD-WALK MODE: no whole-map to scan. Both backlogs come from the tiny manifest
@@ -532,7 +533,15 @@ object AvatarCatalogSweep {
                     // widens the recheck cutoff (livenessCutoff()), so the same walk catches up
                     // everything. This is the future-proof path — it never loads the whole catalog.
                     val r = ownRole ?: Role.FILL
-                    if (roles.contains(Role.REPORTS)) did = reportsPass(context, adminKey, slot, r) || did
+                    var didReports = false
+                    if (roles.contains(Role.REPORTS)) { didReports = reportsPass(context, adminKey, slot, r); did = didReports || did }
+                    // The Reports bot has no queue of its own most of the time (reports are rare),
+                    // so it LOANS itself to the shared catalog walk. Reflect that so its row shows a
+                    // real share of the backlog it's helping (not a confusing "queued 0") and re-splits
+                    // the moment reports arrive. Fill/Liveness bots stay on their own field.
+                    if (r == Role.REPORTS) progress.getValue(r).helping =
+                        if (didReports || lastPendingReports > 0) ""
+                        else if (manifestUnfilled >= manifestStale) "Fill" else "Liveness"
                     did = walkPass(context, adminKey, slot, r) || did
                 } else {
                     for (role in roles) {
@@ -738,6 +747,7 @@ object AvatarCatalogSweep {
     }
     /** Total unfilled backlog from the rebuild Action's `_manifest.json` (set by BotController).
      *  -1 = not read yet. Used for the Bots-tab backlog in shard-walk mode (no whole-map scan). */
+    @Volatile private var lastPendingReports = 0   // last /health report count (from roleViews), for the loan decision
     @Volatile var manifestUnfilled = -1; private set
     fun setManifestUnfilled(n: Int) { manifestUnfilled = n }
     /** Liveness backlog (entries due a recheck) from the manifest — so the Liveness bots show a
