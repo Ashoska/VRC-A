@@ -381,6 +381,12 @@ async function flushR2(env) {
   const admrNames = allNames.filter((n) => n.startsWith("admr:"));
   const admkNames = allNames.filter((n) => n.startsWith("admk:"));
 
+  // Nothing to do → skip the whole flush (no shard reads, no meta write). This stops the
+  // every-minute cron from writing `meta` ~1440×/day while the catalog is idle. Reports keep
+  // the flush active only while any exist (rare); the live /report + /admin counters handle
+  // the count in the meantime, so a fully-idle catalog costs just one KV list per minute.
+  if (!pendNames.length && !admuNames.length && !admrNames.length && !admkNames.length && !repNames.length) return;
+
   // Group every pending op by shard prefix so each shard is read + written ONCE.
   const shardOps = {};
   const S = (sp) => (shardOps[sp] ||= { adds: {}, upserts: {}, removes: new Set(), checked: new Set(), renames: {} });
