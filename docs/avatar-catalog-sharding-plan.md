@@ -538,6 +538,25 @@ makes the Worker-request cost worth a ~$10/yr domain. Because `CATALOG_BASE` is 
   this with avtrdb + VRCX mirrors exactly as today. Contribute-back unchanged.
 - The index buckets are R2 objects served edge-cached (§5b), no per-request Worker on a hit.
   First query on a token ≈ 200–500 ms, then within-session cached; mirrors stream alongside.
+- **Paged (Google-style) search — SHIPPED.** `AvatarGlobalDb.searchShardedPage(query, page,
+  pageSize=20)` computes the AND-intersected candidate id list ONCE per query (parallel token
+  fetch, order preserved from the first/rarest token's posting order) and caches it per-query
+  (`candidateCache`, bounded LRU); each page then fetches ONLY that page's fragment buckets, so
+  cost is bounded no matter how many avatars match ("infinite avatars"). The full candidate
+  count is known up-front, so `hasMore`/Next is EXACT — no need to over-fetch a page to find the
+  end. The UI (`AvatarToolsCard`) shows 20/page with Prev / "Page N of M" / Next: the initial
+  search fetches page 0 AND prefetches page 1 (the "40 on first search"); each Next shows the
+  already-prefetched page instantly and prefetches the following one (always one page ahead).
+  `AvatarSearch.searchPage` wraps it into `ResultPage(results, page, total, hasMore)` mapping
+  entries → `Result`. The paged view is OUR sharded catalog only (stable pages); avtrdb/mirrors
+  still run silently in the background per search (`remoteFill` → `harvestSearchResults`) to
+  absorb avatars we don't have yet — they're not shown inline. When R2 search isn't live
+  (`AvatarSearch.pagedSearchLive()` false, pre-cutover) the UI keeps the legacy single-list
+  merge + "See more". **Eviction:** `AvatarGlobalDb.evictSearchCache()` (searchCache token/frag
+  JSON + candidateCache) fires on a NEW search (top of `runSearch`), and on tab-away / app close
+  via a `DisposableEffect { onDispose { … } }` on `AvatarToolsCard` (leaving the VRChat tab
+  disposes the card). `HOT_TOKEN_CAP` in the rebuild Action raised 800 → 5000 so a hot token
+  pages deep (~250 pages of 20) while an index bucket stays ~30 KB gzipped.
 
 ### 6.3 Contribute / eviction / master
 - `contribute()`: keep queue→POST→Worker + immediate `localOverlay` insert (so the

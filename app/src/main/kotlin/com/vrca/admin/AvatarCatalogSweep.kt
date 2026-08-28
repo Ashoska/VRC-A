@@ -57,6 +57,12 @@ object AvatarCatalogSweep {
     fun progressOf(role: Role): Progress = progress.getValue(role)
 
     @Volatile var running = false; private set
+    // HARD pause gate, driven directly by BotController.applySweepConfig every ~2s from the
+    // saved bots_paused pref (independent of stop()/job cancellation). Checked at the top of
+    // every worker cycle + before every counter-touching batch, so a paused sweep does ZERO
+    // work and can NEVER advance a counter even if a coroutine somehow survived or restarted.
+    @Volatile var paused = false; private set
+    fun setPaused(v: Boolean) { paused = v }
     @Volatile var pushError = ""; private set
     /** The TRUE total backlog (fill + liveness + reports), set on each roleViews() pass.
      *  The per-bot queued numbers are SPLIT shares of a backlog; this is the real total for
@@ -249,12 +255,12 @@ object AvatarCatalogSweep {
         }
         val term = CRAWL_TERMS[((termN % CRAWL_TERMS.size) + CRAWL_TERMS.size) % CRAWL_TERMS.size]
         var new = 0; var nulls = 0; var page = 0
-        crawl@ while (avtrdbCrawlEnabled && running && scope.isActive) {
+        crawl@ while (avtrdbCrawlEnabled && running && !paused && scope.isActive) {
             val pageResults = try { com.vrca.vrchat.AvatarSearch.searchPage(term, page) }
                 catch (e: Throwable) { emptyList() }
             if (pageResults.isEmpty()) break
             for (r in pageResults) {
-                if (!avtrdbCrawlEnabled || !running || !scope.isActive) break@crawl
+                if (!avtrdbCrawlEnabled || !running || paused || !scope.isActive) break@crawl
                 if (!crawlSeen.add(r.id)) continue               // already attempted this session (any bot)
                 // Already in the catalog? Post-cutover use the memory-flat sharded avatar-id
                 // index (no whole map); pre-cutover the in-RAM set. Either way: no VRChat call.
@@ -487,6 +493,10 @@ object AvatarCatalogSweep {
     private suspend fun slotLoop(context: Context, adminKey: String, slot: Int, roles: List<Role>, liveIndex: Int, liveCount: Int) {
         val ownRole = roles.firstOrNull()
         while (running && scope.isActive) {
+            // HARD PAUSE: do nothing (no VRChat call, no counter touch, no alive-stamp) while
+            // paused, so the counters stay frozen the instant the admin pauses — regardless of
+            // whether stop()/cancellation has landed yet. Resumes the moment pause clears.
+            if (paused) { delay(1000); continue }
             // Proof-of-life heartbeat: stamped every cycle (work or idle) so the UI can show
             // the sweep is alive even when the backlog is 0 / nothing is moving.
             lastCycleMs = System.currentTimeMillis()
@@ -540,7 +550,12 @@ object AvatarCatalogSweep {
                 // Responsive sleep: wake IMMEDIATELY (within 500ms) if the blitz OR crawl state
                 // flips, so toggling either kicks EVERY bot at once instead of each waiting out
                 // its idle sleep. Crawl uses the short term-gap (it always has work).
-                val target = if (crawling) CRAWL_TERM_GAP_MS else if (did) ACTIVE_PAUSE_MS else IDLE_SLEEP_MS
+                // Keep moving through a non-empty work-list with the short pause even when a
+                // given shard turned out clear (already filled by another bot / stale worklist),
+                // so the backlog is chewed through in minutes instead of one shard per 20s.
+                val target = if (crawling) CRAWL_TERM_GAP_MS
+                    else if (did || (AvatarGlobalDb.shardWalkLive() && workRemaining())) ACTIVE_PAUSE_MS
+                    else IDLE_SLEEP_MS
                 var slept = 0L
                 while (slept < target && running && scope.isActive &&
                        blitzActive() == blitzing && avtrdbCrawlEnabled == crawling) {
@@ -656,11 +671,41 @@ object AvatarCatalogSweep {
 
     // ---- shard-walk (memory-flat bots, post-cutover) -------------------------
     private const val WALK_BATCH = 40
-    // Shared cursor over the 4096 shard prefixes: every bot getAndIncrement()s it, so the
-    // bots naturally partition the shards with zero overlap and full coverage per cycle —
-    // no explicit role/partition assignment or loaning needed.
-    private val shardCursor = java.util.concurrent.atomic.AtomicInteger(0)
-    private fun nextShardPrefix(): String = (shardCursor.getAndIncrement() and 0xfff).toString(16).padStart(3, '0')
+    // Work-list driven shard walk: the rebuild Action publishes `_worklist.json` = the exact
+    // shard prefixes that hold fill/stale work, so the bots walk ONLY those instead of blindly
+    // stepping through all 4096 (most empty → counters barely move). Bots share ONE queue
+    // (partitioned with zero overlap by polling). When it drains, one bot refills it from a
+    // fresh worklist; a genuinely empty worklist means no backlog → idle. If the worklist can't
+    // be read, fall back to the old blind cursor so liveness coverage never fully stops.
+    private val workQueue = java.util.concurrent.ConcurrentLinkedQueue<String>()
+    private val worklistMutex = Mutex()
+    @Volatile private var worklistFetchedMs = 0L
+    @Volatile private var worklistEmpty = false        // read OK but no work → idle (don't blind-walk)
+    private const val WORKLIST_TTL_MS = 60_000L
+    private val blindCursor = java.util.concurrent.atomic.AtomicInteger(0)
+    private fun blindNextPrefix(): String = (blindCursor.getAndIncrement() and 0xfff).toString(16).padStart(3, '0')
+    /** True while there are still queued shards to walk — slotLoop uses a SHORT pause then
+     *  (keep moving through the backlog) instead of the 20s idle sleep. */
+    fun workRemaining(): Boolean = workQueue.isNotEmpty()
+
+    /** Next shard prefix to walk, or null when there is genuinely no backlog (idle). Refills
+     *  the shared queue from `_worklist.json` when empty (single-flight, TTL-throttled). */
+    private suspend fun nextWorkPrefix(context: Context): String? {
+        workQueue.poll()?.let { return it }
+        return worklistMutex.withLock {
+            workQueue.poll()?.let { return@withLock it }   // another bot refilled while we waited
+            // If we recently learned the worklist is empty, stay idle until the TTL lapses
+            // (don't hammer the CDN or fall back to a pointless blind walk).
+            if (worklistEmpty && System.currentTimeMillis() - worklistFetchedMs < WORKLIST_TTL_MS) return@withLock null
+            val wl = AvatarGlobalDb.fetchWorklist(context)
+            worklistFetchedMs = System.currentTimeMillis()
+            if (wl == null) { worklistEmpty = false; return@withLock blindNextPrefix() }  // read failed → blind fallback
+            val (fill, stale) = wl
+            worklistEmpty = fill.isEmpty() && stale.isEmpty()
+            workQueue.addAll(fill); workQueue.addAll(stale)   // fill first, then stale (liveness)
+            workQueue.poll()   // null when the worklist is empty → idle
+        }
+    }
     // Skip re-checking an avatar within the flush-lag window: the bot's fill/check reaches the
     // shard ~1 flush cycle later, so without this a fast re-walk of the same shard would re-do
     // the same VRChat call. Bounded + TTL'd.
@@ -687,8 +732,9 @@ object AvatarCatalogSweep {
      *  Memory holds only this shard. Dead-checks obey the same VRChat-outage guard as the
      *  master-based passes. Returns true if it did VRChat work. */
     private suspend fun walkPass(context: Context, adminKey: String, slot: Int, role: Role): Boolean {
+        if (paused) return false
         val p = progress.getValue(role)
-        val prefix = nextShardPrefix()
+        val prefix = nextWorkPrefix(context) ?: run { p.status = "no backlog — idle"; return false }
         val entries = AvatarGlobalDb.fetchCatalogShard(context, prefix)
         if (entries == null) { p.status = "walk $prefix: shard read failed"; return false }
         val cutoff = livenessCutoff()
@@ -704,7 +750,7 @@ object AvatarCatalogSweep {
         try {
             var nulls = 0
             for (e in batch) {
-                if (!running) break
+                if (!running || paused) break
                 val chk = BotVrchatSession.checkAvatar(context, slot, e.avatarId)
                 p.checked++
                 if (chk == null) {
@@ -971,7 +1017,7 @@ object AvatarCatalogSweep {
         try {
             var nulls = 0
             for (e in batch) {
-                if (!running) break
+                if (!running || paused) break
                 val chk = BotVrchatSession.checkAvatar(context, slot, e.avatarId)
                 p.checked++
                 if (chk == null) {
@@ -1016,7 +1062,7 @@ object AvatarCatalogSweep {
         try {
             var nulls = 0
             for (e in batch) {
-                if (!running) break
+                if (!running || paused) break
                 val chk = BotVrchatSession.checkAvatar(context, slot, e.avatarId)
                 p.checked++
                 if (chk == null) {

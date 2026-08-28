@@ -36,7 +36,12 @@ service cloud.firestore {
         // into the user's current instance). Admin-only write.
         "selfInviteReqId", "selfInviteAdminId", "selfInviteLocation", "selfInviteAt",
         // Admin remote Start/Stop of a device's OSC sending (device-only). Admin-only write.
-        "oscCommandAt", "oscCommand"
+        "oscCommandAt", "oscCommand",
+        // "Move VRChat login to another device" — admin-written signal/relay fields. The
+        // payload (transferPayload) is end-to-end encrypted to the target's one-time key, so
+        // the admin only relays ciphertext. Admin-only write.
+        "transferReqId", "transferRole", "transferAt",
+        "transferPubKey", "transferPayload", "transferPeerHash"
       ];
     }
 
@@ -87,6 +92,12 @@ service cloud.firestore {
         // Self-invite handshake: the user's app echoes the admin's request id and
         // reports the outcome back so the admin's poll can surface it.
         "selfInviteAckReqId", "selfInviteStatus", "selfInviteError", "selfInviteStatusAt",
+
+        // "Move VRChat login to another device" handoff — the device's own side: the TARGET
+        // publishes its one-time public key (transferPubKeyOut), the SOURCE publishes the
+        // sealed bundle (transferPayloadOut, ciphertext only), and both report status back.
+        "transferAckReqId", "transferPubKeyOut", "transferPayloadOut",
+        "transferStatus", "transferError", "transferStatusAt",
 
         // VRChat identity + presence (written by PipelineService when watched)
         "vrchatUserId", "vrchatDisplayName",

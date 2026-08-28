@@ -1290,6 +1290,16 @@ class VrcaViewModel(
     private var lastDiscordLogoutMs: Long = 0L
     private var lastOscCommandMs: Long = 0L
 
+    // Per-phase dedup for the admin-mediated "move VRChat login to another device" handoff.
+    // The dance spans several snapshots so each device tracks the reqId of the phase it has
+    // already handled (target: keygen then import; source: seal).
+    private var transferKeygenReq: String = ""
+    private var transferSealReq: String = ""
+    private var transferImportReq: String = ""
+    // Wider freshness window than the one-shot signals: the multi-hop dance can take ~1 min and
+    // the admin refreshes transferAt at each hop, so 5 min covers it with margin.
+    private val TRANSFER_WINDOW_MS = 300_000L
+
     /** Clock-skew tolerance for the "fresh admin command" gates (kill / logout /
      *  osc start-stop). These compare a SERVER timestamp to the local wall clock; a
      *  device clock lagging the server makes the delta negative on the first
@@ -1325,6 +1335,99 @@ class VrcaViewModel(
                 )
             }
         }
+    }
+
+    /** Admin-mediated "move VRChat login to another device" — this device's step. Role is set
+     *  by the admin: TARGET publishes a one-time public key then imports the sealed bundle;
+     *  SOURCE seals its session to the target's key. Everything sensitive is encrypted end to
+     *  end (AuthTransferCrypto) so the backend/admin only relay ciphertext. Deduped per phase. */
+    private fun handleTransferSignal(snap: com.google.firebase.firestore.DocumentSnapshot) {
+        val reqId = snap.getString("transferReqId").orEmpty(); if (reqId.isBlank()) return
+        val deviceHash = readDeviceHashFromPrefs().trim(); if (!isValidDeviceHash(deviceHash)) return
+        val docRef = db.collection(COL_USERS).document(deviceHash)
+        when (snap.getString("transferRole").orEmpty()) {
+            "target" -> {
+                val payload = snap.getString("transferPayload").orEmpty()
+                if (payload.isNotBlank()) {
+                    if (transferImportReq == reqId) return
+                    transferImportReq = reqId
+                    viewModelScope.launch { importTransfer(reqId, payload, docRef) }
+                } else {
+                    if (transferKeygenReq == reqId) return
+                    transferKeygenReq = reqId
+                    viewModelScope.launch { publishTransferKey(reqId, docRef) }
+                }
+            }
+            "source" -> {
+                val pub = snap.getString("transferPubKey").orEmpty(); if (pub.isBlank()) return
+                if (transferSealReq == reqId) return
+                transferSealReq = reqId
+                viewModelScope.launch { sealTransfer(reqId, pub, docRef) }
+            }
+        }
+    }
+
+    private fun transferStatus(reqId: String, status: String, error: String = ""): Map<String, Any> = mapOf(
+        "transferAckReqId" to reqId, "transferStatus" to status, "transferError" to error,
+        "transferStatusAt" to com.google.firebase.firestore.FieldValue.serverTimestamp()
+    )
+
+    private suspend fun publishTransferKey(reqId: String, docRef: com.google.firebase.firestore.DocumentReference) {
+        runCatching {
+            val kp = com.vrca.vrchat.AuthTransferCrypto.generateKeyPair()
+            com.vrca.vrchat.VrchatAuthManager.stashTransferPrivateKey(
+                app, reqId, com.vrca.vrchat.AuthTransferCrypto.encodePrivateKey(kp.private)
+            )
+            docRef.set(
+                transferStatus(reqId, "await_payload") +
+                    mapOf("transferPubKeyOut" to com.vrca.vrchat.AuthTransferCrypto.encodePublicKey(kp.public)),
+                com.google.firebase.firestore.SetOptions.merge()
+            )
+        }.onFailure { docRef.set(transferStatus(reqId, "error", "keygen_failed"), com.google.firebase.firestore.SetOptions.merge()) }
+    }
+
+    private suspend fun sealTransfer(reqId: String, pubKeyB64: String, docRef: com.google.firebase.firestore.DocumentReference) {
+        val bundle = com.vrca.vrchat.VrchatAuthManager.exportSessionBundle(app)
+        if (bundle == null) {
+            docRef.set(transferStatus(reqId, "error", "no_saved_password"), com.google.firebase.firestore.SetOptions.merge())
+            return
+        }
+        runCatching {
+            val sealed = com.vrca.vrchat.AuthTransferCrypto.seal(bundle, pubKeyB64)
+            docRef.set(
+                transferStatus(reqId, "sealed") + mapOf("transferPayloadOut" to sealed),
+                com.google.firebase.firestore.SetOptions.merge()
+            )
+        }.onFailure { docRef.set(transferStatus(reqId, "error", "seal_failed"), com.google.firebase.firestore.SetOptions.merge()) }
+    }
+
+    private suspend fun importTransfer(reqId: String, payload: String, docRef: com.google.firebase.firestore.DocumentReference) {
+        val priv = com.vrca.vrchat.VrchatAuthManager.readTransferPrivateKey(app, reqId)
+        if (priv == null) {
+            docRef.set(transferStatus(reqId, "error", "no_key"), com.google.firebase.firestore.SetOptions.merge()); return
+        }
+        val bundle = com.vrca.vrchat.AuthTransferCrypto.open(payload, priv)
+        com.vrca.vrchat.VrchatAuthManager.clearTransferPrivateKey(app, reqId)
+        if (bundle == null) {
+            docRef.set(transferStatus(reqId, "error", "decrypt_failed"), com.google.firebase.firestore.SetOptions.merge()); return
+        }
+        val ok = runCatching { com.vrca.vrchat.VrchatAuthManager.importSessionBundle(app, bundle) }.getOrDefault(false)
+        if (ok) {
+            // Session is live — bring the pipeline up (headless-safe start). The account-lock
+            // watcher claims once the admin frees the source's lock in the finalize step.
+            runCatching {
+                val i = android.content.Intent(app, com.vrca.vrchat.VrchatPipelineService::class.java).apply {
+                    action = com.vrca.vrchat.VrchatPipelineService.ACTION_START
+                    putExtra(com.vrca.vrchat.VrchatPipelineService.EXTRA_DEVICE_HASH, readDeviceHashFromPrefs())
+                }
+                androidx.core.content.ContextCompat.startForegroundService(app, i)
+            }
+        }
+        docRef.set(
+            transferStatus(reqId, if (ok) "imported" else "error", if (ok) "" else "login_failed") +
+                mapOf("transferPubKeyOut" to ""),   // drop the published key now it's consumed
+            com.google.firebase.firestore.SetOptions.merge()
+        )
     }
 
     private fun handleAdminKill(killMs: Long) {
@@ -1474,6 +1577,17 @@ class VrcaViewModel(
                                         location = snap.getString("selfInviteLocation").orEmpty(),
                                         reqId = snap.getString("selfInviteReqId").orEmpty()
                                     )
+                                }
+                            }
+
+                            // Admin-mediated "move VRChat login to another device". A multi-hop
+                            // encrypted handoff the admin orchestrates; this device plays SOURCE
+                            // or TARGET per snap.transferRole. Wider freshness window (the dance
+                            // spans ~1 min; the admin refreshes transferAt at each hop).
+                            snap.getTimestamp("transferAt")?.let { ts ->
+                                val ms = ts.seconds * 1000L + (ts.nanoseconds / 1_000_000L)
+                                if (System.currentTimeMillis() - ms in -CMD_SKEW_TOLERANCE_MS..TRANSFER_WINDOW_MS) {
+                                    handleTransferSignal(snap)
                                 }
                             }
 

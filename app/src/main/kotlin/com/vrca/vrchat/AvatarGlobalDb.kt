@@ -10,6 +10,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
@@ -69,6 +70,14 @@ object AvatarGlobalDb {
     // this many entries (the Worker caps a single POST) so a big harvest isn't lost.
     private const val FLUSH_MS = 2 * 60_000L
     private const val CONTRIBUTE_CHUNK = 200
+    // A USER contribution (own upload / favourite / resolved stranger) quick-flushes within
+    // this window instead of waiting out the 2-min periodic loop — so it reaches the Worker,
+    // gets merged on the next 1-min cron, and shows in the manifest within ~1 min. Debounced
+    // (cancel+reschedule) so a burst still batches into one POST. NOT used by the bulk avtrdb
+    // crawler (localInsert=false) — that stays on the 2-min loop so a continuous crawl can't
+    // keep resetting the debounce and starve the flush.
+    private const val QUICK_FLUSH_MS = 15_000L
+    @Volatile private var quickFlushJob: Job? = null
     // Paced DB-search seeding from favourites / worn avatars. Each name runs ONE
     // AvatarSearch.searchAll (avtrdb + 2 VRCX mirrors + our catalog), which contributes
     // any file-id-bearing result back — so it grows the catalog with OTHER avatars indexed
@@ -117,6 +126,11 @@ object AvatarGlobalDb {
     private val avatarIds = ConcurrentHashMap.newKeySet<String>()
     /** True if this `avtr_` id is already in the catalog (any file id). O(1). */
     fun hasAvatarId(avatarId: String): Boolean = avatarIds.contains(avatarId)
+    // The catalog's REAL size from /health (post-cutover the local `map` is memory-flat and no
+    // longer the whole catalog, so map.size would misleadingly show the old cutover snapshot).
+    @Volatile private var shardedCount = -1
+    /** Catalog size for debug panels: the sharded total when R2 is live, else the local map. */
+    fun catalogCount(): Int = if (r2Serving && shardedCount >= 0) shardedCount else map.size
     private val started = AtomicBoolean(false)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     // Serializes all read-modify-write of the persisted contribution queue so a flush
@@ -175,7 +189,9 @@ object AvatarGlobalDb {
             return
         }
         scope.launch {
-            loadLocalCache(app)
+            // Post-cutover: purge the legacy GitHub-era whole-catalog disk cache (memory-flat).
+            // Pre-cutover: load it as before. purge returns true only when R2 is the live backend.
+            if (!purgeLegacyCacheIfCutover(app)) loadLocalCache(app)
             loadProcessedFavourites(app)
             loadSeedQueue(app)
             refresh(app)
@@ -451,6 +467,38 @@ object AvatarGlobalDb {
         return shard[fileId]
     }
 
+    /** Resolve MANY worn file ids in ONE batch (cloning) — groups by shard prefix and fetches
+     *  each unique shard ONCE, in parallel. So a burst of avatars appearing together (instance
+     *  join, everyone switching) costs one fetch per DISTINCT shard instead of one per avatar,
+     *  and already-cached shards (LRU) are free. Returns fileId -> Entry? (null = not in catalog).
+     *  Populates the LRU so any later single lookupSharded for the same prefix is instant. */
+    suspend fun lookupShardedBatch(context: Context, fileIds: Collection<String>): Map<String, Entry?> = coroutineScope {
+        ensureCatalogBase(context)
+        val valid = fileIds.filter { FILE_RE.matches(it) }.distinct()
+        if (valid.isEmpty()) return@coroutineScope emptyMap()
+        val out = HashMap<String, Entry?>(valid.size)
+        val need = ArrayList<String>(valid.size)
+        for (fid in valid) { val m = map[fid]; if (m != null) out[fid] = m else need.add(fid) }   // own/whole-map instant hits
+        if (need.isEmpty()) return@coroutineScope out
+        val base = if (r2Serving) catalogBase else null
+        if (base == null) { for (fid in need) out[fid] = null; return@coroutineScope out }
+        val byPrefix = need.groupBy { it.substring(5, 8).lowercase() }
+        // One parallel fetch per DISTINCT shard prefix (LRU hit → free; miss → single-flight GET).
+        val shards = byPrefix.keys.map { pfx ->
+            async {
+                pfx to (synchronized(shardLru) { shardLru[pfx] }
+                    ?: fetchShardSingleFlight(base, pfx)?.also { synchronized(shardLru) { shardLru[pfx] = it } })
+            }
+        }.awaitAll().toMap()
+        for ((pfx, ids) in byPrefix) { val shard = shards[pfx]; for (fid in ids) out[fid] = shard?.get(fid) }
+        out
+    }
+
+    /** Warm the shard LRU for a set of worn file ids WITHOUT returning results — grouped by
+     *  prefix + parallel, so a later per-avatar lookupSharded is an instant cache hit. Cheap to
+     *  fire when a batch of members/avatars first appears. */
+    suspend fun prefetchShards(context: Context, fileIds: Collection<String>) { lookupShardedBatch(context, fileIds) }
+
     /** Drop the in-memory shard cache — called on instance leave (presence-scoped
      *  eviction), alongside the roster's own cache clears. The persisted contribution
      *  queue + catalogBase are untouched (separate stores). */
@@ -480,6 +528,29 @@ object AvatarGlobalDb {
                     connectTimeout = 10_000; readTimeout = 10_000
                 }
                 if (conn.responseCode != 200) null else JSONObject(conn.inputStream.bufferedReader().readText())
+            } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
+        }
+    }
+
+    /** Read `_worklist.json` (the shard prefixes with fill/stale work the rebuild Action
+     *  publishes) so the bots walk ONLY those shards. Returns (fillPrefixes, stalePrefixes),
+     *  or null on failure (the sweep then falls back to a blind walk). */
+    suspend fun fetchWorklist(context: Context): Pair<List<String>, List<String>>? {
+        ensureCatalogBase(context)
+        val base = catalogBase ?: return null
+        return kotlinx.coroutines.withContext(Dispatchers.IO) {
+            var conn: HttpURLConnection? = null
+            try {
+                conn = (URL("$base/_worklist.json").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                    connectTimeout = 10_000; readTimeout = 10_000
+                }
+                if (conn.responseCode != 200) return@withContext null
+                val o = JSONObject(conn.inputStream.bufferedReader().readText())
+                fun arr(k: String): List<String> = o.optJSONArray(k)?.let { a ->
+                    (0 until a.length()).mapNotNull { a.optString(it, "").takeIf { s -> s.length == 3 } }
+                } ?: emptyList()
+                arr("fill") to arr("stale")
             } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
         }
     }
@@ -568,6 +639,77 @@ object AvatarGlobalDb {
             if (name == ql) s += 20 else if (name.startsWith(tokens.first())) s += 3
             s
         }.distinctBy { it.avatarId }.take(limit)
+    }
+
+    // ---- PAGED search (Google-style pages, infinite avatars) ------------------
+    // A query's AND-intersected candidate id list is computed ONCE (parallel token fetch)
+    // and cached per-query; each page then fetches ONLY that page's fragment buckets. Because
+    // the full candidate count is known up-front, `hasMore` is exact (no need to prefetch a
+    // page to discover the end) — the UI still prefetches page+1 purely for latency. The
+    // candidate order is the index posting order (rank-ordered by the rebuild job), so pages
+    // are stable across a session. Evicted on tab-away / new search / close via evictSearchCache.
+    data class SearchPage(
+        val results: List<Entry>, val page: Int, val pageSize: Int, val total: Int, val hasMore: Boolean,
+    )
+
+    private const val CANDIDATE_CACHE_MAX = 8
+    private val candidateCache = object : LinkedHashMap<String, List<String>>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<String>>): Boolean = size > CANDIDATE_CACHE_MAX
+    }
+
+    private fun queryKey(query: String): String = query.trim().lowercase()
+
+    /** Compute (or reuse) the ordered AND-intersected candidate id list for a query. The order
+     *  is preserved from the first (rarest) token's posting list so pages don't shuffle. */
+    private suspend fun candidatesFor(base: String, query: String): List<String> = coroutineScope {
+        val key = queryKey(query)
+        synchronized(candidateCache) { candidateCache[key] }?.let { return@coroutineScope it }
+        val tokens = key.split(Regex("[^\\p{L}\\p{N}]+")).filter { it.length >= 2 }.distinct()
+        if (tokens.isEmpty()) return@coroutineScope emptyList<String>().also {
+            synchronized(candidateCache) { candidateCache[key] = it }
+        }
+        val postings = tokens.map { t -> async { fetchTokenIds(base, t) } }.awaitAll()
+        // Order-preserving intersection: keep the first token's order, drop ids missing from any other.
+        val result: List<String> = run {
+            if (postings.any { it.isEmpty() }) return@run emptyList()
+            val ordered = postings[0]
+            if (postings.size == 1) ordered
+            else {
+                val others = postings.drop(1).map { it.toHashSet() }
+                ordered.filter { id -> others.all { it.contains(id) } }
+            }
+        }
+        synchronized(candidateCache) { candidateCache[key] = result }
+        result
+    }
+
+    /**
+     * One page of sharded search results (page is 0-based). Fetches ONLY this page's fragment
+     * buckets, so cost is bounded regardless of how many avatars match — the "infinite avatars"
+     * path. `hasMore` is exact (candidate count known). Empty page when R2 search isn't live.
+     */
+    suspend fun searchShardedPage(context: Context, query: String, page: Int, pageSize: Int = 20): SearchPage = coroutineScope {
+        ensureCatalogBase(context)
+        if (!r2Serving) return@coroutineScope SearchPage(emptyList(), page, pageSize, 0, false)
+        val base = catalogBase ?: return@coroutineScope SearchPage(emptyList(), page, pageSize, 0, false)
+        val candidates = candidatesFor(base, query)
+        val total = candidates.size
+        val from = (page * pageSize).coerceAtLeast(0)
+        if (from >= total) return@coroutineScope SearchPage(emptyList(), page, pageSize, total, false)
+        val slice = candidates.subList(from, minOf(from + pageSize, total))
+        val byBucket = slice.groupBy { fragBucketOf(it) }
+        val fetched = byBucket.keys.map { b -> async { b to (fetchFragments(base, b) ?: emptyMap()) } }
+            .awaitAll().toMap()
+        val out = ArrayList<Entry>(slice.size)
+        for (id in slice) { val frags = fetched[fragBucketOf(id)] ?: continue; frags[id]?.let { out.add(it) } }
+        SearchPage(out, page, pageSize, total, from + pageSize < total)
+    }
+
+    /** Drop the sharded-search caches (token/fragment JSON + per-query candidate lists). Called
+     *  on tab-away from VRChat / a new search / app close so a query's shards don't linger. */
+    fun evictSearchCache() {
+        synchronized(searchCache) { searchCache.clear() }
+        synchronized(candidateCache) { candidateCache.clear() }
     }
 
     private suspend fun fetchTokenIds(base: String, token: String): List<String> {
@@ -685,6 +827,7 @@ object AvatarGlobalDb {
             val r2 = j.optBoolean("r2", false) && j.optString("backend", "") == "r2"
             catalogBase = base
             r2Serving = r2
+            j.optInt("entries", -1).takeIf { it >= 0 }?.let { shardedCount = it }   // real catalog size for the debug panel
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
                 .putString(KEY_CATALOG_BASE, base).putBoolean(KEY_R2, r2).apply()
         } catch (e: Exception) { /* keep last-known */ } finally { runCatching { conn?.disconnect() } }
@@ -739,7 +882,19 @@ object AvatarGlobalDb {
                 lastContributed = "${name.ifBlank { avatarId }} (${nowShort()})"
             }
         }
+        // User contributions get a debounced quick-flush so they reach the Worker in ~15s
+        // (then the 1-min cron merges them) instead of waiting up to 2 min for the periodic
+        // loop. Bulk crawler contributions (localInsert=false) skip this and ride the 2-min loop.
+        if (localInsert) scheduleQuickFlush(app)
         return true
+    }
+
+    /** Debounced quick-flush of the contribution queue (cancel+reschedule), so a burst of
+     *  user contributions batches into one POST ~[QUICK_FLUSH_MS] after the last one. */
+    private fun scheduleQuickFlush(context: Context) {
+        val app = context.applicationContext
+        quickFlushJob?.cancel()
+        quickFlushJob = scope.launch { delay(QUICK_FLUSH_MS); flushQueue(app) }
     }
 
     /** Report an entry as dead (404/private) or renamed so the file self-heals. The
@@ -837,6 +992,20 @@ object AvatarGlobalDb {
             val f = File(context.filesDir, CACHE_FILE)
             if (f.exists()) parseFile(f)   // STREAMING — never reads the whole file into memory
         } catch (e: Throwable) { Log.w(TAG, "cache load failed", e) }
+    }
+
+    /** Post-cutover the app is MEMORY-FLAT (clone via lookupSharded, search via searchSharded),
+     *  so the legacy whole-catalog disk cache from the GitHub big-file era is dead weight — it's
+     *  ~25 MB on disk, loads ~80k rows into RAM (defeats memory-flat + risks the Quest OOM), and
+     *  skews contribute()'s dedup + the debug count. Delete the file + clear the in-memory map so
+     *  it never sticks. Own new avatars still seed `map` live via contribute(localInsert=true).
+     *  Returns true when it purged (R2 live), false when it left the pre-cutover cache in place. */
+    private fun purgeLegacyCacheIfCutover(context: Context): Boolean {
+        ensureCatalogBase(context)
+        if (!r2Serving) return false
+        runCatching { File(context.filesDir, CACHE_FILE).delete() }
+        map.clear(); avatarIds.clear()
+        return true
     }
 
     private fun refresh(context: Context, cacheBust: String? = null) {
@@ -1095,11 +1264,15 @@ object AvatarGlobalDb {
             // FIRST (zero VRChat call for ones we already have), and back off if VRChat starts
             // rate-limiting (HARVEST_RL_BACKOFF consecutive failures) so a broad search can't
             // hammer the user's session.
-            val knownIds = HashSet<String>(map.size); for (e in map.values) knownIds.add(e.avatarId)
+            // Dedup "already in catalog" WITHOUT a VRChat call: post-cutover use the sharded
+            // avatar-id index (memory-flat), pre-cutover the local map. Without this, a purged
+            // map would make every result hit VRChat REST → rate-limit → fewer contributions.
+            val knownIds = if (r2Serving) HashSet() else HashSet<String>(map.size).apply { for (e in map.values) add(e.avatarId) }
             var nulls = 0
             for (r in results) {
                 if (r.imageFileId != null) continue           // already contributed in searchAll
-                if (knownIds.contains(r.id)) continue          // already in catalog — no VRChat call
+                val known = if (r2Serving) isAvatarKnownSharded(app, r.id) else knownIds.contains(r.id)
+                if (known) continue                            // already in catalog — no VRChat call
                 val fid = try { VrchatAuthManager.avatarCatalogEntry(app, r.id)?.fileId }
                     catch (e: Exception) { null }
                 if (fid == null) { if (++nulls >= HARVEST_RL_BACKOFF) break; delay(600); continue }
@@ -1129,6 +1302,7 @@ object AvatarGlobalDb {
                 if (n >= 300) break                           // generous per-call bound (session dedup covers the rest)
                 if (!AVTR_RE.matches(id)) continue
                 if (!harvestedCandidates.add(id)) continue    // already attempted this session
+                if (r2Serving && isAvatarKnownSharded(app, id)) continue   // known — skip the VRChat resolve
                 val e = try { VrchatAuthManager.avatarCatalogEntry(app, id) } catch (ex: Exception) { null }
                     ?: continue                               // null = private/dead/transient (skipped)
                 if (map.containsKey(e.fileId)) continue

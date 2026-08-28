@@ -338,6 +338,24 @@ object AvatarSearch {
         if (AvatarGlobalDb.isR2SearchLive()) AvatarGlobalDb.searchSharded(context, query).map { entryToResult(it) }
         else catalogResults(query)
 
+    // ---- paged search (Google-style pages over the sharded catalog) -----------
+    /** One page of results + paging metadata (0-based page). */
+    data class ResultPage(val results: List<Result>, val page: Int, val total: Int, val hasMore: Boolean)
+
+    /** True when the paged sharded search is live (post-cutover). The UI uses [searchPage]
+     *  when this is true, and the legacy single-list merge (local + remoteFill) otherwise. */
+    fun pagedSearchLive(): Boolean = AvatarGlobalDb.isR2SearchLive()
+
+    /** Fetch ONE page of our sharded catalog (the "infinite avatars" path). Cost is bounded
+     *  to this page's fragment buckets; `hasMore` is exact (candidate count known up-front). */
+    suspend fun searchPage(context: Context, query: String, page: Int, pageSize: Int = 20): ResultPage {
+        val p = AvatarGlobalDb.searchShardedPage(context, query, page, pageSize)
+        return ResultPage(p.results.map { entryToResult(it) }, p.page, p.total, p.hasMore)
+    }
+
+    /** Drop the per-query candidate + shard-search caches (tab-away / new search / close). */
+    fun evictSearchCache() = AvatarGlobalDb.evictSearchCache()
+
     // ---- per-DB health (Settings -> Debug) -----------------------------------
 
     /** Probe each avatar source individually so a broken/misconfigured setup is
@@ -355,7 +373,7 @@ object AvatarSearch {
         val probes = targets.map { (name, url) ->
             async { val (ok, info) = httpProbe(url); "$name: ${if (ok) "OK" else "FAIL"} $info" }
         }
-        (probes.awaitAll() + "catalog(local): ${AvatarGlobalDb.entryCount()} entries").joinToString("\n")
+        (probes.awaitAll() + "catalog: ${AvatarGlobalDb.catalogCount()} entries").joinToString("\n")
     }
 
     private suspend fun httpProbe(url: String): Pair<Boolean, String> = withContext(Dispatchers.IO) {
