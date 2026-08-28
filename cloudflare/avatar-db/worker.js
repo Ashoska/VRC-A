@@ -41,7 +41,14 @@
 const AVTR_RE = /^avtr_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const FILE_RE = /^file_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const REMOVE_QUORUM = 2; // independent "dead" reports needed before a hard remove
-const SHARD_TTL = 300;   // seconds; R2 cacheControl so edge caches expire in ~5 min
+// Shard edge-cache TTL. Long ON PURPOSE: shards are PURGED on every write (flushR2 -> purgeShards),
+// so a changed avatar still goes live in ~1s regardless of this value — the TTL only governs how
+// long an UNCHANGED shard stays served free from the edge. A long TTL is what makes a full-instance
+// join (avatars spread across ~40 different shards) cheap: each shard is read from R2 once, then
+// served free to EVERYONE who encounters that avatar until it changes. 6h balances max cache warmth
+// against the worst case if a purge ever fails (a stale shard = slightly-old name/author; the
+// file->avatar id mapping is stable, so cloning is unaffected).
+const SHARD_TTL = 21600; // 6h (was 5 min); purge-on-write keeps it fresh
 
 // file id = "file_" + UUID (8-4-4-4-12 hex). The 3 hex after "file_" (index 5..7) are the
 // shard prefix. Guarded: fall back to "000" if the format ever differs. 4096 shards.
