@@ -332,6 +332,10 @@ export default {
           totalRemoved: meta.totalRemoved || 0,
           lastCommit: meta.lastCommit || "none",
           adminKeySet: !!env.ADMIN_KEY,
+          // Rebuild-trigger health (free — env checks only): is the Worker configured to fire the
+          // catalog-rebuild Action itself, and when did it last do so.
+          rebuildDispatch: !!(env.GH_DISPATCH_TOKEN && env.GH_OWNER && env.GH_REPO),
+          lastRebuildDispatch: meta.lastRebuildAt || null,
           purgeConfigured: !!(env.CF_PURGE_TOKEN && env.CF_ZONE_ID),
           // R2 is the only backend now. `catalogBase` is what the app appends
           // /shard/<prefix>.json etc. to (learned from here, so a serving change needs no
@@ -398,7 +402,13 @@ async function maybeDispatchRebuild(env) {
         body: JSON.stringify({ ref }),
       }
     );
-    if (!r.ok) await env.AVATAR_KV.put("last_rebuild_ms", String(last));   // failed → retry next minute
+    if (!r.ok) { await env.AVATAR_KV.put("last_rebuild_ms", String(last)); return; }   // failed → retry next minute
+    // Best-effort display stamp for /health (the race-free gate above is the authoritative one).
+    try {
+      const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+      meta.lastRebuildAt = new Date(now).toISOString();
+      await env.AVATAR_KV.put("meta", JSON.stringify(meta));
+    } catch (_) {}
   } catch (_) { await env.AVATAR_KV.put("last_rebuild_ms", String(last)); }
 }
 
