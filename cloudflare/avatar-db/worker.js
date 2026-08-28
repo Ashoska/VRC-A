@@ -336,6 +336,7 @@ export default {
           // catalog-rebuild Action itself, and when did it last do so.
           rebuildDispatch: !!(env.GH_DISPATCH_TOKEN && env.GH_OWNER && env.GH_REPO),
           lastRebuildDispatch: meta.lastRebuildAt || null,
+          lastRebuildError: meta.lastRebuildError || null,
           purgeConfigured: !!(env.CF_PURGE_TOKEN && env.CF_ZONE_ID),
           // R2 is the only backend now. `catalogBase` is what the app appends
           // /shard/<prefix>.json etc. to (learned from here, so a serving change needs no
@@ -388,6 +389,9 @@ async function maybeDispatchRebuild(env) {
   if (now - last < REBUILD_INTERVAL_MS) return;
   await env.AVATAR_KV.put("last_rebuild_ms", String(now));   // claim the slot so we don't double-fire
   const ref = env.GH_REF || "main";
+  const stampMeta = async (patch) => {
+    try { const m = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}"); await env.AVATAR_KV.put("meta", JSON.stringify({ ...m, ...patch })); } catch (_) {}
+  };
   try {
     const r = await fetch(
       `https://api.github.com/repos/${env.GH_OWNER}/${env.GH_REPO}/actions/workflows/catalog-rebuild.yml/dispatches`,
@@ -402,14 +406,17 @@ async function maybeDispatchRebuild(env) {
         body: JSON.stringify({ ref }),
       }
     );
-    if (!r.ok) { await env.AVATAR_KV.put("last_rebuild_ms", String(last)); return; }   // failed → retry next minute
-    // Best-effort display stamp for /health (the race-free gate above is the authoritative one).
-    try {
-      const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
-      meta.lastRebuildAt = new Date(now).toISOString();
-      await env.AVATAR_KV.put("meta", JSON.stringify(meta));
-    } catch (_) {}
-  } catch (_) { await env.AVATAR_KV.put("last_rebuild_ms", String(last)); }
+    if (!r.ok) {
+      const body = (await r.text().catch(() => "")).slice(0, 200);
+      await stampMeta({ lastRebuildError: `${r.status} ${body}` });
+      await env.AVATAR_KV.put("last_rebuild_ms", String(last));   // failed → retry next minute
+      return;
+    }
+    await stampMeta({ lastRebuildAt: new Date(now).toISOString(), lastRebuildError: null });
+  } catch (e) {
+    await stampMeta({ lastRebuildError: `fetch: ${String(e).slice(0, 180)}` });
+    await env.AVATAR_KV.put("last_rebuild_ms", String(last));
+  }
 }
 
 // ---- R2 per-shard flush -----------------------------------------------------
