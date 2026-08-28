@@ -130,6 +130,7 @@ private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null, lastPush: Pair<S
     var totals by remember { mutableStateOf("—") }
     var lastFlush by remember { mutableStateOf("—") }
     var adminKeySet by remember { mutableStateOf("—") }
+    var recent by remember { mutableStateOf<List<String>>(emptyList()) }
     var tick by remember { mutableIntStateOf(0) }
     LaunchedEffect(tick) {
         while (true) {
@@ -149,6 +150,19 @@ private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null, lastPush: Pair<S
                 totals = "＋${j.optInt("totalAdded")}  ·  －${j.optInt("totalRemoved")}"
                 lastFlush = j.optString("lastFlush", "—")
                 adminKeySet = if (j.optBoolean("adminKeySet")) "set" else "NOT set"
+                val ra = j.optJSONArray("recent")
+                recent = if (ra == null) emptyList() else (0 until ra.length()).mapNotNull { idx ->
+                    ra.optJSONObject(idx)?.let { o ->
+                        val by = o.optString("by", "").ifBlank { "someone" }
+                        val n = o.optInt("n", 0)
+                        val names = o.optJSONArray("names")?.let { na ->
+                            (0 until na.length()).mapNotNull { na.optString(it, null) }.filter { it.isNotBlank() }
+                        }.orEmpty()
+                        val nm = if (names.isEmpty()) "" else " · " + names.joinToString(", ") +
+                            (if (n > names.size) " +${n - names.size} more" else "")
+                        "$by  ($n)$nm"
+                    }
+                }
                 status = "live"
             }.onFailure { status = "unreachable (${it.javaClass.simpleName})" }
             delay(15_000)   // auto-refreshes every 15s
@@ -177,6 +191,14 @@ private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null, lastPush: Pair<S
                 Text("Last bot push (${agoS}s ago)", style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(info, style = MaterialTheme.typography.bodySmall)
+            }
+            if (recent.isNotEmpty()) {
+                androidx.compose.material3.Divider(Modifier.padding(vertical = 4.dp))
+                Text("Recent user contributions", style = MaterialTheme.typography.labelMedium)
+                recent.take(15).forEach { line ->
+                    Text(line, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
         }
     }

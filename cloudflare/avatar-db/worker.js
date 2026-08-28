@@ -164,6 +164,10 @@ export default {
         if (good.length === 0) return json({ ok: false, error: "no valid entries" }, 400);
         const payload = {};
         for (const e of good) payload[e.fileId] = cleanEntry(e);
+        // Sender tag + time for the admin "recent contributions" view. Stored as reserved non-fileId
+        // keys so the flush merge (which filters on FILE_RE) ignores them; surfaced free at flush time.
+        if (typeof body.by === "string" && body.by) payload.__by = body.by.slice(0, 40);
+        payload.__ts = Date.now();
         // One KV write per POST (batch). Dedup happens at merge time (keyed by file id).
         await env.AVATAR_KV.put("pend:" + crypto.randomUUID(), JSON.stringify(payload), {
           expirationTtl: 7 * 86400,
@@ -317,6 +321,7 @@ export default {
           totalAdded: meta.totalAdded || 0,
           totalRemoved: meta.totalRemoved || 0,
           lastCommit: meta.lastCommit || "none",
+          recent: Array.isArray(meta.recent) ? meta.recent.slice(0, 40) : [],
           adminKeySet: !!env.ADMIN_KEY,
           purgeConfigured: !!(env.CF_PURGE_TOKEN && env.CF_ZONE_ID),
           // R2 is the only backend now. `catalogBase` is what the app appends
@@ -372,12 +377,20 @@ async function flushR2(env) {
   const S = (sp) => (shardOps[sp] ||= { adds: {}, upserts: {}, removes: new Set(), checked: new Set(), renames: {} });
 
   const pendKeys = [];
+  const recentBatches = [];   // admin "recent contributions" view (free: built from data already read)
   for (const kn of pendNames) {
     pendKeys.push(kn);
     const val = await env.AVATAR_KV.get(kn);
     if (!val) continue;
     let batch; try { batch = JSON.parse(val); } catch (_) { continue; }
-    for (const fid of Object.keys(batch)) if (FILE_RE.test(fid)) S(shardPrefix(fid)).adds[fid] = batch[fid];
+    const fids = Object.keys(batch).filter((fid) => FILE_RE.test(fid));
+    for (const fid of fids) S(shardPrefix(fid)).adds[fid] = batch[fid];
+    if (fids.length) recentBatches.push({
+      ts: typeof batch.__ts === "number" ? batch.__ts : Date.now(),
+      by: typeof batch.__by === "string" ? batch.__by : "",
+      n: fids.length,
+      names: fids.slice(0, 3).map((fid) => (batch[fid] && batch[fid].name) || "").filter(Boolean),
+    });
   }
   const admuKeys = [];
   for (const kn of admuNames) {
@@ -499,6 +512,11 @@ async function flushR2(env) {
       : `R2 partial: some shard IO failed, kept pending (+${added} -${removed})`,
     pendingBatches: pendNames.length,
     reports: repNames.length,
+    // Rolling log of the most recent USER contribution batches (newest first, capped) — who sent
+    // it + a few avatar names. Only updated when batches were actually processed this flush.
+    recent: recentBatches.length
+      ? [...recentBatches.reverse(), ...(Array.isArray(prevMeta.recent) ? prevMeta.recent : [])].slice(0, 40)
+      : (Array.isArray(prevMeta.recent) ? prevMeta.recent : []),
     backend: "r2",
   }));
 }
