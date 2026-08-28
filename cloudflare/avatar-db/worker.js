@@ -264,6 +264,16 @@ export default {
         return json({ ok: true, reports: out });
       }
 
+      if (req.method === "GET" && url.pathname === "/admin/recent") {
+        // Full recent USER contribution batches (who + every avatar name) for the admin's expandable
+        // view. Admin-key gated; ONE cheap KV read, only when the admin is looking (not polled by bots).
+        if (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY) {
+          return json({ ok: false, error: "unauthorized" }, 401);
+        }
+        let recent = []; try { const r = await env.AVATAR_KV.get("recent"); if (r) recent = JSON.parse(r); } catch (_) {}
+        return json({ ok: true, recent: Array.isArray(recent) ? recent : [] });
+      }
+
       if (req.method === "GET" && url.pathname === "/admin/reshard") {
         // RECOVERY (replaces the old GitHub restore + migrate): re-shard from the R2 db.json
         // master snapshot (written by the rebuild Action). Guarded by ADMIN_KEY. Processes a
@@ -321,7 +331,6 @@ export default {
           totalAdded: meta.totalAdded || 0,
           totalRemoved: meta.totalRemoved || 0,
           lastCommit: meta.lastCommit || "none",
-          recent: Array.isArray(meta.recent) ? meta.recent.slice(0, 40) : [],
           adminKeySet: !!env.ADMIN_KEY,
           purgeConfigured: !!(env.CF_PURGE_TOKEN && env.CF_ZONE_ID),
           // R2 is the only backend now. `catalogBase` is what the app appends
@@ -389,7 +398,10 @@ async function flushR2(env) {
       ts: typeof batch.__ts === "number" ? batch.__ts : Date.now(),
       by: typeof batch.__by === "string" ? batch.__by : "",
       n: fids.length,
-      names: fids.slice(0, 3).map((fid) => (batch[fid] && batch[fid].name) || "").filter(Boolean),
+      // Keep ALL names in the batch (a batch is already capped at 200 by /contribute) so the admin
+      // can EXPAND a row to see every avatar. Stored in a DEDICATED `recent` key, not meta, so the
+      // frequently-polled /health stays tiny.
+      names: fids.map((fid) => (batch[fid] && batch[fid].name) || "").filter(Boolean),
     });
   }
   const admuKeys = [];
@@ -512,13 +524,17 @@ async function flushR2(env) {
       : `R2 partial: some shard IO failed, kept pending (+${added} -${removed})`,
     pendingBatches: pendNames.length,
     reports: repNames.length,
-    // Rolling log of the most recent USER contribution batches (newest first, capped) — who sent
-    // it + a few avatar names. Only updated when batches were actually processed this flush.
-    recent: recentBatches.length
-      ? [...recentBatches.reverse(), ...(Array.isArray(prevMeta.recent) ? prevMeta.recent : [])].slice(0, 40)
-      : (Array.isArray(prevMeta.recent) ? prevMeta.recent : []),
     backend: "r2",
   }));
+
+  // Rolling log of the most recent USER contribution batches (newest first) with FULL names, in a
+  // DEDICATED key so it never bloats meta/health. Only rewritten when batches were processed this
+  // flush → +1 small KV write per flush at most, nothing when idle. Capped at 20 batches.
+  if (recentBatches.length) {
+    let prev = []; try { const r = await env.AVATAR_KV.get("recent"); if (r) prev = JSON.parse(r); } catch (_) {}
+    const next = [...recentBatches.reverse(), ...(Array.isArray(prev) ? prev : [])].slice(0, 20);
+    await env.AVATAR_KV.put("recent", JSON.stringify(next));
+  }
 }
 
 // Purge a list of absolute catalog URLs from Cloudflare's edge cache (batches of 30, the
