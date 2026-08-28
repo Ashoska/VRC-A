@@ -467,6 +467,38 @@ object AvatarGlobalDb {
         return shard[fileId]
     }
 
+    /** Resolve MANY worn file ids in ONE batch (cloning) — groups by shard prefix and fetches
+     *  each unique shard ONCE, in parallel. So a burst of avatars appearing together (instance
+     *  join, everyone switching) costs one fetch per DISTINCT shard instead of one per avatar,
+     *  and already-cached shards (LRU) are free. Returns fileId -> Entry? (null = not in catalog).
+     *  Populates the LRU so any later single lookupSharded for the same prefix is instant. */
+    suspend fun lookupShardedBatch(context: Context, fileIds: Collection<String>): Map<String, Entry?> = coroutineScope {
+        ensureCatalogBase(context)
+        val valid = fileIds.filter { FILE_RE.matches(it) }.distinct()
+        if (valid.isEmpty()) return@coroutineScope emptyMap()
+        val out = HashMap<String, Entry?>(valid.size)
+        val need = ArrayList<String>(valid.size)
+        for (fid in valid) { val m = map[fid]; if (m != null) out[fid] = m else need.add(fid) }   // own/whole-map instant hits
+        if (need.isEmpty()) return@coroutineScope out
+        val base = if (r2Serving) catalogBase else null
+        if (base == null) { for (fid in need) out[fid] = null; return@coroutineScope out }
+        val byPrefix = need.groupBy { it.substring(5, 8).lowercase() }
+        // One parallel fetch per DISTINCT shard prefix (LRU hit → free; miss → single-flight GET).
+        val shards = byPrefix.keys.map { pfx ->
+            async {
+                pfx to (synchronized(shardLru) { shardLru[pfx] }
+                    ?: fetchShardSingleFlight(base, pfx)?.also { synchronized(shardLru) { shardLru[pfx] = it } })
+            }
+        }.awaitAll().toMap()
+        for ((pfx, ids) in byPrefix) { val shard = shards[pfx]; for (fid in ids) out[fid] = shard?.get(fid) }
+        out
+    }
+
+    /** Warm the shard LRU for a set of worn file ids WITHOUT returning results — grouped by
+     *  prefix + parallel, so a later per-avatar lookupSharded is an instant cache hit. Cheap to
+     *  fire when a batch of members/avatars first appears. */
+    suspend fun prefetchShards(context: Context, fileIds: Collection<String>) { lookupShardedBatch(context, fileIds) }
+
     /** Drop the in-memory shard cache — called on instance leave (presence-scoped
      *  eviction), alongside the roster's own cache clears. The persisted contribution
      *  queue + catalogBase are untouched (separate stores). */
