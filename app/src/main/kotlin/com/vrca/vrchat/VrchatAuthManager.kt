@@ -1708,6 +1708,10 @@ object VrchatAuthManager {
                 val found = try { com.vrca.vrchat.AvatarSearch.searchCandidates(v) } catch (e: Exception) { emptyList() }
                 for (c in found) merged.putIfAbsent(c.id, c)
             }
+            // FREE GRABS: harvest every candidate this fallback search saw (paced/deduped in the
+            // background) so this path keeps feeding catalog growth, not just the one we return.
+            if (merged.isNotEmpty())
+                com.vrca.vrchat.AvatarGlobalDb.harvestAvatarIds(context, merged.values.map { it.id })
             val matches = merged.values.filter {
                 it.author.trim().lowercase() == authorNorm &&
                     !com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(it.author, it.id, null)
