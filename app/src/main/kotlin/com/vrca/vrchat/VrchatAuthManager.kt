@@ -1684,13 +1684,30 @@ object VrchatAuthManager {
             // No author to lock it → refuse (a name alone is not reliable, per the "guarantee by
             // author" rule). Also skip the fallback name itself.
             if (avatarName.isBlank() || authorNorm.isBlank() || avatarName.trim().equals("Robot", true)) return@withContext null
+
+            // 1. OUR CATALOG FIRST — served from R2/CDN, so no avtrdb rate-limit, image-verified, and
+            //    it already carries platforms (no extra /avatars call). Unique name+author = a lookup.
+            for (v in avatarNameVariants(avatarName)) {
+                val hits = try { com.vrca.vrchat.AvatarGlobalDb.searchSharded(context, v, 40) } catch (e: Exception) { emptyList() }
+                val m = hits.filter {
+                    it.author.trim().lowercase() == authorNorm &&
+                        !com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(it.author, it.avatarId, it.fileId)
+                }.distinctBy { it.avatarId }
+                if (m.size == 1) {
+                    val e = m[0]
+                    val plats = e.platforms.ifEmpty { fetchAvatarPlatforms(context, e.avatarId) }
+                    return@withContext WornAvatarResult(e.avatarId, plats)
+                }
+                if (m.size > 1) return@withContext null   // ambiguous in our own DB → don't guess
+            }
+
+            // 2. FALLBACK to avtrdb/mirrors only if our catalog had nothing (they can rate-limit; a 429
+            //    just means no result this pass and the loading loop retries).
             val merged = LinkedHashMap<String, com.vrca.vrchat.AvatarSearch.Candidate>()
             for (v in avatarNameVariants(avatarName)) {
                 val found = try { com.vrca.vrchat.AvatarSearch.searchCandidates(v) } catch (e: Exception) { emptyList() }
                 for (c in found) merged.putIfAbsent(c.id, c)
             }
-            // Keep only candidates whose AUTHOR matches the log author (the guarantee), excluding any
-            // VRChat fallback/system avatar. Dedup by avatar id.
             val matches = merged.values.filter {
                 it.author.trim().lowercase() == authorNorm &&
                     !com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(it.author, it.id, null)
