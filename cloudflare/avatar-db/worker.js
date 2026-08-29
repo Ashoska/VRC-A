@@ -598,16 +598,25 @@ async function flushR2(env) {
   // (leave the rest for the next 1-min flush) so a big burst can't blow the subrequest limit and wedge
   // the queue forever. A deferred batch is NOT added to pendKeys, so it isn't deleted → it drains next
   // flush. Always take at least the first batch so a single huge batch can't get stuck.
+  // SHARED shard budget across pending USER batches AND admin/bot pushes: each distinct shard is 1 R2
+  // read + 1 write, so the TOTAL touched per flush must stay under Cloudflare's per-invocation limit or
+  // the whole invocation dies before writing meta (the "lastFlush frozen for hours / batches stuck"
+  // symptom — the observed dying flush touched 214 shards). reserve(fids) returns false when this key's
+  // shards would exceed the budget; the caller then DEFERS it (leaves its key) for the next 1-min flush.
   const touchedShards = new Set();
+  const reserve = (fids) => {
+    const p = new Set(); for (const fid of fids) if (FILE_RE.test(fid)) p.add(shardPrefix(fid));
+    let fresh = 0; for (const sp of p) if (!touchedShards.has(sp)) fresh++;
+    if (touchedShards.size > 0 && touchedShards.size + fresh > MAX_SHARDS_PER_FLUSH) return false;
+    for (const sp of p) touchedShards.add(sp);
+    return true;
+  };
   for (const kn of pendNames) {
     const val = await env.AVATAR_KV.get(kn);
     if (!val) { pendKeys.push(kn); continue; }                                 // empty → clear it
     let batch; try { batch = JSON.parse(val); } catch (_) { pendKeys.push(kn); continue; }  // garbage → clear it
     const fids = Object.keys(batch).filter((fid) => FILE_RE.test(fid));
-    const batchPrefixes = new Set(fids.map(shardPrefix));
-    let fresh = 0; for (const sp of batchPrefixes) if (!touchedShards.has(sp)) fresh++;
-    if (touchedShards.size > 0 && touchedShards.size + fresh > MAX_SHARDS_PER_FLUSH) break;  // over budget → defer rest
-    for (const sp of batchPrefixes) touchedShards.add(sp);
+    if (!reserve(fids)) break;                                                 // over budget → defer rest
     pendKeys.push(kn);
     for (const fid of fids) S(shardPrefix(fid)).adds[fid] = batch[fid];
     if (fids.length) recentBatches.push({
@@ -622,27 +631,33 @@ async function flushR2(env) {
   }
   const admuKeys = [];
   for (const kn of admuNames) {
-    admuKeys.push(kn);
     const val = await env.AVATAR_KV.get(kn);
-    if (!val) continue;
-    let batch; try { batch = JSON.parse(val); } catch (_) { continue; }
-    for (const fid of Object.keys(batch)) if (FILE_RE.test(fid)) S(shardPrefix(fid)).upserts[fid] = batch[fid];
+    if (!val) { admuKeys.push(kn); continue; }
+    let batch; try { batch = JSON.parse(val); } catch (_) { admuKeys.push(kn); continue; }
+    const fids = Object.keys(batch).filter((fid) => FILE_RE.test(fid));
+    if (!reserve(fids)) break;   // over budget → defer to next flush
+    admuKeys.push(kn);
+    for (const fid of fids) S(shardPrefix(fid)).upserts[fid] = batch[fid];
   }
   const admrKeys = [];
   for (const kn of admrNames) {
-    admrKeys.push(kn);
     const val = await env.AVATAR_KV.get(kn);
-    if (!val) continue;
-    let arr; try { arr = JSON.parse(val); } catch (_) { continue; }
-    for (const fid of arr) if (typeof fid === "string" && fid.startsWith("file_")) S(shardPrefix(fid)).removes.add(fid);
+    if (!val) { admrKeys.push(kn); continue; }
+    let arr; try { arr = JSON.parse(val); } catch (_) { admrKeys.push(kn); continue; }
+    const fids = arr.filter((f) => typeof f === "string" && f.startsWith("file_"));
+    if (!reserve(fids)) break;   // over budget → defer to next flush
+    admrKeys.push(kn);
+    for (const fid of fids) S(shardPrefix(fid)).removes.add(fid);
   }
   const admkKeys = [];
   for (const kn of admkNames) {
-    admkKeys.push(kn);
     const val = await env.AVATAR_KV.get(kn);
-    if (!val) continue;
-    let arr; try { arr = JSON.parse(val); } catch (_) { continue; }
-    for (const fid of arr) if (typeof fid === "string" && fid.startsWith("file_")) S(shardPrefix(fid)).checked.add(fid);
+    if (!val) { admkKeys.push(kn); continue; }
+    let arr; try { arr = JSON.parse(val); } catch (_) { admkKeys.push(kn); continue; }
+    const fids = arr.filter((f) => typeof f === "string" && f.startsWith("file_"));
+    if (!reserve(fids)) break;   // over budget → defer to next flush
+    admkKeys.push(kn);
+    for (const fid of fids) S(shardPrefix(fid)).checked.add(fid);
   }
   // Reports: rename immediately, remove on quorum; both clear their rep: key.
   const repClear = [];
@@ -652,6 +667,10 @@ async function flushR2(env) {
     const val = await env.AVATAR_KV.get(kn);
     if (!val) continue;
     let r; try { r = JSON.parse(val); } catch (_) { continue; }
+    // A rename/remove touches this fid's shard — respect the same per-flush budget; defer if over.
+    if ((r.status === "renamed" && r.name) || (r.status === "dead" && (r.count || 0) >= REMOVE_QUORUM)) {
+      if (!reserve([fid])) break;
+    }
     if (r.status === "renamed" && r.name) { S(shardPrefix(fid)).renames[fid] = String(r.name).slice(0, 100); repClear.push(kn); }
     else if (r.status === "dead" && (r.count || 0) >= REMOVE_QUORUM) { S(shardPrefix(fid)).removes.add(fid); repClear.push(kn); }
   }
