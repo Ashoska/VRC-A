@@ -1535,7 +1535,11 @@ object VrchatAuthManager {
                 return@withContext WornAvatarResult(null)
             }
             com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog"
-            return@withContext WornAvatarResult(it.avatarId, it.platforms)
+            // Platforms drive the PC-only-on-Quest clone gate. An UNFILLED catalog entry has none,
+            // which would let a PC-only avatar clone on Quest and render as the robot — so fetch them
+            // once when missing (one GET, only for unfilled entries).
+            val plats = it.platforms.ifEmpty { fetchAvatarPlatforms(context, it.avatarId) }
+            return@withContext WornAvatarResult(it.avatarId, plats)
         }
         // SHARDED catalog (R2) — one edge-cached shard GET keyed by the worn file id, so it
         // catches avatars newer than this device's ~30-min whole-file map. Image-file-id-keyed
@@ -1558,7 +1562,10 @@ object VrchatAuthManager {
                         return@withContext WornAvatarResult(null)
                     }
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog (shard)"
-                    return@withContext WornAvatarResult(e.avatarId, e.platforms)
+                    // Fetch platforms when the entry is unfilled so the PC-only-on-Quest gate works
+                    // (else a PC-only avatar clones on Quest and renders as the robot).
+                    val plats = e.platforms.ifEmpty { fetchAvatarPlatforms(context, e.avatarId) }
+                    return@withContext WornAvatarResult(e.avatarId, plats)
                 }
                 com.vrca.vrchat.AvatarGlobalDb.ShardStatus.UNAVAILABLE -> {
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason = "catalog read unavailable — will retry"
