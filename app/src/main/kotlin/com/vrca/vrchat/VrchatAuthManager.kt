@@ -1405,8 +1405,10 @@ object VrchatAuthManager {
                 for (i in 0 until arr.length()) {
                     val a = arr.optJSONObject(i) ?: continue
                     if (a.optString("authorId", "") == authorId) ownerMatches++
-                    val thumb = a.optString("thumbnailImageUrl", "").ifBlank { a.optString("imageUrl", "") }
-                    if (fileMatch == null && fileIdOf(thumb) == wornFileId) {
+                    // Match the worn id against BOTH of the avatar's file ids (thumbnail AND main
+                    // image) — the worn id can be either, so checking only one drops real matches.
+                    val ids = setOfNotNull(fileIdOf(a.optString("thumbnailImageUrl", "")), fileIdOf(a.optString("imageUrl", "")))
+                    if (fileMatch == null && wornFileId in ids) {
                         val id = a.optString("id", "")
                         if (id.startsWith("avtr_")) { fileMatch = id; fileMatchPlatforms = platformsFromAvatarJson(a) }
                     }
@@ -1444,10 +1446,14 @@ object VrchatAuthManager {
         return out.toList()
     }
 
-    /** `(thumbFileId, platforms)` for a public avatar via `GET /avatars/{id}`, or null
-     *  on 404/403/error. Used to CONFIRM a name candidate by its image file id AND to
-     *  read the avatar's platform compatibility for the Quest clone gate. */
-    private suspend fun fetchAvatarInfo(context: Context, avatarId: String): Pair<String?, List<String>>? =
+    /** `(fileIds, platforms)` for a public avatar via `GET /avatars/{id}`, or null on
+     *  404/403/error. [fileIds] is the set of ALL of the avatar's image file ids — BOTH
+     *  `thumbnailImageUrl` AND `imageUrl` — because a stranger's WORN id
+     *  (`currentAvatarThumbnailImageUrl`) can be either one (an avatar's thumbnail and
+     *  main image can be DIFFERENT files), so a CONFIRM must accept a match on either or
+     *  the real avatar gets dropped ("misses stuff"). Used to confirm a candidate by the
+     *  worn image file id AND to read platform compatibility for the Quest clone gate. */
+    private suspend fun fetchAvatarInfo(context: Context, avatarId: String): Pair<Set<String>, List<String>>? =
         withContext(Dispatchers.IO) {
             val cookie = getCookieHeader(context) ?: return@withContext null
             try {
@@ -1455,8 +1461,11 @@ object VrchatAuthManager {
                 if (code == 200) captureRolledCookies(context, raw)
                 if (code != 200 || !body.startsWith("{")) return@withContext null
                 val j = org.json.JSONObject(body)
-                fileIdOf(j.optString("thumbnailImageUrl", "").ifBlank { j.optString("imageUrl", "") }) to
-                    platformsFromAvatarJson(j)
+                val ids = setOfNotNull(
+                    fileIdOf(j.optString("thumbnailImageUrl", "")),
+                    fileIdOf(j.optString("imageUrl", "")),
+                )
+                ids to platformsFromAvatarJson(j)
             } catch (e: Exception) { null }
         }
 
@@ -1538,7 +1547,7 @@ object VrchatAuthManager {
                 // still-public avatar whose CURRENT live thumbnail equals the worn file id; otherwise
                 // fall through (don't offer / don't pollute the catalog with a private avatar).
                 val info = fetchAvatarInfo(context, cand.id)
-                if (info != null && info.first == wornFileId) {
+                if (info != null && wornFileId in info.first) {
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via image file id"
                     com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, cand.id, avatarName, author, cand.authorId, info.second)
                     return@withContext WornAvatarResult(cand.id, info.second)
@@ -1585,7 +1594,7 @@ object VrchatAuthManager {
                 // but the avatar may be PRIVATE/gone now → reject (would robot). Accept only a public
                 // avatar whose live thumbnail still equals the worn file id.
                 val info = fetchAvatarInfo(context, cand.id)
-                if (info != null && info.first == wornFileId) {
+                if (info != null && wornFileId in info.first) {
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name->fileid"
                     com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, cand.id, avatarName, author, cand.authorId, info.second)
                     return@withContext WornAvatarResult(cand.id, info.second)
@@ -1598,7 +1607,7 @@ object VrchatAuthManager {
                 .take(6)
             for (c in ranked) {
                 val info = fetchAvatarInfo(context, c.id)
-                if (info != null && info.first == wornFileId) {
+                if (info != null && wornFileId in info.first) {
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name confirm"
                     com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, c.id, avatarName, c.author, c.authorId, info.second)
                     return@withContext WornAvatarResult(c.id, info.second)
