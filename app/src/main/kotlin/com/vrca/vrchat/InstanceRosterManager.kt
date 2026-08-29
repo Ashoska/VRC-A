@@ -233,6 +233,11 @@ object InstanceRosterManager {
     // Retry count per "uid|avatarName" for an UNCONFIRMED resolve, so a transient miss (rate-limited
     // worn-thumb fetch / Cloudflare shard read) is retried instead of pinned broken until they switch.
     private val avatarResolveTries = ConcurrentHashMap<String, Int>()
+    // "uid|avatarName" -> when we FIRST saw this member on the VRChat fallback (Robot) thumbnail.
+    // Their real avatar is still loading/processing server-side, so we KEEP re-resolving (spinner,
+    // never a final grey) until the real image id lands or LOADING_RESOLVE_WINDOW_MS elapses — so a
+    // member who only briefly shows the Robot is never permanently missed.
+    private val avatarLoadingSince = ConcurrentHashMap<String, Long>()
     private val resolvingAvatars = java.util.concurrent.atomic.AtomicBoolean(false)
     /** True while the roster is actively resolving members' clone ids — that pass hits the
      *  SAME avtrdb/VRCX mirrors the catalog seed search does, so the seed search yields to it
@@ -241,6 +246,8 @@ object InstanceRosterManager {
     fun isResolvingRoster(): Boolean = resolvingAvatars.get()
     private const val RESOLVE_PACE_MS = 1_000L
     private const val MAX_RESOLVE_TRIES = 5   // retry a transient miss this many times before greying
+    private const val LOADING_RESOLVE_WINDOW_MS = 5 * 60_000L   // keep re-resolving a Robot-showing member for up to 5 min
+    private const val LOADING_RERESOLVE_INTERVAL_MS = 15_000L   // ...re-checking every 15s (their real avatar may load anytime)
     private val enrichAttempts = ConcurrentHashMap<String, Int>()
     // Per-user platform (/users/{id} -> last_platform) is the ONLY source for a
     // NON-friend (friends come free in the bulk friends list). VRChat hard
@@ -282,6 +289,35 @@ object InstanceRosterManager {
         val app = context.applicationContext
         scope.launch { runLoop(app) }
         startPfpRefreshLoop(app)
+        startAvatarLoadingRetryLoop(app)
+    }
+
+    /** Re-resolve members who are still showing the VRChat FALLBACK (Robot) — their real avatar is
+     *  loading/processing. Runs every [LOADING_RERESOLVE_INTERVAL_MS] independently of log activity
+     *  (their avatar can finish loading during a quiet moment), so the clone button lights up the
+     *  instant their real image id lands. Bounded: `resolveAvatars` itself gives up after the
+     *  [LOADING_RESOLVE_WINDOW_MS] window, so a genuinely-stuck fallback can't spin forever. */
+    private fun startAvatarLoadingRetryLoop(context: Context) {
+        scope.launch {
+            while (scope.isActive) {
+                delay(LOADING_RERESOLVE_INTERVAL_MS)
+                if (_flow.value.status != Status.LIVE || avatarLoadingSince.isEmpty()) continue
+                // Re-resolve the still-loading members from the last roster snapshot (single-flight).
+                val retry = lastEntries.filter { e ->
+                    val uid = e.userId ?: return@filter false
+                    val name = e.avatarName ?: ""
+                    avatarLoadingSince.containsKey("$uid|$name") &&
+                        avatarIdResolvedFor[uid] != name &&
+                        avatarResolveInFlight.add(uid)
+                }
+                if (retry.isEmpty()) continue
+                if (resolvingAvatars.compareAndSet(false, true)) {
+                    try { resolveAvatars(context, retry) } finally { resolvingAvatars.set(false) }
+                } else {
+                    retry.forEach { it.userId?.let { u -> avatarResolveInFlight.remove(u) } }
+                }
+            }
+        }
     }
 
     // ---- access: All-files (File) + SAF (folder grant) -----------------------
@@ -479,7 +515,7 @@ object InstanceRosterManager {
                     )
                 }
                 stopObserver()
-                platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarPlatformsCache.clear(); avatarResolveInFlight.clear(); avatarResolveTries.clear(); com.vrca.vrchat.AvatarGlobalDb.evictShardCache(); com.vrca.vrchat.AvatarGlobalDb.evictShardCache()
+                platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarPlatformsCache.clear(); avatarResolveInFlight.clear(); avatarResolveTries.clear(); avatarLoadingSince.clear(); com.vrca.vrchat.AvatarGlobalDb.evictShardCache(); com.vrca.vrchat.AvatarGlobalDb.evictShardCache()
                 _flow.value = RosterUi(status = Status.IDLE)
                 currentId = null; offset = 0L; state = VrcLogParser.InstanceState()
                 delay(POLL_MS); continue
@@ -647,7 +683,7 @@ object InstanceRosterManager {
                     confirmedClosed = confirmedClosed
                 )
             }
-            platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarPlatformsCache.clear(); avatarResolveInFlight.clear(); avatarResolveTries.clear(); com.vrca.vrchat.AvatarGlobalDb.evictShardCache()
+            platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarPlatformsCache.clear(); avatarResolveInFlight.clear(); avatarResolveTries.clear(); avatarLoadingSince.clear(); com.vrca.vrchat.AvatarGlobalDb.evictShardCache()
             _flow.value = RosterUi(status = Status.IDLE, worldName = null, location = null, members = emptyList(), logPath = logPath)
             return
         }
@@ -674,7 +710,7 @@ object InstanceRosterManager {
         // in memory across a session (the reader writes NOTHING per-user to disk;
         // this just keeps RAM bounded to the current instance).
         if (!inWorld) {
-            platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarPlatformsCache.clear(); avatarResolveInFlight.clear(); avatarResolveTries.clear(); com.vrca.vrchat.AvatarGlobalDb.evictShardCache()
+            platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarPlatformsCache.clear(); avatarResolveInFlight.clear(); avatarResolveTries.clear(); avatarLoadingSince.clear(); com.vrca.vrchat.AvatarGlobalDb.evictShardCache()
             _flow.value = RosterUi(
                 status = Status.IDLE, worldName = state.worldName,
                 location = state.location, members = emptyList(), logPath = logPath
@@ -881,6 +917,19 @@ object InstanceRosterManager {
                 avatarIdCache[uid] = id
                 avatarIdResolvedFor[uid] = name
                 avatarResolveTries.remove(tryKey)
+                avatarLoadingSince.remove(tryKey)
+            } else if (res.loading) {
+                // Their worn thumbnail is the VRChat FALLBACK (Robot) → their real avatar is still
+                // loading/processing. Keep it a SPINNER (never a final grey) and keep re-resolving —
+                // the moment their real avatar's image id lands, the next pass resolves + enables the
+                // clone. Give up (grey) only after the window, so a genuinely-stuck fallback can't
+                // spin forever. Does NOT count against the transient MAX_RESOLVE_TRIES.
+                val since = avatarLoadingSince.getOrPut(tryKey) { System.currentTimeMillis() }
+                if (System.currentTimeMillis() - since >= LOADING_RESOLVE_WINDOW_MS) {
+                    avatarIdCache[uid] = ""; avatarIdResolvedFor[uid] = name
+                    avatarLoadingSince.remove(tryKey); avatarResolveTries.remove(tryKey)
+                }
+                // else: leave resolvedFor unset → re-resolved by the loading loop / next publish (spinner).
             } else {
                 val tries = (avatarResolveTries[tryKey] ?: 0) + 1
                 avatarResolveTries[tryKey] = tries
@@ -893,7 +942,9 @@ object InstanceRosterManager {
             }
             _flow.value.let { cur ->
                 if (cur.members.any { it.userId == uid && it.avatarName == name }) {
-                    val shown = if (res.avatarId != null || avatarResolveTries[tryKey] == null) id else null
+                    // Resolved/greyed-final → show the cached value ("" greys the button); otherwise
+                    // (transient miss OR still-loading) show null = spinner, so it keeps trying.
+                    val shown = if (avatarIdResolvedFor[uid] == name) avatarIdCache[uid] else null
                     _flow.value = cur.copy(
                         members = cur.members.map { m ->
                             if (m.userId == uid && m.avatarName == name) m.copy(avatarId = shown) else m

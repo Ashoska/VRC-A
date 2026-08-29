@@ -1476,7 +1476,13 @@ object VrchatAuthManager {
     /** The result of a worn-avatar resolve: the `avtr_` id (or null when nothing
      *  could be confirmed) plus the avatar's platform compatibility (for the Quest
      *  clone gate — empty when unknown). */
-    data class WornAvatarResult(val avatarId: String?, val platforms: List<String> = emptyList())
+    // [loading] = the reason for a null avatarId is that the player's worn thumbnail is a VRChat
+    // FALLBACK (the Robot) — i.e. their real avatar is still loading/processing server-side (or is
+    // temporarily hidden). This is TRANSIENT: their real avatar's image id will appear shortly, so
+    // the roster must KEEP re-resolving (not cache a final grey) and light the clone button up the
+    // moment the real thumbnail lands. A null avatarId with loading=false is a genuine no-match
+    // (a real avatar in no database) and is final until they switch avatars.
+    data class WornAvatarResult(val avatarId: String?, val platforms: List<String> = emptyList(), val loading: Boolean = false)
 
     /**
      * Resolve a remote player's EXACT worn avatar id. Quest can't get it from the
@@ -1510,8 +1516,8 @@ object VrchatAuthManager {
         // Without this, a loading player resolves to the Robot (which the harvest had put in the
         // catalog) and the clone turns the user into the Robot.
         if (com.vrca.vrchat.AvatarGlobalDb.isSystemFileId(wornFileId)) {
-            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "avatar still loading (VRChat fallback) — not cloneable"
-            return@withContext WornAvatarResult(null)
+            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "avatar still loading (VRChat fallback) — retrying"
+            return@withContext WornAvatarResult(null, loading = true)
         }
         // GLOBAL crowdsourced catalog first — exact, offline, zero network.
         com.vrca.vrchat.AvatarGlobalDb.lookup(wornFileId)?.let {
