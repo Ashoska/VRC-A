@@ -1516,6 +1516,15 @@ object VrchatAuthManager {
         // Without this, a loading player resolves to the Robot (which the harvest had put in the
         // catalog) and the clone turns the user into the Robot.
         if (com.vrca.vrchat.AvatarGlobalDb.isSystemFileId(wornFileId)) {
+            // The worn image is the fallback, so we can't image-confirm — BUT the log has their REAL
+            // avatar name + author. Resolve by a UNIQUE name+author match (the author locks it to the
+            // same avatar; a unique match is a lookup, not a guess). This clones a loading/hidden
+            // avatar (PROJECT NOBLE SPARTAN etc.) instead of greying or robot-ing it.
+            resolveByNameAndAuthor(context, avatarName, author)?.let {
+                com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name+author (worn image is fallback)"
+                return@withContext it
+            }
+            // No unique name+author match → keep retrying (their real image may still land).
             com.vrca.vrchat.AvatarSearch.Diag.lastReason = "avatar still loading (VRChat fallback) — retrying"
             return@withContext WornAvatarResult(null, loading = true)
         }
@@ -1526,7 +1535,11 @@ object VrchatAuthManager {
                 return@withContext WornAvatarResult(null)
             }
             com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog"
-            return@withContext WornAvatarResult(it.avatarId, it.platforms)
+            // Platforms drive the PC-only-on-Quest clone gate. An UNFILLED catalog entry has none,
+            // which would let a PC-only avatar clone on Quest and render as the robot — so fetch them
+            // once when missing (one GET, only for unfilled entries).
+            val plats = it.platforms.ifEmpty { fetchAvatarPlatforms(context, it.avatarId) }
+            return@withContext WornAvatarResult(it.avatarId, plats)
         }
         // SHARDED catalog (R2) — one edge-cached shard GET keyed by the worn file id, so it
         // catches avatars newer than this device's ~30-min whole-file map. Image-file-id-keyed
@@ -1549,7 +1562,10 @@ object VrchatAuthManager {
                         return@withContext WornAvatarResult(null)
                     }
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog (shard)"
-                    return@withContext WornAvatarResult(e.avatarId, e.platforms)
+                    // Fetch platforms when the entry is unfilled so the PC-only-on-Quest gate works
+                    // (else a PC-only avatar clones on Quest and renders as the robot).
+                    val plats = e.platforms.ifEmpty { fetchAvatarPlatforms(context, e.avatarId) }
+                    return@withContext WornAvatarResult(e.avatarId, plats)
                 }
                 com.vrca.vrchat.AvatarGlobalDb.ShardStatus.UNAVAILABLE -> {
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason = "catalog read unavailable — will retry"
@@ -1654,6 +1670,40 @@ object VrchatAuthManager {
             "${candidates.size} candidates but no worn image to confirm (won't name-guess — greyed)"
         WornAvatarResult(null)
     }
+
+    /**
+     * Resolve a worn avatar by the LOG's name + author when the worn IMAGE can't confirm it (the
+     * player is on the VRChat fallback / loading). The author LOCKS it to the same avatar, and we
+     * only accept a UNIQUE match — so it's a lookup, not a name guess. Searches our catalog + avtrdb
+     * by name variants, keeps candidates whose author matches, and returns the id ONLY when exactly
+     * one distinct avatar remains. Never returns a VRChat fallback/system avatar. Null on 0/ambiguous.
+     */
+    private suspend fun resolveByNameAndAuthor(context: Context, avatarName: String, author: String): WornAvatarResult? =
+        withContext(Dispatchers.IO) {
+            val authorNorm = author.trim().lowercase()
+            // No author to lock it → refuse (a name alone is not reliable, per the "guarantee by
+            // author" rule). Also skip the fallback name itself.
+            if (avatarName.isBlank() || authorNorm.isBlank() || avatarName.trim().equals("Robot", true)) return@withContext null
+            val merged = LinkedHashMap<String, com.vrca.vrchat.AvatarSearch.Candidate>()
+            for (v in avatarNameVariants(avatarName)) {
+                val found = try { com.vrca.vrchat.AvatarSearch.searchCandidates(v) } catch (e: Exception) { emptyList() }
+                for (c in found) merged.putIfAbsent(c.id, c)
+            }
+            // Keep only candidates whose AUTHOR matches the log author (the guarantee), excluding any
+            // VRChat fallback/system avatar. Dedup by avatar id.
+            val matches = merged.values.filter {
+                it.author.trim().lowercase() == authorNorm &&
+                    !com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(it.author, it.id, null)
+            }.distinctBy { it.id }
+            if (matches.size != 1) return@withContext null   // 0 or ambiguous (e.g. v1/v2) → don't guess
+            val c = matches[0]
+            val plats = fetchAvatarPlatforms(context, c.id)
+            // Contribute the pairing if the candidate carries a real VRChat image file id (VRCX
+            // mirrors do; avtrdb proxies don't), so the catalog grows from these too.
+            if (c.imageFileId != null)
+                com.vrca.vrchat.AvatarGlobalDb.contribute(context, c.imageFileId!!, c.id, avatarName, author, c.authorId, plats)
+            WornAvatarResult(c.id, plats)
+        }
 
     private fun normalizeAvatarName(s: String): String =
         s.lowercase().replace(Regex("[^a-z0-9]"), "")
