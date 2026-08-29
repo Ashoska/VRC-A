@@ -455,17 +455,33 @@ object AvatarGlobalDb {
      *  Returns null when R2 isn't the live backend yet, on a miss, or on any error — so the
      *  caller falls through to its existing paths. Image-file-id-keyed, so a hit is exact
      *  (satisfies the "only an image-confirmed match" resolver invariant by construction). */
-    suspend fun lookupSharded(context: Context, fileId: String?): Entry? {
-        if (fileId == null || !FILE_RE.matches(fileId)) return null
-        map[fileId]?.let { return it }                    // own/whole-map (instant)
+    suspend fun lookupSharded(context: Context, fileId: String?): Entry? = lookupShardedResult(context, fileId).entry
+
+    /** HIT = found in the catalog; MISS = the catalog was READ and genuinely doesn't have it;
+     *  UNAVAILABLE = the shard read FAILED (rate-limited/timeout under roster load) so membership
+     *  is UNKNOWN. The distinction matters for the resolver: on UNAVAILABLE it must RETRY the
+     *  catalog, never fall through to the mirror/author paths (which can return a DIFFERENT avatar
+     *  that merely shares this worn image file id → cached wrong id → the intermittent "in-DB
+     *  avatar clones as the robot" bug). Pre-cutover (r2 not live) is MISS so behaviour is unchanged. */
+    enum class ShardStatus { HIT, MISS, UNAVAILABLE }
+    data class ShardLookup(val status: ShardStatus, val entry: Entry?)
+
+    suspend fun lookupShardedResult(context: Context, fileId: String?): ShardLookup {
+        if (fileId == null || !FILE_RE.matches(fileId)) return ShardLookup(ShardStatus.MISS, null)
+        map[fileId]?.let { return ShardLookup(ShardStatus.HIT, it) }   // own/whole-map (instant)
         ensureCatalogBase(context)
-        if (!r2Serving) return null                       // dormant pre-cutover
-        val base = catalogBase ?: return null
+        if (!r2Serving) return ShardLookup(ShardStatus.MISS, null)     // dormant pre-cutover → fall through as before
+        val base = catalogBase ?: return ShardLookup(ShardStatus.MISS, null)
         val prefix = fileId.substring(5, 8).lowercase()
-        synchronized(shardLru) { shardLru[prefix] }?.let { return it[fileId] }
-        val shard = fetchShardSingleFlight(base, prefix) ?: return null
+        synchronized(shardLru) { shardLru[prefix] }?.let {
+            val e = it[fileId]; return ShardLookup(if (e != null) ShardStatus.HIT else ShardStatus.MISS, e)
+        }
+        // null here = TRANSIENT read failure (fetchShard returns emptyMap() for a real 404, so an
+        // empty prefix is a definitive MISS, not UNAVAILABLE). Never cache/LRU a transient failure.
+        val shard = fetchShardSingleFlight(base, prefix) ?: return ShardLookup(ShardStatus.UNAVAILABLE, null)
         synchronized(shardLru) { shardLru[prefix] = shard }
-        return shard[fileId]
+        val e = shard[fileId]
+        return ShardLookup(if (e != null) ShardStatus.HIT else ShardStatus.MISS, e)
     }
 
     /** Resolve MANY worn file ids in ONE batch (cloning) — groups by shard prefix and fetches
@@ -587,6 +603,10 @@ object AvatarGlobalDb {
     // re-resolve/re-contribute an id we just added. Bounded (cleared if it grows very large —
     // mainly the admin crawler); session-scoped, resets on process restart.
     private val sessionContributed = ConcurrentHashMap.newKeySet<String>()
+    // Same idea keyed by FILE id — so a fileId we've already queued/confirmed-in-catalog this
+    // session is never re-queued (covers repeated harvest/search/resolve of the same avatar
+    // within a run). Bounded; session-scoped.
+    private val sessionContributedFiles = ConcurrentHashMap.newKeySet<String>()
 
     /** EXACT membership: is this avatar already in the DB? Reads the avtr-id presence index
      *  (`avtr/<prefix>.json`) — no false positives, no missed contributions. Cheap: one
@@ -797,16 +817,35 @@ object AvatarGlobalDb {
         return try { deferred.await() } finally { shardFetches.remove(prefix, deferred) }
     }
 
-    private fun fetchShard(base: String, prefix: String): Map<String, Entry>? {
-        var conn: HttpURLConnection? = null
-        return try {
-            conn = (URL("$base/shard/$prefix.json").openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
-                connectTimeout = 10_000; readTimeout = 10_000
-            }
-            if (conn.responseCode != 200) return null      // 404 = empty prefix; treat as miss
-            parseShard(conn.inputStream.bufferedReader().readText())
-        } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
+    // Make the image-id -> avatar lookup SELF-HEALING so a hiccup can't become a wrong clone: a
+    // transient shard read (429/5xx/timeout) RETRIES a few times with a short backoff before giving
+    // up. This costs nothing on the common success path, and nothing extra per session — the result
+    // is LRU-cached per prefix (fetchShardSingleFlight also coalesces concurrent fetches), so a whole
+    // instance costs ONE fetch per DISTINCT file-id prefix present, then every same-prefix member is
+    // an instant in-memory HIT/MISS. Only a genuine 404 (empty prefix) or exhausted retries returns
+    // early. So it's faster (fewer calls) AND more reliable, not more expensive.
+    private const val SHARD_FETCH_TRIES = 3
+    private const val SHARD_RETRY_BACKOFF_MS = 300L
+    private suspend fun fetchShard(base: String, prefix: String): Map<String, Entry>? {
+        var attempt = 0
+        while (true) {
+            var conn: HttpURLConnection? = null
+            val transient: Boolean = try {
+                conn = (URL("$base/shard/$prefix.json").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                    connectTimeout = 10_000; readTimeout = 10_000
+                }
+                when (conn.responseCode) {
+                    200 -> return parseShard(conn.inputStream.bufferedReader().readText())  // definitive success
+                    404 -> return emptyMap()   // DEFINITIVE: no shard file for this prefix = genuinely no such avatar
+                    else -> true               // TRANSIENT (429/5xx/redirect) — retry below
+                }
+            } catch (e: Exception) { true } finally { runCatching { conn?.disconnect() } }
+            if (!transient) return null
+            attempt++
+            if (attempt >= SHARD_FETCH_TRIES) return null   // exhausted → caller treats as UNAVAILABLE (retries next pass)
+            kotlinx.coroutines.delay(SHARD_RETRY_BACKOFF_MS * attempt)   // 300ms, 600ms
+        }
     }
 
     private fun parseShard(text: String): Map<String, Entry> {
@@ -904,6 +943,20 @@ object AvatarGlobalDb {
         }
         val app = context.applicationContext
         scope.launch {
+            // Already contributed/confirmed this session? Never re-queue the same file id.
+            if (sessionContributedFiles.size > 40_000) sessionContributedFiles.clear()
+            if (!sessionContributedFiles.add(fileId)) return@launch
+            // AUTHORITATIVE catalog membership: the always-fresh clone shard (fileId-keyed, updated
+            // every flush with NO cap). If it's already there, it's in the catalog → don't re-POST.
+            // This is the single dedup chokepoint for EVERY contribute caller (harvest/search/clone/
+            // resolve): the harvest callers' own filterKnownSharded reads the `avtr/` presence index,
+            // which the Worker maintains with a per-flush cap + carry-forward queue, so it LAGS the
+            // clone shard by several flushes — an avatar reads "in catalog" for cloning yet "unknown"
+            // for that dedup, so the same known avatars were re-sent every session (the "known avatars
+            // show up in the contribution batches / duplicates across batches" bug). The clone shard
+            // has no such lag, so dedup against IT here covers all callers uniformly. A genuine MISS/
+            // UNAVAILABLE (not-in-catalog or a transient read) still queues — nothing new is dropped.
+            if (lookupShardedResult(app, fileId).status == ShardStatus.HIT) return@launch
             queueMutex.withLock {
                 val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 val arr = JSONArray(prefs.getString(KEY_QUEUE, "[]"))

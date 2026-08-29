@@ -1405,8 +1405,10 @@ object VrchatAuthManager {
                 for (i in 0 until arr.length()) {
                     val a = arr.optJSONObject(i) ?: continue
                     if (a.optString("authorId", "") == authorId) ownerMatches++
-                    val thumb = a.optString("thumbnailImageUrl", "").ifBlank { a.optString("imageUrl", "") }
-                    if (fileMatch == null && fileIdOf(thumb) == wornFileId) {
+                    // Match the worn id against BOTH of the avatar's file ids (thumbnail AND main
+                    // image) — the worn id can be either, so checking only one drops real matches.
+                    val ids = setOfNotNull(fileIdOf(a.optString("thumbnailImageUrl", "")), fileIdOf(a.optString("imageUrl", "")))
+                    if (fileMatch == null && wornFileId in ids) {
                         val id = a.optString("id", "")
                         if (id.startsWith("avtr_")) { fileMatch = id; fileMatchPlatforms = platformsFromAvatarJson(a) }
                     }
@@ -1444,10 +1446,14 @@ object VrchatAuthManager {
         return out.toList()
     }
 
-    /** `(thumbFileId, platforms)` for a public avatar via `GET /avatars/{id}`, or null
-     *  on 404/403/error. Used to CONFIRM a name candidate by its image file id AND to
-     *  read the avatar's platform compatibility for the Quest clone gate. */
-    private suspend fun fetchAvatarInfo(context: Context, avatarId: String): Pair<String?, List<String>>? =
+    /** `(fileIds, platforms)` for a public avatar via `GET /avatars/{id}`, or null on
+     *  404/403/error. [fileIds] is the set of ALL of the avatar's image file ids — BOTH
+     *  `thumbnailImageUrl` AND `imageUrl` — because a stranger's WORN id
+     *  (`currentAvatarThumbnailImageUrl`) can be either one (an avatar's thumbnail and
+     *  main image can be DIFFERENT files), so a CONFIRM must accept a match on either or
+     *  the real avatar gets dropped ("misses stuff"). Used to confirm a candidate by the
+     *  worn image file id AND to read platform compatibility for the Quest clone gate. */
+    private suspend fun fetchAvatarInfo(context: Context, avatarId: String): Pair<Set<String>, List<String>>? =
         withContext(Dispatchers.IO) {
             val cookie = getCookieHeader(context) ?: return@withContext null
             try {
@@ -1455,8 +1461,11 @@ object VrchatAuthManager {
                 if (code == 200) captureRolledCookies(context, raw)
                 if (code != 200 || !body.startsWith("{")) return@withContext null
                 val j = org.json.JSONObject(body)
-                fileIdOf(j.optString("thumbnailImageUrl", "").ifBlank { j.optString("imageUrl", "") }) to
-                    platformsFromAvatarJson(j)
+                val ids = setOfNotNull(
+                    fileIdOf(j.optString("thumbnailImageUrl", "")),
+                    fileIdOf(j.optString("imageUrl", "")),
+                )
+                ids to platformsFromAvatarJson(j)
             } catch (e: Exception) { null }
         }
 
@@ -1503,19 +1512,46 @@ object VrchatAuthManager {
         // SHARDED catalog (R2) — one edge-cached shard GET keyed by the worn file id, so it
         // catches avatars newer than this device's ~30-min whole-file map. Image-file-id-keyed
         // (exact). Dormant until R2 is the live backend, so pre-cutover this is a no-op.
-        com.vrca.vrchat.AvatarGlobalDb.lookupSharded(context, wornFileId)?.let {
-            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog (shard)"
-            return@withContext WornAvatarResult(it.avatarId, it.platforms)
+        //
+        // Our catalog is image-VERIFIED, so it is AUTHORITATIVE. Distinguish a genuine miss from a
+        // TRANSIENT read failure (rate-limited/timeout under roster load): on a transient failure DO
+        // NOT fall through to the mirror/author paths below — those match by the same worn image file
+        // id but can return a DIFFERENT avatar that merely shares that image, and that wrong id then
+        // gets CACHED and clones as VRChat's default robot. That silent fall-through is the
+        // intermittent "in-DB avatar → robot" bug (it works whenever the shard read happens to
+        // succeed). On UNAVAILABLE, return unresolved so the roster RETRIES the catalog next pass.
+        run {
+            val shardRes = com.vrca.vrchat.AvatarGlobalDb.lookupShardedResult(context, wornFileId)
+            when (shardRes.status) {
+                com.vrca.vrchat.AvatarGlobalDb.ShardStatus.HIT -> {
+                    val e = shardRes.entry!!
+                    com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog (shard)"
+                    return@withContext WornAvatarResult(e.avatarId, e.platforms)
+                }
+                com.vrca.vrchat.AvatarGlobalDb.ShardStatus.UNAVAILABLE -> {
+                    com.vrca.vrchat.AvatarSearch.Diag.lastReason = "catalog read unavailable — will retry"
+                    return@withContext WornAvatarResult(null)
+                }
+                com.vrca.vrchat.AvatarGlobalDb.ShardStatus.MISS -> { /* genuinely not in our catalog → fall through */ }
+            }
         }
         // 0. EXACT, NAME-INDEPENDENT: look the avatar up by its worn IMAGE FILE ID.
         if (wornFileId != null) {
             val byFile = try { com.vrca.vrchat.AvatarSearch.searchCandidatesByImageFileId(wornFileId) }
                 catch (e: Exception) { emptyList() }
-            byFile.firstOrNull { it.imageFileId == wornFileId }?.let {
-                val plats = fetchAvatarPlatforms(context, it.id)
-                com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via image file id"
-                com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, it.id, avatarName, author, it.authorId, plats)
-                return@withContext WornAvatarResult(it.id, plats)
+            byFile.firstOrNull { it.imageFileId == wornFileId }?.let { cand ->
+                // CONFIRM against VRChat directly (this GET /avatars/{id} already happened here as
+                // fetchAvatarPlatforms, so it's FREE): the mirror still LISTS a file id after the
+                // avatar went PRIVATE (403) or was deleted (404) — selecting it gives the robot — and
+                // a mirror mapping can be stale. fetchAvatarInfo is null on 403/404, so accept ONLY a
+                // still-public avatar whose CURRENT live thumbnail equals the worn file id; otherwise
+                // fall through (don't offer / don't pollute the catalog with a private avatar).
+                val info = fetchAvatarInfo(context, cand.id)
+                if (info != null && wornFileId in info.first) {
+                    com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via image file id"
+                    com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, cand.id, avatarName, author, cand.authorId, info.second)
+                    return@withContext WornAvatarResult(cand.id, info.second)
+                }
             }
             // 0b. OFFICIAL: the author's public-avatars listing, matched by the worn
             //     image file id (also yields the avatar's platforms). Exact.
@@ -1553,11 +1589,16 @@ object VrchatAuthManager {
         if (wornFileId != null) {
             // 2. DIRECT match — a DB already gave VRChat's raw image file id and it
             //    equals the worn one. Exact, no extra VRChat call.
-            candidates.firstOrNull { it.imageFileId == wornFileId }?.let {
-                val plats = fetchAvatarPlatforms(context, it.id)
-                com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name->fileid"
-                com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, it.id, avatarName, author, it.authorId, plats)
-                return@withContext WornAvatarResult(it.id, plats)
+            candidates.firstOrNull { it.imageFileId == wornFileId }?.let { cand ->
+                // Same free confirmation as path 0: the DB gave a raw image url claiming this file id,
+                // but the avatar may be PRIVATE/gone now → reject (would robot). Accept only a public
+                // avatar whose live thumbnail still equals the worn file id.
+                val info = fetchAvatarInfo(context, cand.id)
+                if (info != null && wornFileId in info.first) {
+                    com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name->fileid"
+                    com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, cand.id, avatarName, author, cand.authorId, info.second)
+                    return@withContext WornAvatarResult(cand.id, info.second)
+                }
             }
             // 3. CONFIRM proxied-image candidates (avtrdb) via VRChat GET /avatars/{id}
             //    — match on the worn image file id (also reads platforms in one call).
@@ -1566,7 +1607,7 @@ object VrchatAuthManager {
                 .take(6)
             for (c in ranked) {
                 val info = fetchAvatarInfo(context, c.id)
-                if (info != null && info.first == wornFileId) {
+                if (info != null && wornFileId in info.first) {
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name confirm"
                     com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, c.id, avatarName, c.author, c.authorId, info.second)
                     return@withContext WornAvatarResult(c.id, info.second)
@@ -1738,7 +1779,10 @@ object VrchatAuthManager {
         try {
             val (code, _, raw) = get("$BASE/avatars/$avatarId", null, cookie)
             if (code == 200) captureRolledCookies(context, raw)
-            when (code) { 200 -> true; 404, 410 -> false; else -> null }
+            // 403 = private / not publicly accessible → NOT cloneable (selecting it gives the
+            // default robot avatar), so treat it like a 404 here: callers use `== false` to
+            // report + grey + cull it. 429/5xx/network stay null (transient — never cull).
+            when (code) { 200 -> true; 403, 404, 410 -> false; else -> null }
         } catch (e: Exception) { null }
     }
 
