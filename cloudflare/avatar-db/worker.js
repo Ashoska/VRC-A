@@ -149,10 +149,18 @@ function tokenizeFields(...fields) {
   return set;
 }
 const INDEX_HOT_TOKEN_CAP = 5000;   // must match the app/rebuild HOT_TOKEN_CAP
-// Bound the SEARCH-INDEX work per flush (fragments/index/avtr). The shard/clone writes are separate
-// and unbounded (as before). The index-op backlog beyond this cap carries forward in an `iq:` queue
-// and drains over the next flushes, so a big burst never drops and subrequests stay bounded.
+// Bound the SEARCH-INDEX work per flush (fragments/index/avtr). The index-op backlog beyond this cap
+// carries forward in an `iq:` queue and drains over the next flushes, so a big burst never drops and
+// subrequests stay bounded.
 const MAX_INDEX_OPS_PER_FLUSH = 30;   // ~300 subrequests, leaving room for the shard writes
+// Bound the CLONE-SHARD writes per flush too. Each distinct shard is 1 R2 read + 1 write, so a burst
+// of big USER contribution batches (a 136-avatar batch spans ~136 shards) could push a single flush
+// past Cloudflare's per-invocation subrequest limit → the invocation dies BEFORE clearing the `pend:`
+// keys → the same batches retry and die every minute ("pending batches stuck at N"). The pend loop
+// consumes batches only until this many distinct shards are queued, then leaves the rest for the next
+// 1-min flush, so a backlog DRAINS over a few flushes. 120 shards ≈ 240 R2 ops, well under budget
+// alongside the index work + purges. Admin/bot pushes are separately bounded (WALK_BATCH).
+const MAX_SHARDS_PER_FLUSH = 120;
 
 // The search summary stored in a fragment bucket.
 function fragSummary(e, fileId) {
@@ -547,15 +555,31 @@ async function maybeDispatchRebuild(env) {
 // Read only the shards touched by pending ops, merge, write them back. The whole catalog is
 // NEVER in memory at once, so there's no CPU/memory wall regardless of size. Contributions/
 // admin-upserts arrive already cleanEntry'd (stamped by /contribute + /admin).
+// List every KV key under a prefix, following the cursor. The OLD code did ONE un-paginated
+// AVATAR_KV.list() (max 1000 keys, lexicographic) and filtered — so once the `iq:` index-queue grew
+// past 1000 keys it filled the whole window and, because `iq:` sorts BEFORE `pend:`/`rep:`, the
+// pending USER batches (and reports) fell outside it and were NEVER seen: the flush ran, added 0, and
+// the batches sat forever ("pending batches stuck at N", while the `adm*` admin keys — which sort
+// first — still processed, so the bots kept moving). Listing each prefix on its OWN cursor can never
+// be crowded out. `cap` bounds pagination (we only need a few of some prefixes).
+async function listPrefix(env, prefix, cap = 5000) {
+  const out = []; let cursor;
+  do {
+    const r = await env.AVATAR_KV.list({ prefix, cursor });
+    for (const k of r.keys) out.push(k.name);
+    cursor = r.list_complete ? null : r.cursor;
+  } while (cursor && out.length < cap);
+  return out;
+}
+
 async function flushR2(env) {
   const prevMeta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
-  const allNames = (await env.AVATAR_KV.list()).keys.map((k) => k.name);
-  const pendNames = allNames.filter((n) => n.startsWith("pend:"));
-  const repNames  = allNames.filter((n) => n.startsWith("rep:"));
-  const admuNames = allNames.filter((n) => n.startsWith("admu:"));
-  const admrNames = allNames.filter((n) => n.startsWith("admr:"));
-  const admkNames = allNames.filter((n) => n.startsWith("admk:"));
-  const hasIndexQueue = allNames.some((n) => n.startsWith("iq:"));
+  const pendNames = await listPrefix(env, "pend:");
+  const repNames  = await listPrefix(env, "rep:");
+  const admuNames = await listPrefix(env, "admu:");
+  const admrNames = await listPrefix(env, "admr:");
+  const admkNames = await listPrefix(env, "admk:");
+  const hasIndexQueue = (await env.AVATAR_KV.list({ prefix: "iq:", limit: 1 })).keys.length > 0;
 
   // Nothing to do → skip the whole flush (no shard reads, no meta write). This stops the
   // every-minute cron from writing `meta` ~1440×/day while the catalog is idle. Reports and the
@@ -570,12 +594,30 @@ async function flushR2(env) {
 
   const pendKeys = [];
   const recentBatches = [];   // admin "recent contributions" view (free: built from data already read)
+  // Consume pending USER batches only until MAX_SHARDS_PER_FLUSH distinct shards are queued, then STOP
+  // (leave the rest for the next 1-min flush) so a big burst can't blow the subrequest limit and wedge
+  // the queue forever. A deferred batch is NOT added to pendKeys, so it isn't deleted → it drains next
+  // flush. Always take at least the first batch so a single huge batch can't get stuck.
+  // SHARED shard budget across pending USER batches AND admin/bot pushes: each distinct shard is 1 R2
+  // read + 1 write, so the TOTAL touched per flush must stay under Cloudflare's per-invocation limit or
+  // the whole invocation dies before writing meta (the "lastFlush frozen for hours / batches stuck"
+  // symptom — the observed dying flush touched 214 shards). reserve(fids) returns false when this key's
+  // shards would exceed the budget; the caller then DEFERS it (leaves its key) for the next 1-min flush.
+  const touchedShards = new Set();
+  const reserve = (fids) => {
+    const p = new Set(); for (const fid of fids) if (FILE_RE.test(fid)) p.add(shardPrefix(fid));
+    let fresh = 0; for (const sp of p) if (!touchedShards.has(sp)) fresh++;
+    if (touchedShards.size > 0 && touchedShards.size + fresh > MAX_SHARDS_PER_FLUSH) return false;
+    for (const sp of p) touchedShards.add(sp);
+    return true;
+  };
   for (const kn of pendNames) {
-    pendKeys.push(kn);
     const val = await env.AVATAR_KV.get(kn);
-    if (!val) continue;
-    let batch; try { batch = JSON.parse(val); } catch (_) { continue; }
+    if (!val) { pendKeys.push(kn); continue; }                                 // empty → clear it
+    let batch; try { batch = JSON.parse(val); } catch (_) { pendKeys.push(kn); continue; }  // garbage → clear it
     const fids = Object.keys(batch).filter((fid) => FILE_RE.test(fid));
+    if (!reserve(fids)) break;                                                 // over budget → defer rest
+    pendKeys.push(kn);
     for (const fid of fids) S(shardPrefix(fid)).adds[fid] = batch[fid];
     if (fids.length) recentBatches.push({
       ts: typeof batch.__ts === "number" ? batch.__ts : Date.now(),
@@ -589,27 +631,33 @@ async function flushR2(env) {
   }
   const admuKeys = [];
   for (const kn of admuNames) {
-    admuKeys.push(kn);
     const val = await env.AVATAR_KV.get(kn);
-    if (!val) continue;
-    let batch; try { batch = JSON.parse(val); } catch (_) { continue; }
-    for (const fid of Object.keys(batch)) if (FILE_RE.test(fid)) S(shardPrefix(fid)).upserts[fid] = batch[fid];
+    if (!val) { admuKeys.push(kn); continue; }
+    let batch; try { batch = JSON.parse(val); } catch (_) { admuKeys.push(kn); continue; }
+    const fids = Object.keys(batch).filter((fid) => FILE_RE.test(fid));
+    if (!reserve(fids)) break;   // over budget → defer to next flush
+    admuKeys.push(kn);
+    for (const fid of fids) S(shardPrefix(fid)).upserts[fid] = batch[fid];
   }
   const admrKeys = [];
   for (const kn of admrNames) {
-    admrKeys.push(kn);
     const val = await env.AVATAR_KV.get(kn);
-    if (!val) continue;
-    let arr; try { arr = JSON.parse(val); } catch (_) { continue; }
-    for (const fid of arr) if (typeof fid === "string" && fid.startsWith("file_")) S(shardPrefix(fid)).removes.add(fid);
+    if (!val) { admrKeys.push(kn); continue; }
+    let arr; try { arr = JSON.parse(val); } catch (_) { admrKeys.push(kn); continue; }
+    const fids = arr.filter((f) => typeof f === "string" && f.startsWith("file_"));
+    if (!reserve(fids)) break;   // over budget → defer to next flush
+    admrKeys.push(kn);
+    for (const fid of fids) S(shardPrefix(fid)).removes.add(fid);
   }
   const admkKeys = [];
   for (const kn of admkNames) {
-    admkKeys.push(kn);
     const val = await env.AVATAR_KV.get(kn);
-    if (!val) continue;
-    let arr; try { arr = JSON.parse(val); } catch (_) { continue; }
-    for (const fid of arr) if (typeof fid === "string" && fid.startsWith("file_")) S(shardPrefix(fid)).checked.add(fid);
+    if (!val) { admkKeys.push(kn); continue; }
+    let arr; try { arr = JSON.parse(val); } catch (_) { admkKeys.push(kn); continue; }
+    const fids = arr.filter((f) => typeof f === "string" && f.startsWith("file_"));
+    if (!reserve(fids)) break;   // over budget → defer to next flush
+    admkKeys.push(kn);
+    for (const fid of fids) S(shardPrefix(fid)).checked.add(fid);
   }
   // Reports: rename immediately, remove on quorum; both clear their rep: key.
   const repClear = [];
@@ -619,6 +667,10 @@ async function flushR2(env) {
     const val = await env.AVATAR_KV.get(kn);
     if (!val) continue;
     let r; try { r = JSON.parse(val); } catch (_) { continue; }
+    // A rename/remove touches this fid's shard — respect the same per-flush budget; defer if over.
+    if ((r.status === "renamed" && r.name) || (r.status === "dead" && (r.count || 0) >= REMOVE_QUORUM)) {
+      if (!reserve([fid])) break;
+    }
     if (r.status === "renamed" && r.name) { S(shardPrefix(fid)).renames[fid] = String(r.name).slice(0, 100); repClear.push(kn); }
     else if (r.status === "dead" && (r.count || 0) >= REMOVE_QUORUM) { S(shardPrefix(fid)).removes.add(fid); repClear.push(kn); }
   }
@@ -686,7 +738,7 @@ async function flushR2(env) {
   // so a big burst never drops and subrequests stay bounded. Only runs when shards wrote OK (so we
   // index exactly what persisted; a failed apply re-queues everything and re-applies idempotently).
   if (allShardsOk) {
-    const iqNames = allNames.filter((n) => n.startsWith("iq:"));
+    const iqNames = await listPrefix(env, "iq:", 1000);   // own cursor (never crowded out); we drain only a few
     let queued = []; const drained = [];
     for (const kn of iqNames) {
       if (queued.length >= MAX_INDEX_OPS_PER_FLUSH) break;
