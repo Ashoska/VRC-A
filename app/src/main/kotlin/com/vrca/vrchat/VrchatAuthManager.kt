@@ -1530,11 +1530,19 @@ object VrchatAuthManager {
         if (wornFileId != null) {
             val byFile = try { com.vrca.vrchat.AvatarSearch.searchCandidatesByImageFileId(wornFileId) }
                 catch (e: Exception) { emptyList() }
-            byFile.firstOrNull { it.imageFileId == wornFileId }?.let {
-                val plats = fetchAvatarPlatforms(context, it.id)
-                com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via image file id"
-                com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, it.id, avatarName, author, it.authorId, plats)
-                return@withContext WornAvatarResult(it.id, plats)
+            byFile.firstOrNull { it.imageFileId == wornFileId }?.let { cand ->
+                // CONFIRM against VRChat directly (this GET /avatars/{id} already happened here as
+                // fetchAvatarPlatforms, so it's FREE): the mirror still LISTS a file id after the
+                // avatar went PRIVATE (403) or was deleted (404) — selecting it gives the robot — and
+                // a mirror mapping can be stale. fetchAvatarInfo is null on 403/404, so accept ONLY a
+                // still-public avatar whose CURRENT live thumbnail equals the worn file id; otherwise
+                // fall through (don't offer / don't pollute the catalog with a private avatar).
+                val info = fetchAvatarInfo(context, cand.id)
+                if (info != null && info.first == wornFileId) {
+                    com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via image file id"
+                    com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, cand.id, avatarName, author, cand.authorId, info.second)
+                    return@withContext WornAvatarResult(cand.id, info.second)
+                }
             }
             // 0b. OFFICIAL: the author's public-avatars listing, matched by the worn
             //     image file id (also yields the avatar's platforms). Exact.
@@ -1572,11 +1580,16 @@ object VrchatAuthManager {
         if (wornFileId != null) {
             // 2. DIRECT match — a DB already gave VRChat's raw image file id and it
             //    equals the worn one. Exact, no extra VRChat call.
-            candidates.firstOrNull { it.imageFileId == wornFileId }?.let {
-                val plats = fetchAvatarPlatforms(context, it.id)
-                com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name->fileid"
-                com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, it.id, avatarName, author, it.authorId, plats)
-                return@withContext WornAvatarResult(it.id, plats)
+            candidates.firstOrNull { it.imageFileId == wornFileId }?.let { cand ->
+                // Same free confirmation as path 0: the DB gave a raw image url claiming this file id,
+                // but the avatar may be PRIVATE/gone now → reject (would robot). Accept only a public
+                // avatar whose live thumbnail still equals the worn file id.
+                val info = fetchAvatarInfo(context, cand.id)
+                if (info != null && info.first == wornFileId) {
+                    com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name->fileid"
+                    com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, cand.id, avatarName, author, cand.authorId, info.second)
+                    return@withContext WornAvatarResult(cand.id, info.second)
+                }
             }
             // 3. CONFIRM proxied-image candidates (avtrdb) via VRChat GET /avatars/{id}
             //    — match on the worn image file id (also reads platforms in one call).
