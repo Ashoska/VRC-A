@@ -1504,8 +1504,21 @@ object VrchatAuthManager {
         // NAME-OPTIONAL: resolve purely from the worn image file id when there's no
         // log name (impostor'd player in a big instance).
         if (avatarName.isBlank() && wornFileId == null) return@withContext WornAvatarResult(null)
+        // The worn thumbnail is a VRChat FALLBACK avatar's image (the Robot etc.) → this player's REAL
+        // avatar is still LOADING (or they're genuinely on the fallback). There is nothing to clone —
+        // grey it out. A later publish re-resolves once their real avatar loads (new worn thumbnail).
+        // Without this, a loading player resolves to the Robot (which the harvest had put in the
+        // catalog) and the clone turns the user into the Robot.
+        if (com.vrca.vrchat.AvatarGlobalDb.isSystemFileId(wornFileId)) {
+            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "avatar still loading (VRChat fallback) — not cloneable"
+            return@withContext WornAvatarResult(null)
+        }
         // GLOBAL crowdsourced catalog first — exact, offline, zero network.
         com.vrca.vrchat.AvatarGlobalDb.lookup(wornFileId)?.let {
+            if (com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(it.author, it.avatarId, wornFileId)) {
+                com.vrca.vrchat.AvatarSearch.Diag.lastReason = "resolved to a VRChat fallback — not cloneable"
+                return@withContext WornAvatarResult(null)
+            }
             com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog"
             return@withContext WornAvatarResult(it.avatarId, it.platforms)
         }
@@ -1525,6 +1538,10 @@ object VrchatAuthManager {
             when (shardRes.status) {
                 com.vrca.vrchat.AvatarGlobalDb.ShardStatus.HIT -> {
                     val e = shardRes.entry!!
+                    if (com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(e.author, e.avatarId, wornFileId)) {
+                        com.vrca.vrchat.AvatarSearch.Diag.lastReason = "resolved to a VRChat fallback (shard) — not cloneable"
+                        return@withContext WornAvatarResult(null)
+                    }
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog (shard)"
                     return@withContext WornAvatarResult(e.avatarId, e.platforms)
                 }
