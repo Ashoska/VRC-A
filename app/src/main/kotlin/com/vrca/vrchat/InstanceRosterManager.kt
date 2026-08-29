@@ -246,8 +246,11 @@ object InstanceRosterManager {
     fun isResolvingRoster(): Boolean = resolvingAvatars.get()
     private const val RESOLVE_PACE_MS = 1_000L
     private const val MAX_RESOLVE_TRIES = 5   // retry a transient miss this many times before greying
-    private const val LOADING_RESOLVE_WINDOW_MS = 5 * 60_000L   // keep re-resolving a Robot-showing member for up to 5 min
-    private const val LOADING_RERESOLVE_INTERVAL_MS = 15_000L   // ...re-checking every 15s (their real avatar may load anytime)
+    // A fallback-thumbnail member resolves FAST when it can (catalog / name+author / real REST thumb,
+    // all within seconds). If it still can't after this short window it's private/personal/unavailable
+    // — DECIDE (grey) rather than spin for minutes. Kept just long enough to ride out a brief REST lag.
+    private const val LOADING_RESOLVE_WINDOW_MS = 40_000L       // spinner at most ~40s, then a decision
+    private const val LOADING_RERESOLVE_INTERVAL_MS = 12_000L   // re-check every 12s (≈3 tries in the window)
     private val enrichAttempts = ConcurrentHashMap<String, Int>()
     // Per-user platform (/users/{id} -> last_platform) is the ONLY source for a
     // NON-friend (friends come free in the bulk friends list). VRChat hard
