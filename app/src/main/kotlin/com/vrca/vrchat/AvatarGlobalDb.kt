@@ -254,6 +254,27 @@ object AvatarGlobalDb {
     /** Resolve a worn avatar by its image file id (exact, offline, zero network). */
     fun lookup(fileId: String?): Entry? = fileId?.let { map[it] }
 
+    // ---- VRChat FALLBACK avatars — NEVER catalog or clone these ---------------
+    // A remote player shows VRChat's fallback "Robot" avatar while their REAL avatar is still LOADING,
+    // so their worn thumbnail is the Robot's image. If the Robot is in the catalog, resolving that
+    // loading thumbnail returns the Robot's id and the clone turns the user INTO the Robot (the
+    // "cloned X but became Robot" bug — a crowdsource-harvest regression vs the old curated whole-file
+    // DB). We do NOT filter by author=="VRChat" (VRChat authors plenty of legit, cloneable avatars) —
+    // only the SPECIFIC fallback avatar ids/file ids. This set is the confirmed Robot; expand it from
+    // the user's logs if VRChat uses other fallbacks (different platform/quality fallbacks etc.).
+    private val SYSTEM_AVATAR_IDS = setOf("avtr_c38a1615-5bf5-42b4-84eb-a8b6c37cbd11") // Robot fallback
+    private val SYSTEM_FILE_IDS = setOf("file_0e8c4e32-7444-44ea-ade4-313c010d4bae")   // Robot thumbnail
+    /** True for a VRChat FALLBACK avatar (Robot etc.) — must never enter the catalog nor be offered
+     *  for cloning. Matched by the SPECIFIC avatarId or fileId (NOT by author). */
+    fun isSystemAvatar(author: String?, avatarId: String?, fileId: String?): Boolean {
+        if (avatarId != null && SYSTEM_AVATAR_IDS.contains(avatarId)) return true
+        if (fileId != null && SYSTEM_FILE_IDS.contains(fileId)) return true
+        return false
+    }
+    /** The worn thumbnail is a VRChat fallback's image → the player's real avatar is still loading
+     *  (or they're genuinely on the fallback), so there is nothing cloneable. */
+    fun isSystemFileId(fileId: String?): Boolean = fileId != null && SYSTEM_FILE_IDS.contains(fileId)
+
     /** Number of catalog entries currently loaded (for the debug panels). */
     fun entryCount(): Int = map.size
 
@@ -925,6 +946,10 @@ object AvatarGlobalDb {
         // mature catalog, where a worn/favourited avatar is usually already present).
         if (!FILE_RE.matches(fileId)) return false
         if (!AVTR_RE.matches(avatarId)) return false
+        // NEVER catalog VRChat's default/system avatars (Robot etc.) — a loading player shows the
+        // Robot's thumbnail, so catalog-ing it makes every loading avatar resolve to the Robot and
+        // clone into it. This is the crowdsource-harvest regression vs the old curated whole-file DB.
+        if (isSystemAvatar(author, avatarId, fileId)) return false
         if (map.containsKey(fileId)) return false
         // Remember it for THIS session so the avtr index (rebuilt ~every 20 min) not yet having
         // it can't make us re-resolve/re-contribute it. Bounded to avoid unbounded growth.
