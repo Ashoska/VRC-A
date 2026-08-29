@@ -230,6 +230,9 @@ object InstanceRosterManager {
     // The resolved avatar's platform compatibility (for the Quest PC-only clone gate).
     private val avatarPlatformsCache = ConcurrentHashMap<String, List<String>>()
     private val avatarResolveInFlight = ConcurrentHashMap.newKeySet<String>()
+    // Retry count per "uid|avatarName" for an UNCONFIRMED resolve, so a transient miss (rate-limited
+    // worn-thumb fetch / Cloudflare shard read) is retried instead of pinned broken until they switch.
+    private val avatarResolveTries = ConcurrentHashMap<String, Int>()
     private val resolvingAvatars = java.util.concurrent.atomic.AtomicBoolean(false)
     /** True while the roster is actively resolving members' clone ids — that pass hits the
      *  SAME avtrdb/VRCX mirrors the catalog seed search does, so the seed search yields to it
@@ -237,6 +240,7 @@ object InstanceRosterManager {
      *  Always false on non-headset builds (the roster never starts there). */
     fun isResolvingRoster(): Boolean = resolvingAvatars.get()
     private const val RESOLVE_PACE_MS = 1_000L
+    private const val MAX_RESOLVE_TRIES = 5   // retry a transient miss this many times before greying
     private val enrichAttempts = ConcurrentHashMap<String, Int>()
     // Per-user platform (/users/{id} -> last_platform) is the ONLY source for a
     // NON-friend (friends come free in the bulk friends list). VRChat hard
@@ -475,7 +479,7 @@ object InstanceRosterManager {
                     )
                 }
                 stopObserver()
-                platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarPlatformsCache.clear(); avatarResolveInFlight.clear(); com.vrca.vrchat.AvatarGlobalDb.evictShardCache(); com.vrca.vrchat.AvatarGlobalDb.evictShardCache()
+                platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarPlatformsCache.clear(); avatarResolveInFlight.clear(); avatarResolveTries.clear(); com.vrca.vrchat.AvatarGlobalDb.evictShardCache(); com.vrca.vrchat.AvatarGlobalDb.evictShardCache()
                 _flow.value = RosterUi(status = Status.IDLE)
                 currentId = null; offset = 0L; state = VrcLogParser.InstanceState()
                 delay(POLL_MS); continue
@@ -643,7 +647,7 @@ object InstanceRosterManager {
                     confirmedClosed = confirmedClosed
                 )
             }
-            platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarPlatformsCache.clear(); avatarResolveInFlight.clear(); com.vrca.vrchat.AvatarGlobalDb.evictShardCache()
+            platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarPlatformsCache.clear(); avatarResolveInFlight.clear(); avatarResolveTries.clear(); com.vrca.vrchat.AvatarGlobalDb.evictShardCache()
             _flow.value = RosterUi(status = Status.IDLE, worldName = null, location = null, members = emptyList(), logPath = logPath)
             return
         }
@@ -670,7 +674,7 @@ object InstanceRosterManager {
         // in memory across a session (the reader writes NOTHING per-user to disk;
         // this just keeps RAM bounded to the current instance).
         if (!inWorld) {
-            platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarPlatformsCache.clear(); avatarResolveInFlight.clear(); com.vrca.vrchat.AvatarGlobalDb.evictShardCache()
+            platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarPlatformsCache.clear(); avatarResolveInFlight.clear(); avatarResolveTries.clear(); com.vrca.vrchat.AvatarGlobalDb.evictShardCache()
             _flow.value = RosterUi(
                 status = Status.IDLE, worldName = state.worldName,
                 location = state.location, members = emptyList(), logPath = logPath
@@ -792,7 +796,10 @@ object InstanceRosterManager {
                 // Name-optional: resolve from the worn file id whether or not the log
                 // gave an avatar name (impostor'd players have no name but still a file id).
                 if (wornFid != null) {
-                    com.vrca.vrchat.AvatarGlobalDb.lookup(wornFid)?.let { hit ->
+                    // lookupSharded reads the R2 catalog by the worn image FILE id (exact) — post-cutover
+                    // the in-memory map is empty, so the old lookup() here was DEAD and catalog avatars
+                    // never got their instant clone id (they fell to the slower/less-reliable path).
+                    com.vrca.vrchat.AvatarGlobalDb.lookupSharded(context, wornFid)?.let { hit ->
                         val gated = gateCloneId(hit.avatarId, hit.platforms)  // "" if PC-only on Quest
                         avatarPlatformsCache[id] = hit.platforms
                         avatarIdCache[id] = gated
@@ -863,13 +870,33 @@ object InstanceRosterManager {
                     (if (id.isBlank() && !res.avatarId.isNullOrBlank()) " [PC-only, greyed on Quest]" else "") +
                     (if (why.isNotBlank()) " [$why]" else "")
             )
-            avatarIdCache[uid] = id
-            avatarIdResolvedFor[uid] = name
+            // A CONFIRMED resolve (res.avatarId != null) is cached and stops re-resolving.
+            // A MISS (null) is usually TRANSIENT — the worn-thumbnail fetch or the Cloudflare
+            // shard read got rate-limited/timed out — so DON'T cache it as final (that's what
+            // made a member "sometimes" cloneable and sometimes stuck: one bad read pinned it
+            // broken until they switched avatars). Leave it unresolved so the next pass retries,
+            // and only give up (grey) after a few real attempts.
+            val tryKey = "$uid|$name"
+            if (res.avatarId != null) {
+                avatarIdCache[uid] = id
+                avatarIdResolvedFor[uid] = name
+                avatarResolveTries.remove(tryKey)
+            } else {
+                val tries = (avatarResolveTries[tryKey] ?: 0) + 1
+                avatarResolveTries[tryKey] = tries
+                if (tries >= MAX_RESOLVE_TRIES) {
+                    avatarIdCache[uid] = ""           // genuinely not resolvable → grey out
+                    avatarIdResolvedFor[uid] = name
+                    avatarResolveTries.remove(tryKey)
+                }
+                // else: leave resolvedFor unset so this member is re-queued next pass (spinner).
+            }
             _flow.value.let { cur ->
                 if (cur.members.any { it.userId == uid && it.avatarName == name }) {
+                    val shown = if (res.avatarId != null || avatarResolveTries[tryKey] == null) id else null
                     _flow.value = cur.copy(
                         members = cur.members.map { m ->
-                            if (m.userId == uid && m.avatarName == name) m.copy(avatarId = id) else m
+                            if (m.userId == uid && m.avatarName == name) m.copy(avatarId = shown) else m
                         }
                     )
                 }

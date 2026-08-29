@@ -126,6 +126,128 @@ function cleanEntry(e) {
   return out;
 }
 
+// ---- incremental search index (FULL: add / rename / remove) -----------------
+// The WORKER now owns the entire search index — GitHub is no longer needed for search. The flush
+// maintains fragments/ (id->summary), index/ (token->ids) and avtr/ (id presence) incrementally
+// from the same shard reads it already does, so search is ~1 min fresh with no full rebuild.
+// The bucket scheme MUST match the app's readers EXACTLY (hashCode/indexBucket/fragBucket/tokenize/
+// platMask are copied verbatim). A perf/bio-only bot fill changes no search field, so it's skipped
+// entirely (buildIndexOp returns null) — only real add/rename/remove touch the index (the big saving).
+function hashCode(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0; return h; }
+function indexBucketFor(token) { return ((hashCode(token) & 0xfff) >>> 0).toString(16).padStart(3, "0"); }
+function fragBucketFor(avatarId) { return avatarId.slice(5, 8).toLowerCase(); }
+function platMask(platforms) {
+  let m = 0; const p = platforms || [];
+  if (p.includes("PC")) m |= 1; if (p.includes("Quest")) m |= 2; if (p.includes("iOS")) m |= 4; return m;
+}
+function tokenizeFields(...fields) {
+  const set = new Set();
+  for (const f of fields) {
+    if (!f) continue;
+    for (const w of String(f).toLowerCase().split(/[^\p{L}\p{N}]+/u)) if (w.length >= 2) set.add(w);
+  }
+  return set;
+}
+const INDEX_HOT_TOKEN_CAP = 5000;   // must match the app/rebuild HOT_TOKEN_CAP
+// Bound the SEARCH-INDEX work per flush (fragments/index/avtr). The shard/clone writes are separate
+// and unbounded (as before). The index-op backlog beyond this cap carries forward in an `iq:` queue
+// and drains over the next flushes, so a big burst never drops and subrequests stay bounded.
+const MAX_INDEX_OPS_PER_FLUSH = 30;   // ~300 subrequests, leaving room for the shard writes
+
+// The search summary stored in a fragment bucket.
+function fragSummary(e, fileId) {
+  return { f: fileId, n: e.name || "", au: e.author || "", ai: e.authorId || "",
+    p: platMask(e.platforms), pf: { pc: e.perfPc ?? 5, q: e.perfQuest ?? 5, i: e.perfIos ?? 5 } };
+}
+function tokensOf(e) {
+  const s = tokenizeFields(e.name, e.author, e.desc);
+  if (e.authorId) s.add(String(e.authorId).toLowerCase());
+  return s;
+}
+// Compute a search-index op from an avatar's OLD and NEW state (either may be null).
+//   old=null  -> ADD (new avatar): write fragment + avtr + all tokens.
+//   new=null  -> REMOVE: delete fragment + avtr + remove all old tokens.
+//   both      -> only touch the index if a SEARCH-RELEVANT field changed (name/author/authorId/
+//                platforms); a perf/bio/checked-only bot fill returns null (skipped — the big saving).
+// Op: { id, del, frag|null, add:[tok], rem:[tok], avtr:'a'|'r'|null }.
+function buildIndexOp(oldE, newE, fileId) {
+  if (!newE) {
+    if (!oldE || !oldE.id) return null;
+    return { id: oldE.id, del: true, frag: null, add: [], rem: [...tokensOf(oldE)], avtr: "r" };
+  }
+  if (!newE.id) return null;
+  if (!oldE) return { id: newE.id, del: false, frag: fragSummary(newE, fileId), add: [...tokensOf(newE)], rem: [], avtr: "a" };
+  const relevant = (oldE.name || "") !== (newE.name || "") || (oldE.author || "") !== (newE.author || "") ||
+    (oldE.authorId || "") !== (newE.authorId || "") || platMask(oldE.platforms) !== platMask(newE.platforms);
+  if (!relevant) return null;
+  const ot = tokensOf(oldE), nt = tokensOf(newE);
+  return { id: newE.id, del: false, frag: fragSummary(newE, fileId),
+    add: [...nt].filter((t) => !ot.has(t)), rem: [...ot].filter((t) => !nt.has(t)), avtr: null };
+}
+
+// Apply a batch of index ops to fragments/<p> + avtr/<p> + index/<b>, grouped so each object is
+// read+written ONCE. Returns the changed URLs for edge-cache purge.
+async function applyIndexOps(env, ops) {
+  if (!ops.length) return [];
+  const fragWork = {};   // prefix -> { set:{id:summary}, del:Set(id) }
+  const avtrWork = {};   // prefix -> { add:Set, rem:Set }
+  const idxWork = {};    // indexBucket -> { token -> {add:Set, rem:Set} }
+  for (const o of ops) {
+    const id = o.id; if (!id || !String(id).startsWith("avtr_")) continue;
+    const fp = fragBucketFor(id);
+    const fw = (fragWork[fp] ||= { set: {}, del: new Set() });
+    if (o.del) { fw.del.add(id); delete fw.set[id]; }
+    else if (o.frag) { fw.set[id] = o.frag; fw.del.delete(id); }
+    if (o.avtr === "a") (avtrWork[fp] ||= { add: new Set(), rem: new Set() }).add.add(id);
+    else if (o.avtr === "r") (avtrWork[fp] ||= { add: new Set(), rem: new Set() }).rem.add(id);
+    for (const t of (o.add || [])) ((idxWork[indexBucketFor(t)] ||= {})[t] ||= { add: new Set(), rem: new Set() }).add.add(id);
+    for (const t of (o.rem || [])) ((idxWork[indexBucketFor(t)] ||= {})[t] ||= { add: new Set(), rem: new Set() }).rem.add(id);
+  }
+  const changed = [];
+  const base = env.CATALOG_BASE ? env.CATALOG_BASE.replace(/\/$/, "") : null;
+  const ttl = { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + SHARD_TTL } };
+  // Fragments + avtr share the avatarId prefix.
+  for (const p of new Set([...Object.keys(fragWork), ...Object.keys(avtrWork)])) {
+    const fw = fragWork[p], aw = avtrWork[p];
+    if (fw && (Object.keys(fw.set).length || fw.del.size)) {
+      let cur = { v: 1, e: {} };
+      try { const o = await env.CATALOG.get(`fragments/${p}.json`); if (o) cur = await o.json(); } catch (_) {}
+      if (!cur || typeof cur.e !== "object" || cur.e === null) cur = { v: 1, e: {} };
+      Object.assign(cur.e, fw.set);
+      for (const id of fw.del) delete cur.e[id];
+      try { await env.CATALOG.put(`fragments/${p}.json`, JSON.stringify({ v: 1, e: cur.e }), ttl);
+        if (base) changed.push(base + `/fragments/${p}.json`); } catch (_) {}
+    }
+    if (aw && (aw.add.size || aw.rem.size)) {
+      let cur = { v: 1, ids: [] };
+      try { const o = await env.CATALOG.get(`avtr/${p}.json`); if (o) cur = await o.json(); } catch (_) {}
+      if (!cur || !Array.isArray(cur.ids)) cur = { v: 1, ids: [] };
+      const s = new Set(cur.ids);
+      for (const id of aw.add) s.add(id);
+      for (const id of aw.rem) s.delete(id);
+      try { await env.CATALOG.put(`avtr/${p}.json`, JSON.stringify({ v: 1, ids: Array.from(s) }), ttl);
+        if (base) changed.push(base + `/avtr/${p}.json`); } catch (_) {}
+    }
+  }
+  // Index token lists.
+  for (const [b, toks] of Object.entries(idxWork)) {
+    let cur = { v: 1, t: {} };
+    try { const o = await env.CATALOG.get(`index/${b}.json`); if (o) cur = await o.json(); } catch (_) {}
+    if (!cur || typeof cur.t !== "object" || cur.t === null) cur = { v: 1, t: {} };
+    for (const [tok, ch] of Object.entries(toks)) {
+      const s = new Set(Array.isArray(cur.t[tok]) ? cur.t[tok] : []);
+      for (const id of ch.add) s.add(id);
+      for (const id of ch.rem) s.delete(id);
+      let ids = Array.from(s);
+      if (ids.length > INDEX_HOT_TOKEN_CAP) ids = ids.slice(0, INDEX_HOT_TOKEN_CAP);
+      if (ids.length) cur.t[tok] = ids; else delete cur.t[tok];
+    }
+    try { await env.CATALOG.put(`index/${b}.json`, JSON.stringify({ v: 1, t: cur.t }), ttl);
+      if (base) changed.push(base + `/index/${b}.json`); } catch (_) {}
+  }
+  return changed;
+}
+
 export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
@@ -336,6 +458,7 @@ export default {
           // catalog-rebuild Action itself, and when did it last do so.
           rebuildDispatch: !!(env.GH_DISPATCH_TOKEN && env.GH_OWNER && env.GH_REPO),
           lastRebuildDispatch: meta.lastRebuildAt || null,
+          lastRebuildError: meta.lastRebuildError || null,
           purgeConfigured: !!(env.CF_PURGE_TOKEN && env.CF_ZONE_ID),
           // R2 is the only backend now. `catalogBase` is what the app appends
           // /shard/<prefix>.json etc. to (learned from here, so a serving change needs no
@@ -368,8 +491,10 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
+    // Search is now fully incremental in flushR2 — the GitHub rebuild Action is no longer part of
+    // the pipeline, so we no longer trigger it. (maybeDispatchRebuild is kept below, unused, so the
+    // Action can still be run MANUALLY as a one-shot full reconcile/repair if ever wanted.)
     ctx.waitUntil(flushR2(env));
-    ctx.waitUntil(maybeDispatchRebuild(env));
   },
 };
 
@@ -388,6 +513,9 @@ async function maybeDispatchRebuild(env) {
   if (now - last < REBUILD_INTERVAL_MS) return;
   await env.AVATAR_KV.put("last_rebuild_ms", String(now));   // claim the slot so we don't double-fire
   const ref = env.GH_REF || "main";
+  const stampMeta = async (patch) => {
+    try { const m = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}"); await env.AVATAR_KV.put("meta", JSON.stringify({ ...m, ...patch })); } catch (_) {}
+  };
   try {
     const r = await fetch(
       `https://api.github.com/repos/${env.GH_OWNER}/${env.GH_REPO}/actions/workflows/catalog-rebuild.yml/dispatches`,
@@ -402,14 +530,17 @@ async function maybeDispatchRebuild(env) {
         body: JSON.stringify({ ref }),
       }
     );
-    if (!r.ok) { await env.AVATAR_KV.put("last_rebuild_ms", String(last)); return; }   // failed → retry next minute
-    // Best-effort display stamp for /health (the race-free gate above is the authoritative one).
-    try {
-      const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
-      meta.lastRebuildAt = new Date(now).toISOString();
-      await env.AVATAR_KV.put("meta", JSON.stringify(meta));
-    } catch (_) {}
-  } catch (_) { await env.AVATAR_KV.put("last_rebuild_ms", String(last)); }
+    if (!r.ok) {
+      const body = (await r.text().catch(() => "")).slice(0, 200);
+      await stampMeta({ lastRebuildError: `${r.status} ${body}` });
+      await env.AVATAR_KV.put("last_rebuild_ms", String(last));   // failed → retry next minute
+      return;
+    }
+    await stampMeta({ lastRebuildAt: new Date(now).toISOString(), lastRebuildError: null });
+  } catch (e) {
+    await stampMeta({ lastRebuildError: `fetch: ${String(e).slice(0, 180)}` });
+    await env.AVATAR_KV.put("last_rebuild_ms", String(last));
+  }
 }
 
 // ---- R2 per-shard flush -----------------------------------------------------
@@ -424,12 +555,14 @@ async function flushR2(env) {
   const admuNames = allNames.filter((n) => n.startsWith("admu:"));
   const admrNames = allNames.filter((n) => n.startsWith("admr:"));
   const admkNames = allNames.filter((n) => n.startsWith("admk:"));
+  const hasIndexQueue = allNames.some((n) => n.startsWith("iq:"));
 
   // Nothing to do → skip the whole flush (no shard reads, no meta write). This stops the
-  // every-minute cron from writing `meta` ~1440×/day while the catalog is idle. Reports keep
-  // the flush active only while any exist (rare); the live /report + /admin counters handle
-  // the count in the meantime, so a fully-idle catalog costs just one KV list per minute.
-  if (!pendNames.length && !admuNames.length && !admrNames.length && !admkNames.length && !repNames.length) return;
+  // every-minute cron from writing `meta` ~1440×/day while the catalog is idle. Reports and the
+  // index carry-forward queue keep the flush active only while any exist; a fully-idle catalog
+  // costs just one KV list per minute.
+  if (!pendNames.length && !admuNames.length && !admrNames.length && !admkNames.length &&
+      !repNames.length && !hasIndexQueue) return;
 
   // Group every pending op by shard prefix so each shard is read + written ONCE.
   const shardOps = {};
@@ -492,6 +625,10 @@ async function flushR2(env) {
 
   const nowChecked = Date.now();
   let added = 0, removed = 0, allShardsOk = true;
+  let unfilledDelta = 0;      // incremental Fill-backlog delta (Worker owns the count now)
+  const indexOps = [];        // search-index ops computed from the SAME shard read (no re-fetch)
+  const fillHintAdd = new Set();   // touched shards that still have an unfilled avatar
+  const fillHintDone = new Set();  // touched shards that are now fully filled
   const prefixes = Object.keys(shardOps);
   for (const sp of prefixes) {
     const ops = shardOps[sp];
@@ -502,17 +639,36 @@ async function flushR2(env) {
       if (!cur || typeof cur !== "object" || typeof cur.e !== "object" || cur.e === null) cur = { v: 1, e: {} };
     } catch (_) { allShardsOk = false; continue; } // read failed -> skip (never wipe), retry next flush
     const e = cur.e;
-    for (const fid of Object.keys(ops.adds)) if (!e[fid]) { e[fid] = ops.adds[fid]; added++; }
+    for (const fid of Object.keys(ops.adds)) if (!e[fid]) {
+      const ne = ops.adds[fid]; e[fid] = ne; added++;
+      const op = buildIndexOp(null, ne, fid); if (op) indexOps.push(op);
+      if (ne.filled !== true) unfilledDelta++;
+    }
     for (const fid of Object.keys(ops.upserts)) {
       const inc = ops.upserts[fid];
       const prev = e[fid];
       if (prev && typeof prev.added === "number") inc.added = prev.added; // `added` is immutable
       else if (!prev) added++;
+      if (!prev) { if (inc.filled !== true) unfilledDelta++; }
+      else { const wasUnfilled = prev.filled !== true, nowUnfilled = inc.filled !== true;
+        if (wasUnfilled && !nowUnfilled) unfilledDelta--; else if (!wasUnfilled && nowUnfilled) unfilledDelta++; }
+      const op = buildIndexOp(prev || null, inc, fid); if (op) indexOps.push(op);
       e[fid] = inc;
     }
-    for (const fid of Object.keys(ops.renames)) if (e[fid]) e[fid].name = ops.renames[fid];
+    for (const fid of Object.keys(ops.renames)) if (e[fid]) {
+      const prev = { ...e[fid] }; e[fid].name = ops.renames[fid];
+      const op = buildIndexOp(prev, e[fid], fid); if (op) indexOps.push(op);
+    }
     for (const fid of ops.checked) if (e[fid]) e[fid].checked = nowChecked;
-    for (const fid of ops.removes) if (e[fid]) { delete e[fid]; removed++; }
+    for (const fid of ops.removes) if (e[fid]) {
+      const prev = e[fid]; delete e[fid]; removed++;
+      const op = buildIndexOp(prev, null, fid); if (op) indexOps.push(op);
+      if (prev.filled !== true) unfilledDelta--;
+    }
+    // Bot FILL-hint (replaces the Action's worklist): does this shard, AFTER the ops, still hold
+    // an unfilled avatar? Accurate + cheap (the shard is already in memory). Drives _worklist.json.
+    if (Object.values(e).some((x) => x && x.filled !== true)) fillHintAdd.add(sp);
+    else fillHintDone.add(sp);
     try {
       await env.CATALOG.put(`shard/${sp}.json`, JSON.stringify({ v: 1, e }), {
         httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + SHARD_TTL },
@@ -524,6 +680,33 @@ async function flushR2(env) {
   // ~seconds instead of the TTL. No-op unless a purge token is configured.
   if (allShardsOk && prefixes.length > 0) await purgeShards(env, prefixes);
 
+  // FULL incremental SEARCH INDEX (add / rename / remove + avtr presence) — computed above from the
+  // SAME shard reads (no re-fetch). Drain any carried-over ops first, then this flush's, up to the
+  // per-flush cap; the remainder carries forward in an `iq:` queue and drains over the next flushes,
+  // so a big burst never drops and subrequests stay bounded. Only runs when shards wrote OK (so we
+  // index exactly what persisted; a failed apply re-queues everything and re-applies idempotently).
+  if (allShardsOk) {
+    const iqNames = allNames.filter((n) => n.startsWith("iq:"));
+    let queued = []; const drained = [];
+    for (const kn of iqNames) {
+      if (queued.length >= MAX_INDEX_OPS_PER_FLUSH) break;
+      const val = await env.AVATAR_KV.get(kn); drained.push(kn);
+      if (val) try { const a = JSON.parse(val); if (Array.isArray(a)) queued.push(...a); } catch (_) {}
+    }
+    const all = [...queued, ...indexOps];
+    const toApply = all.slice(0, MAX_INDEX_OPS_PER_FLUSH);
+    let applied = true;
+    if (toApply.length) {
+      try { const urls = await applyIndexOps(env, toApply); if (urls.length) await purgeCatalogUrls(env, urls); }
+      catch (_) { applied = false; }
+    }
+    for (const kn of drained) await env.AVATAR_KV.delete(kn);
+    const requeue = applied ? all.slice(MAX_INDEX_OPS_PER_FLUSH) : all;   // on failure retry all (idempotent)
+    for (let i = 0; i < requeue.length; i += MAX_INDEX_OPS_PER_FLUSH)
+      await env.AVATAR_KV.put("iq:" + crypto.randomUUID(),
+        JSON.stringify(requeue.slice(i, i + MAX_INDEX_OPS_PER_FLUSH)), { expirationTtl: 7 * 86400 });
+  }
+
   // Clear KV only when every touched shard wrote OK (idempotent retry otherwise — nothing lost).
   if (allShardsOk) {
     for (const n of pendKeys) await env.AVATAR_KV.delete(n);
@@ -533,24 +716,30 @@ async function flushR2(env) {
     for (const n of repClear) await env.AVATAR_KV.delete(n);
   }
 
-  // Manifest: write it ONLY when the count actually moved, and MERGE so the fields the 20-min
-  // rebuild Action owns (unfilled/searchReady/indexScheme/lastFullRebuild) are preserved
-  // instead of being clobbered to undefined every minute. Short TTL + an explicit purge so the
-  // fresh count/`lastUpdate` is live in ~1s.
-  const countMoved = added > 0 || removed > 0;
+  // Manifest — the WORKER now owns it (search + counts are fully incremental, no Action needed).
+  // entryCount and unfilled move by the deltas computed above; searchReady is always true. Written
+  // only when something moved; short TTL + purge so the fresh number is live in ~1s. If a full
+  // rebuild is ever run as an optional backstop, its authoritative counts are adopted once.
+  const countMoved = added > 0 || removed > 0 || unfilledDelta !== 0;
   let entries = Math.max(0, (prevMeta.entries || 0) + added - removed);
+  let unfilled = 0;
   let adoptedRebuild = prevMeta.adoptedRebuild || null;
   if (countMoved) {
     let man = {};
     try { const m = await env.CATALOG.get("_manifest.json"); if (m) man = await m.json(); } catch (_) {}
     if (!man || typeof man !== "object") man = {};
-    // Adopt the Action's AUTHORITATIVE entryCount on each fresh full rebuild — self-heals the
-    // running counter's drift without a whole-catalog scan.
+    // Seed the running unfilled from KV meta, else from the manifest baseline (first run after this
+    // change / after an optional full rebuild), then apply this flush's delta.
+    const baseUnfilled = typeof prevMeta.unfilled === "number" ? prevMeta.unfilled
+      : (typeof man.unfilled === "number" ? man.unfilled : 0);
+    unfilled = Math.max(0, baseUnfilled + unfilledDelta);
     if (man.lastFullRebuild && man.lastFullRebuild !== adoptedRebuild && typeof man.entryCount === "number") {
       entries = Math.max(0, man.entryCount + added - removed);
+      if (typeof man.unfilled === "number") unfilled = Math.max(0, man.unfilled + unfilledDelta);
       adoptedRebuild = man.lastFullRebuild;
     }
-    man = { ...man, v: 1, shardScheme: "filehex3-full", shardCount: 4096, entryCount: entries, lastUpdate: new Date().toISOString() };
+    man = { ...man, v: 1, shardScheme: "filehex3-full", shardCount: 4096, indexScheme: "hash3",
+      entryCount: entries, unfilled, searchReady: true, lastUpdate: new Date().toISOString() };
     try {
       await env.CATALOG.put("_manifest.json", JSON.stringify(man), {
         httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=30" },
@@ -561,6 +750,32 @@ async function flushR2(env) {
     }
   }
 
+  // Bot FILL worklist (replaces the Action's _worklist.json): the running set of shard prefixes that
+  // still hold an unfilled avatar, maintained incrementally from the accurate per-shard check above.
+  // The bots read this to fill NEW avatars promptly; liveness is left to their oldest-swept walk.
+  let fillHint = Array.isArray(prevMeta.fillHint) ? prevMeta.fillHint : null;
+  let seeded = false;
+  if (fillHint === null) {   // first run after this change: seed from the existing worklist so the
+    try { const w = await env.CATALOG.get("_worklist.json"); if (w) { const j = await w.json(); if (Array.isArray(j.fill)) fillHint = j.fill; } } catch (_) {}
+    if (fillHint === null) fillHint = [];   // current ~12k-unfilled backlog is preserved, then maintained
+    seeded = true;
+  }
+  let hintChanged = false;
+  if (allShardsOk) {
+    const s = new Set(fillHint);
+    for (const p of fillHintAdd) if (!s.has(p)) { s.add(p); hintChanged = true; }
+    for (const p of fillHintDone) if (s.has(p)) { s.delete(p); hintChanged = true; }
+    if (hintChanged) {
+      fillHint = Array.from(s).slice(0, 4096);
+      try {
+        await env.CATALOG.put("_worklist.json",
+          JSON.stringify({ v: 1, ts: new Date().toISOString(), fill: fillHint, stale: [] }),
+          { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=30" } });
+        if (env.CATALOG_BASE) await purgeCatalogUrls(env, [env.CATALOG_BASE.replace(/\/$/, "") + "/_worklist.json"]);
+      } catch (_) {}
+    }
+  }
+
   await env.AVATAR_KV.put("meta", JSON.stringify({
     ...prevMeta,
     lastFlush: new Date().toISOString(),
@@ -568,6 +783,8 @@ async function flushR2(env) {
     totalAdded: (prevMeta.totalAdded || 0) + added,
     totalRemoved: (prevMeta.totalRemoved || 0) + removed,
     entries,
+    ...(countMoved ? { unfilled } : {}),   // running Fill backlog (preserved when nothing moved)
+    ...(hintChanged || seeded ? { fillHint } : {}),  // bot fill worklist (seeded once, then maintained)
     adoptedRebuild,
     lastCommit: allShardsOk
       ? `R2 +${added} -${removed} (${prefixes.length} shards)`

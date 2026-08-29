@@ -123,7 +123,16 @@ fun BotsTab() {
 
 // ---- catalog health ---------------------------------------------------------
 
-private data class RecentBatch(val by: String, val n: Int, val ago: String, val names: List<String>)
+private data class RecentBatch(val by: String, val n: Int, val ts: Long, val names: List<String>)
+
+private fun agoLabel(fromMs: Long, now: Long): String {
+    val s = ((now - fromMs) / 1000L).coerceAtLeast(0)
+    return when {
+        s < 60 -> "${s}s ago"
+        s < 3600 -> "${s / 60}m ago"
+        else -> "${s / 3600}h ago"
+    }
+}
 
 @Composable
 private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null, lastPush: Pair<String, Long>? = null, adminKey: String = "") {
@@ -136,6 +145,9 @@ private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null, lastPush: Pair<S
     var recent by remember { mutableStateOf<List<RecentBatch>>(emptyList()) }
     var expanded by remember { mutableStateOf<Int?>(null) }
     var tick by remember { mutableIntStateOf(0) }
+    // Live clock so relative-time labels tick and the card refreshes on its own (no manual refresh).
+    var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) { while (true) { delay(2000); nowMs = System.currentTimeMillis() } }
     LaunchedEffect(tick) {
         while (true) {
             runCatching {
@@ -182,9 +194,8 @@ private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null, lastPush: Pair<S
                         val names = o.optJSONArray("names")?.let { na ->
                             (0 until na.length()).mapNotNull { na.optString(it, null) }.filter { it.isNotBlank() }
                         }.orEmpty()
-                        val ageMin = ((now - o.optLong("ts", now)) / 60_000L).coerceAtLeast(0)
                         RecentBatch(o.optString("by", "").ifBlank { "someone" }, o.optInt("n", names.size),
-                            if (ageMin < 1) "just now" else "${ageMin}m ago", names)
+                            o.optLong("ts", now), names)
                     }
                 }
             }
@@ -210,8 +221,7 @@ private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null, lastPush: Pair<S
             AdminLabeledRow("Last flush", lastFlush)
             AdminLabeledRow("Admin key", adminKeySet)
             lastPush?.let { (info, atMs) ->
-                val agoS = ((System.currentTimeMillis() - atMs) / 1000).coerceAtLeast(0)
-                Text("Last bot push (${agoS}s ago)", style = MaterialTheme.typography.labelSmall,
+                Text("Last bot push (${agoLabel(atMs, nowMs)})", style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(info, style = MaterialTheme.typography.bodySmall)
             }
@@ -221,7 +231,7 @@ private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null, lastPush: Pair<S
                 recent.forEachIndexed { i, b ->
                     val isOpen = expanded == i
                     Text(
-                        "${if (isOpen) "▾" else "▸"} ${b.by} · ${b.n} avatars · ${b.ago}",
+                        "${if (isOpen) "▾" else "▸"} ${b.by} · ${b.n} avatars · ${agoLabel(b.ts, nowMs)}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier
