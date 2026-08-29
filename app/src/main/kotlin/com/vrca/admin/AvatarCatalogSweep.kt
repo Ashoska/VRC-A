@@ -810,21 +810,31 @@ object AvatarCatalogSweep {
         // staleness order → the parts checked longest ago go first).
         if (blitzActive()) return oldestSweptPrefix(context, dueOnly = false)
         workQueue.poll()?.let { return it }
+        // When the manifest reports a real FILL backlog (unfilled avatars exist) but the
+        // worklist is empty, those unfilled entries live in shards NOT touched by recent
+        // contributions — so the Worker's incremental `_worklist.json` never lists them, AND
+        // a recent walk/blitz stamped every shard "swept < 7 days ago" so the due-only liveness
+        // trickle returns null → the bots go IDLE with a nonzero backlog (the "queued 368,
+        // checked 0" bug). While a fill backlog is known, walk the WHOLE catalog oldest-swept
+        // first (dueOnly=false) so walkPass's needsFill() filter finds and fills them; it
+        // reverts to the weekly liveness trickle once the backlog drains to 0.
+        val fillBacklog = manifestUnfilled > 0
         return worklistMutex.withLock {
             workQueue.poll()?.let { return@withLock it }   // another bot refilled while we waited
             // If we recently learned the worklist is empty, don't re-hit the CDN this cycle — but
-            // instead of idling, do a paced oldest-swept LIVENESS trickle so the catalog stays
-            // evenly fresh (a due shard, or null when everything is within the weekly interval).
+            // instead of idling, walk oldest-swept: the WHOLE catalog while a fill backlog is
+            // known (find the unfilled), else just the due (weekly) shards (liveness trickle).
             if (worklistEmpty && System.currentTimeMillis() - worklistFetchedMs < WORKLIST_TTL_MS)
-                return@withLock oldestSweptPrefix(context, dueOnly = true)
+                return@withLock oldestSweptPrefix(context, dueOnly = !fillBacklog)
             val wl = AvatarGlobalDb.fetchWorklist(context)
             worklistFetchedMs = System.currentTimeMillis()
             if (wl == null) { worklistEmpty = false; return@withLock oldestSweptPrefix(context, dueOnly = false) }  // read failed → oldest-swept fallback
             val (fill, stale) = wl
             worklistEmpty = fill.isEmpty() && stale.isEmpty()
             workQueue.addAll(fill); workQueue.addAll(stale)   // fill first, then stale (liveness)
-            // Worklist empty → oldest-swept liveness trickle instead of idle.
-            workQueue.poll() ?: oldestSweptPrefix(context, dueOnly = true)
+            // Worklist empty → oldest-swept: whole catalog while a fill backlog is known, else
+            // the due (weekly) liveness trickle.
+            workQueue.poll() ?: oldestSweptPrefix(context, dueOnly = !fillBacklog)
         }
     }
     // Skip re-checking an avatar within the flush-lag window: the bot's fill/check reaches the
@@ -897,7 +907,17 @@ object AvatarCatalogSweep {
                 val chk = BotVrchatSession.checkAvatar(context, slot, e.avatarId)
                 p.checked++
                 if (chk == null) {
-                    if (needsFill(e)) noteFillNull(slot, e.fileId)
+                    if (needsFill(e)) {
+                        noteFillNull(slot, e.fileId)
+                        // Just benched (6 nulls while the session was proven alive) → mark it
+                        // filled=true on the server so it LEAVES the unfilled count. Otherwise a
+                        // permanently-unfetchable entry pins manifestUnfilled > 0 forever, which
+                        // (with the fill-backlog whole-catalog walk above) would churn the bots
+                        // across all shards endlessly. The weekly liveness sweep still re-checks it.
+                        if (fillGaveUp.contains(e.fileId)) {
+                            upserts.add(e.copy(filled = true)); filledSinceManifest.incrementAndGet()
+                        }
+                    }
                     if (++nulls >= 3) { p.status = "rate-limited — backing off"; rateLimited = true; break }
                     delay(PACE_MS); continue
                 }

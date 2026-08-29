@@ -1503,9 +1503,28 @@ object VrchatAuthManager {
         // SHARDED catalog (R2) — one edge-cached shard GET keyed by the worn file id, so it
         // catches avatars newer than this device's ~30-min whole-file map. Image-file-id-keyed
         // (exact). Dormant until R2 is the live backend, so pre-cutover this is a no-op.
-        com.vrca.vrchat.AvatarGlobalDb.lookupSharded(context, wornFileId)?.let {
-            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog (shard)"
-            return@withContext WornAvatarResult(it.avatarId, it.platforms)
+        //
+        // Our catalog is image-VERIFIED, so it is AUTHORITATIVE. Distinguish a genuine miss from a
+        // TRANSIENT read failure (rate-limited/timeout under roster load): on a transient failure DO
+        // NOT fall through to the mirror/author paths below — those match by the same worn image file
+        // id but can return a DIFFERENT avatar that merely shares that image, and that wrong id then
+        // gets CACHED and clones as VRChat's default robot. That silent fall-through is the
+        // intermittent "in-DB avatar → robot" bug (it works whenever the shard read happens to
+        // succeed). On UNAVAILABLE, return unresolved so the roster RETRIES the catalog next pass.
+        run {
+            val shardRes = com.vrca.vrchat.AvatarGlobalDb.lookupShardedResult(context, wornFileId)
+            when (shardRes.status) {
+                com.vrca.vrchat.AvatarGlobalDb.ShardStatus.HIT -> {
+                    val e = shardRes.entry!!
+                    com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog (shard)"
+                    return@withContext WornAvatarResult(e.avatarId, e.platforms)
+                }
+                com.vrca.vrchat.AvatarGlobalDb.ShardStatus.UNAVAILABLE -> {
+                    com.vrca.vrchat.AvatarSearch.Diag.lastReason = "catalog read unavailable — will retry"
+                    return@withContext WornAvatarResult(null)
+                }
+                com.vrca.vrchat.AvatarGlobalDb.ShardStatus.MISS -> { /* genuinely not in our catalog → fall through */ }
+            }
         }
         // 0. EXACT, NAME-INDEPENDENT: look the avatar up by its worn IMAGE FILE ID.
         if (wornFileId != null) {
@@ -1738,7 +1757,10 @@ object VrchatAuthManager {
         try {
             val (code, _, raw) = get("$BASE/avatars/$avatarId", null, cookie)
             if (code == 200) captureRolledCookies(context, raw)
-            when (code) { 200 -> true; 404, 410 -> false; else -> null }
+            // 403 = private / not publicly accessible → NOT cloneable (selecting it gives the
+            // default robot avatar), so treat it like a 404 here: callers use `== false` to
+            // report + grey + cull it. 429/5xx/network stay null (transient — never cull).
+            when (code) { 200 -> true; 403, 404, 410 -> false; else -> null }
         } catch (e: Exception) { null }
     }
 
