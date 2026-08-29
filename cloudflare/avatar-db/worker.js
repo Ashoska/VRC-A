@@ -555,15 +555,31 @@ async function maybeDispatchRebuild(env) {
 // Read only the shards touched by pending ops, merge, write them back. The whole catalog is
 // NEVER in memory at once, so there's no CPU/memory wall regardless of size. Contributions/
 // admin-upserts arrive already cleanEntry'd (stamped by /contribute + /admin).
+// List every KV key under a prefix, following the cursor. The OLD code did ONE un-paginated
+// AVATAR_KV.list() (max 1000 keys, lexicographic) and filtered — so once the `iq:` index-queue grew
+// past 1000 keys it filled the whole window and, because `iq:` sorts BEFORE `pend:`/`rep:`, the
+// pending USER batches (and reports) fell outside it and were NEVER seen: the flush ran, added 0, and
+// the batches sat forever ("pending batches stuck at N", while the `adm*` admin keys — which sort
+// first — still processed, so the bots kept moving). Listing each prefix on its OWN cursor can never
+// be crowded out. `cap` bounds pagination (we only need a few of some prefixes).
+async function listPrefix(env, prefix, cap = 5000) {
+  const out = []; let cursor;
+  do {
+    const r = await env.AVATAR_KV.list({ prefix, cursor });
+    for (const k of r.keys) out.push(k.name);
+    cursor = r.list_complete ? null : r.cursor;
+  } while (cursor && out.length < cap);
+  return out;
+}
+
 async function flushR2(env) {
   const prevMeta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
-  const allNames = (await env.AVATAR_KV.list()).keys.map((k) => k.name);
-  const pendNames = allNames.filter((n) => n.startsWith("pend:"));
-  const repNames  = allNames.filter((n) => n.startsWith("rep:"));
-  const admuNames = allNames.filter((n) => n.startsWith("admu:"));
-  const admrNames = allNames.filter((n) => n.startsWith("admr:"));
-  const admkNames = allNames.filter((n) => n.startsWith("admk:"));
-  const hasIndexQueue = allNames.some((n) => n.startsWith("iq:"));
+  const pendNames = await listPrefix(env, "pend:");
+  const repNames  = await listPrefix(env, "rep:");
+  const admuNames = await listPrefix(env, "admu:");
+  const admrNames = await listPrefix(env, "admr:");
+  const admkNames = await listPrefix(env, "admk:");
+  const hasIndexQueue = (await env.AVATAR_KV.list({ prefix: "iq:", limit: 1 })).keys.length > 0;
 
   // Nothing to do → skip the whole flush (no shard reads, no meta write). This stops the
   // every-minute cron from writing `meta` ~1440×/day while the catalog is idle. Reports and the
@@ -703,7 +719,7 @@ async function flushR2(env) {
   // so a big burst never drops and subrequests stay bounded. Only runs when shards wrote OK (so we
   // index exactly what persisted; a failed apply re-queues everything and re-applies idempotently).
   if (allShardsOk) {
-    const iqNames = allNames.filter((n) => n.startsWith("iq:"));
+    const iqNames = await listPrefix(env, "iq:", 1000);   // own cursor (never crowded out); we drain only a few
     let queued = []; const drained = [];
     for (const kn of iqNames) {
       if (queued.length >= MAX_INDEX_OPS_PER_FLUSH) break;
