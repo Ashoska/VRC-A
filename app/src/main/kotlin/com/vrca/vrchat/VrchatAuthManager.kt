@@ -442,6 +442,14 @@ object VrchatAuthManager {
                 ?: return@withContext InviteResult(false, "Not signed in to VRChat")
             try {
                 val (code, respBody, rawCookies) = put("$BASE/avatars/$id/select", "", cookieHeader)
+                // Record the ACTUAL VRChat response so the "clone -> robot" cause is visible in
+                // Settings -> Debug (200 = VRChat accepted; 4xx = it rejected, body says why).
+                runCatching {
+                    context.getSharedPreferences("vrca_diag", Context.MODE_PRIVATE).edit()
+                        .putInt("avatar_select_last_code", code)
+                        .putString("avatar_select_last_body", respBody.take(300))
+                        .commit()
+                }
                 if (code == 200) {
                     captureRolledCookies(context, rawCookies)
                     InviteResult(true)
@@ -451,6 +459,12 @@ object VrchatAuthManager {
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "selectAvatar failed", e)
+                runCatching {
+                    context.getSharedPreferences("vrca_diag", Context.MODE_PRIVATE).edit()
+                        .putInt("avatar_select_last_code", -1)
+                        .putString("avatar_select_last_body", "exception: ${e.javaClass.simpleName} ${e.message}".take(300))
+                        .commit()
+                }
                 InviteResult(false, "Network error")
             }
         }
@@ -1566,27 +1580,14 @@ object VrchatAuthManager {
                 "${candidates.size} candidates, none matched the worn image (won't name-guess)"
             return@withContext WornAvatarResult(null)
         }
-        // wornFileId == null (impostor'd / hidden thumb): a name-only best-effort is
-        // the ONLY option here. (a) a single unambiguous name+author match.
-        val authorMatches = candidates.filter {
-            authorNorm.isNotBlank() && it.author.trim().lowercase() == authorNorm
-        }
-        if (authorMatches.size == 1) {
-            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name+author (no worn image)"
-            return@withContext WornAvatarResult(authorMatches[0].id)
-        }
-        // (b) a single EXACT-name match.
-        val wantNames = variants.map { normalizeAvatarName(it) }.filter { it.length >= 2 }.toSet()
-        val nameHits = candidates.filter {
-            normalizeAvatarName(it.name) in wantNames &&
-                (authorNorm.isBlank() || it.author.trim().lowercase() == authorNorm)
-        }.distinctBy { it.id }
-        if (nameHits.size == 1) {
-            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via unique exact-name (no worn image)"
-            return@withContext WornAvatarResult(nameHits[0].id)
-        }
+        // wornFileId == null (impostor'd / hidden thumb — common for PRIVATE avatars, where
+        // VRChat hides the real thumbnail). We CANNOT verify a candidate is the actual worn
+        // avatar without the worn image file id, so a name/author "best-effort" here just clones
+        // a DIFFERENT same-named public avatar → the user turns into the wrong avatar / robot, and
+        // the clone button wrongly lights up for un-resolvable (private) avatars. Refuse to guess:
+        // grey it out. (This removes the old name-only fallback that caused exactly that.)
         com.vrca.vrchat.AvatarSearch.Diag.lastReason =
-            "${candidates.size} candidates, ambiguous (no worn image to confirm)"
+            "${candidates.size} candidates but no worn image to confirm (won't name-guess — greyed)"
         WornAvatarResult(null)
     }
 
