@@ -149,10 +149,18 @@ function tokenizeFields(...fields) {
   return set;
 }
 const INDEX_HOT_TOKEN_CAP = 5000;   // must match the app/rebuild HOT_TOKEN_CAP
-// Bound the SEARCH-INDEX work per flush (fragments/index/avtr). The shard/clone writes are separate
-// and unbounded (as before). The index-op backlog beyond this cap carries forward in an `iq:` queue
-// and drains over the next flushes, so a big burst never drops and subrequests stay bounded.
+// Bound the SEARCH-INDEX work per flush (fragments/index/avtr). The index-op backlog beyond this cap
+// carries forward in an `iq:` queue and drains over the next flushes, so a big burst never drops and
+// subrequests stay bounded.
 const MAX_INDEX_OPS_PER_FLUSH = 30;   // ~300 subrequests, leaving room for the shard writes
+// Bound the CLONE-SHARD writes per flush too. Each distinct shard is 1 R2 read + 1 write, so a burst
+// of big USER contribution batches (a 136-avatar batch spans ~136 shards) could push a single flush
+// past Cloudflare's per-invocation subrequest limit → the invocation dies BEFORE clearing the `pend:`
+// keys → the same batches retry and die every minute ("pending batches stuck at N"). The pend loop
+// consumes batches only until this many distinct shards are queued, then leaves the rest for the next
+// 1-min flush, so a backlog DRAINS over a few flushes. 120 shards ≈ 240 R2 ops, well under budget
+// alongside the index work + purges. Admin/bot pushes are separately bounded (WALK_BATCH).
+const MAX_SHARDS_PER_FLUSH = 120;
 
 // The search summary stored in a fragment bucket.
 function fragSummary(e, fileId) {
@@ -570,12 +578,21 @@ async function flushR2(env) {
 
   const pendKeys = [];
   const recentBatches = [];   // admin "recent contributions" view (free: built from data already read)
+  // Consume pending USER batches only until MAX_SHARDS_PER_FLUSH distinct shards are queued, then STOP
+  // (leave the rest for the next 1-min flush) so a big burst can't blow the subrequest limit and wedge
+  // the queue forever. A deferred batch is NOT added to pendKeys, so it isn't deleted → it drains next
+  // flush. Always take at least the first batch so a single huge batch can't get stuck.
+  const touchedShards = new Set();
   for (const kn of pendNames) {
-    pendKeys.push(kn);
     const val = await env.AVATAR_KV.get(kn);
-    if (!val) continue;
-    let batch; try { batch = JSON.parse(val); } catch (_) { continue; }
+    if (!val) { pendKeys.push(kn); continue; }                                 // empty → clear it
+    let batch; try { batch = JSON.parse(val); } catch (_) { pendKeys.push(kn); continue; }  // garbage → clear it
     const fids = Object.keys(batch).filter((fid) => FILE_RE.test(fid));
+    const batchPrefixes = new Set(fids.map(shardPrefix));
+    let fresh = 0; for (const sp of batchPrefixes) if (!touchedShards.has(sp)) fresh++;
+    if (touchedShards.size > 0 && touchedShards.size + fresh > MAX_SHARDS_PER_FLUSH) break;  // over budget → defer rest
+    for (const sp of batchPrefixes) touchedShards.add(sp);
+    pendKeys.push(kn);
     for (const fid of fids) S(shardPrefix(fid)).adds[fid] = batch[fid];
     if (fids.length) recentBatches.push({
       ts: typeof batch.__ts === "number" ? batch.__ts : Date.now(),
