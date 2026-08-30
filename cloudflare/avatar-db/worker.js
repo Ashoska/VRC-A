@@ -929,8 +929,22 @@ async function flushR2(env) {
   // flush → +1 small KV write per flush at most, nothing when idle. Capped at 20 batches.
   if (recentBatches.length) {
     let prev = []; try { const r = await env.AVATAR_KV.get("recent"); if (r) prev = JSON.parse(r); } catch (_) {}
-    const next = [...recentBatches.reverse(), ...(Array.isArray(prev) ? prev : [])].slice(0, 20);
-    await env.AVATAR_KV.put("recent", JSON.stringify(next));
+    prev = Array.isArray(prev) ? prev : [];
+    // DEDUP the display log by CONTENT (contributor + the exact avatar set), not timestamp: a
+    // contribution POST that times out on the phone but actually landed gets retried, creating a 2nd
+    // identical pend: batch — harmless for the catalog (contribute is idempotent, +0 added) but it
+    // showed the same row twice in "Recent user contributions". The client sends no per-batch ts, so a
+    // re-POST processed in a later flush has a different Date.now(); a content signature catches it
+    // regardless. (Genuine repeats can't collide: the client dedups its queue by file id and contribute
+    // dedups against R2, so an identical avatar set is only ever a re-POST.)
+    const sigOf = (b) => `${b.by || ""}|${b.n || 0}|${(b.names || []).join("")}`;
+    const seen = new Set(prev.map(sigOf));
+    const fresh = [];
+    for (const b of recentBatches) { const s = sigOf(b); if (!seen.has(s)) { seen.add(s); fresh.push(b); } }
+    if (fresh.length) {
+      const next = [...fresh.reverse(), ...prev].slice(0, 20);
+      await env.AVATAR_KV.put("recent", JSON.stringify(next));
+    }
   }
 }
 
