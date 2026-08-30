@@ -1478,9 +1478,62 @@ object VrchatAuthManager {
             } catch (e: Exception) { null }
         }
 
-    /** Just the platform compatibility list for an avatar (empty on any failure). */
-    private suspend fun fetchAvatarPlatforms(context: Context, avatarId: String): List<String> =
-        fetchAvatarInfo(context, avatarId)?.second ?: emptyList()
+    // Session liveness cache: avatarId -> true (confirmed 200, wearable) / false (403 private-or-
+    // not-accessible, 404 deleted — NOT wearable). A transient failure (429/5xx/network) is NOT
+    // cached (left absent so it re-confirms). Bounds the "no robot tap" pre-check to at most ONE
+    // GET /avatars/{id} per distinct avatar per session, then free.
+    private val avatarLiveCache = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    private val avatarLivePlatforms = java.util.concurrent.ConcurrentHashMap<String, List<String>>()
+    private val avatarLiveFileIds = java.util.concurrent.ConcurrentHashMap<String, Set<String>>()
+
+    /** Result of a live-confirm: [live]=true (200, wearable), false (403/404, not wearable → grey +
+     *  report), null (transient → unknown, retry, do NOT grey/report). */
+    data class AvatarConfirm(val live: Boolean?, val fileIds: Set<String>, val platforms: List<String>)
+
+    /** Confirm an avatar is still LIVE + PUBLIC before its catalog entry is offered as clonable, so
+     *  the clone button NEVER robots on a dead/private avatar (the user's hard requirement). One
+     *  `GET /avatars/{id}` (session-cached by avatarId). This is the SAME call the non-catalog resolve
+     *  paths already make to confirm; the catalog-HIT paths skipped it for cost, which is exactly why
+     *  a since-dead/since-private catalog entry could still show clickable → robot. */
+    suspend fun confirmAvatarLive(context: Context, avatarId: String): AvatarConfirm =
+        withContext(Dispatchers.IO) {
+            avatarLiveCache[avatarId]?.let {
+                return@withContext AvatarConfirm(it, avatarLiveFileIds[avatarId] ?: emptySet(), avatarLivePlatforms[avatarId] ?: emptyList())
+            }
+            val cookie = getCookieHeader(context) ?: return@withContext AvatarConfirm(null, emptySet(), emptyList())
+            try {
+                val (code, body, raw) = get("$BASE/avatars/$avatarId", null, cookie)
+                when {
+                    code == 200 && body.startsWith("{") -> {
+                        captureRolledCookies(context, raw)
+                        val j = org.json.JSONObject(body)
+                        val ids = setOfNotNull(fileIdOf(j.optString("thumbnailImageUrl", "")), fileIdOf(j.optString("imageUrl", "")))
+                        val plats = platformsFromAvatarJson(j)
+                        avatarLiveCache[avatarId] = true; avatarLiveFileIds[avatarId] = ids; avatarLivePlatforms[avatarId] = plats
+                        AvatarConfirm(true, ids, plats)
+                    }
+                    code == 403 || code == 404 -> { avatarLiveCache[avatarId] = false; AvatarConfirm(false, emptySet(), emptyList()) }
+                    else -> AvatarConfirm(null, emptySet(), emptyList())   // transient — do not cache, retry
+                }
+            } catch (e: Exception) { AvatarConfirm(null, emptySet(), emptyList()) }
+        }
+
+    private enum class HitVerdict { SERVE, DEAD, RETRY, FALLTHROUGH }
+
+    /** Verify a catalog-HIT avatar is safe to offer as clonable. SERVE = live+public (and, when the
+     *  worn file id is known, its image still matches — not a stale re-keyed entry). DEAD = 403/404
+     *  (grey + report). RETRY = transient (leave unresolved, retry). FALLTHROUGH = live but the worn
+     *  image no longer matches this entry (stale mapping) → let the fresh resolve paths find the
+     *  right avatar. */
+    private suspend fun verifyCatalogHit(context: Context, avatarId: String, wornFileId: String?): Pair<HitVerdict, List<String>> {
+        val c = confirmAvatarLive(context, avatarId)
+        return when (c.live) {
+            false -> HitVerdict.DEAD to emptyList()
+            null -> HitVerdict.RETRY to emptyList()
+            else -> if (wornFileId == null || wornFileId in c.fileIds) HitVerdict.SERVE to c.platforms
+                    else HitVerdict.FALLTHROUGH to emptyList()
+        }
+    }
 
     /** The result of a worn-avatar resolve: the `avtr_` id (or null when nothing
      *  could be confirmed) plus the avatar's platform compatibility (for the Quest
@@ -1495,7 +1548,10 @@ object VrchatAuthManager {
     // the caller so a clone that VRChat later rejects (403 private / 404 deleted) can report the EXACT
     // catalog entry for culling — the target's live worn thumbnail may be the fallback by then, so it
     // can't be re-derived reliably at tap time.
-    data class WornAvatarResult(val avatarId: String?, val platforms: List<String> = emptyList(), val loading: Boolean = false, val fileId: String? = null)
+    // [dead] = the resolved catalog entry was CONFIRMED not wearable (403 private / 404 deleted) via a
+    // live GET, so the clone button must grey out IMMEDIATELY (not spin/retry) — this is what makes a
+    // dead/private avatar never present a clickable button that would robot the user.
+    data class WornAvatarResult(val avatarId: String?, val platforms: List<String> = emptyList(), val loading: Boolean = false, val fileId: String? = null, val dead: Boolean = false)
 
     /**
      * Resolve a remote player's EXACT worn avatar id. Quest can't get it from the
@@ -1542,13 +1598,29 @@ object VrchatAuthManager {
             return@withContext WornAvatarResult(null, loading = true)
         }
         // GLOBAL crowdsourced catalog first — exact, offline, zero network.
-        com.vrca.vrchat.AvatarGlobalDb.lookup(wornFileId)?.let {
-            if (com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(it.author, it.avatarId, wornFileId)) {
+        com.vrca.vrchat.AvatarGlobalDb.lookup(wornFileId)?.let { hit ->
+            if (com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(hit.author, hit.avatarId, wornFileId)) {
                 com.vrca.vrchat.AvatarSearch.Diag.lastReason = "resolved to a VRChat fallback — not cloneable"
                 return@withContext WornAvatarResult(null)
             }
-            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog"
-            return@withContext WornAvatarResult(it.avatarId, it.platforms, fileId = wornFileId)
+            // CONFIRM it's still wearable before offering it (no robot-tap on a since-dead/private entry).
+            val (verdict, plats) = verifyCatalogHit(context, hit.avatarId, wornFileId)
+            when (verdict) {
+                HitVerdict.SERVE -> {
+                    com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog (confirmed live)"
+                    return@withContext WornAvatarResult(hit.avatarId, plats.ifEmpty { hit.platforms }, fileId = wornFileId)
+                }
+                HitVerdict.DEAD -> {
+                    com.vrca.vrchat.AvatarGlobalDb.report(context, wornFileId!!, hit.avatarId, "dead")
+                    com.vrca.vrchat.AvatarSearch.Diag.lastReason = "catalog entry dead/private (confirmed) — greyed + reported"
+                    return@withContext WornAvatarResult(null, dead = true, fileId = wornFileId)
+                }
+                HitVerdict.RETRY -> {
+                    com.vrca.vrchat.AvatarSearch.Diag.lastReason = "catalog hit, liveness unknown — retry"
+                    return@withContext WornAvatarResult(null)
+                }
+                HitVerdict.FALLTHROUGH -> { /* stale mapping (image changed) → resolve fresh below */ }
+            }
         }
         // SHARDED catalog (R2) — one edge-cached shard GET keyed by the worn file id, so it
         // catches avatars newer than this device's ~30-min whole-file map. Image-file-id-keyed
@@ -1570,13 +1642,26 @@ object VrchatAuthManager {
                         com.vrca.vrchat.AvatarSearch.Diag.lastReason = "resolved to a VRChat fallback (shard) — not cloneable"
                         return@withContext WornAvatarResult(null)
                     }
-                    com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog (shard)"
-                    // Use the entry's own platforms (no extra /avatars call). PC-only isn't the robot
-                    // cause — VRChat itself gracefully restricts a PC-only avatar on Quest with a message,
-                    // so paying a GET per catalog HIT to learn platforms was pure cost for no benefit and
-                    // defeated the whole point of the offline catalog. gateCloneId still greys a KNOWN
-                    // PC-only entry on Quest; an unfilled (empty-platforms) entry shows and VRChat restricts.
-                    return@withContext WornAvatarResult(e.avatarId, e.platforms, fileId = wornFileId)
+                    // CONFIRM live+public before offering (the catalog is image-verified at CONTRIBUTION
+                    // time, but avatars go private/deleted later; without this, a since-dead/private entry
+                    // shows clickable → robot). One GET, session-cached — the honest cost of "no robot tap".
+                    val (verdict, plats) = verifyCatalogHit(context, e.avatarId, wornFileId)
+                    when (verdict) {
+                        HitVerdict.SERVE -> {
+                            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog (shard, confirmed live)"
+                            return@withContext WornAvatarResult(e.avatarId, plats.ifEmpty { e.platforms }, fileId = wornFileId)
+                        }
+                        HitVerdict.DEAD -> {
+                            com.vrca.vrchat.AvatarGlobalDb.report(context, wornFileId!!, e.avatarId, "dead")
+                            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "catalog entry dead/private (shard, confirmed) — greyed + reported"
+                            return@withContext WornAvatarResult(null, dead = true, fileId = wornFileId)
+                        }
+                        HitVerdict.RETRY -> {
+                            com.vrca.vrchat.AvatarSearch.Diag.lastReason = "catalog shard hit, liveness unknown — retry"
+                            return@withContext WornAvatarResult(null)
+                        }
+                        HitVerdict.FALLTHROUGH -> { /* stale mapping → resolve fresh below */ }
+                    }
                 }
                 com.vrca.vrchat.AvatarGlobalDb.ShardStatus.UNAVAILABLE -> {
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason = "catalog read unavailable — will retry"
@@ -1706,9 +1791,18 @@ object VrchatAuthManager {
                 }.distinctBy { it.avatarId }
                 if (m.size == 1) {
                     val e = m[0]
-                    // Use the entry's own platforms — no extra /avatars call (PC-only is restricted by
-                    // VRChat itself, so paying to learn platforms here was wasted).
-                    return@withContext WornAvatarResult(e.avatarId, e.platforms)
+                    // CONFIRM live+public before offering (no worn image to match here — loading player —
+                    // so live==200 is the gate). A since-private/deleted catalog entry must NOT present a
+                    // clickable button that would robot the user.
+                    val (verdict, plats) = verifyCatalogHit(context, e.avatarId, null)
+                    return@withContext when (verdict) {
+                        HitVerdict.SERVE -> WornAvatarResult(e.avatarId, plats.ifEmpty { e.platforms })
+                        HitVerdict.DEAD -> {
+                            com.vrca.vrchat.AvatarGlobalDb.report(context, e.fileId, e.avatarId, "dead")
+                            WornAvatarResult(null, dead = true)
+                        }
+                        else -> null   // transient → retry via the loading loop
+                    }
                 }
                 if (m.size > 1) return@withContext null   // ambiguous in our own DB → don't guess
             }
@@ -1730,7 +1824,18 @@ object VrchatAuthManager {
             }.distinctBy { it.id }
             if (matches.size != 1) return@withContext null   // 0 or ambiguous (e.g. v1/v2) → don't guess
             val c = matches[0]
-            val plats = fetchAvatarPlatforms(context, c.id)
+            // CONFIRM live+public (same GET fetchAvatarPlatforms did, now session-cached + tri-state) so
+            // a dead/private avtrdb match never presents a clickable button that robots the user.
+            val conf = confirmAvatarLive(context, c.id)
+            when (conf.live) {
+                false -> {
+                    if (c.imageFileId != null) com.vrca.vrchat.AvatarGlobalDb.report(context, c.imageFileId!!, c.id, "dead")
+                    return@withContext WornAvatarResult(null, dead = true)
+                }
+                null -> return@withContext null   // transient → retry
+                else -> {}
+            }
+            val plats = conf.platforms
             // Contribute the pairing if the candidate carries a real VRChat image file id (VRCX
             // mirrors do; avtrdb proxies don't), so the catalog grows from these too.
             if (c.imageFileId != null)

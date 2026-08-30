@@ -868,12 +868,29 @@ object InstanceRosterManager {
                     if (shardRes.status == com.vrca.vrchat.AvatarGlobalDb.ShardStatus.HIT) {
                         val hit = shardRes.entry!!
                         if (!com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(hit.author, hit.avatarId, wornFid)) {
-                            val gated = gateCloneId(hit.avatarId, hit.platforms)  // "" if PC-only on Quest
-                            avatarPlatformsCache[id] = hit.platforms
-                            avatarIdCache[id] = gated
-                            avatarIdResolvedFor[id] = avaName
-                            if (gated.isNotBlank()) avatarCloneFileIdCache[id] = wornFid else avatarCloneFileIdCache.remove(id)
-                            catalogAvatarId = gated
+                            // CONFIRM the catalog entry is still wearable BEFORE lighting the button — the
+                            // shortcut used to present it unverified, so a since-dead/private catalog entry
+                            // showed clickable → robot. One GET, session-cached (shared with the guarded
+                            // resolver), so it stays ~instant and never double-charges.
+                            val conf = VrchatAuthManager.confirmAvatarLive(context, hit.avatarId)
+                            when (conf.live) {
+                                true -> if (wornFid in conf.fileIds || conf.fileIds.isEmpty()) {
+                                    val plats = conf.platforms.ifEmpty { hit.platforms }
+                                    val gated = gateCloneId(hit.avatarId, plats)  // "" if PC-only on Quest
+                                    avatarPlatformsCache[id] = plats
+                                    avatarIdCache[id] = gated
+                                    avatarIdResolvedFor[id] = avaName
+                                    if (gated.isNotBlank()) avatarCloneFileIdCache[id] = wornFid else avatarCloneFileIdCache.remove(id)
+                                    catalogAvatarId = gated
+                                }   // else: worn image no longer matches (stale re-key) → let the guarded resolver find the right one
+                                false -> {
+                                    // Confirmed dead/private → report + grey DECISIVELY (never a clickable robot).
+                                    com.vrca.vrchat.AvatarGlobalDb.report(context, wornFid, hit.avatarId, "dead")
+                                    avatarIdCache[id] = ""; avatarIdResolvedFor[id] = avaName
+                                    avatarCloneFileIdCache.remove(id); catalogAvatarId = ""
+                                }
+                                null -> { /* transient — don't pin; the guarded resolveAvatars pass retries */ }
+                            }
                         }
                     }
                     // MISS/UNAVAILABLE (or a fallback entry) → don't pin; the guarded resolveAvatars pass
@@ -959,6 +976,11 @@ object InstanceRosterManager {
                 avatarResolveTries.remove(tryKey)
                 avatarLoadingSince.remove(tryKey)
                 avatarSlowRetryAt.remove(tryKey)   // resolved (possibly in the slow phase) → un-grey
+            } else if (res.dead) {
+                // Confirmed dead/private (403/404) → grey DECISIVELY, don't spin/retry (already reported).
+                avatarIdCache[uid] = ""; avatarIdResolvedFor[uid] = name
+                avatarCloneFileIdCache.remove(uid)
+                avatarResolveTries.remove(tryKey); avatarLoadingSince.remove(tryKey); avatarSlowRetryAt.remove(tryKey)
             } else if (res.loading) {
                 // Worn thumbnail is the fallback → real avatar loading/hidden. Fast phase (<40s):
                 // spinner + fast retries. Slow phase (40s–15min): GREY the button (decisive UI) but
