@@ -576,6 +576,23 @@ internal fun SettingsPage(
                             )
                         }
 
+                        // Re-scan the user's OWN avatar library → push any public avatar that isn't in
+                        // the catalog (e.g. one just flipped from private back to public) RIGHT NOW.
+                        Text("My avatars → catalog", style = MaterialTheme.typography.labelMedium)
+                        var libDiag by remember { mutableStateOf(com.vrca.vrchat.AvatarGlobalDb.ownLibraryDiag()) }
+                        var rescanTick by remember { mutableStateOf(0) }
+                        if (rescanTick > 0) {
+                            androidx.compose.runtime.LaunchedEffect(rescanTick) {
+                                com.vrca.vrchat.AvatarGlobalDb.rescanOwnLibraryNow(ctx)
+                                // The scan runs off-thread; poll the diag for a few seconds so the result shows.
+                                repeat(12) { kotlinx.coroutines.delay(1500); libDiag = com.vrca.vrchat.AvatarGlobalDb.ownLibraryDiag() }
+                            }
+                        }
+                        TextButton(onClick = { rescanTick++ }) { Text("Re-scan my avatars now") }
+                        SelectionContainer {
+                            Text(libDiag, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                        }
+
                         Text("OSC Output Preview", style = MaterialTheme.typography.labelMedium)
                         SelectionContainer {
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
