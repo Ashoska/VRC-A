@@ -334,7 +334,10 @@ object VrchatAuthManager {
      * user WHY a re-invite failed (instance closed / full / not accessible)
      * instead of a generic failure.
      */
-    data class InviteResult(val ok: Boolean, val error: String? = null)
+    // [code] = the raw HTTP status (0 when a request never completed). selectAvatar sets it so the
+    // clone caller can tell a definitive not-accessible/not-found (403/404 → the avatar went private or
+    // was deleted → report + cull) apart from a transient failure (429/5xx/network → keep it, retry).
+    data class InviteResult(val ok: Boolean, val error: String? = null, val code: Int = 0)
 
     /** Extracts VRChat's `error.message` (or a bare `message`) from a response body. */
     private fun parseVrcError(body: String, code: Int): String? {
@@ -452,10 +455,10 @@ object VrchatAuthManager {
                 }
                 if (code == 200) {
                     captureRolledCookies(context, rawCookies)
-                    InviteResult(true)
+                    InviteResult(true, code = code)
                 } else {
                     Log.w(TAG, "selectAvatar returned $code for $id body=${respBody.take(200)}")
-                    InviteResult(false, parseVrcError(respBody, code))
+                    InviteResult(false, parseVrcError(respBody, code), code = code)
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "selectAvatar failed", e)
@@ -481,7 +484,13 @@ object VrchatAuthManager {
         if (id == null || at == 0L) return "no avatar clone/select this install yet"
         val ago = "${(System.currentTimeMillis() - at) / 1000}s ago"
         val clock = java.text.SimpleDateFormat("MMM d HH:mm:ss", java.util.Locale.US).format(java.util.Date(at))
-        return "last select: $id\n  at $clock ($ago) · total this install: $n"
+        // The ACTUAL VRChat response is the definitive "why robot" signal: 200 = VRChat accepted the
+        // select (a robot after a 200 is VRChat still downloading the Quest asset, not a wrong id);
+        // 404 = the resolved id is deleted, 403 = private/not-accessible (both now auto-reported+culled).
+        val code = p.getInt("avatar_select_last_code", 0)
+        val body = p.getString("avatar_select_last_body", "").orEmpty()
+        val codeLine = if (code != 0) "\n  VRChat replied: $code" + (if (body.isNotBlank()) " — ${body.take(140)}" else "") else ""
+        return "last select: $id\n  at $clock ($ago) · total this install: $n$codeLine"
     }
 
     /**
@@ -1482,7 +1491,11 @@ object VrchatAuthManager {
     // the roster must KEEP re-resolving (not cache a final grey) and light the clone button up the
     // moment the real thumbnail lands. A null avatarId with loading=false is a genuine no-match
     // (a real avatar in no database) and is final until they switch avatars.
-    data class WornAvatarResult(val avatarId: String?, val platforms: List<String> = emptyList(), val loading: Boolean = false)
+    // [fileId] = the worn image FILE id this avatar resolved FROM (the catalog shard key). Threaded to
+    // the caller so a clone that VRChat later rejects (403 private / 404 deleted) can report the EXACT
+    // catalog entry for culling — the target's live worn thumbnail may be the fallback by then, so it
+    // can't be re-derived reliably at tap time.
+    data class WornAvatarResult(val avatarId: String?, val platforms: List<String> = emptyList(), val loading: Boolean = false, val fileId: String? = null)
 
     /**
      * Resolve a remote player's EXACT worn avatar id. Quest can't get it from the
@@ -1535,11 +1548,7 @@ object VrchatAuthManager {
                 return@withContext WornAvatarResult(null)
             }
             com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog"
-            // Platforms drive the PC-only-on-Quest clone gate. An UNFILLED catalog entry has none,
-            // which would let a PC-only avatar clone on Quest and render as the robot — so fetch them
-            // once when missing (one GET, only for unfilled entries).
-            val plats = it.platforms.ifEmpty { fetchAvatarPlatforms(context, it.avatarId) }
-            return@withContext WornAvatarResult(it.avatarId, plats)
+            return@withContext WornAvatarResult(it.avatarId, it.platforms, fileId = wornFileId)
         }
         // SHARDED catalog (R2) — one edge-cached shard GET keyed by the worn file id, so it
         // catches avatars newer than this device's ~30-min whole-file map. Image-file-id-keyed
@@ -1562,10 +1571,12 @@ object VrchatAuthManager {
                         return@withContext WornAvatarResult(null)
                     }
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog (shard)"
-                    // Fetch platforms when the entry is unfilled so the PC-only-on-Quest gate works
-                    // (else a PC-only avatar clones on Quest and renders as the robot).
-                    val plats = e.platforms.ifEmpty { fetchAvatarPlatforms(context, e.avatarId) }
-                    return@withContext WornAvatarResult(e.avatarId, plats)
+                    // Use the entry's own platforms (no extra /avatars call). PC-only isn't the robot
+                    // cause — VRChat itself gracefully restricts a PC-only avatar on Quest with a message,
+                    // so paying a GET per catalog HIT to learn platforms was pure cost for no benefit and
+                    // defeated the whole point of the offline catalog. gateCloneId still greys a KNOWN
+                    // PC-only entry on Quest; an unfilled (empty-platforms) entry shows and VRChat restricts.
+                    return@withContext WornAvatarResult(e.avatarId, e.platforms, fileId = wornFileId)
                 }
                 com.vrca.vrchat.AvatarGlobalDb.ShardStatus.UNAVAILABLE -> {
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason = "catalog read unavailable — will retry"
@@ -1589,7 +1600,7 @@ object VrchatAuthManager {
                 if (info != null && wornFileId in info.first) {
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via image file id"
                     com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, cand.id, avatarName, author, cand.authorId, info.second)
-                    return@withContext WornAvatarResult(cand.id, info.second)
+                    return@withContext WornAvatarResult(cand.id, info.second, fileId = wornFileId)
                 }
             }
             // 0b. OFFICIAL: the author's public-avatars listing, matched by the worn
@@ -1597,7 +1608,7 @@ object VrchatAuthManager {
             resolveViaAuthorAvatars(context, wornFileId)?.let { (id, plats) ->
                 com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via author listing"
                 com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, id, avatarName, author, "", plats)
-                return@withContext WornAvatarResult(id, plats)
+                return@withContext WornAvatarResult(id, plats, fileId = wornFileId)
             }
         }
         // No log name (impostor'd player) — the file-id/catalog/author paths above were
@@ -1636,7 +1647,7 @@ object VrchatAuthManager {
                 if (info != null && wornFileId in info.first) {
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name->fileid"
                     com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, cand.id, avatarName, author, cand.authorId, info.second)
-                    return@withContext WornAvatarResult(cand.id, info.second)
+                    return@withContext WornAvatarResult(cand.id, info.second, fileId = wornFileId)
                 }
             }
             // 3. CONFIRM proxied-image candidates (avtrdb) via VRChat GET /avatars/{id}
@@ -1649,7 +1660,7 @@ object VrchatAuthManager {
                 if (info != null && wornFileId in info.first) {
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name confirm"
                     com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, c.id, avatarName, c.author, c.authorId, info.second)
-                    return@withContext WornAvatarResult(c.id, info.second)
+                    return@withContext WornAvatarResult(c.id, info.second, fileId = wornFileId)
                 }
                 kotlinx.coroutines.delay(250)
             }
@@ -1695,8 +1706,9 @@ object VrchatAuthManager {
                 }.distinctBy { it.avatarId }
                 if (m.size == 1) {
                     val e = m[0]
-                    val plats = e.platforms.ifEmpty { fetchAvatarPlatforms(context, e.avatarId) }
-                    return@withContext WornAvatarResult(e.avatarId, plats)
+                    // Use the entry's own platforms — no extra /avatars call (PC-only is restricted by
+                    // VRChat itself, so paying to learn platforms here was wasted).
+                    return@withContext WornAvatarResult(e.avatarId, e.platforms)
                 }
                 if (m.size > 1) return@withContext null   // ambiguous in our own DB → don't guess
             }
