@@ -237,13 +237,10 @@ object InstanceRosterManager {
     // The resolved avatar's platform compatibility (for the Quest PC-only clone gate).
     private val avatarPlatformsCache = ConcurrentHashMap<String, List<String>>()
     private val avatarResolveInFlight = ConcurrentHashMap.newKeySet<String>()
-    // Retry count per "uid|avatarName" for an UNCONFIRMED resolve, so a transient miss (rate-limited
-    // worn-thumb fetch / Cloudflare shard read) is retried instead of pinned broken until they switch.
-    private val avatarResolveTries = ConcurrentHashMap<String, Int>()
-    // "uid|avatarName" -> when we FIRST saw this member on the VRChat fallback (Robot) thumbnail.
-    // Their real avatar is still loading/processing server-side, so we KEEP re-resolving (spinner,
-    // never a final grey) until the real image id lands or LOADING_RESOLVE_WINDOW_MS elapses — so a
-    // member who only briefly shows the Robot is never permanently missed.
+    // "uid|avatarName" -> when we FIRST attempted to resolve this member's clone id (set for EVERY
+    // unresolved member — fallback/loading, transient rate-limit, or no-match-yet). Drives the unified
+    // time-based button decision (spinner <40s, grey ≥40s, final grey at the 15-min hard cap) so the
+    // button ALWAYS decides within ~40s and never spins longer, and the retry loop re-resolves off it.
     private val avatarLoadingSince = ConcurrentHashMap<String, Long>()
     // Last time a member in the SLOW phase (past the fast window, greyed but still retriable) was
     // re-resolved — so a could-have-been-found avatar (avtrdb recovered, catalog grew) still lights up.
@@ -260,7 +257,6 @@ object InstanceRosterManager {
      *  Always false on non-headset builds (the roster never starts there). */
     fun isResolvingRoster(): Boolean = resolvingAvatars.get()
     private const val RESOLVE_PACE_MS = 1_000L
-    private const val MAX_RESOLVE_TRIES = 5   // retry a transient miss this many times before greying
     // A fallback-thumbnail member resolves FAST when it can (catalog / name+author / real REST thumb,
     // all within seconds). If it still can't after this short window it's private/personal/unavailable
     // — DECIDE (grey) rather than spin for minutes. Kept just long enough to ride out a brief REST lag.
@@ -775,12 +771,11 @@ object InstanceRosterManager {
             }
             val pfp = if (isSelfMember) (selfPresence?.profilePicUrl ?: "")
                       else e.userId?.let { pfpCache[it] } ?: ""
-            // Pre-resolved clone target: null = still resolving (or not applicable),
-            // "" = resolved with no cloneable match (gray out), non-blank = ready.
-            // Only valid when resolved FOR the current avatar name (an avatar switch
-            // invalidates it → null again → the button shows "resolving" and re-runs).
-            val avaId: String? = if (!isSelfMember && e.userId != null &&
-                avatarIdResolvedFor[e.userId] == (e.avatarName ?: "")) avatarIdCache[e.userId] else null
+            // Pre-resolved clone target — the SAME source of truth resolveAvatars publishes with, so the
+            // button can't flicker between spinner and grey/blue as the two loops interleave: null =
+            // still resolving (spinner, only for the first ~40s), "" = decided grey, non-blank = ready.
+            val avaId: String? = if (!isSelfMember && e.userId != null)
+                cloneButtonState(e.userId, e.avatarName ?: "") else null
             Member(
                 displayName = e.displayName,
                 userId = e.userId,
@@ -817,13 +812,20 @@ object InstanceRosterManager {
             }
         }
 
-        // Pre-resolve clone ids in the background so the button is instant + can grey
-        // out when there's no cloneable match. Resolve for anyone (non-self) whose
-        // current avatar name isn't resolved yet (a switch changes the name → re-run).
-        // Single-flight, paced; the next publish re-queues anyone this pass skipped.
+        // Pre-resolve clone ids in the background so the button is instant + can grey out when there's
+        // no cloneable match. publish only fires the FIRST attempt for a member (no avatarLoadingSince
+        // yet); once a member is being tracked, the paced retry loop (startAvatarLoadingRetryLoop) owns
+        // its re-resolution. This is critical: publish runs every ~1s (poll + every FileObserver wake),
+        // so without this guard an unresolved member re-fired a FULL resolve (GET /users/{id} + GET
+        // /avatars/{id} + the DB search) EVERY second — hammering VRChat/avtrdb and causing the very
+        // rate-limit failures that kept it unresolved. Single-flight + paced.
         val toResolve = ordered.filter { e ->
-            e.userId != null && e.userId != self &&
-                avatarIdResolvedFor[e.userId] != (e.avatarName ?: "") && avatarResolveInFlight.add(e.userId!!)
+            val uid = e.userId ?: return@filter false
+            if (uid == self) return@filter false
+            val name = e.avatarName ?: ""
+            if (avatarIdResolvedFor[uid] == name) return@filter false          // already decided
+            if (avatarLoadingSince.containsKey("$uid|$name")) return@filter false // tracked → retry loop owns it
+            avatarResolveInFlight.add(uid)
         }
         if (toResolve.isNotEmpty() && resolvingAvatars.compareAndSet(false, true)) {
             scope.launch { try { resolveAvatars(context, toResolve) } finally { resolvingAvatars.set(false) } }
@@ -958,7 +960,7 @@ object InstanceRosterManager {
         platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear()
         lastAvatarByUser.clear(); lastEntries = emptyList()
         avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarCloneFileIdCache.clear()
-        avatarPlatformsCache.clear(); avatarResolveInFlight.clear(); avatarResolveTries.clear()
+        avatarPlatformsCache.clear(); avatarResolveInFlight.clear()
         avatarLoadingSince.clear(); avatarSlowRetryAt.clear()
         com.vrca.vrchat.AvatarGlobalDb.evictShardCache()
     }
@@ -968,6 +970,21 @@ object InstanceRosterManager {
         if (selfIsQuest() && platforms.isNotEmpty() &&
             platforms.none { it.equals("Quest", true) || it.equals("android", true) }) return ""
         return id
+    }
+
+    /** The SINGLE source of truth for a member's clone-button state, used by BOTH `publish` (runs every
+     *  ~1s + on every FileObserver wake) AND `resolveAvatars` (runs on the resolve/retry cadence). They
+     *  MUST agree or the button flickers between spinner and grey/blue every second — the reported
+     *  "constantly switches between loading and the chose phase" bug, which also made the spinner
+     *  reappear past 40s ("loading for longer than 40 seconds"). Returns:
+     *    null = still resolving (spinner) — only within the first [LOADING_RESOLVE_WINDOW_MS] (~40s),
+     *    ""   = decided grey (no cloneable match / greyed on Quest) — final OR slow-retry phase,
+     *    id   = ready (clickable). A member is thus ALWAYS decided (grey or blue) within ~40s and never
+     *  shows a spinner longer than that; the slow phase keeps re-resolving underneath but shows grey. */
+    private fun cloneButtonState(uid: String, name: String): String? {
+        if (avatarIdResolvedFor[uid] == name) return avatarIdCache[uid]   // FINAL: "" grey / id blue
+        val since = avatarLoadingSince["$uid|$name"] ?: return null       // not attempted yet → spinner
+        return if (System.currentTimeMillis() - since >= LOADING_RESOLVE_WINDOW_MS) "" else null
     }
 
     /** Resolve each member's exact clone id in the background (paced, single-flight)
@@ -1001,53 +1018,36 @@ object InstanceRosterManager {
                 // Remember the shard key this resolved from so a failed clone reports the exact entry.
                 if (id.isNotBlank() && res.fileId != null) avatarCloneFileIdCache[uid] = res.fileId
                 else avatarCloneFileIdCache.remove(uid)
-                avatarResolveTries.remove(tryKey)
                 avatarLoadingSince.remove(tryKey)
                 avatarSlowRetryAt.remove(tryKey)   // resolved (possibly in the slow phase) → un-grey
             } else if (res.dead) {
                 // Confirmed dead/private (403/404) → grey DECISIVELY, don't spin/retry (already reported).
                 avatarIdCache[uid] = ""; avatarIdResolvedFor[uid] = name
                 avatarCloneFileIdCache.remove(uid)
-                avatarResolveTries.remove(tryKey); avatarLoadingSince.remove(tryKey); avatarSlowRetryAt.remove(tryKey)
-            } else if (res.loading) {
-                // Worn thumbnail is the fallback → real avatar loading/hidden. Fast phase (<40s):
-                // spinner + fast retries. Slow phase (40s–15min): GREY the button (decisive UI) but
-                // KEEP re-resolving slowly, so an avatar that becomes findable later (avtrdb recovered,
-                // catalog grew, real thumbnail landed) still lights up. Final grey only after 15 min.
+                avatarLoadingSince.remove(tryKey); avatarSlowRetryAt.remove(tryKey)
+            } else {
+                // UNRESOLVED (loading fallback / transient rate-limit / no-match-yet) — ONE time-based
+                // path for all of them so the button ALWAYS decides within ~40s (no >40s spinner, no
+                // flicker). avatarLoadingSince is the first-attempt time (set for EVERY unresolved
+                // member, not just fallback ones). cloneButtonState reads it: <40s → spinner, ≥40s →
+                // grey. The retry loop keeps re-resolving underneath (fast <40s, slow 40s–15min), so a
+                // member that becomes findable later (avtrdb recovered, catalog grew, real thumbnail
+                // landed, rate-limit cleared) still lights up. Final grey (stop) only after 15 min.
                 val since = avatarLoadingSince.getOrPut(tryKey) { System.currentTimeMillis() }
                 val elapsed = System.currentTimeMillis() - since
                 when {
                     elapsed >= LOADING_HARD_CAP_MS -> {                 // given up → final grey, stop retrying
                         avatarIdCache[uid] = ""; avatarIdResolvedFor[uid] = name
-                        avatarLoadingSince.remove(tryKey); avatarSlowRetryAt.remove(tryKey); avatarResolveTries.remove(tryKey)
+                        avatarLoadingSince.remove(tryKey); avatarSlowRetryAt.remove(tryKey)
                     }
-                    elapsed >= LOADING_RESOLVE_WINDOW_MS ->             // slow phase: grey the button, keep slow-retrying
+                    elapsed >= LOADING_RESOLVE_WINDOW_MS ->             // slow phase: show grey, keep slow-retrying
                         avatarSlowRetryAt[tryKey] = System.currentTimeMillis()
-                    // else fast phase: leave everything unset → spinner + fast retry.
+                    // else fast phase: leave unset → spinner + fast retry (retry loop).
                 }
-            } else {
-                val tries = (avatarResolveTries[tryKey] ?: 0) + 1
-                avatarResolveTries[tryKey] = tries
-                if (tries >= MAX_RESOLVE_TRIES) {
-                    avatarIdCache[uid] = ""           // genuinely not resolvable → grey out
-                    avatarIdResolvedFor[uid] = name
-                    avatarResolveTries.remove(tryKey)
-                }
-                // else: leave resolvedFor unset so this member is re-queued next pass (spinner).
             }
             _flow.value.let { cur ->
                 if (cur.members.any { it.userId == uid && it.avatarName == name }) {
-                    // Resolved/greyed-final → cached value ("" greys). Past the fast window (slow phase)
-                    // → grey the button but we keep slow-retrying underneath. Otherwise (fast transient
-                    // miss / still-loading) → null = spinner.
-                    val pastFastWindow = avatarLoadingSince[tryKey]?.let {
-                        System.currentTimeMillis() - it >= LOADING_RESOLVE_WINDOW_MS
-                    } == true
-                    val shown = when {
-                        avatarIdResolvedFor[uid] == name -> avatarIdCache[uid]
-                        pastFastWindow -> ""
-                        else -> null
-                    }
+                    val shown = cloneButtonState(uid, name)   // SAME source of truth as publish → no flicker
                     _flow.value = cur.copy(
                         members = cur.members.map { m ->
                             if (m.userId == uid && m.avatarName == name)
