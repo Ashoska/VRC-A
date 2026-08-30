@@ -172,6 +172,7 @@ object AvatarGlobalDb {
     @Volatile private var ownAvatar = "not harvested yet"
     @Volatile private var lastSwitch = "no avatar switch seen yet"
     @Volatile private var lastFav = "no favourites sweep yet"
+    @Volatile private var lastOwnAvatars = "(re-scan to list)"
     @Volatile private var lastContributed = "none"
     @Volatile private var contributedCount = 0
     @Volatile private var lastOwnHarvestMs = 0L
@@ -541,6 +542,28 @@ object AvatarGlobalDb {
      *  eviction), alongside the roster's own cache clears. The persisted contribution
      *  queue + catalogBase are untouched (separate stores). */
     fun evictShardCache() { synchronized(shardLru) { shardLru.clear() } }
+
+    /** Is this avatar id present in the SEARCH INDEX (its `fragments/<bucket>.json`)? An avatar can be
+     *  in the clone shard (cloneable) yet MISSING from the search index (unsearchable) when its index
+     *  op was lost/lagged or the full rebuild is down. Returns true/false, or null on a read failure /
+     *  R2 not live. Diagnostic only — one edge-cached GET. */
+    suspend fun isInSearchIndex(context: Context, avatarId: String): Boolean? = kotlinx.coroutines.withContext(Dispatchers.IO) {
+        if (avatarId.length < 8) return@withContext null
+        ensureCatalogBase(context)
+        val base = (if (r2Serving) catalogBase else null) ?: return@withContext null
+        val bucket = avatarId.substring(5, 8).lowercase()
+        var conn: HttpURLConnection? = null
+        try {
+            conn = (URL("$base/fragments/$bucket.json").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A"); connectTimeout = 10_000; readTimeout = 10_000
+            }
+            when (conn.responseCode) {
+                200 -> JSONObject(conn.inputStream.bufferedReader().readText()).optJSONObject("e")?.has(avatarId) == true
+                404 -> false
+                else -> null
+            }
+        } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
+    }
 
     // ---- admin shard-walk source (memory-flat bots, no whole-master grab) -----
     /** Fetch ONE lookup shard's entries directly from R2 (admin catalog sweep). No LRU/no
@@ -1443,6 +1466,30 @@ object AvatarGlobalDb {
      *  so resolving its own file id + platforms is a free coverage grab. Deduped
      *  against the catalog + a session set, paced + capped so a big instance can't
      *  storm VRChat REST. Fire-and-forget. */
+    /** Harvest a set of clone/search CANDIDATES into the catalog — the "free grabs" from a clone that
+     *  falls back to the avtrdb/mirror name search. Unlike [harvestAvatarIds] (ids only, one VRChat
+     *  resolve each), this keeps each candidate's data: a VRCX-mirror candidate already carries VRChat's
+     *  RAW image `file_…` id, so it's contributed DIRECTLY (zero VRChat calls); only the avtrdb ones
+     *  (proxied image → no file id) are resolved via [harvestAvatarIds]. So the clone fallback adds
+     *  EVERY candidate it saw, not just the one it cloned, and the mirror ones cost nothing. */
+    fun harvestCandidates(context: Context, candidates: List<AvatarSearch.Candidate>) {
+        if (candidates.isEmpty()) return
+        val app = context.applicationContext
+        scope.launch {
+            // (a) mirror candidates with a real file id → contribute directly (platforms fill in via the
+            //     admin FILL bot later). contribute() self-dedups against the live shard, so a known one
+            //     is a cheap no-op; a genuinely new one enters the catalog with no VRChat call.
+            for (c in candidates) {
+                val fid = c.imageFileId ?: continue
+                if (!harvestedCandidates.add(c.id)) continue
+                contribute(app, fid, c.id, c.name, c.author, c.authorId)
+            }
+        }
+        // (b) avtrdb candidates (no file id) → resolve the file id via VRChat + contribute (paced,
+        //     deduped, rate-limit backoff inside harvestAvatarIds).
+        harvestAvatarIds(context, candidates.filter { it.imageFileId == null }.map { it.id })
+    }
+
     fun harvestAvatarIds(context: Context, avatarIds: List<String>) {
         val app = context.applicationContext
         scope.launch {
@@ -1501,9 +1548,19 @@ object AvatarGlobalDb {
             val libKnownSet: Set<String> = if (r2Serving) filterKnownSharded(context, lib.map { it.entry.avatarId })
                 else lib.filter { map.containsKey(it.entry.fileId) }.map { it.entry.avatarId }.toSet()
             var libRecontributed = 0; var libUnavail = 0
+            val detail = StringBuilder()
             for (a in lib) {
                 val e = a.entry
                 if (a.isPublic) {
+                    // Per-avatar diagnostic: is it CLONEABLE (in the clone shard) AND SEARCHABLE (in the
+                    // search index)? A "cloneable=Y searchable=N" avatar is the "in catalog but I can't
+                    // find it in search" case — its index op was lost/lagged or the full rebuild is down.
+                    val cloneable = lookupShardedResult(context, e.fileId).status == ShardStatus.HIT
+                    val searchable = isInSearchIndex(context, e.avatarId)
+                    detail.append("• ${e.name.ifBlank { e.avatarId }}\n    ${e.avatarId}\n    clone=")
+                        .append(if (cloneable) "Y" else "N")
+                        .append(" search=").append(when (searchable) { true -> "Y"; false -> "N"; null -> "?" })
+                        .append(" author='${e.author}'\n")
                     // Check the AUTHORITATIVE live clone shard directly (not libKnownSet — the avtr/
                     // presence index LAGS a cull by several rebuilds, and not the local map/session sets
                     // — those can carry a stale entry the admin liveness bot culled without this device
@@ -1575,6 +1632,7 @@ object AvatarGlobalDb {
                 }
                 delay(FAV_PACE_MS)
             }
+            if (detail.isNotEmpty()) lastOwnAvatars = detail.toString().trimEnd()
             if (favProcessed > 0) saveProcessedFavourites(context)
             saveSeedQueue(context)   // persist the names this sweep queued (favourites seed the queue)
             lastFav = "favourites ${favs.size}: $favNew new / $favKnown known" +
@@ -1616,6 +1674,10 @@ object AvatarGlobalDb {
     /** The last own-library harvest summary (public uploads: N in catalog / M re-added, favourites, …)
      *  for the Settings → Debug readout, so a user can confirm a flipped-public avatar was re-added. */
     fun ownLibraryDiag(): String = lastFav
+
+    /** Per-avatar own-library breakdown (name / id / clone=Y·N / search=Y·N·? / author) for the debug
+     *  readout — so a "clone=Y search=N" avatar (cloneable but not in the search index) is pinpointed. */
+    fun ownAvatarsDiag(): String = lastOwnAvatars
 
     fun harvestOwnAvatarNow(context: Context) {
         val now = System.currentTimeMillis()

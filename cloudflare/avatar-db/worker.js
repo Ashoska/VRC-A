@@ -320,7 +320,11 @@ export default {
           cur.avatarId = body.avatarId;
         }
         cur.count = (cur.count || 0) + 1;
-        await env.AVATAR_KV.put(key, JSON.stringify(cur), { expirationTtl: 30 * 86400 });
+        // 7-day backstop (was 30): a report that never reaches quorum AND the bot can never verify
+        // (a persistently-unreachable avatar id) self-expires instead of sitting in the queue for a
+        // month. The flush's moot-clear already drains reports whose avatar left the catalog; this
+        // covers the rarer in-catalog-but-unverifiable case so the queue always fully drains.
+        await env.AVATAR_KV.put(key, JSON.stringify(cur), { expirationTtl: 7 * 86400 });
         // Wake the bot promptly: bump the live report count so the sweep's /health poll sees
         // it immediately instead of waiting for the next flush. Self-corrects at flush.
         if (isNewReport) {
@@ -462,11 +466,12 @@ export default {
           totalRemoved: meta.totalRemoved || 0,
           lastCommit: meta.lastCommit || "none",
           adminKeySet: !!env.ADMIN_KEY,
-          // Rebuild-trigger health (free — env checks only): is the Worker configured to fire the
-          // catalog-rebuild Action itself, and when did it last do so.
-          rebuildDispatch: !!(env.GH_DISPATCH_TOKEN && env.GH_OWNER && env.GH_REPO),
-          lastRebuildDispatch: meta.lastRebuildAt || null,
-          lastRebuildError: meta.lastRebuildError || null,
+          // Worker-side search-index reconcile (NO GitHub): how far the round-robin shard walk has got
+          // (rc = next of 4096), when it last ran, and cumulative shards walked / entries re-indexed.
+          reconcileCursor: meta.rc || 0,
+          lastReconcile: meta.lastReconcile || null,
+          reconcileScanned: meta.reconcileScanned || 0,
+          reconcileFixed: meta.reconcileFixed || 0,
           purgeConfigured: !!(env.CF_PURGE_TOKEN && env.CF_ZONE_ID),
           // R2 is the only backend now. `catalogBase` is what the app appends
           // /shard/<prefix>.json etc. to (learned from here, so a serving change needs no
@@ -499,12 +504,60 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    // Search is now fully incremental in flushR2 — the GitHub rebuild Action is no longer part of
-    // the pipeline, so we no longer trigger it. (maybeDispatchRebuild is kept below, unused, so the
-    // Action can still be run MANUALLY as a one-shot full reconcile/repair if ever wanted.)
-    ctx.waitUntil(flushR2(env));
+    // Search is fully incremental in flushR2 (no GitHub). reconcileIndex() is the WORKER-side
+    // replacement for the Action's full reconcile: it walks the clone shards a few per minute and
+    // re-indexes any entry MISSING from the search index (fragments/avtr/index), healing avatars
+    // that were cloneable-but-unsearchable because their index op was dropped in the past. No GitHub.
+    ctx.waitUntil((async () => { await flushR2(env); await reconcileIndex(env); })());
   },
 };
+
+// ---- Worker-side search-index reconciler (NO GitHub) ----------------------------------------------
+// The incremental flush maintains the index for NEW changes, but nothing repaired avatars whose index
+// op was dropped in the past (the GitHub rebuild used to be the only reconciler). This walks the clone
+// shards round-robin (a few per cron), and for every entry NOT present in its avtr/ presence bucket,
+// enqueues an ADD index op to the iq: queue (drained by the next flushes, TTL-free so never lost).
+// One full pass heals the whole catalog over ~a day; it then keeps looping as ongoing insurance.
+// Bounded per run: RECONCILE_SHARDS_PER_RUN shard reads + one avtr/ read per distinct id-bucket seen
+// (cached within the run) → well under the subrequest budget alongside flushR2.
+const RECONCILE_SHARDS_PER_RUN = 4;
+async function reconcileIndex(env) {
+  const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+  let cursor = (typeof meta.rc === "number" ? meta.rc : 0) & 0xfff;
+  const avtrCache = {};        // id-bucket -> Set(ids present in the search index)
+  const missing = [];          // ADD index ops for entries not yet indexed
+  let scanned = 0;
+  for (let n = 0; n < RECONCILE_SHARDS_PER_RUN; n++) {
+    const prefix = cursor.toString(16).padStart(3, "0");
+    cursor = (cursor + 1) & 0xfff;   // 0..4095 wrap
+    let shard = null;
+    try { const o = await env.CATALOG.get(`shard/${prefix}.json`); shard = o ? await o.json() : null; } catch (_) { shard = null; }
+    if (!shard || !shard.e) continue;
+    for (const [fid, e] of Object.entries(shard.e)) {
+      const id = e && e.id;
+      if (!id || !id.startsWith("avtr_")) continue;
+      const b = fragBucketFor(id);
+      if (!(b in avtrCache)) {
+        let ids = new Set();
+        try { const o = await env.CATALOG.get(`avtr/${b}.json`); if (o) { const j = await o.json(); if (Array.isArray(j.ids)) ids = new Set(j.ids); } } catch (_) {}
+        avtrCache[b] = ids;
+      }
+      if (!avtrCache[b].has(id)) {
+        const op = buildIndexOp(null, e, fid);   // ADD: writes fragment + avtr + tokens
+        if (op) { missing.push(op); avtrCache[b].add(id); }   // add to cache so siblings this run aren't re-flagged
+      }
+    }
+    scanned++;
+  }
+  // Enqueue the repairs (TTL-free) — the normal flush drains them via applyIndexOps.
+  for (let i = 0; i < missing.length; i += MAX_INDEX_OPS_PER_FLUSH)
+    await env.AVATAR_KV.put("iq:" + crypto.randomUUID(), JSON.stringify(missing.slice(i, i + MAX_INDEX_OPS_PER_FLUSH)));
+  meta.rc = cursor;
+  meta.lastReconcile = new Date().toISOString();
+  meta.reconcileScanned = (meta.reconcileScanned || 0) + scanned;   // cumulative shards walked
+  meta.reconcileFixed = (meta.reconcileFixed || 0) + missing.length; // cumulative entries re-indexed
+  await env.AVATAR_KV.put("meta", JSON.stringify(meta));
+}
 
 // GitHub's own `schedule:` cron is best-effort — it drops/delays most runs (observed 10–12h
 // gaps), so the search index went stale. Cloudflare's cron IS reliable, so the Worker triggers
@@ -659,20 +712,39 @@ async function flushR2(env) {
     admkKeys.push(kn);
     for (const fid of fids) S(shardPrefix(fid)).checked.add(fid);
   }
-  // Reports: rename immediately, remove on quorum; both clear their rep: key.
+  // Reports: rename immediately, remove on quorum; both clear their rep: key. A below-quorum "dead"
+  // report whose avatar is ALREADY GONE from the catalog is MOOT — clear it so it doesn't sit pending
+  // forever (the "a few reports that never go away" case: a 2nd report already caused the removal, or
+  // the liveness bot culled it, or it was never in the catalog). A shard READ we can't do (over budget
+  // / read failed) leaves the report untouched so nothing is dropped on uncertainty.
   const repClear = [];
+  const repShardCache = {};   // prefix -> entries map (null = read failed/unknown → don't moot-clear)
+  const repShardEntries = async (prefix) => {
+    if (prefix in repShardCache) return repShardCache[prefix];
+    let e = null;
+    try { const o = await env.CATALOG.get(`shard/${prefix}.json`); e = o ? ((await o.json()).e || {}) : {}; } catch (_) { e = null; }
+    repShardCache[prefix] = e; return e;
+  };
   for (const kn of repNames) {
     const fid = kn.slice(4);
     if (!fid.startsWith("file_")) continue;
     const val = await env.AVATAR_KV.get(kn);
     if (!val) continue;
     let r; try { r = JSON.parse(val); } catch (_) { continue; }
-    // A rename/remove touches this fid's shard — respect the same per-flush budget; defer if over.
-    if ((r.status === "renamed" && r.name) || (r.status === "dead" && (r.count || 0) >= REMOVE_QUORUM)) {
-      if (!reserve([fid])) break;
+    if (r.status === "renamed" && r.name) {
+      if (!reserve([fid])) break;                                   // shard WRITE → budget
+      S(shardPrefix(fid)).renames[fid] = String(r.name).slice(0, 100); repClear.push(kn);
+    } else if (r.status === "dead" && (r.count || 0) >= REMOVE_QUORUM) {
+      if (!reserve([fid])) break;                                   // shard WRITE → budget
+      S(shardPrefix(fid)).removes.add(fid); repClear.push(kn);
+    } else if (r.status === "dead" && (Object.keys(repShardCache).length < 30 || shardPrefix(fid) in repShardCache)) {
+      // Below quorum: normally waits for a 2nd report or the bot. Drain it here ONLY if the avatar is
+      // no longer in the catalog (nothing to remove) — a shard READ, no write, so no budget reserve.
+      // Capped at ~30 distinct shard reads/flush so a big report backlog can't blow the subrequest
+      // budget; the rest are checked over subsequent flushes.
+      const ent = await repShardEntries(shardPrefix(fid));
+      if (ent && !ent[fid]) repClear.push(kn);
     }
-    if (r.status === "renamed" && r.name) { S(shardPrefix(fid)).renames[fid] = String(r.name).slice(0, 100); repClear.push(kn); }
-    else if (r.status === "dead" && (r.count || 0) >= REMOVE_QUORUM) { S(shardPrefix(fid)).removes.add(fid); repClear.push(kn); }
   }
 
   const nowChecked = Date.now();
@@ -755,8 +827,14 @@ async function flushR2(env) {
     for (const kn of drained) await env.AVATAR_KV.delete(kn);
     const requeue = applied ? all.slice(MAX_INDEX_OPS_PER_FLUSH) : all;   // on failure retry all (idempotent)
     for (let i = 0; i < requeue.length; i += MAX_INDEX_OPS_PER_FLUSH)
+      // NO expiry: a search-index op is the ONLY thing that makes an avatar searchable, so it must
+      // NEVER be dropped. The old 7-day TTL silently EXPIRED queued ops whenever the backlog outlived
+      // it (heavy harvesting, or while the full rebuild was down), leaving avatars cloneable-but-
+      // unsearchable forever. The queue self-drains as flushes catch up; the paginated listPrefix read
+      // keeps it from crowding out pend:/rep:, and the full rebuild reconciles fragments/index from the
+      // clone shards, so an un-drained op is at worst redundant, never lost.
       await env.AVATAR_KV.put("iq:" + crypto.randomUUID(),
-        JSON.stringify(requeue.slice(i, i + MAX_INDEX_OPS_PER_FLUSH)), { expirationTtl: 7 * 86400 });
+        JSON.stringify(requeue.slice(i, i + MAX_INDEX_OPS_PER_FLUSH)));
   }
 
   // Clear KV only when every touched shard wrote OK (idempotent retry otherwise — nothing lost).
@@ -842,7 +920,7 @@ async function flushR2(env) {
       ? `R2 +${added} -${removed} (${prefixes.length} shards)`
       : `R2 partial: some shard IO failed, kept pending (+${added} -${removed})`,
     pendingBatches: pendNames.length,
-    reports: repNames.length,
+    reports: allShardsOk ? Math.max(0, repNames.length - repClear.length) : repNames.length,
     backend: "r2",
   }));
 

@@ -276,6 +276,13 @@ object AvatarSearch {
                 AvatarGlobalDb.contribute(context, fid, r.id, r.name, r.author, r.authorId, r.platforms)
             }
         }
+        // HARVEST the avtrdb (and any other) results that DON'T carry a file id — resolve each one's
+        // file id (GET /avatars/{id}) and contribute it. Without this, a search's avtrdb results were
+        // NEVER added to the catalog (avtrdb proxies its images, so imageFileId is null, so the loop
+        // above skipped them) — which is why searches stopped producing contribution batches. The
+        // harvester dedups against the catalog FIRST (no VRChat call for ones we already have), paces,
+        // and backs off on rate-limit, so a broad search can't hammer the session.
+        AvatarGlobalDb.harvestSearchResults(context, list)
         list
     }
 
