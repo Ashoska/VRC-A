@@ -212,7 +212,28 @@ object AvatarCatalogSweep {
     // OFF by default so the build ships BEFORE the sharding migration; flip on (Bots tab) after.
     @Volatile var avtrdbCrawlEnabled = false
     @Volatile var avtrdbCrawlStatus = "off"; private set
-    private val CRAWL_TERMS = (('a'..'z').map { it.toString() } + ('0'..'9').map { it.toString() })
+    // Enumeration terms for the avtrdb crawl. The old set was ONLY a-z + 0-9, so it never discovered
+    // avatars whose name has no Latin letter (Japanese, Korean, Russian, Arabic, …). avtrdb search is
+    // substring-based, so a single common character of a script matches most names in that script.
+    // We include the FULL small syllabaries/alphabets (hiragana, katakana, Cyrillic, Arabic) for
+    // complete coverage, plus a curated set of common CJK + Korean characters. isLetterOrDigit is
+    // Unicode-aware and searchPage URL-encodes, so non-Latin terms work end-to-end.
+    private val CRAWL_TERMS: List<String> = buildList {
+        ('a'..'z').forEach { add(it.toString()) }
+        ('0'..'9').forEach { add(it.toString()) }
+        ('ぁ'..'ゖ').forEach { add(it.toString()) }   // Hiragana
+        ('ァ'..'ヺ').forEach { add(it.toString()) }   // Katakana
+        ('а'..'я').forEach { add(it.toString()) }   // Cyrillic (lowercase а..я)
+        ('ا'..'ي').forEach { add(it.toString()) }   // Arabic letters
+        // Common CJK / kanji that show up in avatar + character names
+        "猫犬狐兎狼熊龍竜星月花鳥魚水火風光闇天神鬼獣羊姫少女少年悪魔天使妖精精霊魔法可愛黒白赤青紫金銀影夢愛心蝶".forEach { add(it.toString()) }
+        // Common Korean syllables (surnames + frequent name syllables)
+        "김이박최강고여우유리미호수아자하다라마바사나가".forEach { add(it.toString()) }
+    }.distinct()
+    // A fixed-per-process RANDOM permutation of the terms: the shared cursor walks this, so what we
+    // grab "looks random" (not alphabetical a,b,c…) yet still covers EVERY term once per full pass,
+    // and the mix of scripts is interleaved. Re-shuffled each process so repeated runs vary.
+    private val CRAWL_ORDER: List<String> = CRAWL_TERMS.shuffled()
     private const val CRAWL_PAGE_GAP_MS = 1_500L   // pace avtrdb paging (polite to the DB)
     private const val CRAWL_TERM_GAP_MS = 3_000L
     private const val CRAWL_RL_BACKOFF = 5         // consecutive resolve failures => rate-limited
@@ -253,7 +274,7 @@ object AvatarCatalogSweep {
             context.getSharedPreferences("vrca_admin_local", Context.MODE_PRIVATE)
                 .edit().putInt("avtrdb_crawl_idx", termN).apply()
         }
-        val term = CRAWL_TERMS[((termN % CRAWL_TERMS.size) + CRAWL_TERMS.size) % CRAWL_TERMS.size]
+        val term = CRAWL_ORDER[((termN % CRAWL_ORDER.size) + CRAWL_ORDER.size) % CRAWL_ORDER.size]
         var new = 0; var nulls = 0; var page = 0
         crawl@ while (avtrdbCrawlEnabled && running && !paused && scope.isActive) {
             val pageResults = try { com.vrca.vrchat.AvatarSearch.searchPage(term, page) }
