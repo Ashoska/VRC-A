@@ -164,14 +164,23 @@ object VrcLogParser {
             }
         }
         RE_AVATAR_SWITCH.find(body)?.let { m ->
-            return LogEvent.AvatarSwitch(m.groupValues[1].trim(), m.groupValues[2].trim())
+            return LogEvent.AvatarSwitch(m.groupValues[1].trim(), cleanAvatarName(m.groupValues[2]))
         }
         RE_AVATAR_UNPACK.find(body)?.let { m ->
-            return LogEvent.AvatarUnpack(m.groupValues[1].trim(), m.groupValues[2].trim())
+            return LogEvent.AvatarUnpack(cleanAvatarName(m.groupValues[1]), m.groupValues[2].trim())
         }
         // Any avtr_ id (own avatar-data load/save) — the local player's own avatar.
         RE_OWN_AVATAR.find(body)?.let { return LogEvent.OwnAvatar(it.groupValues[1]) }
         return null
+    }
+
+    /** VRChat logs `Switching X to avatar -` (and `Unpacking Avatar (- by ...)`) when the avatar has
+     *  no resolvable display name — hidden/blocked/loading/fallback. Returning "" for such a name keeps
+     *  the placeholder "-" out of the roster row AND out of the name search (a "-" query is meaningless
+     *  and was hitting avtrdb). A real avatar with a short name like "8" is kept (has a letter/digit). */
+    private fun cleanAvatarName(raw: String): String {
+        val s = raw.trim()
+        return if (s.isEmpty() || s.none { it.isLetterOrDigit() }) "" else s
     }
 
     /** One person currently in the instance, folded from the event stream. */
@@ -271,13 +280,16 @@ object VrcLogParser {
             // clone button → VrchatAuthManager.resolveWornAvatarId). If the player
             // isn't in the roster yet (VRChat logs the switch BEFORE OnPlayerJoined),
             // buffer the name so it's applied the moment they join.
+            // A blank (sanitized "-") avatar name means "unknown" — store null, not "-", and don't
+            // buffer a blank pending name.
+            val avatarName = event.avatarName.ifBlank { null }
             val entry = state.roster.entries.firstOrNull { it.value.displayName == event.displayName }
-            if (entry == null) state.copy(
-                pendingAvatarByName = state.pendingAvatarByName + (event.displayName to event.avatarName)
-            )
-            else state.copy(
+            if (entry == null) {
+                if (avatarName == null) state
+                else state.copy(pendingAvatarByName = state.pendingAvatarByName + (event.displayName to avatarName))
+            } else state.copy(
                 suspended = false,
-                roster = state.roster + (entry.key to entry.value.copy(avatarName = event.avatarName))
+                roster = state.roster + (entry.key to entry.value.copy(avatarName = avatarName))
             )
         }
         is LogEvent.AvatarUnpack -> {

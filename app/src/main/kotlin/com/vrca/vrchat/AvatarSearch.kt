@@ -55,6 +55,24 @@ object AvatarSearch {
     private const val AVTRDB_PAGE_GUARD = 1000
     private const val AVTRDB_PAGE_SIZE = 20
 
+    // --- avtrdb load control (the avtrdb dev flagged the SAME query being fully re-paginated every
+    //     few seconds) ---------------------------------------------------------------------------
+    // The roster's resolve-retry loop re-runs a name search every ~12s for an unresolved/loading
+    // member, and each run paginated EVERY page. Two guards:
+    //  (1) a short-lived per-query candidate cache so a retry reuses the last result instead of
+    //      re-hitting avtrdb + the mirrors;
+    //  (2) the RESOLVE/harvest path paginates only a FEW pages — a name match is relevance-ranked
+    //      near the top, so page 0-2 finds it; exhaustive paging stays for the explicit user search
+    //      box (search()/searchAll) and the paced admin crawler (searchPage), which aren't in a loop.
+    private const val RESOLVE_PAGE_CAP = 3
+    private const val CANDIDATE_CACHE_TTL_MS = 5 * 60_000L
+    private val candidateCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<Candidate>>>()
+
+    /** A query is worth sending only if it carries at least 2 letters/digits — this rejects the
+     *  garbage the avtrdb dev saw (empty, "-", "|", "--", punctuation-only) that a blank-check misses,
+     *  e.g. a log avatar name that is literally "-". */
+    private fun meaningfulQuery(q: String): Boolean = q.count { it.isLetterOrDigit() } >= 2
+
     /** Parse one avtrdb page body into display Results. Real avtrdb schema: id =
      *  "vrc_id"; author is an OBJECT {name,vrc_id}; thumbnail = "image_url"; platforms
      *  = "compatibility" (["pc","android","ios"]). */
@@ -88,7 +106,7 @@ object AvatarSearch {
     }
 
     suspend fun search(query: String): List<Result> = withContext(Dispatchers.IO) {
-        if (query.isBlank()) return@withContext emptyList()
+        if (!meaningfulQuery(query.trim())) return@withContext emptyList()
         val q = URLEncoder.encode(query.trim(), "UTF-8")
         val out = LinkedHashMap<String, Result>()
         for (page in 0 until AVTRDB_PAGE_GUARD) {
@@ -107,7 +125,7 @@ object AvatarSearch {
      *  bursting all pages via [search]). Empty = no more pages / error. Page size is
      *  [AVTRDB_PAGE_SIZE]; a short/empty page means the last page. */
     suspend fun searchPage(query: String, page: Int): List<Result> = withContext(Dispatchers.IO) {
-        if (query.isBlank()) return@withContext emptyList()
+        if (!meaningfulQuery(query.trim())) return@withContext emptyList()
         val q = URLEncoder.encode(query.trim(), "UTF-8")
         val body = httpGet("$BASE?query=$q&page=$page") ?: return@withContext emptyList()
         try { parseAvtrdbResults(body) } catch (e: Exception) { Log.w(TAG, "avtrdb page parse failed", e); emptyList() }
@@ -141,11 +159,25 @@ object AvatarSearch {
      * url (imageFileId set → direct confirm, no VRChat call). Each source fails soft.
      */
     suspend fun searchCandidates(query: String): List<Candidate> = coroutineScope {
-        if (query.isBlank()) return@coroutineScope emptyList()
-        val q = URLEncoder.encode(query.trim(), "UTF-8")
-        (listOf(async { avtrdbCandidates(q) }) +
+        val trimmed = query.trim()
+        // Never send a meaningless query to avtrdb/mirrors (empty, "-", punctuation-only).
+        if (!meaningfulQuery(trimmed)) return@coroutineScope emptyList()
+        val key = trimmed.lowercase()
+        // Reuse a recent result so the ~12s resolve-retry loop for one member doesn't re-paginate
+        // avtrdb every cycle (the avtrdb dev's "same query hammered" complaint).
+        candidateCache[key]?.let { (ts, cached) ->
+            if (System.currentTimeMillis() - ts < CANDIDATE_CACHE_TTL_MS) return@coroutineScope cached
+        }
+        val q = URLEncoder.encode(trimmed, "UTF-8")
+        val result = (listOf(async { avtrdbCandidates(q) }) +
             VRCX_MIRRORS.map { m -> async { vrcxCandidates("$m?search=$q") } })
             .awaitAll().flatten().filter { it.id.startsWith("avtr_") }.distinctBy { it.id }
+        candidateCache[key] = System.currentTimeMillis() to result
+        if (candidateCache.size > 500) {   // bound: drop the oldest entries
+            val cutoff = System.currentTimeMillis() - CANDIDATE_CACHE_TTL_MS
+            candidateCache.entries.removeAll { it.value.first < cutoff }
+        }
+        result
     }
 
     /**
@@ -167,7 +199,10 @@ object AvatarSearch {
 
     private suspend fun avtrdbCandidates(encodedQuery: String): List<Candidate> = withContext(Dispatchers.IO) {
         val out = LinkedHashMap<String, Candidate>()
-        for (page in 0 until AVTRDB_PAGE_GUARD) {
+        // RESOLVE/harvest path: only a few pages (the match ranks near the top). This is the loop the
+        // avtrdb dev saw paginating every page every ~12s — capped now, and the whole call is cached
+        // by searchCandidates so a retry doesn't reach here at all.
+        for (page in 0 until RESOLVE_PAGE_CAP) {
             val body = httpGet("$BASE?query=$encodedQuery&page=$page") ?: break
             val parsed = try {
                 val arr = JSONObject(body).optJSONArray("avatars") ?: JSONObject(body).optJSONArray("results")
@@ -220,7 +255,7 @@ object AvatarSearch {
      * catalog immediately, so searching slowly fills our DB from the others.
      */
     suspend fun searchAll(context: Context, query: String): List<Result> = coroutineScope {
-        if (query.isBlank()) return@coroutineScope emptyList()
+        if (!meaningfulQuery(query.trim())) return@coroutineScope emptyList()
         val q = URLEncoder.encode(query.trim(), "UTF-8")
         val remote = (listOf(async { runCatching { search(query) }.getOrDefault(emptyList()) }) +
             VRCX_MIRRORS.map { m -> async { vrcxResults("$m?search=$q") } })
