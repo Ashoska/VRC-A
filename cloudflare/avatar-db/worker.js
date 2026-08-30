@@ -320,7 +320,11 @@ export default {
           cur.avatarId = body.avatarId;
         }
         cur.count = (cur.count || 0) + 1;
-        await env.AVATAR_KV.put(key, JSON.stringify(cur), { expirationTtl: 30 * 86400 });
+        // 7-day backstop (was 30): a report that never reaches quorum AND the bot can never verify
+        // (a persistently-unreachable avatar id) self-expires instead of sitting in the queue for a
+        // month. The flush's moot-clear already drains reports whose avatar left the catalog; this
+        // covers the rarer in-catalog-but-unverifiable case so the queue always fully drains.
+        await env.AVATAR_KV.put(key, JSON.stringify(cur), { expirationTtl: 7 * 86400 });
         // Wake the bot promptly: bump the live report count so the sweep's /health poll sees
         // it immediately instead of waiting for the next flush. Self-corrects at flush.
         if (isNewReport) {
@@ -708,20 +712,39 @@ async function flushR2(env) {
     admkKeys.push(kn);
     for (const fid of fids) S(shardPrefix(fid)).checked.add(fid);
   }
-  // Reports: rename immediately, remove on quorum; both clear their rep: key.
+  // Reports: rename immediately, remove on quorum; both clear their rep: key. A below-quorum "dead"
+  // report whose avatar is ALREADY GONE from the catalog is MOOT — clear it so it doesn't sit pending
+  // forever (the "a few reports that never go away" case: a 2nd report already caused the removal, or
+  // the liveness bot culled it, or it was never in the catalog). A shard READ we can't do (over budget
+  // / read failed) leaves the report untouched so nothing is dropped on uncertainty.
   const repClear = [];
+  const repShardCache = {};   // prefix -> entries map (null = read failed/unknown → don't moot-clear)
+  const repShardEntries = async (prefix) => {
+    if (prefix in repShardCache) return repShardCache[prefix];
+    let e = null;
+    try { const o = await env.CATALOG.get(`shard/${prefix}.json`); e = o ? ((await o.json()).e || {}) : {}; } catch (_) { e = null; }
+    repShardCache[prefix] = e; return e;
+  };
   for (const kn of repNames) {
     const fid = kn.slice(4);
     if (!fid.startsWith("file_")) continue;
     const val = await env.AVATAR_KV.get(kn);
     if (!val) continue;
     let r; try { r = JSON.parse(val); } catch (_) { continue; }
-    // A rename/remove touches this fid's shard — respect the same per-flush budget; defer if over.
-    if ((r.status === "renamed" && r.name) || (r.status === "dead" && (r.count || 0) >= REMOVE_QUORUM)) {
-      if (!reserve([fid])) break;
+    if (r.status === "renamed" && r.name) {
+      if (!reserve([fid])) break;                                   // shard WRITE → budget
+      S(shardPrefix(fid)).renames[fid] = String(r.name).slice(0, 100); repClear.push(kn);
+    } else if (r.status === "dead" && (r.count || 0) >= REMOVE_QUORUM) {
+      if (!reserve([fid])) break;                                   // shard WRITE → budget
+      S(shardPrefix(fid)).removes.add(fid); repClear.push(kn);
+    } else if (r.status === "dead" && (Object.keys(repShardCache).length < 30 || shardPrefix(fid) in repShardCache)) {
+      // Below quorum: normally waits for a 2nd report or the bot. Drain it here ONLY if the avatar is
+      // no longer in the catalog (nothing to remove) — a shard READ, no write, so no budget reserve.
+      // Capped at ~30 distinct shard reads/flush so a big report backlog can't blow the subrequest
+      // budget; the rest are checked over subsequent flushes.
+      const ent = await repShardEntries(shardPrefix(fid));
+      if (ent && !ent[fid]) repClear.push(kn);
     }
-    if (r.status === "renamed" && r.name) { S(shardPrefix(fid)).renames[fid] = String(r.name).slice(0, 100); repClear.push(kn); }
-    else if (r.status === "dead" && (r.count || 0) >= REMOVE_QUORUM) { S(shardPrefix(fid)).removes.add(fid); repClear.push(kn); }
   }
 
   const nowChecked = Date.now();
@@ -897,7 +920,7 @@ async function flushR2(env) {
       ? `R2 +${added} -${removed} (${prefixes.length} shards)`
       : `R2 partial: some shard IO failed, kept pending (+${added} -${removed})`,
     pendingBatches: pendNames.length,
-    reports: repNames.length,
+    reports: allShardsOk ? Math.max(0, repNames.length - repClear.length) : repNames.length,
     backend: "r2",
   }));
 
