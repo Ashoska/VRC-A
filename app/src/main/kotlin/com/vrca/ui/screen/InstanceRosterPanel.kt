@@ -289,7 +289,7 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
                             if (busy) return@IconButton
                             busy = true
                             val name = m.avatarName
-                            val uid = m.userId
+                            val fid = m.cloneFileId   // the EXACT catalog shard key this id resolved from
                             scope.launch {
                                 val res = com.vrca.vrchat.VrchatAuthManager.selectAvatar(ctx, avaId)
                                 android.widget.Toast.makeText(
@@ -298,12 +298,14 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
                                     else (res.error ?: "Couldn't wear this avatar"),
                                     android.widget.Toast.LENGTH_LONG
                                 ).show()
-                                // Clone failed + avatar confirmed gone/private -> report + grey.
-                                if (!res.ok && uid != null &&
-                                    com.vrca.vrchat.VrchatAuthManager.avatarExists(ctx, avaId) == false) {
-                                    val fid = Regex("file_[0-9a-fA-F-]{36}").find(
-                                        com.vrca.vrchat.VrchatAuthManager.fetchUserInfo(ctx, uid)?.wornAvatarThumbUrl.orEmpty()
-                                    )?.value
+                                // VRChat DEFINITIVELY rejected the select: 404 = deleted, 403 = private /
+                                // not accessible. Either way it's not wearable by anyone but the owner, so
+                                // it must not keep showing as clonable. Report the EXACT resolved shard key
+                                // (m.cloneFileId — reliable; the target's live worn thumbnail may be the
+                                // fallback by now, which is why we don't re-derive it here) so the Worker
+                                // culls it on quorum, and grey the button locally right away. A transient
+                                // failure (429/5xx/network) is NOT reported — the entry stays, tap retries.
+                                if (!res.ok && (res.code == 403 || res.code == 404)) {
                                     if (fid != null) com.vrca.vrchat.AvatarGlobalDb.report(ctx, fid, avaId, "dead")
                                     deadLocally = true
                                 }

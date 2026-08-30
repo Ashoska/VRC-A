@@ -101,6 +101,10 @@ object InstanceRosterManager {
          *  "" = no cloneable match found (button greyed out), non-blank = the
          *  avtr_ id ready to select. Re-resolves when they switch avatars. */
         val avatarId: String? = null,
+        /** The worn image FILE id [avatarId] resolved FROM (the catalog shard key). Used to report
+         *  the EXACT entry for culling when a clone fails 403/404 — the target's live worn thumbnail
+         *  may be the fallback by tap time, so it can't be re-derived reliably then. */
+        val cloneFileId: String? = null,
         /** In the user's VRChat friends list — sorted near the top, shown yellow. */
         val isFriend: Boolean = false,
         /** The local user themselves — pinned to the very top, shown purple. */
@@ -227,6 +231,9 @@ object InstanceRosterManager {
     // resolves top-to-bottom without bursting the DBs/VRChat.
     private val avatarIdCache = ConcurrentHashMap<String, String>()
     private val avatarIdResolvedFor = ConcurrentHashMap<String, String>()
+    // The worn image FILE id each cached clone id resolved FROM (the catalog shard key), so a failed
+    // clone can report+cull the EXACT entry (the live worn thumbnail may be the fallback by tap time).
+    private val avatarCloneFileIdCache = ConcurrentHashMap<String, String>()
     // The resolved avatar's platform compatibility (for the Quest PC-only clone gate).
     private val avatarPlatformsCache = ConcurrentHashMap<String, List<String>>()
     private val avatarResolveInFlight = ConcurrentHashMap.newKeySet<String>()
@@ -241,6 +248,11 @@ object InstanceRosterManager {
     // Last time a member in the SLOW phase (past the fast window, greyed but still retriable) was
     // re-resolved — so a could-have-been-found avatar (avtrdb recovered, catalog grew) still lights up.
     private val avatarSlowRetryAt = ConcurrentHashMap<String, Long>()
+    // The instance location we last had caches populated for. A DIRECT hop (A -> B) never passes
+    // through "not in world", so the leave-path cache clears don't fire — the old instance's per-user
+    // caches AND the shard LRU would leak into the new instance and accumulate across a hopping
+    // session. Comparing this to state.location detects the hop and clears on change.
+    @Volatile private var lastLocation: String? = null
     private val resolvingAvatars = java.util.concurrent.atomic.AtomicBoolean(false)
     /** True while the roster is actively resolving members' clone ids — that pass hits the
      *  SAME avtrdb/VRCX mirrors the catalog seed search does, so the seed search yields to it
@@ -528,7 +540,7 @@ object InstanceRosterManager {
                     )
                 }
                 stopObserver()
-                platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarPlatformsCache.clear(); avatarResolveInFlight.clear(); avatarResolveTries.clear(); avatarLoadingSince.clear(); avatarSlowRetryAt.clear(); com.vrca.vrchat.AvatarGlobalDb.evictShardCache(); com.vrca.vrchat.AvatarGlobalDb.evictShardCache()
+                clearRosterCaches(); lastLocation = null; VrchatAuthManager.clearAvatarLiveCache()
                 _flow.value = RosterUi(status = Status.IDLE)
                 currentId = null; offset = 0L; state = VrcLogParser.InstanceState()
                 delay(POLL_MS); continue
@@ -696,7 +708,7 @@ object InstanceRosterManager {
                     confirmedClosed = confirmedClosed
                 )
             }
-            platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarPlatformsCache.clear(); avatarResolveInFlight.clear(); avatarResolveTries.clear(); avatarLoadingSince.clear(); avatarSlowRetryAt.clear(); com.vrca.vrchat.AvatarGlobalDb.evictShardCache()
+            clearRosterCaches(); lastLocation = null; VrchatAuthManager.clearAvatarLiveCache()
             _flow.value = RosterUi(status = Status.IDLE, worldName = null, location = null, members = emptyList(), logPath = logPath)
             return
         }
@@ -723,12 +735,22 @@ object InstanceRosterManager {
         // in memory across a session (the reader writes NOTHING per-user to disk;
         // this just keeps RAM bounded to the current instance).
         if (!inWorld) {
-            platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarPlatformsCache.clear(); avatarResolveInFlight.clear(); avatarResolveTries.clear(); avatarLoadingSince.clear(); avatarSlowRetryAt.clear(); com.vrca.vrchat.AvatarGlobalDb.evictShardCache()
+            clearRosterCaches(); lastLocation = null; VrchatAuthManager.clearAvatarLiveCache()
             _flow.value = RosterUi(
                 status = Status.IDLE, worldName = state.worldName,
                 location = state.location, members = emptyList(), logPath = logPath
             )
             return
+        }
+
+        // DIRECT HOP (A -> B) — the log went straight from one populated instance to another without
+        // ever passing through "not in world", so the leave-path clear above never fired. Detect it by
+        // the location changing and drop the previous instance's per-user caches + shard LRU here, so
+        // memory stays bounded to the CURRENT instance and no stale row/clone id carries over. The
+        // members below are then rebuilt fresh from this instance's roster (re-enriched/re-resolved).
+        if (state.location != lastLocation) {
+            clearRosterCaches()
+            lastLocation = state.location
         }
 
         val friends = friendIds(context)
@@ -766,6 +788,7 @@ object InstanceRosterManager {
                 avatarName = e.avatarName,
                 avatarCreator = e.avatarCreator,
                 avatarId = avaId,
+                cloneFileId = if (!isSelfMember) e.userId?.let { avatarCloneFileIdCache[it] } else null,
                 isFriend = e.userId != null && friends.contains(e.userId),
                 isSelf = isSelfMember,
                 profilePicUrl = pfp
@@ -842,19 +865,51 @@ object InstanceRosterManager {
                 val wornFid = Regex("file_[0-9a-fA-F-]{36}").find(info.wornAvatarThumbUrl)?.value
                 val avaName = _flow.value.members.firstOrNull { it.userId == id }?.avatarName ?: ""
                 var catalogAvatarId: String? = null
-                // Name-optional: resolve from the worn file id whether or not the log
-                // gave an avatar name (impostor'd players have no name but still a file id).
-                if (wornFid != null) {
-                    // lookupSharded reads the R2 catalog by the worn image FILE id (exact) — post-cutover
-                    // the in-memory map is empty, so the old lookup() here was DEAD and catalog avatars
-                    // never got their instant clone id (they fell to the slower/less-reliable path).
-                    com.vrca.vrchat.AvatarGlobalDb.lookupSharded(context, wornFid)?.let { hit ->
-                        val gated = gateCloneId(hit.avatarId, hit.platforms)  // "" if PC-only on Quest
-                        avatarPlatformsCache[id] = hit.platforms
-                        avatarIdCache[id] = gated
-                        avatarIdResolvedFor[id] = avaName
-                        catalogAvatarId = gated
+                // Name-optional: resolve from the worn file id whether or not the log gave an avatar name
+                // (impostor'd players have no name but still a file id). This is the INSTANT catalog-hit
+                // shortcut (clone id ready the moment the pfp loads, no separate DB search) — but it MUST
+                // apply the SAME guards resolveWornAvatarId does, because it also sets avatarIdResolvedFor,
+                // which permanently blocks the guarded resolver from ever running for this member. Missing
+                // guards here were the real "clonable → robot, reopening fixes it" bug: a loading player's
+                // worn thumbnail is the VRChat fallback (Robot) file, and a bare lookup on that / on the
+                // lone Robot catalog entry cached the Robot id as clonable and pinned it.
+                //  - isSystemFileId(wornFid): the worn image IS the fallback → player is loading; skip the
+                //    shortcut so the guarded resolver's loading path (name+author retry) handles it.
+                //  - HIT-only (lookupShardedResult): a transient UNAVAILABLE read must NOT cache/pin — leave
+                //    it for the guarded resolver to retry (that path distinguishes HIT/MISS/UNAVAILABLE).
+                //  - isSystemAvatar(hit): never offer a resolved-to-fallback entry as clonable.
+                if (wornFid != null && !com.vrca.vrchat.AvatarGlobalDb.isSystemFileId(wornFid)) {
+                    val shardRes = com.vrca.vrchat.AvatarGlobalDb.lookupShardedResult(context, wornFid)
+                    if (shardRes.status == com.vrca.vrchat.AvatarGlobalDb.ShardStatus.HIT) {
+                        val hit = shardRes.entry!!
+                        if (!com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(hit.author, hit.avatarId, wornFid)) {
+                            // CONFIRM the catalog entry is still wearable BEFORE lighting the button — the
+                            // shortcut used to present it unverified, so a since-dead/private catalog entry
+                            // showed clickable → robot. One GET, session-cached (shared with the guarded
+                            // resolver), so it stays ~instant and never double-charges.
+                            val conf = VrchatAuthManager.confirmAvatarLive(context, hit.avatarId)
+                            when (conf.live) {
+                                true -> if (wornFid in conf.fileIds || conf.fileIds.isEmpty()) {
+                                    val plats = conf.platforms.ifEmpty { hit.platforms }
+                                    val gated = gateCloneId(hit.avatarId, plats)  // "" if PC-only on Quest
+                                    avatarPlatformsCache[id] = plats
+                                    avatarIdCache[id] = gated
+                                    avatarIdResolvedFor[id] = avaName
+                                    if (gated.isNotBlank()) avatarCloneFileIdCache[id] = wornFid else avatarCloneFileIdCache.remove(id)
+                                    catalogAvatarId = gated
+                                }   // else: worn image no longer matches (stale re-key) → let the guarded resolver find the right one
+                                false -> {
+                                    // Confirmed dead/private → report + grey DECISIVELY (never a clickable robot).
+                                    com.vrca.vrchat.AvatarGlobalDb.report(context, wornFid, hit.avatarId, "dead")
+                                    avatarIdCache[id] = ""; avatarIdResolvedFor[id] = avaName
+                                    avatarCloneFileIdCache.remove(id); catalogAvatarId = ""
+                                }
+                                null -> { /* transient — don't pin; the guarded resolveAvatars pass retries */ }
+                            }
+                        }
                     }
+                    // MISS/UNAVAILABLE (or a fallback entry) → don't pin; the guarded resolveAvatars pass
+                    // (queued from publish because avatarIdResolvedFor is still unset) resolves it properly.
                 }
                 _flow.value.let { cur ->
                     if (cur.members.any { it.userId == id }) {
@@ -862,7 +917,8 @@ object InstanceRosterManager {
                             members = cur.members.map { m ->
                                 if (m.userId == id) m.copy(
                                     platform = plat, profilePicUrl = info.profilePicUrl,
-                                    avatarId = catalogAvatarId ?: m.avatarId
+                                    avatarId = catalogAvatarId ?: m.avatarId,
+                                    cloneFileId = avatarCloneFileIdCache[id] ?: m.cloneFileId
                                 ) else m
                             }
                         )
@@ -894,6 +950,19 @@ object InstanceRosterManager {
      *  cloneable match, OR a PC/iOS-only avatar while the local user is on Quest —
      *  it can't be worn there), non-blank = the avtr_ id to select. The avatar is
      *  still saved to the catalog regardless (that happens during resolve). */
+    /** Drop ALL per-user roster caches + the in-app shard LRU. Called on instance leave AND on a
+     *  direct hop (see [lastLocation]) so nothing accumulates in memory across a session — the reader
+     *  writes NOTHING per-user to disk; this keeps RAM bounded to the CURRENT instance. The shard LRU
+     *  eviction also drops any shard fetched for the previous instance's avatars. */
+    private fun clearRosterCaches() {
+        platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear()
+        lastAvatarByUser.clear(); lastEntries = emptyList()
+        avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarCloneFileIdCache.clear()
+        avatarPlatformsCache.clear(); avatarResolveInFlight.clear(); avatarResolveTries.clear()
+        avatarLoadingSince.clear(); avatarSlowRetryAt.clear()
+        com.vrca.vrchat.AvatarGlobalDb.evictShardCache()
+    }
+
     private fun gateCloneId(id: String?, platforms: List<String>): String {
         if (id.isNullOrBlank()) return ""
         if (selfIsQuest() && platforms.isNotEmpty() &&
@@ -929,9 +998,17 @@ object InstanceRosterManager {
             if (res.avatarId != null) {
                 avatarIdCache[uid] = id
                 avatarIdResolvedFor[uid] = name
+                // Remember the shard key this resolved from so a failed clone reports the exact entry.
+                if (id.isNotBlank() && res.fileId != null) avatarCloneFileIdCache[uid] = res.fileId
+                else avatarCloneFileIdCache.remove(uid)
                 avatarResolveTries.remove(tryKey)
                 avatarLoadingSince.remove(tryKey)
                 avatarSlowRetryAt.remove(tryKey)   // resolved (possibly in the slow phase) → un-grey
+            } else if (res.dead) {
+                // Confirmed dead/private (403/404) → grey DECISIVELY, don't spin/retry (already reported).
+                avatarIdCache[uid] = ""; avatarIdResolvedFor[uid] = name
+                avatarCloneFileIdCache.remove(uid)
+                avatarResolveTries.remove(tryKey); avatarLoadingSince.remove(tryKey); avatarSlowRetryAt.remove(tryKey)
             } else if (res.loading) {
                 // Worn thumbnail is the fallback → real avatar loading/hidden. Fast phase (<40s):
                 // spinner + fast retries. Slow phase (40s–15min): GREY the button (decisive UI) but
@@ -973,7 +1050,9 @@ object InstanceRosterManager {
                     }
                     _flow.value = cur.copy(
                         members = cur.members.map { m ->
-                            if (m.userId == uid && m.avatarName == name) m.copy(avatarId = shown) else m
+                            if (m.userId == uid && m.avatarName == name)
+                                m.copy(avatarId = shown, cloneFileId = avatarCloneFileIdCache[uid] ?: m.cloneFileId)
+                            else m
                         }
                     )
                 }

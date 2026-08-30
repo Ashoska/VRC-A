@@ -1020,8 +1020,24 @@ object AvatarGlobalDb {
     /** Report an entry as dead (404/private) or renamed so the file self-heals. The
      *  avatarId lets the admin bot verify it WITHOUT a catalog lookup, so the bot only
      *  ever checks REPORTED avatars (scales to a huge catalog). */
+    /** Drop a fileId/avatarId from the LOCAL caches so it is no longer served and — critically — is
+     *  no longer blocked from being re-contributed. Without this, an avatar that went private/dead and
+     *  was culled from the shard could never be re-added by THIS device once it goes public again: the
+     *  stale local `map` entry (line "if (map.containsKey(fileId)) return false" in contribute) and the
+     *  session-contributed sets permanently short-circuited it. Called on a "dead" report. */
+    private fun forgetLocal(fileId: String, avatarId: String) {
+        map.remove(fileId)
+        avatarIds.remove(avatarId)
+        sessionContributed.remove(avatarId)
+        sessionContributedFiles.remove(fileId)
+    }
+
     fun report(context: Context, fileId: String, avatarId: String, status: String, name: String? = null) {
         if (!fileId.startsWith("file_")) return
+        // A dead report means this pairing is no longer wearable — forget it locally so (a) we stop
+        // serving it and (b) a later re-publish (private → public again) can be re-contributed instead
+        // of being silently deduped away by the stale local entry.
+        if (status == "dead") forgetLocal(fileId, avatarId)
         val app = context.applicationContext
         scope.launch {
             val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -1479,7 +1495,12 @@ object AvatarGlobalDb {
             for (a in lib) {
                 val e = a.entry
                 if (a.isPublic) {
-                    if (libKnownSet.contains(e.avatarId)) { libKnown++; continue }   // already in DB — don't re-contribute
+                    // ALWAYS attempt contribute for our own PUBLIC uploads — do NOT skip on libKnownSet
+                    // (the avtr/ presence index LAGS a cull by several rebuilds). contribute() self-dedups
+                    // against the LIVE clone shard (still-present → cheap no-op via map/shard HIT), so a
+                    // re-published avatar (public → private → public) re-enters as soon as the earlier cull
+                    // propagated, instead of being permanently skipped by the stale presence index. This is
+                    // the "avatars turned public again after going private don't get added" fix.
                     if (contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description))
                         libNew++ else libKnown++
                 } else if (a.ownUpload && libKnownSet.contains(e.avatarId)) {
