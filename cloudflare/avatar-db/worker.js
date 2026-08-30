@@ -462,11 +462,12 @@ export default {
           totalRemoved: meta.totalRemoved || 0,
           lastCommit: meta.lastCommit || "none",
           adminKeySet: !!env.ADMIN_KEY,
-          // Rebuild-trigger health (free — env checks only): is the Worker configured to fire the
-          // catalog-rebuild Action itself, and when did it last do so.
-          rebuildDispatch: !!(env.GH_DISPATCH_TOKEN && env.GH_OWNER && env.GH_REPO),
-          lastRebuildDispatch: meta.lastRebuildAt || null,
-          lastRebuildError: meta.lastRebuildError || null,
+          // Worker-side search-index reconcile (NO GitHub): how far the round-robin shard walk has got
+          // (rc = next of 4096), when it last ran, and cumulative shards walked / entries re-indexed.
+          reconcileCursor: meta.rc || 0,
+          lastReconcile: meta.lastReconcile || null,
+          reconcileScanned: meta.reconcileScanned || 0,
+          reconcileFixed: meta.reconcileFixed || 0,
           purgeConfigured: !!(env.CF_PURGE_TOKEN && env.CF_ZONE_ID),
           // R2 is the only backend now. `catalogBase` is what the app appends
           // /shard/<prefix>.json etc. to (learned from here, so a serving change needs no
@@ -499,12 +500,60 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    // Search is now fully incremental in flushR2 — the GitHub rebuild Action is no longer part of
-    // the pipeline, so we no longer trigger it. (maybeDispatchRebuild is kept below, unused, so the
-    // Action can still be run MANUALLY as a one-shot full reconcile/repair if ever wanted.)
-    ctx.waitUntil(flushR2(env));
+    // Search is fully incremental in flushR2 (no GitHub). reconcileIndex() is the WORKER-side
+    // replacement for the Action's full reconcile: it walks the clone shards a few per minute and
+    // re-indexes any entry MISSING from the search index (fragments/avtr/index), healing avatars
+    // that were cloneable-but-unsearchable because their index op was dropped in the past. No GitHub.
+    ctx.waitUntil((async () => { await flushR2(env); await reconcileIndex(env); })());
   },
 };
+
+// ---- Worker-side search-index reconciler (NO GitHub) ----------------------------------------------
+// The incremental flush maintains the index for NEW changes, but nothing repaired avatars whose index
+// op was dropped in the past (the GitHub rebuild used to be the only reconciler). This walks the clone
+// shards round-robin (a few per cron), and for every entry NOT present in its avtr/ presence bucket,
+// enqueues an ADD index op to the iq: queue (drained by the next flushes, TTL-free so never lost).
+// One full pass heals the whole catalog over ~a day; it then keeps looping as ongoing insurance.
+// Bounded per run: RECONCILE_SHARDS_PER_RUN shard reads + one avtr/ read per distinct id-bucket seen
+// (cached within the run) → well under the subrequest budget alongside flushR2.
+const RECONCILE_SHARDS_PER_RUN = 4;
+async function reconcileIndex(env) {
+  const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+  let cursor = (typeof meta.rc === "number" ? meta.rc : 0) & 0xfff;
+  const avtrCache = {};        // id-bucket -> Set(ids present in the search index)
+  const missing = [];          // ADD index ops for entries not yet indexed
+  let scanned = 0;
+  for (let n = 0; n < RECONCILE_SHARDS_PER_RUN; n++) {
+    const prefix = cursor.toString(16).padStart(3, "0");
+    cursor = (cursor + 1) & 0xfff;   // 0..4095 wrap
+    let shard = null;
+    try { const o = await env.CATALOG.get(`shard/${prefix}.json`); shard = o ? await o.json() : null; } catch (_) { shard = null; }
+    if (!shard || !shard.e) continue;
+    for (const [fid, e] of Object.entries(shard.e)) {
+      const id = e && e.id;
+      if (!id || !id.startsWith("avtr_")) continue;
+      const b = fragBucketFor(id);
+      if (!(b in avtrCache)) {
+        let ids = new Set();
+        try { const o = await env.CATALOG.get(`avtr/${b}.json`); if (o) { const j = await o.json(); if (Array.isArray(j.ids)) ids = new Set(j.ids); } } catch (_) {}
+        avtrCache[b] = ids;
+      }
+      if (!avtrCache[b].has(id)) {
+        const op = buildIndexOp(null, e, fid);   // ADD: writes fragment + avtr + tokens
+        if (op) { missing.push(op); avtrCache[b].add(id); }   // add to cache so siblings this run aren't re-flagged
+      }
+    }
+    scanned++;
+  }
+  // Enqueue the repairs (TTL-free) — the normal flush drains them via applyIndexOps.
+  for (let i = 0; i < missing.length; i += MAX_INDEX_OPS_PER_FLUSH)
+    await env.AVATAR_KV.put("iq:" + crypto.randomUUID(), JSON.stringify(missing.slice(i, i + MAX_INDEX_OPS_PER_FLUSH)));
+  meta.rc = cursor;
+  meta.lastReconcile = new Date().toISOString();
+  meta.reconcileScanned = (meta.reconcileScanned || 0) + scanned;   // cumulative shards walked
+  meta.reconcileFixed = (meta.reconcileFixed || 0) + missing.length; // cumulative entries re-indexed
+  await env.AVATAR_KV.put("meta", JSON.stringify(meta));
+}
 
 // GitHub's own `schedule:` cron is best-effort — it drops/delays most runs (observed 10–12h
 // gaps), so the search index went stale. Cloudflare's cron IS reliable, so the Worker triggers
