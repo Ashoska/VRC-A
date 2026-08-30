@@ -755,8 +755,14 @@ async function flushR2(env) {
     for (const kn of drained) await env.AVATAR_KV.delete(kn);
     const requeue = applied ? all.slice(MAX_INDEX_OPS_PER_FLUSH) : all;   // on failure retry all (idempotent)
     for (let i = 0; i < requeue.length; i += MAX_INDEX_OPS_PER_FLUSH)
+      // NO expiry: a search-index op is the ONLY thing that makes an avatar searchable, so it must
+      // NEVER be dropped. The old 7-day TTL silently EXPIRED queued ops whenever the backlog outlived
+      // it (heavy harvesting, or while the full rebuild was down), leaving avatars cloneable-but-
+      // unsearchable forever. The queue self-drains as flushes catch up; the paginated listPrefix read
+      // keeps it from crowding out pend:/rep:, and the full rebuild reconciles fragments/index from the
+      // clone shards, so an un-drained op is at worst redundant, never lost.
       await env.AVATAR_KV.put("iq:" + crypto.randomUUID(),
-        JSON.stringify(requeue.slice(i, i + MAX_INDEX_OPS_PER_FLUSH)), { expirationTtl: 7 * 86400 });
+        JSON.stringify(requeue.slice(i, i + MAX_INDEX_OPS_PER_FLUSH)));
   }
 
   // Clear KV only when every touched shard wrote OK (idempotent retry otherwise — nothing lost).

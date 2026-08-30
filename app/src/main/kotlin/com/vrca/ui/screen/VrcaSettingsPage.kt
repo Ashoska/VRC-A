@@ -580,17 +580,26 @@ internal fun SettingsPage(
                         // the catalog (e.g. one just flipped from private back to public) RIGHT NOW.
                         Text("My avatars → catalog", style = MaterialTheme.typography.labelMedium)
                         var libDiag by remember { mutableStateOf(com.vrca.vrchat.AvatarGlobalDb.ownLibraryDiag()) }
+                        var libList by remember { mutableStateOf(com.vrca.vrchat.AvatarGlobalDb.ownAvatarsDiag()) }
                         var rescanTick by remember { mutableStateOf(0) }
                         if (rescanTick > 0) {
                             androidx.compose.runtime.LaunchedEffect(rescanTick) {
                                 com.vrca.vrchat.AvatarGlobalDb.rescanOwnLibraryNow(ctx)
                                 // The scan runs off-thread; poll the diag for a few seconds so the result shows.
-                                repeat(12) { kotlinx.coroutines.delay(1500); libDiag = com.vrca.vrchat.AvatarGlobalDb.ownLibraryDiag() }
+                                repeat(14) {
+                                    kotlinx.coroutines.delay(1500)
+                                    libDiag = com.vrca.vrchat.AvatarGlobalDb.ownLibraryDiag()
+                                    libList = com.vrca.vrchat.AvatarGlobalDb.ownAvatarsDiag()
+                                }
                             }
                         }
                         TextButton(onClick = { rescanTick++ }) { Text("Re-scan my avatars now") }
                         SelectionContainer {
-                            Text(libDiag, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(libDiag, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                                // Per-avatar: clone=Y search=N means cloneable but NOT in the search index.
+                                Text(libList, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                            }
                         }
 
                         Text("OSC Output Preview", style = MaterialTheme.typography.labelMedium)
