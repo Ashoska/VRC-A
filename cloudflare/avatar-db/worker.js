@@ -538,7 +538,8 @@ export default {
 // no reason to keep reading R2 forever. Re-run it any time with GET /admin/reconcile?key=… (resets the
 // cursor) if a future audit ever suspects drift. Bounded per run: RECONCILE_SHARDS_PER_RUN shard reads
 // + one avtr/ read per distinct id-bucket seen (cached within the run).
-const RECONCILE_SHARDS_PER_RUN = 4;
+const RECONCILE_SHARDS_PER_RUN = 8;   // one-time pass → go a bit faster (~8.5h) then STOP; stays under
+                                      // the subrequest budget alongside flushR2
 async function reconcileIndex(env) {
   const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
   if (meta.rcDone) return;   // one-time heal already completed → the incremental flush maintains it
@@ -546,6 +547,13 @@ async function reconcileIndex(env) {
   const avtrCache = {};        // id-bucket -> Set(ids present in the search index)
   const missing = [];          // ADD index ops for entries not yet indexed
   let scanned = 0;
+  // Recount the AUTHORITATIVE entry + unfilled totals as we read every shard, to correct the running
+  // incremental counts that drift with no full rebuild — a drifted `unfilled` makes the FILL bots
+  // churn the whole catalog forever on a phantom backlog they can never drain ("queued 247, checked
+  // 0, stuck at a random number"). Accumulated across the pass into meta, adopted authoritatively on
+  // completion. (Slightly high in the rare real-backlog case since fills happen during the ~day pass,
+  // but for a PHANTOM count it finds the true near-zero and fixes the churn.)
+  let entriesSeen = 0, unfilledSeen = 0;
   for (let n = 0; n < RECONCILE_SHARDS_PER_RUN; n++) {
     const prefix = cursor.toString(16).padStart(3, "0");
     cursor = (cursor + 1) & 0xfff;   // 0..4095 wrap
@@ -555,6 +563,8 @@ async function reconcileIndex(env) {
     for (const [fid, e] of Object.entries(shard.e)) {
       const id = e && e.id;
       if (!id || !id.startsWith("avtr_")) continue;
+      entriesSeen++;
+      if (e.filled !== true) unfilledSeen++;
       const b = fragBucketFor(id);
       if (!(b in avtrCache)) {
         let ids = new Set();
@@ -575,8 +585,25 @@ async function reconcileIndex(env) {
   meta.lastReconcile = new Date().toISOString();
   meta.reconcileScanned = (meta.reconcileScanned || 0) + scanned;   // shards walked this pass
   meta.reconcileFixed = (meta.reconcileFixed || 0) + missing.length; // entries re-indexed this pass
-  // One full pass = 4096 shards walked → STOP (rely on the incremental flush from here on).
-  if (meta.reconcileScanned >= 4096) { meta.rcDone = true; meta.rcDoneAt = new Date().toISOString(); }
+  meta.rcEntries = (meta.rcEntries || 0) + entriesSeen;             // authoritative recount (this pass)
+  meta.rcUnfilled = (meta.rcUnfilled || 0) + unfilledSeen;
+  // One full pass = 4096 shards walked → STOP, and ADOPT the recomputed counts so the running
+  // incremental counters can't stay drifted (fixes the phantom fill-backlog the bots churn on).
+  if (meta.reconcileScanned >= 4096) {
+    meta.rcDone = true; meta.rcDoneAt = new Date().toISOString();
+    meta.entries = meta.rcEntries || 0;
+    meta.unfilled = meta.rcUnfilled || 0;
+    // Push the corrected counts straight to the manifest (what the admin/bots read) + purge.
+    try {
+      let man = {}; const m = await env.CATALOG.get("_manifest.json"); if (m) man = await m.json();
+      man = { ...man, v: 1, shardScheme: "filehex3-full", shardCount: 4096, indexScheme: "hash3",
+        entryCount: meta.entries, unfilled: meta.unfilled, searchReady: true, lastUpdate: new Date().toISOString() };
+      await env.CATALOG.put("_manifest.json", JSON.stringify(man),
+        { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=30" } });
+      if (env.CATALOG_BASE) await purgeCatalogUrls(env, [env.CATALOG_BASE.replace(/\/$/, "") + "/_manifest.json"]);
+    } catch (_) {}
+    meta.rcEntries = 0; meta.rcUnfilled = 0;   // reset accumulators for a future re-arm
+  }
   await env.AVATAR_KV.put("meta", JSON.stringify(meta));
 }
 
