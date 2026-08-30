@@ -379,6 +379,19 @@ export default {
         return json({ ok: true, upserts: upserts.length, removes: removes.length, cleared: clearReports.length });
       }
 
+      if (req.method === "GET" && url.pathname === "/admin/reconcile") {
+        // Re-arm the ONE-TIME search-index reconciler (resets its cursor + done flag) so it walks all
+        // 4096 clone shards again — only needed if a future audit suspects the search index drifted
+        // from the clone shards. Normal operation never needs this (the incremental flush maintains it).
+        if (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY) {
+          return json({ ok: false, error: "unauthorized" }, 401);
+        }
+        const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+        meta.rc = 0; meta.rcDone = false; meta.reconcileScanned = 0; meta.reconcileFixed = 0;
+        await env.AVATAR_KV.put("meta", JSON.stringify(meta));
+        return json({ ok: true, reconcile: "re-armed (one full pass will run over ~a day)" });
+      }
+
       if (req.method === "GET" && url.pathname === "/admin/reports") {
         // The bot fetches PENDING dead/rename reports to verify — so it only checks REPORTED
         // avatars, never the whole catalog (scales to millions).
@@ -472,6 +485,8 @@ export default {
           lastReconcile: meta.lastReconcile || null,
           reconcileScanned: meta.reconcileScanned || 0,
           reconcileFixed: meta.reconcileFixed || 0,
+          reconcileDone: !!meta.rcDone,          // one-time heal finished → reconciler idle (flush maintains)
+          reconcileDoneAt: meta.rcDoneAt || null,
           purgeConfigured: !!(env.CF_PURGE_TOKEN && env.CF_ZONE_ID),
           // R2 is the only backend now. `catalogBase` is what the app appends
           // /shard/<prefix>.json etc. to (learned from here, so a serving change needs no
@@ -517,12 +532,16 @@ export default {
 // op was dropped in the past (the GitHub rebuild used to be the only reconciler). This walks the clone
 // shards round-robin (a few per cron), and for every entry NOT present in its avtr/ presence bucket,
 // enqueues an ADD index op to the iq: queue (drained by the next flushes, TTL-free so never lost).
-// One full pass heals the whole catalog over ~a day; it then keeps looping as ongoing insurance.
-// Bounded per run: RECONCILE_SHARDS_PER_RUN shard reads + one avtr/ read per distinct id-bucket seen
-// (cached within the run) → well under the subrequest budget alongside flushR2.
+// This is a ONE-TIME heal: it walks all 4096 clone shards ONCE (~a day at 4/min), re-indexing the
+// avatars whose index op was dropped in the past, then STOPS (meta.rcDone) — ongoing indexing of NEW
+// avatars is handled by the incremental flush (with the now-durable, TTL-free iq: queue), so there's
+// no reason to keep reading R2 forever. Re-run it any time with GET /admin/reconcile?key=… (resets the
+// cursor) if a future audit ever suspects drift. Bounded per run: RECONCILE_SHARDS_PER_RUN shard reads
+// + one avtr/ read per distinct id-bucket seen (cached within the run).
 const RECONCILE_SHARDS_PER_RUN = 4;
 async function reconcileIndex(env) {
   const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
+  if (meta.rcDone) return;   // one-time heal already completed → the incremental flush maintains it
   let cursor = (typeof meta.rc === "number" ? meta.rc : 0) & 0xfff;
   const avtrCache = {};        // id-bucket -> Set(ids present in the search index)
   const missing = [];          // ADD index ops for entries not yet indexed
@@ -554,8 +573,10 @@ async function reconcileIndex(env) {
     await env.AVATAR_KV.put("iq:" + crypto.randomUUID(), JSON.stringify(missing.slice(i, i + MAX_INDEX_OPS_PER_FLUSH)));
   meta.rc = cursor;
   meta.lastReconcile = new Date().toISOString();
-  meta.reconcileScanned = (meta.reconcileScanned || 0) + scanned;   // cumulative shards walked
-  meta.reconcileFixed = (meta.reconcileFixed || 0) + missing.length; // cumulative entries re-indexed
+  meta.reconcileScanned = (meta.reconcileScanned || 0) + scanned;   // shards walked this pass
+  meta.reconcileFixed = (meta.reconcileFixed || 0) + missing.length; // entries re-indexed this pass
+  // One full pass = 4096 shards walked → STOP (rely on the incremental flush from here on).
+  if (meta.reconcileScanned >= 4096) { meta.rcDone = true; meta.rcDoneAt = new Date().toISOString(); }
   await env.AVATAR_KV.put("meta", JSON.stringify(meta));
 }
 
@@ -929,8 +950,22 @@ async function flushR2(env) {
   // flush → +1 small KV write per flush at most, nothing when idle. Capped at 20 batches.
   if (recentBatches.length) {
     let prev = []; try { const r = await env.AVATAR_KV.get("recent"); if (r) prev = JSON.parse(r); } catch (_) {}
-    const next = [...recentBatches.reverse(), ...(Array.isArray(prev) ? prev : [])].slice(0, 20);
-    await env.AVATAR_KV.put("recent", JSON.stringify(next));
+    prev = Array.isArray(prev) ? prev : [];
+    // DEDUP the display log by CONTENT (contributor + the exact avatar set), not timestamp: a
+    // contribution POST that times out on the phone but actually landed gets retried, creating a 2nd
+    // identical pend: batch — harmless for the catalog (contribute is idempotent, +0 added) but it
+    // showed the same row twice in "Recent user contributions". The client sends no per-batch ts, so a
+    // re-POST processed in a later flush has a different Date.now(); a content signature catches it
+    // regardless. (Genuine repeats can't collide: the client dedups its queue by file id and contribute
+    // dedups against R2, so an identical avatar set is only ever a re-POST.)
+    const sigOf = (b) => `${b.by || ""}|${b.n || 0}|${(b.names || []).join("")}`;
+    const seen = new Set(prev.map(sigOf));
+    const fresh = [];
+    for (const b of recentBatches) { const s = sigOf(b); if (!seen.has(s)) { seen.add(s); fresh.push(b); } }
+    if (fresh.length) {
+      const next = [...fresh.reverse(), ...prev].slice(0, 20);
+      await env.AVATAR_KV.put("recent", JSON.stringify(next));
+    }
   }
 }
 
