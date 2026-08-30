@@ -111,9 +111,14 @@ object VrcLogParser {
     )
     // "[…] Unpacking Avatar (<avatarName> by <author>)" — carries the author. On
     // Quest this is logged by [AssetBundleDownloadManager], not [Behaviour], so the
-    // tag is left unanchored.
+    // tag is left unanchored. The NAME group is GREEDY so the split is the LAST " by "
+    // (the author is the trailing token); a non-greedy name split at the FIRST " by ",
+    // which mis-grabbed the name AND author for any avatar whose NAME contains " by "
+    // (e.g. "Song by the Sea by CoolCreator" -> name "Song", author "the Sea by
+    // CoolCreator"). VRChat substitutes ASCII parens in names with fullwidth （）, so
+    // the author's ")" terminator is unambiguous.
     private val RE_AVATAR_UNPACK = Regex(
-        """Unpacking Avatar\s+\((.+?)\s+by\s+(.+?)\)\s*$"""
+        """Unpacking Avatar\s+\((.+)\s+by\s+(.+?)\)\s*$"""
     )
     // Any `avtr_` id in a Quest log line is the LOCAL player's OWN avatar (remote
     // players' ids are never logged) — captured from its avatar-data load/save lines.
