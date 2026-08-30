@@ -488,9 +488,14 @@ object AvatarGlobalDb {
     enum class ShardStatus { HIT, MISS, UNAVAILABLE }
     data class ShardLookup(val status: ShardStatus, val entry: Entry?)
 
-    suspend fun lookupShardedResult(context: Context, fileId: String?): ShardLookup {
+    // [checkLocalMap] MUST be false for contribute()'s dedup: contribute does a localInsert (map[fileId]
+    // = …) BEFORE it launches the dedup, so a true here would ALWAYS see that just-inserted entry, return
+    // HIT, and never queue the contribution to the Worker — which silently killed ALL user contribution
+    // batches (the "newer versions don't send batches, 1.12.39 does" regression). The dedup wants the
+    // AUTHORITATIVE R2 shard membership, not the local map we just polluted.
+    suspend fun lookupShardedResult(context: Context, fileId: String?, checkLocalMap: Boolean = true): ShardLookup {
         if (fileId == null || !FILE_RE.matches(fileId)) return ShardLookup(ShardStatus.MISS, null)
-        map[fileId]?.let { return ShardLookup(ShardStatus.HIT, it) }   // own/whole-map (instant)
+        if (checkLocalMap) map[fileId]?.let { return ShardLookup(ShardStatus.HIT, it) }   // own/whole-map (instant)
         ensureCatalogBase(context)
         if (!r2Serving) return ShardLookup(ShardStatus.MISS, null)     // dormant pre-cutover → fall through as before
         val base = catalogBase ?: return ShardLookup(ShardStatus.MISS, null)
@@ -1012,7 +1017,9 @@ object AvatarGlobalDb {
             // show up in the contribution batches / duplicates across batches" bug). The clone shard
             // has no such lag, so dedup against IT here covers all callers uniformly. A genuine MISS/
             // UNAVAILABLE (not-in-catalog or a transient read) still queues — nothing new is dropped.
-            if (lookupShardedResult(app, fileId).status == ShardStatus.HIT) return@launch
+            // R2-only membership (checkLocalMap=false): our own localInsert above must NOT count as a
+            // HIT here, or the contribution is never queued (the batches regression).
+            if (lookupShardedResult(app, fileId, checkLocalMap = false).status == ShardStatus.HIT) return@launch
             queueMutex.withLock {
                 val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 val arr = JSONArray(prefs.getString(KEY_QUEUE, "[]"))
@@ -1594,6 +1601,26 @@ object AvatarGlobalDb {
             //    After a favourite is processed once it's never fetched again (the admin bots'
             //    7-day liveness sweep covers ongoing death of catalog entries).
             val favs = VrchatAuthManager.favouriteAvatarIds(context)
+            // ONE-TIME RE-HEAL for the batches regression: contributions were silently dropped, so some
+            // favourites were marked "processed" but never actually landed in the catalog. Re-check the
+            // favourites against the LIVE R2 catalog (one cheap filterKnownSharded batch — NOT 1000
+            // GETs) and un-mark any that are missing so the loop below re-resolves + re-contributes them.
+            // Own UPLOADS already self-heal every harvest (shard-authoritative MISS → re-contribute), so
+            // only favourites need this. Best-effort one-shot, gated on a real favourites fetch.
+            if (r2Serving && favs.isNotEmpty()) {
+                val prefs0 = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                if (!prefs0.getBoolean("fav_reheal_v1", false)) {
+                    try {
+                        val known = filterKnownSharded(context, favs)
+                        val missing = favs.filter { it !in known }.toSet()
+                        if (missing.isNotEmpty()) {
+                            processedFavourites.removeAll(missing); saveProcessedFavourites(context)
+                            AvatarSearch.Diag.record("fav re-heal: ${missing.size} favourite(s) missing from catalog → re-queued")
+                        }
+                        prefs0.edit().putBoolean("fav_reheal_v1", true).apply()
+                    } catch (e: Exception) { /* leave the flag unset → retry next open */ }
+                }
+            }
             val knownById = HashMap<String, AvatarGlobalDb.Entry>(map.size)
             for (e in map.values) knownById[e.avatarId] = e
             var favNew = 0; var favKnown = 0; var favSkipped = 0; var favDead = 0; var favProcessed = 0

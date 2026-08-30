@@ -143,6 +143,13 @@ object BotController {
         val app = context.applicationContext
         if (!started.compareAndSet(false, true)) return
 
+        // Keep a FOREGROUND service alive while the bots run so Android doesn't throttle the sweep's
+        // CPU/network the moment the admin app is backgrounded ("bots stop working when backgrounded").
+        // Idempotent (coalesces if already running). NOTE: on OEMs with aggressive background killers
+        // this still needs the admin device to grant VRC-A battery-optimization exemption + the OEM
+        // allow-list (Autostart / "never sleeping app"); no app code can override those.
+        runCatching { com.vrca.keepalive.KeepAliveService.start(app) }
+
         // Load + keep the avatar catalog fresh ALWAYS — even when the bots are stopped/paused —
         // so the admin can see the REAL backlog counts and decide whether to run them. (Before,
         // the catalog only loaded while the sweep ran, so the queues sat at 0 until you started
