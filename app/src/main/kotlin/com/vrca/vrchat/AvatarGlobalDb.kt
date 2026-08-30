@@ -938,7 +938,7 @@ object AvatarGlobalDb {
     fun contribute(
         context: Context, fileId: String, avatarId: String,
         name: String, author: String, authorId: String = "", platforms: List<String> = emptyList(),
-        description: String = "", localInsert: Boolean = true
+        description: String = "", localInsert: Boolean = true, bypassLocalDedup: Boolean = false
     ): Boolean {
         // Only add entries we ACTUALLY have a valid avatar id + file id for.
         // Returns TRUE only when this call adds a genuinely NEW entry — so harvest
@@ -950,7 +950,14 @@ object AvatarGlobalDb {
         // Robot's thumbnail, so catalog-ing it makes every loading avatar resolve to the Robot and
         // clone into it. This is the crowdsource-harvest regression vs the old curated whole-file DB.
         if (isSystemAvatar(author, avatarId, fileId)) return false
-        if (map.containsKey(fileId)) return false
+        // [bypassLocalDedup] — for the OWNER'S OWN uploads: the AUTHORITATIVE dedup is the live clone
+        // shard (checked below), NOT the local map/session sets. Those local sets can carry a STALE
+        // entry (e.g. the admin liveness bot culled the avatar while it was private, so this device
+        // never ran forgetLocal) that would otherwise block re-contributing the avatar when the owner
+        // flips it back to public — until an app restart purged the local map. Skipping them here lets
+        // an own re-published avatar re-enter within one harvest cycle. This was the "I turned my
+        // avatar public again and it never came back into the system" bug.
+        if (!bypassLocalDedup && map.containsKey(fileId)) return false
         // Remember it for THIS session so the avtr index (rebuilt ~every 20 min) not yet having
         // it can't make us re-resolve/re-contribute it. Bounded to avoid unbounded growth.
         if (sessionContributed.size > 40_000) sessionContributed.clear()
@@ -969,8 +976,9 @@ object AvatarGlobalDb {
         val app = context.applicationContext
         scope.launch {
             // Already contributed/confirmed this session? Never re-queue the same file id.
+            // (Own-upload re-scans pass bypassLocalDedup so a stale session mark can't block a re-add.)
             if (sessionContributedFiles.size > 40_000) sessionContributedFiles.clear()
-            if (!sessionContributedFiles.add(fileId)) return@launch
+            if (!bypassLocalDedup && !sessionContributedFiles.add(fileId)) return@launch
             // AUTHORITATIVE catalog membership: the always-fresh clone shard (fileId-keyed, updated
             // every flush with NO cap). If it's already there, it's in the catalog → don't re-POST.
             // This is the single dedup chokepoint for EVERY contribute caller (harvest/search/clone/
@@ -1492,17 +1500,27 @@ object AvatarGlobalDb {
             // being re-contributed every open). Pre-cutover falls back to the local map.
             val libKnownSet: Set<String> = if (r2Serving) filterKnownSharded(context, lib.map { it.entry.avatarId })
                 else lib.filter { map.containsKey(it.entry.fileId) }.map { it.entry.avatarId }.toSet()
+            var libRecontributed = 0; var libUnavail = 0
             for (a in lib) {
                 val e = a.entry
                 if (a.isPublic) {
-                    // ALWAYS attempt contribute for our own PUBLIC uploads — do NOT skip on libKnownSet
-                    // (the avtr/ presence index LAGS a cull by several rebuilds). contribute() self-dedups
-                    // against the LIVE clone shard (still-present → cheap no-op via map/shard HIT), so a
-                    // re-published avatar (public → private → public) re-enters as soon as the earlier cull
-                    // propagated, instead of being permanently skipped by the stale presence index. This is
-                    // the "avatars turned public again after going private don't get added" fix.
-                    if (contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId, e.platforms, e.description))
-                        libNew++ else libKnown++
+                    // Check the AUTHORITATIVE live clone shard directly (not libKnownSet — the avtr/
+                    // presence index LAGS a cull by several rebuilds, and not the local map/session sets
+                    // — those can carry a stale entry the admin liveness bot culled without this device
+                    // running forgetLocal). MISS → re-contribute with bypassLocalDedup so a stale local
+                    // entry can't block it; HIT → already present (no-op); UNAVAILABLE → transient, retry
+                    // next harvest. This is the "I turned my avatar public again and it never came back
+                    // into the system" fix — an own re-published avatar re-enters within one harvest cycle.
+                    when (lookupShardedResult(context, e.fileId).status) {
+                        ShardStatus.MISS -> {
+                            contribute(context, e.fileId, e.avatarId, e.name, e.author, e.authorId,
+                                e.platforms, e.description, bypassLocalDedup = true)
+                            libRecontributed++; libNew++
+                            AvatarSearch.Diag.record("own '${e.name.ifBlank { e.avatarId }}' -> re-contributed (was missing from catalog)")
+                        }
+                        ShardStatus.HIT -> libKnown++
+                        ShardStatus.UNAVAILABLE -> libUnavail++   // transient read → retry next harvest
+                    }
                 } else if (a.ownUpload && libKnownSet.contains(e.avatarId)) {
                     // The user made their own PUBLIC avatar private -> report removal
                     // (the admin bot confirms via a 404 on the now-private avatar).
@@ -1563,7 +1581,9 @@ object AvatarGlobalDb {
                 (if (favDead > 0) " / $favDead dead-reported" else "") +
                 (if (favSkipped > 0) " / $favSkipped private" else "") +
                 (if (rateLimited) " · rate-limited, resuming next sweep" else "") +
-                " · ${processedFavourites.size} done all-time · uploads +$libNew" +
+                " · ${processedFavourites.size} done all-time · uploads: ${lib.count { it.isPublic }} public, " +
+                "$libKnown in catalog, $libRecontributed re-added" +
+                (if (libUnavail > 0) " ($libUnavail unchecked)" else "") +
                 (if (privateRemoved > 0) " · $privateRemoved now-private" else "") +
                 " ${nowShort()}"
         } catch (ex: Exception) { Log.w(TAG, "library harvest failed", ex) }
@@ -1584,6 +1604,18 @@ object AvatarGlobalDb {
         if (searchSeedQueue.size >= SEARCH_SEED_QUEUE_CAP) return   // bounded
         searchSeedQueue.add(n)
     }
+
+    /** Force an immediate own-library re-scan (own uploads + favourites) so a user who just flipped an
+     *  avatar back to public can push it into the catalog RIGHT NOW instead of waiting for the 30-min
+     *  cycle. The result is visible in the harvest diag line (`lastFav`: "N re-added"). */
+    fun rescanOwnLibraryNow(context: Context) {
+        val app = context.applicationContext
+        scope.launch { runCatching { harvestLibrary(app) }.onFailure { Log.w(TAG, "manual rescan failed", it) } }
+    }
+
+    /** The last own-library harvest summary (public uploads: N in catalog / M re-added, favourites, …)
+     *  for the Settings → Debug readout, so a user can confirm a flipped-public avatar was re-added. */
+    fun ownLibraryDiag(): String = lastFav
 
     fun harvestOwnAvatarNow(context: Context) {
         val now = System.currentTimeMillis()
