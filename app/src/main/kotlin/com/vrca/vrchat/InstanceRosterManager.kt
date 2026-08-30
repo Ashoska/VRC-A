@@ -248,6 +248,11 @@ object InstanceRosterManager {
     // Last time a member in the SLOW phase (past the fast window, greyed but still retriable) was
     // re-resolved — so a could-have-been-found avatar (avtrdb recovered, catalog grew) still lights up.
     private val avatarSlowRetryAt = ConcurrentHashMap<String, Long>()
+    // The instance location we last had caches populated for. A DIRECT hop (A -> B) never passes
+    // through "not in world", so the leave-path cache clears don't fire — the old instance's per-user
+    // caches AND the shard LRU would leak into the new instance and accumulate across a hopping
+    // session. Comparing this to state.location detects the hop and clears on change.
+    @Volatile private var lastLocation: String? = null
     private val resolvingAvatars = java.util.concurrent.atomic.AtomicBoolean(false)
     /** True while the roster is actively resolving members' clone ids — that pass hits the
      *  SAME avtrdb/VRCX mirrors the catalog seed search does, so the seed search yields to it
@@ -535,7 +540,7 @@ object InstanceRosterManager {
                     )
                 }
                 stopObserver()
-                platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarCloneFileIdCache.clear(); avatarPlatformsCache.clear(); avatarResolveInFlight.clear(); avatarResolveTries.clear(); avatarLoadingSince.clear(); avatarSlowRetryAt.clear(); com.vrca.vrchat.AvatarGlobalDb.evictShardCache(); com.vrca.vrchat.AvatarGlobalDb.evictShardCache()
+                clearRosterCaches(); lastLocation = null; VrchatAuthManager.clearAvatarLiveCache()
                 _flow.value = RosterUi(status = Status.IDLE)
                 currentId = null; offset = 0L; state = VrcLogParser.InstanceState()
                 delay(POLL_MS); continue
@@ -703,7 +708,7 @@ object InstanceRosterManager {
                     confirmedClosed = confirmedClosed
                 )
             }
-            platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarCloneFileIdCache.clear(); avatarPlatformsCache.clear(); avatarResolveInFlight.clear(); avatarResolveTries.clear(); avatarLoadingSince.clear(); avatarSlowRetryAt.clear(); com.vrca.vrchat.AvatarGlobalDb.evictShardCache()
+            clearRosterCaches(); lastLocation = null; VrchatAuthManager.clearAvatarLiveCache()
             _flow.value = RosterUi(status = Status.IDLE, worldName = null, location = null, members = emptyList(), logPath = logPath)
             return
         }
@@ -730,12 +735,22 @@ object InstanceRosterManager {
         // in memory across a session (the reader writes NOTHING per-user to disk;
         // this just keeps RAM bounded to the current instance).
         if (!inWorld) {
-            platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear(); lastAvatarByUser.clear(); lastEntries = emptyList(); avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarCloneFileIdCache.clear(); avatarPlatformsCache.clear(); avatarResolveInFlight.clear(); avatarResolveTries.clear(); avatarLoadingSince.clear(); avatarSlowRetryAt.clear(); com.vrca.vrchat.AvatarGlobalDb.evictShardCache()
+            clearRosterCaches(); lastLocation = null; VrchatAuthManager.clearAvatarLiveCache()
             _flow.value = RosterUi(
                 status = Status.IDLE, worldName = state.worldName,
                 location = state.location, members = emptyList(), logPath = logPath
             )
             return
+        }
+
+        // DIRECT HOP (A -> B) — the log went straight from one populated instance to another without
+        // ever passing through "not in world", so the leave-path clear above never fired. Detect it by
+        // the location changing and drop the previous instance's per-user caches + shard LRU here, so
+        // memory stays bounded to the CURRENT instance and no stale row/clone id carries over. The
+        // members below are then rebuilt fresh from this instance's roster (re-enriched/re-resolved).
+        if (state.location != lastLocation) {
+            clearRosterCaches()
+            lastLocation = state.location
         }
 
         val friends = friendIds(context)
@@ -935,6 +950,19 @@ object InstanceRosterManager {
      *  cloneable match, OR a PC/iOS-only avatar while the local user is on Quest —
      *  it can't be worn there), non-blank = the avtr_ id to select. The avatar is
      *  still saved to the catalog regardless (that happens during resolve). */
+    /** Drop ALL per-user roster caches + the in-app shard LRU. Called on instance leave AND on a
+     *  direct hop (see [lastLocation]) so nothing accumulates in memory across a session — the reader
+     *  writes NOTHING per-user to disk; this keeps RAM bounded to the CURRENT instance. The shard LRU
+     *  eviction also drops any shard fetched for the previous instance's avatars. */
+    private fun clearRosterCaches() {
+        platformCache.clear(); pfpCache.clear(); enrichAttempts.clear(); enrichInFlight.clear()
+        lastAvatarByUser.clear(); lastEntries = emptyList()
+        avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarCloneFileIdCache.clear()
+        avatarPlatformsCache.clear(); avatarResolveInFlight.clear(); avatarResolveTries.clear()
+        avatarLoadingSince.clear(); avatarSlowRetryAt.clear()
+        com.vrca.vrchat.AvatarGlobalDb.evictShardCache()
+    }
+
     private fun gateCloneId(id: String?, platforms: List<String>): String {
         if (id.isNullOrBlank()) return ""
         if (selfIsQuest() && platforms.isNotEmpty() &&

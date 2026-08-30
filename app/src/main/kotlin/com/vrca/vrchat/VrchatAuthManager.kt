@@ -1486,6 +1486,11 @@ object VrchatAuthManager {
     private val avatarLivePlatforms = java.util.concurrent.ConcurrentHashMap<String, List<String>>()
     private val avatarLiveFileIds = java.util.concurrent.ConcurrentHashMap<String, Set<String>>()
 
+    /** Drop the session liveness cache — called on instance leave so it doesn't accumulate across a
+     *  long session (kept ACROSS hops so a re-seen avatar isn't re-confirmed). Bounds the memory the
+     *  "no robot tap" pre-check holds. */
+    fun clearAvatarLiveCache() { avatarLiveCache.clear(); avatarLivePlatforms.clear(); avatarLiveFileIds.clear() }
+
     /** Result of a live-confirm: [live]=true (200, wearable), false (403/404, not wearable → grey +
      *  report), null (transient → unknown, retry, do NOT grey/report). */
     data class AvatarConfirm(val live: Boolean?, val fileIds: Set<String>, val platforms: List<String>)
