@@ -488,9 +488,14 @@ object AvatarGlobalDb {
     enum class ShardStatus { HIT, MISS, UNAVAILABLE }
     data class ShardLookup(val status: ShardStatus, val entry: Entry?)
 
-    suspend fun lookupShardedResult(context: Context, fileId: String?): ShardLookup {
+    // [checkLocalMap] MUST be false for contribute()'s dedup: contribute does a localInsert (map[fileId]
+    // = …) BEFORE it launches the dedup, so a true here would ALWAYS see that just-inserted entry, return
+    // HIT, and never queue the contribution to the Worker — which silently killed ALL user contribution
+    // batches (the "newer versions don't send batches, 1.12.39 does" regression). The dedup wants the
+    // AUTHORITATIVE R2 shard membership, not the local map we just polluted.
+    suspend fun lookupShardedResult(context: Context, fileId: String?, checkLocalMap: Boolean = true): ShardLookup {
         if (fileId == null || !FILE_RE.matches(fileId)) return ShardLookup(ShardStatus.MISS, null)
-        map[fileId]?.let { return ShardLookup(ShardStatus.HIT, it) }   // own/whole-map (instant)
+        if (checkLocalMap) map[fileId]?.let { return ShardLookup(ShardStatus.HIT, it) }   // own/whole-map (instant)
         ensureCatalogBase(context)
         if (!r2Serving) return ShardLookup(ShardStatus.MISS, null)     // dormant pre-cutover → fall through as before
         val base = catalogBase ?: return ShardLookup(ShardStatus.MISS, null)
@@ -1012,7 +1017,9 @@ object AvatarGlobalDb {
             // show up in the contribution batches / duplicates across batches" bug). The clone shard
             // has no such lag, so dedup against IT here covers all callers uniformly. A genuine MISS/
             // UNAVAILABLE (not-in-catalog or a transient read) still queues — nothing new is dropped.
-            if (lookupShardedResult(app, fileId).status == ShardStatus.HIT) return@launch
+            // R2-only membership (checkLocalMap=false): our own localInsert above must NOT count as a
+            // HIT here, or the contribution is never queued (the batches regression).
+            if (lookupShardedResult(app, fileId, checkLocalMap = false).status == ShardStatus.HIT) return@launch
             queueMutex.withLock {
                 val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 val arr = JSONArray(prefs.getString(KEY_QUEUE, "[]"))
