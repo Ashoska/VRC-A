@@ -1716,11 +1716,11 @@ object VrchatAuthManager {
             for (c in found) merged.putIfAbsent(c.id, c)   // no cap — collect every candidate (free grabs)
         }
         val candidates = merged.values.toList()
-        // FREE GRABS: every candidate is a real avatar — harvest ALL of them into the
-        // catalog in the background (each resolves its own file id + platforms), not
-        // just the one we clone. Fire-and-forget, paced + deduped inside the harvester.
+        // FREE GRABS: every candidate is a real avatar — harvest ALL of them into the catalog in the
+        // background (mirror candidates carry a file id → contributed directly for free; avtrdb ones are
+        // resolved), not just the one we clone. Fire-and-forget, paced + deduped inside the harvester.
         if (candidates.isNotEmpty())
-            com.vrca.vrchat.AvatarGlobalDb.harvestAvatarIds(context, candidates.map { it.id })
+            com.vrca.vrchat.AvatarGlobalDb.harvestCandidates(context, candidates)
         if (candidates.isEmpty()) {
             com.vrca.vrchat.AvatarSearch.Diag.lastReason = "0 candidates in any DB (not indexed)"
             return@withContext WornAvatarResult(null)
@@ -1819,10 +1819,11 @@ object VrchatAuthManager {
                 val found = try { com.vrca.vrchat.AvatarSearch.searchCandidates(v) } catch (e: Exception) { emptyList() }
                 for (c in found) merged.putIfAbsent(c.id, c)
             }
-            // FREE GRABS: harvest every candidate this fallback search saw (paced/deduped in the
-            // background) so this path keeps feeding catalog growth, not just the one we return.
+            // FREE GRABS: harvest every candidate this fallback search saw (mirror ones contributed
+            // directly via their file id, avtrdb ones resolved) so this path keeps feeding catalog
+            // growth, not just the one we return.
             if (merged.isNotEmpty())
-                com.vrca.vrchat.AvatarGlobalDb.harvestAvatarIds(context, merged.values.map { it.id })
+                com.vrca.vrchat.AvatarGlobalDb.harvestCandidates(context, merged.values.toList())
             val matches = merged.values.filter {
                 it.author.trim().lowercase() == authorNorm &&
                     !com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(it.author, it.id, null)

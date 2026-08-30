@@ -1466,6 +1466,30 @@ object AvatarGlobalDb {
      *  so resolving its own file id + platforms is a free coverage grab. Deduped
      *  against the catalog + a session set, paced + capped so a big instance can't
      *  storm VRChat REST. Fire-and-forget. */
+    /** Harvest a set of clone/search CANDIDATES into the catalog — the "free grabs" from a clone that
+     *  falls back to the avtrdb/mirror name search. Unlike [harvestAvatarIds] (ids only, one VRChat
+     *  resolve each), this keeps each candidate's data: a VRCX-mirror candidate already carries VRChat's
+     *  RAW image `file_…` id, so it's contributed DIRECTLY (zero VRChat calls); only the avtrdb ones
+     *  (proxied image → no file id) are resolved via [harvestAvatarIds]. So the clone fallback adds
+     *  EVERY candidate it saw, not just the one it cloned, and the mirror ones cost nothing. */
+    fun harvestCandidates(context: Context, candidates: List<AvatarSearch.Candidate>) {
+        if (candidates.isEmpty()) return
+        val app = context.applicationContext
+        scope.launch {
+            // (a) mirror candidates with a real file id → contribute directly (platforms fill in via the
+            //     admin FILL bot later). contribute() self-dedups against the live shard, so a known one
+            //     is a cheap no-op; a genuinely new one enters the catalog with no VRChat call.
+            for (c in candidates) {
+                val fid = c.imageFileId ?: continue
+                if (!harvestedCandidates.add(c.id)) continue
+                contribute(app, fid, c.id, c.name, c.author, c.authorId)
+            }
+        }
+        // (b) avtrdb candidates (no file id) → resolve the file id via VRChat + contribute (paced,
+        //     deduped, rate-limit backoff inside harvestAvatarIds).
+        harvestAvatarIds(context, candidates.filter { it.imageFileId == null }.map { it.id })
+    }
+
     fun harvestAvatarIds(context: Context, avatarIds: List<String>) {
         val app = context.applicationContext
         scope.launch {
