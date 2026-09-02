@@ -507,6 +507,11 @@ export default {
           reconcileFixed: meta.reconcileFixed || 0,
           reconcileDone: !!meta.rcDone,          // one-time heal finished → reconciler idle (flush maintains)
           reconcileDoneAt: meta.rcDoneAt || null,
+          // Recount-integrity guards (v8+): shards a recount lap couldn't read, retry attempts, and whether
+          // the last completed lap SKIPPED adopting its count because it was tainted (kept the incremental).
+          rcReadFail: meta.rcReadFail || 0,
+          rcAttempts: meta.rcAttempts || 0,
+          rcAdoptSkipped: meta.rcAdoptSkipped || 0,
           purgeConfigured: !!(env.CF_PURGE_TOKEN && env.CF_ZONE_ID),
           // R2 is the only backend now. `catalogBase` is what the app appends
           // /shard/<prefix>.json etc. to (learned from here, so a serving change needs no
@@ -516,7 +521,7 @@ export default {
           catalogBase: env.CATALOG_BASE || `https://${url.host}/catalog`,
           shardScheme: "filehex3-full",
           shardCount: 4096,
-          version: 7,
+          version: 8,   // bumped for the cost/exact-count/reconcile-hardening pass — /health reads 8 once deployed
         });
       }
 
