@@ -712,7 +712,13 @@ object InstanceRosterManager {
                     confirmedClosed = confirmedClosed
                 )
             }
-            clearRosterCaches(); lastLocation = null; VrchatAuthManager.clearAvatarLiveCache()
+            // Force presence offline (RPC) + show IDLE, but DO NOT wipe the roster/clone caches. While
+            // the app is BACKGROUNDED and the user is still in VRChat, `alive` can read false purely
+            // because OUR OSCQuery poll got throttled (VRChat is up; we just can't reach it) — wiping
+            // here made every resolved clone button grey out and re-resolve on return (the tester's
+            // bug). Retaining the caches (and lastLocation) means the moment `alive` recovers into the
+            // SAME instance, every button is restored instantly; a real move into a DIFFERENT instance
+            // is still cleared by the hop check below (location != lastLocation).
             _flow.value = RosterUi(status = Status.IDLE, worldName = null, location = null, members = emptyList(), logPath = logPath)
             return
         }
@@ -739,7 +745,13 @@ object InstanceRosterManager {
         // in memory across a session (the reader writes NOTHING per-user to disk;
         // this just keeps RAM bounded to the current instance).
         if (!inWorld) {
-            clearRosterCaches(); lastLocation = null; VrchatAuthManager.clearAvatarLiveCache()
+            // Momentarily not-in-world (empty roster / null location). This can be a genuine leave OR
+            // just a transient empty state from a background log re-read / rotation while still in
+            // VRChat. Either way DON'T wipe the caches here — retaining them costs one instance's worth
+            // of memory (freed on the next hop or on app stop) and means a transient empty that refills
+            // to the SAME instance restores every clone button instantly instead of greying them. A
+            // genuine move to a DIFFERENT instance is cleared by the hop check below; leaving/hopping
+            // away entirely also clears on the next populated instance's hop.
             _flow.value = RosterUi(
                 status = Status.IDLE, worldName = state.worldName,
                 location = state.location, members = emptyList(), logPath = logPath
