@@ -111,7 +111,11 @@ object InstanceRosterManager {
         val isSelf: Boolean = false,
         /** VRChat+ icon / worn-avatar thumbnail for the row (temporary, evicts on
          *  leave). Self reuses the VRChat tab's pic; others come from the API. */
-        val profilePicUrl: String = ""
+        val profilePicUrl: String = "",
+        /** DIAGNOSTIC: the step-by-step clone-resolution trace for this member's CURRENT avatar —
+         *  what was tried, what each DB/confirm returned, and the terminal outcome. Surfaced under
+         *  the row so the whole resolve process is visible for every user in the instance. */
+        val resolveTrace: List<String> = emptyList()
     )
 
     data class RosterUi(
@@ -806,7 +810,10 @@ object InstanceRosterManager {
                 cloneFileId = if (!isSelfMember) e.userId?.let { avatarCloneFileIdCache[it] } else null,
                 isFriend = e.userId != null && friends.contains(e.userId),
                 isSelf = isSelfMember,
-                profilePicUrl = pfp
+                profilePicUrl = pfp,
+                // Carry the resolver's step trace (kept per-uid in VrchatAuthManager until the roster
+                // caches clear) so it survives the ~1s publish rebuild instead of blanking each cycle.
+                resolveTrace = if (!isSelfMember) e.userId?.let { VrchatAuthManager.lastResolveTrace(it) } ?: emptyList() else emptyList()
             )
         }
         _flow.value = RosterUi(
@@ -919,12 +926,22 @@ object InstanceRosterManager {
                                     avatarIdResolvedFor[id] = avaName
                                     if (gated.isNotBlank()) avatarCloneFileIdCache[id] = wornFid else avatarCloneFileIdCache.remove(id)
                                     catalogAvatarId = gated
+                                    VrchatAuthManager.putResolveTrace(id, listOf(
+                                        "worn image fileId: $wornFid",
+                                        "instant enrich shortcut: local catalog HIT ${hit.avatarId}",
+                                        "confirmed live" + (if (gated.isBlank()) " but PC-only → greyed on Quest" else ""),
+                                        "result: via catalog (enrich shortcut)"))
                                 }   // else: worn image no longer matches (stale re-key) → let the guarded resolver find the right one
                                 false -> {
                                     // Confirmed dead/private → report + grey DECISIVELY (never a clickable robot).
                                     com.vrca.vrchat.AvatarGlobalDb.report(context, wornFid, hit.avatarId, "dead")
                                     avatarIdCache[id] = ""; avatarIdResolvedFor[id] = avaName
                                     avatarCloneFileIdCache.remove(id); catalogAvatarId = ""
+                                    VrchatAuthManager.putResolveTrace(id, listOf(
+                                        "worn image fileId: $wornFid",
+                                        "instant enrich shortcut: local catalog HIT ${hit.avatarId}",
+                                        "confirmed DEAD/private → reported + greyed",
+                                        "result: dead"))
                                 }
                                 null -> { /* transient — don't pin; the guarded resolveAvatars pass retries */ }
                             }
@@ -940,7 +957,8 @@ object InstanceRosterManager {
                                 if (m.userId == id) m.copy(
                                     platform = plat, profilePicUrl = info.profilePicUrl,
                                     avatarId = catalogAvatarId ?: m.avatarId,
-                                    cloneFileId = avatarCloneFileIdCache[id] ?: m.cloneFileId
+                                    cloneFileId = avatarCloneFileIdCache[id] ?: m.cloneFileId,
+                                    resolveTrace = VrchatAuthManager.lastResolveTrace(id).ifEmpty { m.resolveTrace }
                                 ) else m
                             }
                         )
@@ -982,6 +1000,7 @@ object InstanceRosterManager {
         avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarCloneFileIdCache.clear()
         avatarPlatformsCache.clear(); avatarResolveInFlight.clear()
         avatarLoadingSince.clear(); avatarSlowRetryAt.clear()
+        VrchatAuthManager.clearResolveTraces()
         com.vrca.vrchat.AvatarGlobalDb.evictShardCache()
     }
 
@@ -1068,10 +1087,12 @@ object InstanceRosterManager {
             _flow.value.let { cur ->
                 if (cur.members.any { it.userId == uid && it.avatarName == name }) {
                     val shown = cloneButtonState(uid, name)   // SAME source of truth as publish → no flicker
+                    val trace = VrchatAuthManager.lastResolveTrace(uid)
                     _flow.value = cur.copy(
                         members = cur.members.map { m ->
                             if (m.userId == uid && m.avatarName == name)
-                                m.copy(avatarId = shown, cloneFileId = avatarCloneFileIdCache[uid] ?: m.cloneFileId)
+                                m.copy(avatarId = shown, cloneFileId = avatarCloneFileIdCache[uid] ?: m.cloneFileId,
+                                    resolveTrace = if (trace.isNotEmpty()) trace else m.resolveTrace)
                             else m
                         }
                     )
