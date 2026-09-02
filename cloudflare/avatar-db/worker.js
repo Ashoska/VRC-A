@@ -405,6 +405,9 @@ export default {
         }
         const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
         meta.rc = 0; meta.rcDone = false; meta.reconcileScanned = 0; meta.reconcileFixed = 0;
+        // Reset the recount accumulators + the clean-pass guards so the re-armed pass computes a
+        // fresh EXACT count (adopted only if the whole 4096-shard lap reads cleanly).
+        meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcReadFail = 0; meta.rcAttempts = 0; meta.rcAdoptSkipped = 0;
         await env.AVATAR_KV.put("meta", JSON.stringify(meta));
         return json({ ok: true, reconcile: "re-armed (one full pass will run over ~a day)" });
       }
@@ -867,30 +870,35 @@ async function flushR2(env) {
     // avatar no longer in the shard) must NOT rewrite the shard — an unconditional put was the
     // single biggest wasted R2 Class A write, since the harvest re-contributes thousands of
     // already-present avatars. Only put when `dirty`.
-    let dirty = false;
+    // Per-shard tallies. These fold into the global added/removed/unfilledDelta ONLY after this
+    // shard's write SUCCEEDS — so a write that fails (KV not cleared → retried next flush) can never
+    // bump `entries` for a shard that didn't persist and then get RE-counted on the retry. That
+    // double-count on partial failures was a source of the running count drifting off exact.
+    let dirty = false, sAdded = 0, sRemoved = 0, sUnfilled = 0;
+    const sIndexOps = [];
     for (const fid of Object.keys(ops.adds)) if (!e[fid]) {
-      const ne = ops.adds[fid]; e[fid] = ne; added++; dirty = true;
-      const op = buildIndexOp(null, ne, fid); if (op) indexOps.push(op);
-      if (ne.filled !== true) unfilledDelta++;
+      const ne = ops.adds[fid]; e[fid] = ne; sAdded++; dirty = true;
+      const op = buildIndexOp(null, ne, fid); if (op) sIndexOps.push(op);
+      if (ne.filled !== true) sUnfilled++;
     }
     for (const fid of Object.keys(ops.upserts)) {
       const inc = ops.upserts[fid];
       const prev = e[fid];
       if (prev && typeof prev.added === "number") inc.added = prev.added; // `added` is immutable
-      else if (!prev) added++;
-      if (!prev) { if (inc.filled !== true) unfilledDelta++; }
+      else if (!prev) sAdded++;
+      if (!prev) { if (inc.filled !== true) sUnfilled++; }
       else { const wasUnfilled = prev.filled !== true, nowUnfilled = inc.filled !== true;
-        if (wasUnfilled && !nowUnfilled) unfilledDelta--; else if (!wasUnfilled && nowUnfilled) unfilledDelta++; }
+        if (wasUnfilled && !nowUnfilled) sUnfilled--; else if (!wasUnfilled && nowUnfilled) sUnfilled++; }
       // An upsert that changes nothing material (same name/author/authorId/platforms/bio/filled)
       // shouldn't rewrite the shard either. entryEquivalent compares the persisted fields.
       if (!prev || !entryEquivalent(prev, inc)) {
-        const op = buildIndexOp(prev || null, inc, fid); if (op) indexOps.push(op);
+        const op = buildIndexOp(prev || null, inc, fid); if (op) sIndexOps.push(op);
         e[fid] = inc; dirty = true;
       }
     }
     for (const fid of Object.keys(ops.renames)) if (e[fid] && e[fid].name !== ops.renames[fid]) {
       const prev = { ...e[fid] }; e[fid].name = ops.renames[fid]; dirty = true;
-      const op = buildIndexOp(prev, e[fid], fid); if (op) indexOps.push(op);
+      const op = buildIndexOp(prev, e[fid], fid); if (op) sIndexOps.push(op);
     }
     // `checked` bumps DO dirty the shard — the timestamp must persist so the liveness sweep can
     // pace itself (an un-persisted `checked` would leave the avatar perpetually stale → re-checked
@@ -899,21 +907,27 @@ async function flushR2(env) {
     // month — well under the R2 free tier — instead of the old 7d cadence's ~4x churn.
     for (const fid of ops.checked) if (e[fid]) { e[fid].checked = nowChecked; dirty = true; }
     for (const fid of ops.removes) if (e[fid]) {
-      const prev = e[fid]; delete e[fid]; removed++; dirty = true;
-      const op = buildIndexOp(prev, null, fid); if (op) indexOps.push(op);
-      if (prev.filled !== true) unfilledDelta--;
+      const prev = e[fid]; delete e[fid]; sRemoved++; dirty = true;
+      const op = buildIndexOp(prev, null, fid); if (op) sIndexOps.push(op);
+      if (prev.filled !== true) sUnfilled--;
     }
     // Bot FILL-hint (replaces the Action's worklist): does this shard, AFTER the ops, still hold
     // an unfilled avatar? Accurate + cheap (the shard is already in memory). Drives _worklist.json.
     if (Object.values(e).some((x) => x && x.filled !== true)) fillHintAdd.add(sp);
     else fillHintDone.add(sp);
     if (!dirty) continue;   // nothing changed → skip the R2 write (and the purge below)
-    dirtyPrefixes.push(sp);
+    let wrote = false;
     try {
       await env.CATALOG.put(`shard/${sp}.json`, JSON.stringify({ v: 1, e }), {
         httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + SHARD_TTL },
       });
+      wrote = true;
     } catch (_) { allShardsOk = false; }
+    if (wrote) {   // fold the count deltas + index ops ONLY now that the shard actually persisted
+      dirtyPrefixes.push(sp);
+      added += sAdded; removed += sRemoved; unfilledDelta += sUnfilled;
+      for (const op of sIndexOps) indexOps.push(op);
+    }
   }
 
   // Purge just the shards we actually REWROTE from the edge cache so a new avatar goes live
