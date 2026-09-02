@@ -581,8 +581,15 @@ private fun RoleRow(v: AvatarCatalogSweep.RoleView) {
             StatusPill("queued ${v.queued}", queuedTone)
         }
         val processedLabel = if (v.role == AvatarCatalogSweep.Role.FILL || v.helping == "Fill") "filled" else "refreshed"
+        // The Reports bot gets its OWN line (reports verified/culled) so its work is visible even
+        // while it loans to the shard walk; every bot shows shard throughput (the real cheap unit).
+        val detail = if (v.role == AvatarCatalogSweep.Role.REPORTS) {
+            "reports ${v.reportsVerified} · culled ${v.reportsRemoved} · shards ${v.shards} · checked ${v.checked}"
+        } else {
+            "shards ${v.shards} · checked ${v.checked} · removed ${v.removed} · $processedLabel ${v.refreshedOrFilled}"
+        }
         Text(
-            "checked ${v.checked} · removed ${v.removed} · $processedLabel ${v.refreshedOrFilled}",
+            detail,
             style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )

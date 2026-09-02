@@ -5,7 +5,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -188,8 +190,11 @@ private fun HintState(text: String) {
 private fun MemberRow(m: InstanceRosterManager.Member) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
+    // Tap the row to reveal the step-by-step clone-resolution trace for this member (diagnostics).
+    var traceOpen by remember(m.userId) { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth()) {
     Row(
-        Modifier.fillMaxWidth(),
+        Modifier.fillMaxWidth().clickable { traceOpen = !traceOpen },
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
@@ -330,6 +335,32 @@ private fun MemberRow(m: InstanceRosterManager.Member) {
                             )
                         }
                     }
+                }
+            }
+        }
+    }
+        // Expandable per-user resolution trace: every step the clone resolver walked for this
+        // member's current avatar + the terminal outcome ("result: via …" / "result: 0 candidates").
+        if (traceOpen) {
+            Column(
+                Modifier.fillMaxWidth().padding(start = 40.dp, end = 4.dp, top = 1.dp, bottom = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(1.dp)
+            ) {
+                if (m.resolveTrace.isEmpty()) {
+                    Text(
+                        if (m.isSelf) "(you — not resolved)" else "resolving… (no trace yet)",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else m.resolveTrace.forEach { line ->
+                    Text(
+                        line,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = if (line.startsWith("result:")) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }

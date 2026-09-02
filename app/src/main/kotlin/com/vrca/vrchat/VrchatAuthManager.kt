@@ -1558,6 +1558,16 @@ object VrchatAuthManager {
     // dead/private avatar never present a clickable button that would robot the user.
     data class WornAvatarResult(val avatarId: String?, val platforms: List<String> = emptyList(), val loading: Boolean = false, val fileId: String? = null, val dead: Boolean = false)
 
+    // ---- per-user resolve TRACE (roster diagnostics) -------------------------------------------
+    // Every step resolveWornAvatarId walks for a member — what it tried, what each DB/confirm returned,
+    // and the terminal outcome — kept per userId so the roster UI can surface the WHOLE process for
+    // every user in the instance (debugging "why did this one grey out / resolve to the wrong thing").
+    // Bounded (one list per user, overwritten each resolve; the map is cleared with the roster caches).
+    private val resolveTraces = java.util.concurrent.ConcurrentHashMap<String, List<String>>()
+    fun lastResolveTrace(userId: String): List<String> = resolveTraces[userId] ?: emptyList()
+    fun putResolveTrace(userId: String, steps: List<String>) { resolveTraces[userId] = steps }
+    fun clearResolveTraces() { resolveTraces.clear() }
+
     /**
      * Resolve a remote player's EXACT worn avatar id. Quest can't get it from the
      * log (the avatar id isn't written) or the API (`/users/{id}` hides it), so we:
@@ -1580,16 +1590,24 @@ object VrchatAuthManager {
     suspend fun resolveWornAvatarId(
         context: Context, userId: String, avatarName: String, author: String
     ): WornAvatarResult = withContext(Dispatchers.IO) {
+        // Trace collector — records EVERY stage so the roster UI can show the whole resolve process
+        // per user. `step` = an intermediate note; the terminal Diag.lastReason is appended in finally.
+        val tr = java.util.ArrayList<String>()
+        fun step(s: String) { tr.add(s) }
+        try {
         val wornFileId = fileIdOf(fetchUserInfo(context, userId)?.wornAvatarThumbUrl.orEmpty())
+        step("worn image fileId: ${wornFileId ?: "none (hidden thumb / impostor / offline)"}")
+        if (avatarName.isNotBlank()) step("log avatar name: \"$avatarName\"${if (author.isNotBlank()) " by $author" else ""}")
         // NAME-OPTIONAL: resolve purely from the worn image file id when there's no
         // log name (impostor'd player in a big instance).
-        if (avatarName.isBlank() && wornFileId == null) return@withContext WornAvatarResult(null)
+        if (avatarName.isBlank() && wornFileId == null) { step("no name AND no worn image → nothing to resolve"); return@withContext WornAvatarResult(null) }
         // The worn thumbnail is a VRChat FALLBACK avatar's image (the Robot etc.) → this player's REAL
         // avatar is still LOADING (or they're genuinely on the fallback). There is nothing to clone —
         // grey it out. A later publish re-resolves once their real avatar loads (new worn thumbnail).
         // Without this, a loading player resolves to the Robot (which the harvest had put in the
         // catalog) and the clone turns the user into the Robot.
         if (com.vrca.vrchat.AvatarGlobalDb.isSystemFileId(wornFileId)) {
+            step("worn image is a VRChat FALLBACK (avatar still loading) → try unique name+author")
             // The worn image is the fallback, so we can't image-confirm — BUT the log has their REAL
             // avatar name + author. Resolve by a UNIQUE name+author match (the author locks it to the
             // same avatar; a unique match is a lookup, not a guess). This clones a loading/hidden
@@ -1603,7 +1621,9 @@ object VrchatAuthManager {
             return@withContext WornAvatarResult(null, loading = true)
         }
         // GLOBAL crowdsourced catalog first — exact, offline, zero network.
+        step("→ local catalog (offline map) lookup by fileId")
         com.vrca.vrchat.AvatarGlobalDb.lookup(wornFileId)?.let { hit ->
+            step("  local catalog HIT: ${hit.avatarId} — confirming still live")
             if (com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(hit.author, hit.avatarId, wornFileId)) {
                 com.vrca.vrchat.AvatarSearch.Diag.lastReason = "resolved to a VRChat fallback — not cloneable"
                 return@withContext WornAvatarResult(null)
@@ -1638,11 +1658,13 @@ object VrchatAuthManager {
         // gets CACHED and clones as VRChat's default robot. That silent fall-through is the
         // intermittent "in-DB avatar → robot" bug (it works whenever the shard read happens to
         // succeed). On UNAVAILABLE, return unresolved so the roster RETRIES the catalog next pass.
+        step("→ R2 shard catalog lookup by fileId")
         run {
             val shardRes = com.vrca.vrchat.AvatarGlobalDb.lookupShardedResult(context, wornFileId)
             when (shardRes.status) {
                 com.vrca.vrchat.AvatarGlobalDb.ShardStatus.HIT -> {
                     val e = shardRes.entry!!
+                    step("  shard HIT: ${e.avatarId} — confirming still live")
                     if (com.vrca.vrchat.AvatarGlobalDb.isSystemAvatar(e.author, e.avatarId, wornFileId)) {
                         com.vrca.vrchat.AvatarSearch.Diag.lastReason = "resolved to a VRChat fallback (shard) — not cloneable"
                         return@withContext WornAvatarResult(null)
@@ -1677,8 +1699,10 @@ object VrchatAuthManager {
         }
         // 0. EXACT, NAME-INDEPENDENT: look the avatar up by its worn IMAGE FILE ID.
         if (wornFileId != null) {
+            step("→ VRCX mirrors: search by worn image fileId (exact)")
             val byFile = try { com.vrca.vrchat.AvatarSearch.searchCandidatesByImageFileId(wornFileId) }
-                catch (e: Exception) { emptyList() }
+                catch (e: Exception) { step("  mirror image-id search error: ${e.javaClass.simpleName}"); emptyList() }
+            step("  mirror image-id candidates: ${byFile.size}")
             byFile.firstOrNull { it.imageFileId == wornFileId }?.let { cand ->
                 // CONFIRM against VRChat directly (this GET /avatars/{id} already happened here as
                 // fetchAvatarPlatforms, so it's FREE): the mirror still LISTS a file id after the
@@ -1695,6 +1719,7 @@ object VrchatAuthManager {
             }
             // 0b. OFFICIAL: the author's public-avatars listing, matched by the worn
             //     image file id (also yields the avatar's platforms). Exact.
+            step("→ VRChat author public-avatars listing (via /file owner)")
             resolveViaAuthorAvatars(context, wornFileId)?.let { (id, plats) ->
                 com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via author listing"
                 com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, id, avatarName, author, "", plats)
@@ -1709,6 +1734,7 @@ object VrchatAuthManager {
         }
         // 1. NAME search across VARIANTS (the log name often carries a descriptor the
         //    DB doesn't store). Merge candidates deduped by avtr_ id.
+        step("→ name search (avtrdb + VRCX mirrors) over ${avatarNameVariants(avatarName).size} name variant(s)")
         val variants = avatarNameVariants(avatarName)
         val merged = LinkedHashMap<String, com.vrca.vrchat.AvatarSearch.Candidate>()
         for (v in variants) {
@@ -1716,6 +1742,7 @@ object VrchatAuthManager {
             for (c in found) merged.putIfAbsent(c.id, c)   // no cap — collect every candidate (free grabs)
         }
         val candidates = merged.values.toList()
+        step("  name candidates: ${candidates.size}")
         // FREE GRABS: every candidate is a real avatar — harvest ALL of them into the catalog in the
         // background (mirror candidates carry a file id → contributed directly for free; avtrdb ones are
         // resolved), not just the one we clone. Fire-and-forget, paced + deduped inside the harvester.
@@ -1745,6 +1772,7 @@ object VrchatAuthManager {
             val ranked = candidates.filter { it.imageFileId == null }
                 .sortedByDescending { if (authorNorm.isNotBlank() && it.author.trim().lowercase() == authorNorm) 1 else 0 }
                 .take(6)
+            if (ranked.isNotEmpty()) step("  confirming ${ranked.size} proxied candidate(s) vs VRChat by image fileId")
             for (c in ranked) {
                 val info = fetchAvatarInfo(context, c.id)
                 if (info != null && wornFileId in info.first) {
@@ -1770,6 +1798,12 @@ object VrchatAuthManager {
         com.vrca.vrchat.AvatarSearch.Diag.lastReason =
             "${candidates.size} candidates but no worn image to confirm (won't name-guess — greyed)"
         WornAvatarResult(null)
+        } finally {
+            // The terminal outcome (the reason set right before whichever return fired) is the LAST
+            // step — "result: via image file id" / "result: 0 candidates in any DB", etc.
+            tr.add("result: " + com.vrca.vrchat.AvatarSearch.Diag.lastReason)
+            resolveTraces[userId] = tr.toList()
+        }
     }
 
     /**

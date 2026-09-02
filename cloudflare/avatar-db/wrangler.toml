@@ -42,6 +42,9 @@ GH_REPO = "VRC-A"
 GH_REF = "VRC-A-Official"
 
 [triggers]
-# Cheap per-shard R2 writes, so run every minute — paired with purge-on-write this makes a
-# new avatar live for everyone in ~1s.
-crons = ["* * * * *"]
+# Every 2 minutes (was every minute). The flush drains the KV queues in bounded chunks, so a
+# 2-min cadence halves the idle-tick overhead (per-tick meta read/write + prefix lists) and the
+# per-active-tick manifest/worklist writes, with no data loss (pending ops just wait one extra
+# minute). Clone LOOKUPS don't depend on this at all — apps read the shard straight off the CDN —
+# so propagation of a NEW contribution is ~2 min instead of ~1, which is imperceptible here.
+crons = ["*/2 * * * *"]

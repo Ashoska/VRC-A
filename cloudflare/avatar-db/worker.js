@@ -177,6 +177,23 @@ function tokensOf(e) {
 //   new=null  -> REMOVE: delete fragment + avtr + remove all old tokens.
 //   both      -> only touch the index if a SEARCH-RELEVANT field changed (name/author/authorId/
 //                platforms); a perf/bio/checked-only bot fill returns null (skipped — the big saving).
+// True when an upsert would change NOTHING material about the stored entry — so the shard write
+// (and index re-key) can be skipped. Compares only the persisted, admin-refreshable fields; the
+// `checked` timestamp and immutable `added` are intentionally ignored (a `checked` bump is handled
+// separately, and `added` never changes). This is what stops an admin/bot "refresh" that found the
+// avatar unchanged from pointlessly rewriting its shard.
+function entryEquivalent(a, b) {
+  if (!a || !b) return false;
+  if (a.id !== b.id) return false;
+  if ((a.name || "") !== (b.name || "")) return false;
+  if ((a.author || "") !== (b.author || "")) return false;
+  if ((a.authorId || "") !== (b.authorId || "")) return false;
+  if ((a.desc || "") !== (b.desc || "")) return false;
+  if ((a.filled === true) !== (b.filled === true)) return false;
+  if (platMask(a.platforms) !== platMask(b.platforms)) return false;
+  return true;
+}
+
 // Op: { id, del, frag|null, add:[tok], rem:[tok], avtr:'a'|'r'|null }.
 function buildIndexOp(oldE, newE, fileId) {
   if (!newE) {
@@ -388,6 +405,9 @@ export default {
         }
         const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
         meta.rc = 0; meta.rcDone = false; meta.reconcileScanned = 0; meta.reconcileFixed = 0;
+        // Reset the recount accumulators + the clean-pass guards so the re-armed pass computes a
+        // fresh EXACT count (adopted only if the whole 4096-shard lap reads cleanly).
+        meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcReadFail = 0; meta.rcAttempts = 0; meta.rcAdoptSkipped = 0;
         await env.AVATAR_KV.put("meta", JSON.stringify(meta));
         return json({ ok: true, reconcile: "re-armed (one full pass will run over ~a day)" });
       }
@@ -540,26 +560,34 @@ export default {
 // + one avtr/ read per distinct id-bucket seen (cached within the run).
 const RECONCILE_SHARDS_PER_RUN = 8;   // one-time pass → go a bit faster (~8.5h) then STOP; stays under
                                       // the subrequest budget alongside flushR2
+const RC_MAX_ATTEMPTS = 3;            // retry a tainted (read-failed) count pass this many times, then
+                                      // give up and keep the incremental count (never adopt a bad one)
 async function reconcileIndex(env) {
   const meta = JSON.parse((await env.AVATAR_KV.get("meta")) || "{}");
   if (meta.rcDone) return;   // one-time heal already completed → the incremental flush maintains it
   let cursor = (typeof meta.rc === "number" ? meta.rc : 0) & 0xfff;
   const avtrCache = {};        // id-bucket -> Set(ids present in the search index)
   const missing = [];          // ADD index ops for entries not yet indexed
-  let scanned = 0;
   // Recount the AUTHORITATIVE entry + unfilled totals as we read every shard, to correct the running
   // incremental counts that drift with no full rebuild — a drifted `unfilled` makes the FILL bots
   // churn the whole catalog forever on a phantom backlog they can never drain ("queued 247, checked
   // 0, stuck at a random number"). Accumulated across the pass into meta, adopted authoritatively on
   // completion. (Slightly high in the rare real-backlog case since fills happen during the ~day pass,
   // but for a PHANTOM count it finds the true near-zero and fixes the churn.)
-  let entriesSeen = 0, unfilledSeen = 0;
+  let entriesSeen = 0, unfilledSeen = 0, stepped = 0, readFail = 0;
   for (let n = 0; n < RECONCILE_SHARDS_PER_RUN; n++) {
     const prefix = cursor.toString(16).padStart(3, "0");
     cursor = (cursor + 1) & 0xfff;   // 0..4095 wrap
-    let shard = null;
-    try { const o = await env.CATALOG.get(`shard/${prefix}.json`); shard = o ? await o.json() : null; } catch (_) { shard = null; }
-    if (!shard || !shard.e) continue;
+    // Distinguish a genuinely-ABSENT/empty shard (0 entries, fine to count as 0) from a transient
+    // READ FAILURE (the object exists but the GET/parse threw). A read failure means we'd UNDER-count
+    // that shard's ~32 avatars — the recount must NOT be adopted as authoritative if any occurred, or
+    // the admin sees a phantom "lost N avatars" drop (the count is display-only; the shards are intact).
+    let shard = null, failed = false;
+    try { const o = await env.CATALOG.get(`shard/${prefix}.json`); if (o) shard = await o.json(); }
+    catch (_) { failed = true; }
+    stepped++;                             // one shard VISITED (completion is a full 4096-step lap)
+    if (failed) { readFail++; continue; }  // undercount risk — tallied, pass won't be adopted if >0
+    if (!shard || !shard.e) continue;      // genuinely absent/empty → 0 entries (fine)
     for (const [fid, e] of Object.entries(shard.e)) {
       const id = e && e.id;
       if (!id || !id.startsWith("avtr_")) continue;
@@ -576,33 +604,58 @@ async function reconcileIndex(env) {
         if (op) { missing.push(op); avtrCache[b].add(id); }   // add to cache so siblings this run aren't re-flagged
       }
     }
-    scanned++;
   }
   // Enqueue the repairs (TTL-free) — the normal flush drains them via applyIndexOps.
   for (let i = 0; i < missing.length; i += MAX_INDEX_OPS_PER_FLUSH)
     await env.AVATAR_KV.put("iq:" + crypto.randomUUID(), JSON.stringify(missing.slice(i, i + MAX_INDEX_OPS_PER_FLUSH)));
   meta.rc = cursor;
   meta.lastReconcile = new Date().toISOString();
-  meta.reconcileScanned = (meta.reconcileScanned || 0) + scanned;   // shards walked this pass
+  // reconcileScanned now counts STEPS (shards visited), so completion is exactly one 4096-shard lap —
+  // no re-lapping / double-counting even if some reads failed (the old `scanned` skipped failed/empty
+  // shards, so failures made the count fall short → the cursor re-lapped and re-counted, corrupting
+  // the recount).
+  meta.reconcileScanned = (meta.reconcileScanned || 0) + stepped;
   meta.reconcileFixed = (meta.reconcileFixed || 0) + missing.length; // entries re-indexed this pass
   meta.rcEntries = (meta.rcEntries || 0) + entriesSeen;             // authoritative recount (this pass)
   meta.rcUnfilled = (meta.rcUnfilled || 0) + unfilledSeen;
-  // One full pass = 4096 shards walked → STOP, and ADOPT the recomputed counts so the running
-  // incremental counters can't stay drifted (fixes the phantom fill-backlog the bots churn on).
+  meta.rcReadFail = (meta.rcReadFail || 0) + readFail;              // shards we couldn't read this pass
+  // One full 4096-step lap → decide. ONLY adopt the recomputed counts when the whole lap read cleanly
+  // (rcReadFail === 0) — a tainted pass would UNDER-count and show a phantom "lost N avatars" drop
+  // (the shards themselves are never touched by reconcile; this is a display/backlog counter only).
+  // On a tainted lap, retry a fresh clean pass up to RC_MAX_ATTEMPTS; if it still can't get a clean
+  // read, STOP and keep the running incremental count (never adopt a bad number).
   if (meta.reconcileScanned >= 4096) {
-    meta.rcDone = true; meta.rcDoneAt = new Date().toISOString();
-    meta.entries = meta.rcEntries || 0;
-    meta.unfilled = meta.rcUnfilled || 0;
-    // Push the corrected counts straight to the manifest (what the admin/bots read) + purge.
-    try {
-      let man = {}; const m = await env.CATALOG.get("_manifest.json"); if (m) man = await m.json();
-      man = { ...man, v: 1, shardScheme: "filehex3-full", shardCount: 4096, indexScheme: "hash3",
-        entryCount: meta.entries, unfilled: meta.unfilled, searchReady: true, lastUpdate: new Date().toISOString() };
-      await env.CATALOG.put("_manifest.json", JSON.stringify(man),
-        { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=30" } });
-      if (env.CATALOG_BASE) await purgeCatalogUrls(env, [env.CATALOG_BASE.replace(/\/$/, "") + "/_manifest.json"]);
-    } catch (_) {}
-    meta.rcEntries = 0; meta.rcUnfilled = 0;   // reset accumulators for a future re-arm
+    const clean = (meta.rcReadFail || 0) === 0;
+    const attempts = (meta.rcAttempts || 0);
+    if (clean) {
+      meta.rcDone = true; meta.rcDoneAt = new Date().toISOString();
+      meta.entries = meta.rcEntries || 0;
+      meta.unfilled = meta.rcUnfilled || 0;
+      meta.rcAdoptSkipped = 0;
+      // Push the corrected counts straight to the manifest (what the admin/bots read) + purge.
+      try {
+        let man = {}; const m = await env.CATALOG.get("_manifest.json"); if (m) man = await m.json();
+        man = { ...man, v: 1, shardScheme: "filehex3-full", shardCount: 4096, indexScheme: "hash3",
+          entryCount: meta.entries, unfilled: meta.unfilled, searchReady: true, lastUpdate: new Date().toISOString() };
+        await env.CATALOG.put("_manifest.json", JSON.stringify(man),
+          { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=30" } });
+        if (env.CATALOG_BASE) await purgeCatalogUrls(env, [env.CATALOG_BASE.replace(/\/$/, "") + "/_manifest.json"]);
+      } catch (_) {}
+      meta.rc = 0; meta.reconcileScanned = 0; meta.rcEntries = 0; meta.rcUnfilled = 0;
+      meta.rcReadFail = 0; meta.rcAttempts = 0;   // reset accumulators for a future re-arm
+    } else if (attempts < RC_MAX_ATTEMPTS) {
+      // Tainted lap → retry a fresh full pass (index repairs already enqueued above are idempotent).
+      meta.rcAttempts = attempts + 1;
+      meta.rc = 0; meta.reconcileScanned = 0; meta.rcEntries = 0; meta.rcUnfilled = 0; meta.rcReadFail = 0;
+      // rcDone stays false → the next cron re-walks the whole catalog for a clean count.
+    } else {
+      // Couldn't get a clean read after the retries → give up and KEEP the incremental count
+      // (never overwrite it with an under-counted recount). Re-arm manually later if desired.
+      meta.rcDone = true; meta.rcDoneAt = new Date().toISOString();
+      meta.rcAdoptSkipped = (meta.rcReadFail || 0);
+      meta.rc = 0; meta.reconcileScanned = 0; meta.rcEntries = 0; meta.rcUnfilled = 0;
+      meta.rcReadFail = 0; meta.rcAttempts = 0;
+    }
   }
   await env.AVATAR_KV.put("meta", JSON.stringify(meta));
 }
@@ -802,6 +855,7 @@ async function flushR2(env) {
   const fillHintAdd = new Set();   // touched shards that still have an unfilled avatar
   const fillHintDone = new Set();  // touched shards that are now fully filled
   const prefixes = Object.keys(shardOps);
+  const dirtyPrefixes = [];        // shards we actually REWROTE (only these are put + purged)
   for (const sp of prefixes) {
     const ops = shardOps[sp];
     let cur;
@@ -811,46 +865,74 @@ async function flushR2(env) {
       if (!cur || typeof cur !== "object" || typeof cur.e !== "object" || cur.e === null) cur = { v: 1, e: {} };
     } catch (_) { allShardsOk = false; continue; } // read failed -> skip (never wipe), retry next flush
     const e = cur.e;
+    // Track whether this shard's CONTENT actually changed. A flush where every op is a no-op
+    // (harvest re-sending already-known avatars → all adds are dupes; a `checked` bump for an
+    // avatar no longer in the shard) must NOT rewrite the shard — an unconditional put was the
+    // single biggest wasted R2 Class A write, since the harvest re-contributes thousands of
+    // already-present avatars. Only put when `dirty`.
+    // Per-shard tallies. These fold into the global added/removed/unfilledDelta ONLY after this
+    // shard's write SUCCEEDS — so a write that fails (KV not cleared → retried next flush) can never
+    // bump `entries` for a shard that didn't persist and then get RE-counted on the retry. That
+    // double-count on partial failures was a source of the running count drifting off exact.
+    let dirty = false, sAdded = 0, sRemoved = 0, sUnfilled = 0;
+    const sIndexOps = [];
     for (const fid of Object.keys(ops.adds)) if (!e[fid]) {
-      const ne = ops.adds[fid]; e[fid] = ne; added++;
-      const op = buildIndexOp(null, ne, fid); if (op) indexOps.push(op);
-      if (ne.filled !== true) unfilledDelta++;
+      const ne = ops.adds[fid]; e[fid] = ne; sAdded++; dirty = true;
+      const op = buildIndexOp(null, ne, fid); if (op) sIndexOps.push(op);
+      if (ne.filled !== true) sUnfilled++;
     }
     for (const fid of Object.keys(ops.upserts)) {
       const inc = ops.upserts[fid];
       const prev = e[fid];
       if (prev && typeof prev.added === "number") inc.added = prev.added; // `added` is immutable
-      else if (!prev) added++;
-      if (!prev) { if (inc.filled !== true) unfilledDelta++; }
+      else if (!prev) sAdded++;
+      if (!prev) { if (inc.filled !== true) sUnfilled++; }
       else { const wasUnfilled = prev.filled !== true, nowUnfilled = inc.filled !== true;
-        if (wasUnfilled && !nowUnfilled) unfilledDelta--; else if (!wasUnfilled && nowUnfilled) unfilledDelta++; }
-      const op = buildIndexOp(prev || null, inc, fid); if (op) indexOps.push(op);
-      e[fid] = inc;
+        if (wasUnfilled && !nowUnfilled) sUnfilled--; else if (!wasUnfilled && nowUnfilled) sUnfilled++; }
+      // An upsert that changes nothing material (same name/author/authorId/platforms/bio/filled)
+      // shouldn't rewrite the shard either. entryEquivalent compares the persisted fields.
+      if (!prev || !entryEquivalent(prev, inc)) {
+        const op = buildIndexOp(prev || null, inc, fid); if (op) sIndexOps.push(op);
+        e[fid] = inc; dirty = true;
+      }
     }
-    for (const fid of Object.keys(ops.renames)) if (e[fid]) {
-      const prev = { ...e[fid] }; e[fid].name = ops.renames[fid];
-      const op = buildIndexOp(prev, e[fid], fid); if (op) indexOps.push(op);
+    for (const fid of Object.keys(ops.renames)) if (e[fid] && e[fid].name !== ops.renames[fid]) {
+      const prev = { ...e[fid] }; e[fid].name = ops.renames[fid]; dirty = true;
+      const op = buildIndexOp(prev, e[fid], fid); if (op) sIndexOps.push(op);
     }
-    for (const fid of ops.checked) if (e[fid]) e[fid].checked = nowChecked;
+    // `checked` bumps DO dirty the shard — the timestamp must persist so the liveness sweep can
+    // pace itself (an un-persisted `checked` would leave the avatar perpetually stale → re-checked
+    // every pass forever). The write volume is instead bounded by the RECHECK_INTERVAL_MS (widened
+    // to 30d in the app): at 30d, re-verifying the whole catalog is ~1 shard write per avatar per
+    // month — well under the R2 free tier — instead of the old 7d cadence's ~4x churn.
+    for (const fid of ops.checked) if (e[fid]) { e[fid].checked = nowChecked; dirty = true; }
     for (const fid of ops.removes) if (e[fid]) {
-      const prev = e[fid]; delete e[fid]; removed++;
-      const op = buildIndexOp(prev, null, fid); if (op) indexOps.push(op);
-      if (prev.filled !== true) unfilledDelta--;
+      const prev = e[fid]; delete e[fid]; sRemoved++; dirty = true;
+      const op = buildIndexOp(prev, null, fid); if (op) sIndexOps.push(op);
+      if (prev.filled !== true) sUnfilled--;
     }
     // Bot FILL-hint (replaces the Action's worklist): does this shard, AFTER the ops, still hold
     // an unfilled avatar? Accurate + cheap (the shard is already in memory). Drives _worklist.json.
     if (Object.values(e).some((x) => x && x.filled !== true)) fillHintAdd.add(sp);
     else fillHintDone.add(sp);
+    if (!dirty) continue;   // nothing changed → skip the R2 write (and the purge below)
+    let wrote = false;
     try {
       await env.CATALOG.put(`shard/${sp}.json`, JSON.stringify({ v: 1, e }), {
         httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + SHARD_TTL },
       });
+      wrote = true;
     } catch (_) { allShardsOk = false; }
+    if (wrote) {   // fold the count deltas + index ops ONLY now that the shard actually persisted
+      dirtyPrefixes.push(sp);
+      added += sAdded; removed += sRemoved; unfilledDelta += sUnfilled;
+      for (const op of sIndexOps) indexOps.push(op);
+    }
   }
 
-  // Purge just the changed shards from the edge cache so a new avatar goes live within
-  // ~seconds instead of the TTL. No-op unless a purge token is configured.
-  if (allShardsOk && prefixes.length > 0) await purgeShards(env, prefixes);
+  // Purge just the shards we actually REWROTE from the edge cache so a new avatar goes live
+  // within ~seconds instead of the TTL. No-op unless a purge token is configured.
+  if (allShardsOk && dirtyPrefixes.length > 0) await purgeShards(env, dirtyPrefixes);
 
   // FULL incremental SEARCH INDEX (add / rename / remove + avtr presence) — computed above from the
   // SAME shard reads (no re-fetch). Drain any carried-over ops first, then this flush's, up to the

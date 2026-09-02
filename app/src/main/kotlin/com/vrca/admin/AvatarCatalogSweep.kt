@@ -47,6 +47,15 @@ object AvatarCatalogSweep {
         @Volatile var refreshed = 0
         @Volatile var removed = 0
         @Volatile var filled = 0
+        // Shards walked (shard-walk mode) — the bots grab a WHOLE shard and recheck everything in
+        // it, so this is the meaningful unit of work now (one shard = one cheap R2 write), not the
+        // per-avatar `checked`. Surfaced in the UI so the admin sees shard throughput.
+        @Volatile var shards = 0
+        // DEDICATED report counters so the Reports bot's real activity is visible even when it's
+        // ALSO loaning to the shard walk (which would otherwise pollute checked/removed with walk
+        // work). reportsVerified = reports it dead-checked; reportsRemoved = confirmed-dead culls.
+        @Volatile var reportsVerified = 0
+        @Volatile var reportsRemoved = 0
         @Volatile var status = "idle"
         /** Non-blank ("Fill"/"Liveness") while this bot's own role has no work and it is
          *  LOANING itself to another backlog — so the UI can show it's helping, not idle. */
@@ -158,7 +167,11 @@ object AvatarCatalogSweep {
     private const val BATCH = 500                // ops per /admin push (effectively one/pass)
     private const val FILL_BATCH = 40            // entries per fill pass
     private const val LIVENESS_BATCH = 40        // entries per liveness pass
-    private const val RECHECK_INTERVAL_MS = 7L * 24 * 60 * 60 * 1000  // 7 days (steady-state recheck)
+    // Steady-state recheck cadence. Widened 7d -> 30d: re-verifying a low-use catalog weekly was
+    // ~4x the R2 write/read churn (every re-sweep bumps `checked` on a whole shard = a shard write,
+    // plus a shard read) for little benefit — a dead avatar is caught the moment a user tries to
+    // clone it (report path). 30d keeps proactive culling while cutting the liveness cost ~4x.
+    private const val RECHECK_INTERVAL_MS = 30L * 24 * 60 * 60 * 1000  // 30 days (steady-state recheck)
     private const val BLITZ_WINDOW_MS = 30L * 60 * 1000                // initial blitz window per press
     // While a blitz is actively doing work, keep its window rolling forward by this much, so a
     // full-catalog blitz that takes >30 min doesn't EXPIRE mid-way (the "blitz queue disappears
@@ -194,6 +207,10 @@ object AvatarCatalogSweep {
     // restart (the entry re-pulls unfilled/stale and is re-processed).
     private const val FLUSH_MS = 60_000L
     private const val FLUSH_CHUNK = 200            // ops per /admin push (≈ one KV write each)
+    // Hard cap on the buffered-ops count before an IMMEDIATE flush (don't wait out FLUSH_MS). Bounds
+    // the buffer + push latency during a burst/blitz; the same 1k cap the user contributions use.
+    private const val BOT_FLUSH_MAX_BATCH = 1000
+    private val capFlushing = AtomicBoolean(false)   // one in-flight cap-triggered flush at a time
     private val pendingUpserts = java.util.concurrent.ConcurrentHashMap<String, AvatarGlobalDb.Entry>()
     private val pendingRemoves = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val pendingClears = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
@@ -212,7 +229,28 @@ object AvatarCatalogSweep {
     // OFF by default so the build ships BEFORE the sharding migration; flip on (Bots tab) after.
     @Volatile var avtrdbCrawlEnabled = false
     @Volatile var avtrdbCrawlStatus = "off"; private set
-    private val CRAWL_TERMS = (('a'..'z').map { it.toString() } + ('0'..'9').map { it.toString() })
+    // Enumeration terms for the avtrdb crawl. The old set was ONLY a-z + 0-9, so it never discovered
+    // avatars whose name has no Latin letter (Japanese, Korean, Russian, Arabic, …). avtrdb search is
+    // substring-based, so a single common character of a script matches most names in that script.
+    // We include the FULL small syllabaries/alphabets (hiragana, katakana, Cyrillic, Arabic) for
+    // complete coverage, plus a curated set of common CJK + Korean characters. isLetterOrDigit is
+    // Unicode-aware and searchPage URL-encodes, so non-Latin terms work end-to-end.
+    private val CRAWL_TERMS: List<String> = buildList {
+        ('a'..'z').forEach { add(it.toString()) }
+        ('0'..'9').forEach { add(it.toString()) }
+        ('ぁ'..'ゖ').forEach { add(it.toString()) }   // Hiragana
+        ('ァ'..'ヺ').forEach { add(it.toString()) }   // Katakana
+        ('а'..'я').forEach { add(it.toString()) }   // Cyrillic (lowercase а..я)
+        ('ا'..'ي').forEach { add(it.toString()) }   // Arabic letters
+        // Common CJK / kanji that show up in avatar + character names
+        "猫犬狐兎狼熊龍竜星月花鳥魚水火風光闇天神鬼獣羊姫少女少年悪魔天使妖精精霊魔法可愛黒白赤青紫金銀影夢愛心蝶".forEach { add(it.toString()) }
+        // Common Korean syllables (surnames + frequent name syllables)
+        "김이박최강고여우유리미호수아자하다라마바사나가".forEach { add(it.toString()) }
+    }.distinct()
+    // A fixed-per-process RANDOM permutation of the terms: the shared cursor walks this, so what we
+    // grab "looks random" (not alphabetical a,b,c…) yet still covers EVERY term once per full pass,
+    // and the mix of scripts is interleaved. Re-shuffled each process so repeated runs vary.
+    private val CRAWL_ORDER: List<String> = CRAWL_TERMS.shuffled()
     private const val CRAWL_PAGE_GAP_MS = 1_500L   // pace avtrdb paging (polite to the DB)
     private const val CRAWL_TERM_GAP_MS = 3_000L
     private const val CRAWL_RL_BACKOFF = 5         // consecutive resolve failures => rate-limited
@@ -253,7 +291,7 @@ object AvatarCatalogSweep {
             context.getSharedPreferences("vrca_admin_local", Context.MODE_PRIVATE)
                 .edit().putInt("avtrdb_crawl_idx", termN).apply()
         }
-        val term = CRAWL_TERMS[((termN % CRAWL_TERMS.size) + CRAWL_TERMS.size) % CRAWL_TERMS.size]
+        val term = CRAWL_ORDER[((termN % CRAWL_ORDER.size) + CRAWL_ORDER.size) % CRAWL_ORDER.size]
         var new = 0; var nulls = 0; var page = 0
         crawl@ while (avtrdbCrawlEnabled && running && !paused && scope.isActive) {
             val pageResults = try { com.vrca.vrchat.AvatarSearch.searchPage(term, page) }
@@ -445,7 +483,12 @@ object AvatarCatalogSweep {
         val role: Role, val bot: String, val queued: Int,
         val checked: Int, val removed: Int, val refreshedOrFilled: Int, val status: String, val running: Boolean,
         /** Non-blank ("Fill"/"Liveness") when this bot is loaning to another backlog. */
-        val helping: String = ""
+        val helping: String = "",
+        /** Shards this bot has walked (shard-walk throughput — the real unit of work). */
+        val shards: Int = 0,
+        /** Reports the Reports bot has verified + culled (survives loaning to the walk). */
+        val reportsVerified: Int = 0,
+        val reportsRemoved: Int = 0
     )
 
     /** `pendingReports` = the Worker's live report count (from /health). Fill + liveness
@@ -500,7 +543,10 @@ object AvatarCatalogSweep {
                     running = p.running,
                     // No "helping" label in walk mode: every bot shares the same pool equally, so the
                     // even queued share already shows they're all working — the tag was noise.
-                    helping = ""
+                    helping = "",
+                    shards = p.shards,
+                    reportsVerified = p.reportsVerified,
+                    reportsRemoved = p.reportsRemoved
                 )
             }
         }
@@ -533,7 +579,10 @@ object AvatarCatalogSweep {
                 refreshedOrFilled = if (r == Role.FILL || p.helping == "Fill") p.filled else p.refreshed,
                 status = p.status,
                 running = p.running,
-                helping = p.helping
+                helping = p.helping,
+                shards = p.shards,
+                reportsVerified = p.reportsVerified,
+                reportsRemoved = p.reportsRemoved
             )
         }
     }
@@ -750,7 +799,7 @@ object AvatarCatalogSweep {
     private val sweptAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
     @Volatile private var sweptLoaded = false
     private val sweptPersistCounter = java.util.concurrent.atomic.AtomicInteger(0)
-    private const val LIVENESS_SHARD_INTERVAL_MS = 7L * 24 * 60 * 60_000L  // re-sweep a shard ~weekly
+    private const val LIVENESS_SHARD_INTERVAL_MS = 30L * 24 * 60 * 60_000L  // re-sweep a shard ~monthly (was weekly; 4x cheaper)
     private fun loadSwept(context: Context) {
         if (sweptLoaded) return
         sweptLoaded = true
@@ -889,6 +938,7 @@ object AvatarCatalogSweep {
         val entries = AvatarGlobalDb.fetchCatalogShard(context, prefix)
         if (entries == null) { p.status = "walk $prefix: shard read failed"; return false }
         stampSwept(context, prefix)   // record the sweep (even if clean) so the oldest-swept cadence advances
+        p.shards++                    // shard-walk throughput (one shard = one cheap grouped R2 write)
         val cutoff = livenessCutoff()
         val work = entries.filter { (needsFill(it) || it.checked < cutoff) && !wasRecentlyProcessed(it.fileId) }
         if (work.isEmpty()) { p.status = "walking ($prefix clear)"; return false }
@@ -980,6 +1030,12 @@ object AvatarCatalogSweep {
         for (fid in removes) { pendingUpserts.remove(fid); pendingChecked.remove(fid); pendingRemoves.add(fid) }
         for (fid in clears) pendingClears.add(fid)
         for (fid in checked) if (!pendingUpserts.containsKey(fid) && !pendingRemoves.contains(fid)) pendingChecked.add(fid)
+        // Hit the 1k buffer cap → flush NOW instead of waiting out FLUSH_MS (bounds buffer + latency).
+        // capFlushing gates to one in-flight flush; flushPending is mutex-guarded so it's safe + idempotent.
+        val total = pendingUpserts.size + pendingRemoves.size + pendingChecked.size + pendingClears.size
+        if (total >= BOT_FLUSH_MAX_BATCH && capFlushing.compareAndSet(false, true)) {
+            scope.launch { try { flushPending() } catch (_: Throwable) {} finally { capFlushing.set(false) } }
+        }
     }
 
     /** Drain the buffered ops to the Worker in size-capped chunks (≈ one KV write each),
@@ -1114,14 +1170,14 @@ object AvatarCatalogSweep {
             if (!running || paused) break
             if (r.avatarId.isBlank()) { clears.add(r.fileId); continue }
             val chk = BotVrchatSession.checkAvatar(context, slot, r.avatarId)
-            p.checked++
+            p.checked++; p.reportsVerified++   // dedicated report counter (survives loaning to the walk)
             if (chk == null) { delay(PACE_MS); continue }
             if (chk.alive) noteAlive()
             if (!chk.alive) {
                 // Don't remove on a report during a suspected VRChat outage — a 404 could be
                 // false. Skip clearing too, so the report stays pending and is re-verified once
                 // VRChat is back (don't mark a maybe-alive avatar's report resolved).
-                if (canRemove()) { removes.add(r.fileId); p.removed++; applyItemLocal(remove = r.fileId) }
+                if (canRemove()) { removes.add(r.fileId); p.removed++; p.reportsRemoved++; applyItemLocal(remove = r.fileId) }
             }
             else {
                 clears.add(r.fileId)  // alive → false positive

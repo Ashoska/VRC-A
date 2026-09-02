@@ -68,10 +68,13 @@ object AvatarSearch {
     private const val CANDIDATE_CACHE_TTL_MS = 5 * 60_000L
     private val candidateCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<Candidate>>>()
 
-    /** A query is worth sending only if it carries at least 2 letters/digits — this rejects the
-     *  garbage the avtrdb dev saw (empty, "-", "|", "--", punctuation-only) that a blank-check misses,
-     *  e.g. a log avatar name that is literally "-". */
-    private fun meaningfulQuery(q: String): Boolean = q.count { it.isLetterOrDigit() } >= 2
+    /** A query is worth sending only if it carries at least ONE letter/digit — this rejects the garbage
+     *  the avtrdb dev saw (empty, "-", "|", "--", whitespace/punctuation-only, e.g. a log avatar name
+     *  that is literally "-"). It must NOT require 2+, because the avtrdb CRAWL enumerates by SINGLE
+     *  characters (a-z, hiragana, katakana, Cyrillic, common CJK…) — a valid single char like "a" or
+     *  "猫" is a legitimate broad query and requiring 2 silently broke the crawl. `isLetterOrDigit`
+     *  is Unicode-aware, so a single CJK/Cyrillic character counts. */
+    private fun meaningfulQuery(q: String): Boolean = q.any { it.isLetterOrDigit() }
 
     /** Parse one avtrdb page body into display Results. Real avtrdb schema: id =
      *  "vrc_id"; author is an OBJECT {name,vrc_id}; thumbnail = "image_url"; platforms

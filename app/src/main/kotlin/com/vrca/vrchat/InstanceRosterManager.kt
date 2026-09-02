@@ -111,7 +111,11 @@ object InstanceRosterManager {
         val isSelf: Boolean = false,
         /** VRChat+ icon / worn-avatar thumbnail for the row (temporary, evicts on
          *  leave). Self reuses the VRChat tab's pic; others come from the API. */
-        val profilePicUrl: String = ""
+        val profilePicUrl: String = "",
+        /** DIAGNOSTIC: the step-by-step clone-resolution trace for this member's CURRENT avatar —
+         *  what was tried, what each DB/confirm returned, and the terminal outcome. Surfaced under
+         *  the row so the whole resolve process is visible for every user in the instance. */
+        val resolveTrace: List<String> = emptyList()
     )
 
     data class RosterUi(
@@ -536,9 +540,17 @@ object InstanceRosterManager {
                     )
                 }
                 stopObserver()
-                clearRosterCaches(); lastLocation = null; VrchatAuthManager.clearAvatarLiveCache()
+                // Force presence offline (above) for the RPC — but DO NOT wipe the roster/clone/live
+                // caches or reset the log position here. This branch fires on a TRANSIENT OSCQuery-down,
+                // which on a BACKGROUNDED headset (or a brief headset sleep) is usually just our poll
+                // being throttled, not VRChat actually closing. Wiping the caches made every already-
+                // resolved clone button grey out and need a full re-resolve on return — the tester's
+                // "clonable avatars go grey while the app is in the background" bug. Keeping them (and
+                // lastLocation + the log offset) means a resume into the SAME instance restores every
+                // button INSTANTLY; a resume into a DIFFERENT instance is caught by publish()'s hop
+                // detection (location != lastLocation), which clears them correctly. A genuine leave is
+                // still handled by the leave paths in publish().
                 _flow.value = RosterUi(status = Status.IDLE)
-                currentId = null; offset = 0L; state = VrcLogParser.InstanceState()
                 delay(POLL_MS); continue
             }
             if (!hasAnyAccess(context)) {
@@ -704,7 +716,13 @@ object InstanceRosterManager {
                     confirmedClosed = confirmedClosed
                 )
             }
-            clearRosterCaches(); lastLocation = null; VrchatAuthManager.clearAvatarLiveCache()
+            // Force presence offline (RPC) + show IDLE, but DO NOT wipe the roster/clone caches. While
+            // the app is BACKGROUNDED and the user is still in VRChat, `alive` can read false purely
+            // because OUR OSCQuery poll got throttled (VRChat is up; we just can't reach it) — wiping
+            // here made every resolved clone button grey out and re-resolve on return (the tester's
+            // bug). Retaining the caches (and lastLocation) means the moment `alive` recovers into the
+            // SAME instance, every button is restored instantly; a real move into a DIFFERENT instance
+            // is still cleared by the hop check below (location != lastLocation).
             _flow.value = RosterUi(status = Status.IDLE, worldName = null, location = null, members = emptyList(), logPath = logPath)
             return
         }
@@ -731,7 +749,13 @@ object InstanceRosterManager {
         // in memory across a session (the reader writes NOTHING per-user to disk;
         // this just keeps RAM bounded to the current instance).
         if (!inWorld) {
-            clearRosterCaches(); lastLocation = null; VrchatAuthManager.clearAvatarLiveCache()
+            // Momentarily not-in-world (empty roster / null location). This can be a genuine leave OR
+            // just a transient empty state from a background log re-read / rotation while still in
+            // VRChat. Either way DON'T wipe the caches here — retaining them costs one instance's worth
+            // of memory (freed on the next hop or on app stop) and means a transient empty that refills
+            // to the SAME instance restores every clone button instantly instead of greying them. A
+            // genuine move to a DIFFERENT instance is cleared by the hop check below; leaving/hopping
+            // away entirely also clears on the next populated instance's hop.
             _flow.value = RosterUi(
                 status = Status.IDLE, worldName = state.worldName,
                 location = state.location, members = emptyList(), logPath = logPath
@@ -786,7 +810,10 @@ object InstanceRosterManager {
                 cloneFileId = if (!isSelfMember) e.userId?.let { avatarCloneFileIdCache[it] } else null,
                 isFriend = e.userId != null && friends.contains(e.userId),
                 isSelf = isSelfMember,
-                profilePicUrl = pfp
+                profilePicUrl = pfp,
+                // Carry the resolver's step trace (kept per-uid in VrchatAuthManager until the roster
+                // caches clear) so it survives the ~1s publish rebuild instead of blanking each cycle.
+                resolveTrace = if (!isSelfMember) e.userId?.let { VrchatAuthManager.lastResolveTrace(it) } ?: emptyList() else emptyList()
             )
         }
         _flow.value = RosterUi(
@@ -899,12 +926,22 @@ object InstanceRosterManager {
                                     avatarIdResolvedFor[id] = avaName
                                     if (gated.isNotBlank()) avatarCloneFileIdCache[id] = wornFid else avatarCloneFileIdCache.remove(id)
                                     catalogAvatarId = gated
+                                    VrchatAuthManager.putResolveTrace(id, listOf(
+                                        "worn image fileId: $wornFid",
+                                        "instant enrich shortcut: local catalog HIT ${hit.avatarId}",
+                                        "confirmed live" + (if (gated.isBlank()) " but PC-only → greyed on Quest" else ""),
+                                        "result: via catalog (enrich shortcut)"))
                                 }   // else: worn image no longer matches (stale re-key) → let the guarded resolver find the right one
                                 false -> {
                                     // Confirmed dead/private → report + grey DECISIVELY (never a clickable robot).
                                     com.vrca.vrchat.AvatarGlobalDb.report(context, wornFid, hit.avatarId, "dead")
                                     avatarIdCache[id] = ""; avatarIdResolvedFor[id] = avaName
                                     avatarCloneFileIdCache.remove(id); catalogAvatarId = ""
+                                    VrchatAuthManager.putResolveTrace(id, listOf(
+                                        "worn image fileId: $wornFid",
+                                        "instant enrich shortcut: local catalog HIT ${hit.avatarId}",
+                                        "confirmed DEAD/private → reported + greyed",
+                                        "result: dead"))
                                 }
                                 null -> { /* transient — don't pin; the guarded resolveAvatars pass retries */ }
                             }
@@ -920,7 +957,8 @@ object InstanceRosterManager {
                                 if (m.userId == id) m.copy(
                                     platform = plat, profilePicUrl = info.profilePicUrl,
                                     avatarId = catalogAvatarId ?: m.avatarId,
-                                    cloneFileId = avatarCloneFileIdCache[id] ?: m.cloneFileId
+                                    cloneFileId = avatarCloneFileIdCache[id] ?: m.cloneFileId,
+                                    resolveTrace = VrchatAuthManager.lastResolveTrace(id).ifEmpty { m.resolveTrace }
                                 ) else m
                             }
                         )
@@ -962,6 +1000,7 @@ object InstanceRosterManager {
         avatarIdCache.clear(); avatarIdResolvedFor.clear(); avatarCloneFileIdCache.clear()
         avatarPlatformsCache.clear(); avatarResolveInFlight.clear()
         avatarLoadingSince.clear(); avatarSlowRetryAt.clear()
+        VrchatAuthManager.clearResolveTraces()
         com.vrca.vrchat.AvatarGlobalDb.evictShardCache()
     }
 
@@ -1048,10 +1087,12 @@ object InstanceRosterManager {
             _flow.value.let { cur ->
                 if (cur.members.any { it.userId == uid && it.avatarName == name }) {
                     val shown = cloneButtonState(uid, name)   // SAME source of truth as publish → no flicker
+                    val trace = VrchatAuthManager.lastResolveTrace(uid)
                     _flow.value = cur.copy(
                         members = cur.members.map { m ->
                             if (m.userId == uid && m.avatarName == name)
-                                m.copy(avatarId = shown, cloneFileId = avatarCloneFileIdCache[uid] ?: m.cloneFileId)
+                                m.copy(avatarId = shown, cloneFileId = avatarCloneFileIdCache[uid] ?: m.cloneFileId,
+                                    resolveTrace = if (trace.isNotEmpty()) trace else m.resolveTrace)
                             else m
                         }
                     )
