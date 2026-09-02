@@ -70,13 +70,21 @@ object AvatarGlobalDb {
     // this many entries (the Worker caps a single POST) so a big harvest isn't lost.
     private const val FLUSH_MS = 2 * 60_000L
     private const val CONTRIBUTE_CHUNK = 200
-    // A USER contribution (own upload / favourite / resolved stranger) quick-flushes within
-    // this window instead of waiting out the 2-min periodic loop — so it reaches the Worker,
-    // gets merged on the next 1-min cron, and shows in the manifest within ~1 min. Debounced
-    // (cancel+reschedule) so a burst still batches into one POST. NOT used by the bulk avtrdb
-    // crawler (localInsert=false) — that stays on the 2-min loop so a continuous crawl can't
-    // keep resetting the debounce and starve the flush.
-    private const val QUICK_FLUSH_MS = 15_000L
+    // Hard cap on how many queued contributions we let accumulate before an IMMEDIATE flush,
+    // regardless of the debounce. Bounds both the payload size and the worst-case latency of a
+    // fast contributor; a continuous burst therefore sends at most one POST per 1000 avatars
+    // instead of dribbling out many tiny batches.
+    private const val CONTRIBUTE_MAX_BATCH = 1000
+    // A USER contribution (own upload / favourite / resolved stranger) quick-flushes after this
+    // SETTLE window — but ONLY once contributions stop arriving. Debounced (cancel+reschedule),
+    // so while the queue is still GROWING nothing is sent (this is what kills the "batch of 1"
+    // spam the screenshot showed — a lone clone waited 15s then fired alone; now near-simultaneous
+    // contributions coalesce into one POST). Widened 15s -> 60s: propagation of a new avatar to
+    // OTHER users is ~1-2 min either way (the cron merges it), and the user's OWN clone already
+    // happened, so the extra settle time costs nothing but saves a lot of tiny writes. The 2-min
+    // periodic loop is the backstop, and CONTRIBUTE_MAX_BATCH force-sends a big burst immediately.
+    // NOT used by the bulk avtrdb crawler (localInsert=false) — that stays on the 2-min loop.
+    private const val QUICK_FLUSH_MS = 60_000L
     @Volatile private var quickFlushJob: Job? = null
     // Paced DB-search seeding from favourites / worn avatars. Each name runs ONE
     // AvatarSearch.searchAll (avtrdb + 2 VRCX mirrors + our catalog), which contributes
@@ -1020,6 +1028,7 @@ object AvatarGlobalDb {
             // R2-only membership (checkLocalMap=false): our own localInsert above must NOT count as a
             // HIT here, or the contribution is never queued (the batches regression).
             if (lookupShardedResult(app, fileId, checkLocalMap = false).status == ShardStatus.HIT) return@launch
+            var overCap = false
             queueMutex.withLock {
                 val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 val arr = JSONArray(prefs.getString(KEY_QUEUE, "[]"))
@@ -1033,12 +1042,16 @@ object AvatarGlobalDb {
                     put("platforms", JSONArray(platforms))
                     if (description.isNotBlank()) put("description", description)
                 })
-                // Persist to disk (survives app close; drained on the 5-min flush loop /
-                // next open). Do NOT flush per contribution — the periodic flush batches.
+                // Persist to disk (survives app close; drained on the periodic flush loop /
+                // next open). Do NOT flush per contribution — the debounce/periodic flush batches.
                 prefs.edit().putString(KEY_QUEUE, arr.toString()).apply()
                 contributedCount++
                 lastContributed = "${name.ifBlank { avatarId }} (${nowShort()})"
+                overCap = arr.length() >= CONTRIBUTE_MAX_BATCH
             }
+            // Hit the hard cap → flush NOW (cancel the pending debounce) so a big burst goes as one
+            // bounded POST instead of growing unbounded or waiting out the settle window.
+            if (overCap) { quickFlushJob?.cancel(); flushQueue(app) }
         }
         // User contributions get a debounced quick-flush so they reach the Worker in ~15s
         // (then the 1-min cron merges them) instead of waiting up to 2 min for the periodic

@@ -177,6 +177,23 @@ function tokensOf(e) {
 //   new=null  -> REMOVE: delete fragment + avtr + remove all old tokens.
 //   both      -> only touch the index if a SEARCH-RELEVANT field changed (name/author/authorId/
 //                platforms); a perf/bio/checked-only bot fill returns null (skipped — the big saving).
+// True when an upsert would change NOTHING material about the stored entry — so the shard write
+// (and index re-key) can be skipped. Compares only the persisted, admin-refreshable fields; the
+// `checked` timestamp and immutable `added` are intentionally ignored (a `checked` bump is handled
+// separately, and `added` never changes). This is what stops an admin/bot "refresh" that found the
+// avatar unchanged from pointlessly rewriting its shard.
+function entryEquivalent(a, b) {
+  if (!a || !b) return false;
+  if (a.id !== b.id) return false;
+  if ((a.name || "") !== (b.name || "")) return false;
+  if ((a.author || "") !== (b.author || "")) return false;
+  if ((a.authorId || "") !== (b.authorId || "")) return false;
+  if ((a.desc || "") !== (b.desc || "")) return false;
+  if ((a.filled === true) !== (b.filled === true)) return false;
+  if (platMask(a.platforms) !== platMask(b.platforms)) return false;
+  return true;
+}
+
 // Op: { id, del, frag|null, add:[tok], rem:[tok], avtr:'a'|'r'|null }.
 function buildIndexOp(oldE, newE, fileId) {
   if (!newE) {
@@ -802,6 +819,7 @@ async function flushR2(env) {
   const fillHintAdd = new Set();   // touched shards that still have an unfilled avatar
   const fillHintDone = new Set();  // touched shards that are now fully filled
   const prefixes = Object.keys(shardOps);
+  const dirtyPrefixes = [];        // shards we actually REWROTE (only these are put + purged)
   for (const sp of prefixes) {
     const ops = shardOps[sp];
     let cur;
@@ -811,8 +829,14 @@ async function flushR2(env) {
       if (!cur || typeof cur !== "object" || typeof cur.e !== "object" || cur.e === null) cur = { v: 1, e: {} };
     } catch (_) { allShardsOk = false; continue; } // read failed -> skip (never wipe), retry next flush
     const e = cur.e;
+    // Track whether this shard's CONTENT actually changed. A flush where every op is a no-op
+    // (harvest re-sending already-known avatars → all adds are dupes; a `checked` bump for an
+    // avatar no longer in the shard) must NOT rewrite the shard — an unconditional put was the
+    // single biggest wasted R2 Class A write, since the harvest re-contributes thousands of
+    // already-present avatars. Only put when `dirty`.
+    let dirty = false;
     for (const fid of Object.keys(ops.adds)) if (!e[fid]) {
-      const ne = ops.adds[fid]; e[fid] = ne; added++;
+      const ne = ops.adds[fid]; e[fid] = ne; added++; dirty = true;
       const op = buildIndexOp(null, ne, fid); if (op) indexOps.push(op);
       if (ne.filled !== true) unfilledDelta++;
     }
@@ -824,16 +848,25 @@ async function flushR2(env) {
       if (!prev) { if (inc.filled !== true) unfilledDelta++; }
       else { const wasUnfilled = prev.filled !== true, nowUnfilled = inc.filled !== true;
         if (wasUnfilled && !nowUnfilled) unfilledDelta--; else if (!wasUnfilled && nowUnfilled) unfilledDelta++; }
-      const op = buildIndexOp(prev || null, inc, fid); if (op) indexOps.push(op);
-      e[fid] = inc;
+      // An upsert that changes nothing material (same name/author/authorId/platforms/bio/filled)
+      // shouldn't rewrite the shard either. entryEquivalent compares the persisted fields.
+      if (!prev || !entryEquivalent(prev, inc)) {
+        const op = buildIndexOp(prev || null, inc, fid); if (op) indexOps.push(op);
+        e[fid] = inc; dirty = true;
+      }
     }
-    for (const fid of Object.keys(ops.renames)) if (e[fid]) {
-      const prev = { ...e[fid] }; e[fid].name = ops.renames[fid];
+    for (const fid of Object.keys(ops.renames)) if (e[fid] && e[fid].name !== ops.renames[fid]) {
+      const prev = { ...e[fid] }; e[fid].name = ops.renames[fid]; dirty = true;
       const op = buildIndexOp(prev, e[fid], fid); if (op) indexOps.push(op);
     }
-    for (const fid of ops.checked) if (e[fid]) e[fid].checked = nowChecked;
+    // `checked` bumps DO dirty the shard — the timestamp must persist so the liveness sweep can
+    // pace itself (an un-persisted `checked` would leave the avatar perpetually stale → re-checked
+    // every pass forever). The write volume is instead bounded by the RECHECK_INTERVAL_MS (widened
+    // to 30d in the app): at 30d, re-verifying the whole catalog is ~1 shard write per avatar per
+    // month — well under the R2 free tier — instead of the old 7d cadence's ~4x churn.
+    for (const fid of ops.checked) if (e[fid]) { e[fid].checked = nowChecked; dirty = true; }
     for (const fid of ops.removes) if (e[fid]) {
-      const prev = e[fid]; delete e[fid]; removed++;
+      const prev = e[fid]; delete e[fid]; removed++; dirty = true;
       const op = buildIndexOp(prev, null, fid); if (op) indexOps.push(op);
       if (prev.filled !== true) unfilledDelta--;
     }
@@ -841,6 +874,8 @@ async function flushR2(env) {
     // an unfilled avatar? Accurate + cheap (the shard is already in memory). Drives _worklist.json.
     if (Object.values(e).some((x) => x && x.filled !== true)) fillHintAdd.add(sp);
     else fillHintDone.add(sp);
+    if (!dirty) continue;   // nothing changed → skip the R2 write (and the purge below)
+    dirtyPrefixes.push(sp);
     try {
       await env.CATALOG.put(`shard/${sp}.json`, JSON.stringify({ v: 1, e }), {
         httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=" + SHARD_TTL },
@@ -848,9 +883,9 @@ async function flushR2(env) {
     } catch (_) { allShardsOk = false; }
   }
 
-  // Purge just the changed shards from the edge cache so a new avatar goes live within
-  // ~seconds instead of the TTL. No-op unless a purge token is configured.
-  if (allShardsOk && prefixes.length > 0) await purgeShards(env, prefixes);
+  // Purge just the shards we actually REWROTE from the edge cache so a new avatar goes live
+  // within ~seconds instead of the TTL. No-op unless a purge token is configured.
+  if (allShardsOk && dirtyPrefixes.length > 0) await purgeShards(env, dirtyPrefixes);
 
   // FULL incremental SEARCH INDEX (add / rename / remove + avtr presence) — computed above from the
   // SAME shard reads (no re-fetch). Drain any carried-over ops first, then this flush's, up to the
