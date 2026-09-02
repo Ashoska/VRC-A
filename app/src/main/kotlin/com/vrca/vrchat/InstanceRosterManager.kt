@@ -536,9 +536,17 @@ object InstanceRosterManager {
                     )
                 }
                 stopObserver()
-                clearRosterCaches(); lastLocation = null; VrchatAuthManager.clearAvatarLiveCache()
+                // Force presence offline (above) for the RPC — but DO NOT wipe the roster/clone/live
+                // caches or reset the log position here. This branch fires on a TRANSIENT OSCQuery-down,
+                // which on a BACKGROUNDED headset (or a brief headset sleep) is usually just our poll
+                // being throttled, not VRChat actually closing. Wiping the caches made every already-
+                // resolved clone button grey out and need a full re-resolve on return — the tester's
+                // "clonable avatars go grey while the app is in the background" bug. Keeping them (and
+                // lastLocation + the log offset) means a resume into the SAME instance restores every
+                // button INSTANTLY; a resume into a DIFFERENT instance is caught by publish()'s hop
+                // detection (location != lastLocation), which clears them correctly. A genuine leave is
+                // still handled by the leave paths in publish().
                 _flow.value = RosterUi(status = Status.IDLE)
-                currentId = null; offset = 0L; state = VrcLogParser.InstanceState()
                 delay(POLL_MS); continue
             }
             if (!hasAnyAccess(context)) {
