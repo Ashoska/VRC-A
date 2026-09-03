@@ -24,13 +24,18 @@ import java.util.concurrent.atomic.AtomicBoolean
  *  - **FILL**     — first-fill NEW/incomplete entries (name, author, platforms, bio)
  *                   via `GET /avatars/{id}` — the info Quest devices can't read. Marks
  *                   the entry `filled=true`.
- *  - **LIVENESS A/B** — passive oldest-checked-first dead/refresh sweep, PARTITIONED by
- *                   a stable hash of the file id (A = partition 0, B = partition 1) so
- *                   the two liveness bots NEVER check the same avatar.
+ *  - **LIVENESS A/B** — passive oldest-checked-first dead/refresh sweep.
+ *
+ * NOTE (post-cutover / shard-walk mode — the LIVE path when `AvatarGlobalDb.shardWalkLive()`):
+ * the role labels are just IDENTITY. Every bot pulls the next shard prefix from a shared work
+ * source (worklist → oldest-swept) and does fill + refresh + dead-check on the whole shard;
+ * overlap is prevented by the shared queue/claim (`workQueue.poll()`, `shardClaims`, per-avatar
+ * `inFlight`/`claimBatch`), NOT by the `fileId % 2` partition. The `%2` partition + `blitzPass`/
+ * `blitzViews` only run in the PRE-CUTOVER local-map fallback. In walk mode the Bots tab folds a
+ * bot's roles into ONE row (see roleViews) since they all chew the same pool.
  *
  * Roles are assigned to whichever bot slots are logged in (1..4). With 4 bots, one
- * role each runs in parallel; with fewer, a slot round-robins several roles. The
- * liveness partition guarantees no double-checking regardless of assignment.
+ * role each; with fewer, a slot round-robins several roles.
  *
  * A **full blitz** ([requestFullBlitz]) widens the fill + liveness scope for a bounded
  * window so all bots catch up the whole catalog (fill everything from before + dead
@@ -488,7 +493,16 @@ object AvatarCatalogSweep {
         val shards: Int = 0,
         /** Reports the Reports bot has verified + culled (survives loaning to the walk). */
         val reportsVerified: Int = 0,
-        val reportsRemoved: Int = 0
+        val reportsRemoved: Int = 0,
+        /** In walk mode a bot does BOTH first-fills AND refreshes; both are surfaced (M3) instead of
+         *  only one via refreshedOrFilled. */
+        val filled: Int = 0,
+        val refreshed: Int = 0,
+        /** True for the ONE folded row a bot shows in walk mode (all its roles chew the same pool, so
+         *  per-role rows showed 0 for every role but the first — M2). */
+        val walkFolded: Boolean = false,
+        /** This bot IS handling reports (show the reports detail line). */
+        val isReportsBot: Boolean = false
     )
 
     /** `pendingReports` = the Worker's live report count (from /health). Fill + liveness
@@ -524,29 +538,45 @@ object AvatarCatalogSweep {
         // everyone else — including a loaning Reports bot — gets an equal share).
         if (AvatarGlobalDb.shardWalkLive()) {
             val pool = fill + liveness
-            fun assigned(r: Role) = progress.getValue(r).slot >= 0 || assignmentPreview[r] != null
-            fun onReports(r: Role) = r == Role.REPORTS && pendingReports > 0
-            val walkers = Role.values().count { assigned(it) && !onReports(it) }.coerceAtLeast(1)
-            val share = (pool + walkers - 1) / walkers   // ceil-split evenly across every walking bot
-            return Role.values().map { r ->
-                val p = progress.getValue(r)
-                val slot = p.slot.takeIf { it >= 0 } ?: assignmentPreview[r] ?: -1
-                val rep = onReports(r)
+            // Group every ASSIGNED role by the SLOT (bot) it runs on, then emit ONE folded row per bot.
+            // In walk mode slotLoop only drives progress on the slot's OWN (first) role — so every other
+            // role sharing that slot showed checked/shards = 0 even while the bot was clearly working
+            // (M2). Summing a slot's roles recovers the real counters (only the own role is non-zero).
+            val bySlot = Role.values().mapNotNull { r ->
+                val slot = progress.getValue(r).slot.takeIf { it >= 0 } ?: assignmentPreview[r]
+                if (slot == null) null else slot to r
+            }.groupBy({ it.first }, { it.second })
+            val reportsSlot = if (pendingReports > 0) (progress.getValue(Role.REPORTS).slot.takeIf { it >= 0 }
+                ?: assignmentPreview[Role.REPORTS]) else null
+            val walkerSlots = bySlot.keys.count { it != reportsSlot }.coerceAtLeast(1)
+            val share = (pool + walkerSlots - 1) / walkerSlots   // ceil-split across the WALKING bots
+            return bySlot.entries.sortedBy { it.key }.map { (slot, rolesOnSlot) ->
+                var c = 0; var rem = 0; var fl = 0; var rf = 0; var sh = 0; var rv = 0; var rr = 0
+                var status = ""; var run = false
+                for (r in rolesOnSlot) {
+                    val p = progress.getValue(r)
+                    c += p.checked; rem += p.removed; fl += p.filled; rf += p.refreshed
+                    sh += p.shards; rv += p.reportsVerified; rr += p.reportsRemoved
+                    if (p.checked + p.shards > 0 || status.isEmpty()) status = p.status
+                    run = run || p.running
+                }
+                val isRepBot = rolesOnSlot.contains(Role.REPORTS)
                 RoleView(
-                    role = r,
-                    bot = if (slot >= 0) "bot ${slot + 1}" else "—",
-                    queued = if (rep) pendingReports else share,
-                    checked = p.checked,
-                    removed = p.removed,
-                    refreshedOrFilled = if (r == Role.FILL) p.filled else p.refreshed,
-                    status = p.status,
-                    running = p.running,
-                    // No "helping" label in walk mode: every bot shares the same pool equally, so the
-                    // even queued share already shows they're all working — the tag was noise.
+                    role = if (isRepBot) Role.REPORTS else (rolesOnSlot.firstOrNull() ?: Role.FILL),
+                    bot = "bot ${slot + 1}",
+                    queued = if (slot == reportsSlot) pendingReports else share,
+                    checked = c,
+                    removed = rem,
+                    refreshedOrFilled = fl + rf,   // legacy field: combined
+                    filled = fl, refreshed = rf,
+                    status = status,
+                    running = run,
                     helping = "",
-                    shards = p.shards,
-                    reportsVerified = p.reportsVerified,
-                    reportsRemoved = p.reportsRemoved
+                    shards = sh,
+                    reportsVerified = rv,
+                    reportsRemoved = rr,
+                    walkFolded = true,
+                    isReportsBot = isRepBot
                 )
             }
         }
@@ -823,10 +853,22 @@ object AvatarCatalogSweep {
      *  the weekly interval (returns null when nothing is due → idle). Stamps the pick to claim it,
      *  so two bots rarely grab the same shard (the per-avatar claim/dedup covers any overlap). */
     private val sweptSelectLock = Any()
-    private fun oldestSweptPrefix(context: Context, dueOnly: Boolean): String? {
+    // Short-lived per-shard CLAIM so two bots don't grab the same shard at once, WITHOUT stamping
+    // sweptAt at selection time. The old code stamped sweptAt on selection — so a shard whose read
+    // then FAILED was marked "swept just now" and hidden from the liveness sweep for the full 30d
+    // interval (a silent liveness gap on any flaky read). Now sweptAt is stamped only AFTER a
+    // successful read (in walkPass); a failed read leaves the claim to EXPIRE (a ~30s backoff) and
+    // the shard stays oldest, so it's retried instead of hidden.
+    private val shardClaims = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private const val SHARD_CLAIM_TTL_MS = 30_000L
+    fun releaseShardClaim(prefix: String) { shardClaims.remove(prefix) }
+    /** Oldest-swept shard prefix (unswept counts as oldest). `dueOnly` skips shards swept within the
+     *  liveness interval (returns null when nothing is due → idle). `coverBeforeMs` bounds a PASS: only
+     *  shards last swept BEFORE that instant are eligible, so a blitz / fill-scan ENDS once every shard
+     *  has been covered (no endless re-reading of an already-covered catalog). Claims the pick so two
+     *  bots rarely grab the same shard; the claim (not sweptAt) is what's set here. */
+    private fun oldestSweptPrefix(context: Context, dueOnly: Boolean, coverBeforeMs: Long? = null): String? {
         loadSwept(context)
-        // Scan + claim under a lock so two bots (esp. all 4 during a blitz, which calls this
-        // OUTSIDE worklistMutex) can't pick the SAME oldest shard and duplicate its fetch.
         synchronized(sweptSelectLock) {
             val now = System.currentTimeMillis()
             var best: String? = null; var bestT = Long.MAX_VALUE
@@ -834,11 +876,24 @@ object AvatarCatalogSweep {
                 val p = i.toString(16).padStart(3, '0')
                 val t = sweptAt[p] ?: 0L
                 if (dueOnly && now - t < LIVENESS_SHARD_INTERVAL_MS) continue
+                if (coverBeforeMs != null && t >= coverBeforeMs) continue   // already covered this pass
+                val claim = shardClaims[p]; if (claim != null && now - claim < SHARD_CLAIM_TTL_MS) continue
                 if (t < bestT) { bestT = t; best = p }
             }
-            best?.let { sweptAt[it] = now }   // claim immediately
+            best?.let { shardClaims[it] = now }   // claim (NOT sweptAt) — stamped on success in walkPass
             return best
         }
+    }
+    /** Oldest shard eligible for FILL work: the whole catalog while a fill backlog is known, bounded
+     *  to ONE pass per manifest-value (fillScanStartMs) so a STICKY manifestUnfilled > 0 (poison
+     *  entries) can't make the bots blind-walk all 4096 shards forever; after one pass it falls back
+     *  to the due (liveness) trickle. */
+    private fun fillOrLivenessPrefix(context: Context, fillBacklog: Boolean): String? {
+        if (fillBacklog) {
+            if (fillScanStartMs == 0L) fillScanStartMs = System.currentTimeMillis()
+            oldestSweptPrefix(context, dueOnly = false, coverBeforeMs = fillScanStartMs)?.let { return it }
+        }
+        return oldestSweptPrefix(context, dueOnly = true)
     }
     /** True while there are still queued shards to walk — slotLoop uses a SHORT pause then
      *  (keep moving through the backlog) instead of the 20s idle sleep. */
@@ -855,9 +910,11 @@ object AvatarCatalogSweep {
      *  the work-list only lists steady-state work shards. Otherwise refill the shared queue from
      *  `_worklist.json` when empty (single-flight, TTL-throttled). */
     private suspend fun nextWorkPrefix(context: Context): String? {
-        // BLITZ: cover the WHOLE catalog, oldest-swept first (still hits all 4096, just in
-        // staleness order → the parts checked longest ago go first).
-        if (blitzActive()) return oldestSweptPrefix(context, dueOnly = false)
+        // BLITZ: cover the WHOLE catalog ONCE, oldest-swept first, bounded to shards not yet swept
+        // since the blitz began (blitzStartMs). Returns null once every shard is covered → the bots
+        // idle → the blitz keepalive lapses → the blitz ENDS, instead of spin-reading the whole
+        // catalog every ~1.5s for the rest of the 30-min window after coverage was already complete.
+        if (blitzActive()) return oldestSweptPrefix(context, dueOnly = false, coverBeforeMs = blitzStartMs)
         workQueue.poll()?.let { return it }
         // When the manifest reports a real FILL backlog (unfilled avatars exist) but the
         // worklist is empty, those unfilled entries live in shards NOT touched by recent
@@ -874,16 +931,16 @@ object AvatarCatalogSweep {
             // instead of idling, walk oldest-swept: the WHOLE catalog while a fill backlog is
             // known (find the unfilled), else just the due (weekly) shards (liveness trickle).
             if (worklistEmpty && System.currentTimeMillis() - worklistFetchedMs < WORKLIST_TTL_MS)
-                return@withLock oldestSweptPrefix(context, dueOnly = !fillBacklog)
+                return@withLock fillOrLivenessPrefix(context, fillBacklog)
             val wl = AvatarGlobalDb.fetchWorklist(context)
             worklistFetchedMs = System.currentTimeMillis()
-            if (wl == null) { worklistEmpty = false; return@withLock oldestSweptPrefix(context, dueOnly = false) }  // read failed → oldest-swept fallback
+            if (wl == null) { worklistEmpty = false; return@withLock fillOrLivenessPrefix(context, fillBacklog) }  // read failed → bounded fallback
             val (fill, stale) = wl
             worklistEmpty = fill.isEmpty() && stale.isEmpty()
             workQueue.addAll(fill); workQueue.addAll(stale)   // fill first, then stale (liveness)
-            // Worklist empty → oldest-swept: whole catalog while a fill backlog is known, else
-            // the due (weekly) liveness trickle.
-            workQueue.poll() ?: oldestSweptPrefix(context, dueOnly = !fillBacklog)
+            // Worklist empty → oldest-swept: bounded whole-catalog pass while a fill backlog is known,
+            // else the due (liveness) trickle.
+            workQueue.poll() ?: fillOrLivenessPrefix(context, fillBacklog)
         }
     }
     // Skip re-checking an avatar within the flush-lag window: the bot's fill/check reaches the
@@ -918,10 +975,14 @@ object AvatarCatalogSweep {
     private val filledSinceManifest = java.util.concurrent.atomic.AtomicInteger(0)
     private val recheckedSinceManifest = java.util.concurrent.atomic.AtomicInteger(0)
     @Volatile var manifestUnfilled = -1; private set
+    // Start of the CURRENT bounded fill-scan pass — reset whenever manifestUnfilled changes to a new
+    // value, so each genuine backlog change gets ONE fresh whole-catalog pass; a sticky value doesn't
+    // re-trigger endless passes (H2). fillOrLivenessPrefix bounds the pass to shards swept before this.
+    @Volatile private var fillScanStartMs = 0L
     // Reset the optimistic decrement ONLY when the value actually CHANGES (a fresh Action rebuild),
     // not on every 30s poll of the same value — otherwise each poll snapped the live-decremented
     // queue back up to the manifest number (the "keeps jumping to ~8200" sawtooth).
-    fun setManifestUnfilled(n: Int) { if (n != manifestUnfilled) { manifestUnfilled = n; filledSinceManifest.set(0) } }
+    fun setManifestUnfilled(n: Int) { if (n != manifestUnfilled) { manifestUnfilled = n; filledSinceManifest.set(0); if (n > 0) fillScanStartMs = System.currentTimeMillis() } }
     /** Liveness backlog (entries due a recheck) from the manifest — so the Liveness bots show a
      *  real "queued" number in shard-walk mode instead of a confusing 0 while they're working. */
     @Volatile var manifestStale = -1; private set
@@ -934,10 +995,14 @@ object AvatarCatalogSweep {
         if (paused) return false
         val p = progress.getValue(role)
         val prefix = nextWorkPrefix(context) ?: run { p.status = "no backlog — idle"; return false }
-        if (blitzActive()) blitzWalked.add(prefix)   // track blitz shard coverage (done/left)
         val entries = AvatarGlobalDb.fetchCatalogShard(context, prefix)
+        // Failed read → leave the claim to EXPIRE (a ~30s backoff) so the shard stays oldest and is
+        // RETRIED, and do NOT stamp sweptAt / advance the coverage bar (M1 — a flaky read must not hide
+        // a shard for 30d nor falsely count it as covered).
         if (entries == null) { p.status = "walk $prefix: shard read failed"; return false }
-        stampSwept(context, prefix)   // record the sweep (even if clean) so the oldest-swept cadence advances
+        stampSwept(context, prefix)   // success: record the sweep (even if clean) so oldest-swept advances
+        releaseShardClaim(prefix)     // done with it — let it be re-selected once genuinely due again
+        if (blitzActive()) blitzWalked.add(prefix)   // count coverage only for shards actually READ
         p.shards++                    // shard-walk throughput (one shard = one cheap grouped R2 write)
         val cutoff = livenessCutoff()
         val work = entries.filter { (needsFill(it) || it.checked < cutoff) && !wasRecentlyProcessed(it.fileId) }
@@ -1170,14 +1235,19 @@ object AvatarCatalogSweep {
             if (!running || paused) break
             if (r.avatarId.isBlank()) { clears.add(r.fileId); continue }
             val chk = BotVrchatSession.checkAvatar(context, slot, r.avatarId)
-            p.checked++; p.reportsVerified++   // dedicated report counter (survives loaning to the walk)
+            // Count a verification only when the check ACTUALLY ran — a null is a transient/rate-limited
+            // no-op that verified nothing, so it must not inflate checked/reportsVerified (M4).
             if (chk == null) { delay(PACE_MS); continue }
+            p.checked++; p.reportsVerified++   // dedicated report counter (survives loaning to the walk)
             if (chk.alive) noteAlive()
             if (!chk.alive) {
                 // Don't remove on a report during a suspected VRChat outage — a 404 could be
                 // false. Skip clearing too, so the report stays pending and is re-verified once
                 // VRChat is back (don't mark a maybe-alive avatar's report resolved).
-                if (canRemove()) { removes.add(r.fileId); p.removed++; p.reportsRemoved++; applyItemLocal(remove = r.fileId) }
+                // On a confirmed cull, CLEAR the report in the SAME push as the remove so it doesn't
+                // linger pending and get needlessly re-fetched + re-checked for another cycle or two
+                // before the Worker's own repShardEntries sweep drops it (M4).
+                if (canRemove()) { removes.add(r.fileId); clears.add(r.fileId); p.removed++; p.reportsRemoved++; applyItemLocal(remove = r.fileId) }
             }
             else {
                 clears.add(r.fileId)  // alive → false positive

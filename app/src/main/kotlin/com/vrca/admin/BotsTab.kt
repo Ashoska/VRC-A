@@ -573,19 +573,32 @@ private fun RoleRow(v: AvatarCatalogSweep.RoleView) {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            // In walk mode a bot is ONE folded row doing fill + refresh + liveness (+ reports if it's the
+            // reports bot) over the shared shard pool — so it's labelled by what it DOES, not one role
+            // that happened to be first. Pre-cutover keeps the per-role label + loan marker.
+            val label = when {
+                v.walkFolded && v.isReportsBot -> "Reports + shard walk"
+                v.walkFolded -> "Shard walk"
+                v.helping.isNotBlank() -> "${v.role.label}  →  helping ${v.helping}"
+                else -> v.role.label
+            }
             Text(
-                if (v.helping.isNotBlank()) "${v.role.label}  →  helping ${v.helping}" else v.role.label,
+                label,
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f)
             )
             StatusPill("queued ${v.queued}", queuedTone)
         }
-        val processedLabel = if (v.role == AvatarCatalogSweep.Role.FILL || v.helping == "Fill") "filled" else "refreshed"
-        // The Reports bot gets its OWN line (reports verified/culled) so its work is visible even
-        // while it loans to the shard walk; every bot shows shard throughput (the real cheap unit).
-        val detail = if (v.role == AvatarCatalogSweep.Role.REPORTS) {
+        // Every bot shows shard throughput (the real cheap unit). A folded walk row shows BOTH filled
+        // AND refreshed (a bot does both — showing only one hid half its work); the reports bot also
+        // shows reports verified/culled so its work is visible even while it loans to the walk.
+        val detail = if (v.walkFolded) {
+            val walk = "shards ${v.shards} · filled ${v.filled} · refreshed ${v.refreshed} · checked ${v.checked} · removed ${v.removed}"
+            if (v.isReportsBot) "reports ${v.reportsVerified} · culled ${v.reportsRemoved} · $walk" else walk
+        } else if (v.role == AvatarCatalogSweep.Role.REPORTS) {
             "reports ${v.reportsVerified} · culled ${v.reportsRemoved} · shards ${v.shards} · checked ${v.checked}"
         } else {
+            val processedLabel = if (v.role == AvatarCatalogSweep.Role.FILL || v.helping == "Fill") "filled" else "refreshed"
             "shards ${v.shards} · checked ${v.checked} · removed ${v.removed} · $processedLabel ${v.refreshedOrFilled}"
         }
         Text(
