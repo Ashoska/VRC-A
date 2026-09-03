@@ -1327,7 +1327,7 @@ object VrchatAuthManager {
                     .ifBlank { j.optString("userIcon", "") }
                     .ifBlank { j.optString("currentAvatarThumbnailImageUrl", "") },
                 wornAvatarThumbUrl = j.optString("currentAvatarThumbnailImageUrl", "")
-            )
+            ).also { cacheWornThumb(userId, it.wornAvatarThumbUrl) }
         } catch (e: Exception) {
             Log.w(TAG, "fetchUserInfo($userId) failed", e)
             null
@@ -1566,7 +1566,25 @@ object VrchatAuthManager {
     private val resolveTraces = java.util.concurrent.ConcurrentHashMap<String, List<String>>()
     fun lastResolveTrace(userId: String): List<String> = resolveTraces[userId] ?: emptyList()
     fun putResolveTrace(userId: String, steps: List<String>) { resolveTraces[userId] = steps }
-    fun clearResolveTraces() { resolveTraces.clear() }
+    fun clearResolveTraces() { resolveTraces.clear(); wornThumbCache.clear() }
+
+    // ---- worn-thumbnail micro-cache (halves the roster's /users/{id} calls) --------------------
+    // The worn avatar thumbnail URL comes from GET /users/{id}. On a roster the SAME member is
+    // fetched twice in quick succession — once by enrichPlatforms (platform/pfp) and again by
+    // resolveWornAvatarId (worn file id) — so a catalog-MISS member (the expensive full-resolve
+    // path) pays TWO identical /users/{id} calls, and a retrying member pays even more. That
+    // duplicate is a big chunk of the roster's VRChat REST load (and its 429s). fetchUserInfo
+    // stamps the worn thumb here on every 200; resolveWornAvatarId reads it when fresh instead of
+    // re-fetching. Short TTL so an avatar SWITCH still surfaces quickly (the log drives re-resolve;
+    // this only avoids the redundant back-to-back fetch). Cleared on instance leave with the traces.
+    private const val WORN_THUMB_TTL_MS = 12_000L
+    private val wornThumbCache = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Long>>()
+    private fun cacheWornThumb(userId: String, url: String) {
+        if (userId.startsWith("usr_")) wornThumbCache[userId] = url to System.currentTimeMillis()
+    }
+    /** Fresh worn-thumb URL for this user, or null if not cached within the TTL. */
+    private fun cachedWornThumb(userId: String): String? =
+        wornThumbCache[userId]?.let { (url, ts) -> if (System.currentTimeMillis() - ts < WORN_THUMB_TTL_MS) url else null }
 
     /**
      * Resolve a remote player's EXACT worn avatar id. Quest can't get it from the
@@ -1595,8 +1613,14 @@ object VrchatAuthManager {
         val tr = java.util.ArrayList<String>()
         fun step(s: String) { tr.add(s) }
         try {
-        val wornFileId = fileIdOf(fetchUserInfo(context, userId)?.wornAvatarThumbUrl.orEmpty())
-        step("worn image fileId: ${wornFileId ?: "none (hidden thumb / impostor / offline)"}")
+        // Reuse the worn thumbnail enrichPlatforms just fetched for this member (within the TTL)
+        // instead of a second identical GET /users/{id}. `reused` is surfaced in the trace so the
+        // diagnostics show when a call was saved vs a fresh fetch made.
+        val reusedThumb = cachedWornThumb(userId)
+        val wornThumbUrl = reusedThumb ?: fetchUserInfo(context, userId)?.wornAvatarThumbUrl.orEmpty()
+        val wornFileId = fileIdOf(wornThumbUrl)
+        step("worn image fileId: ${wornFileId ?: "none (hidden thumb / impostor / offline)"}" +
+            if (reusedThumb != null) " [reused /users cache]" else " [fresh /users fetch]")
         if (avatarName.isNotBlank()) step("log avatar name: \"$avatarName\"${if (author.isNotBlank()) " by $author" else ""}")
         // NAME-OPTIONAL: resolve purely from the worn image file id when there's no
         // log name (impostor'd player in a big instance).
