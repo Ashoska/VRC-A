@@ -549,7 +549,12 @@ object AvatarCatalogSweep {
             val reportsSlot = if (pendingReports > 0) (progress.getValue(Role.REPORTS).slot.takeIf { it >= 0 }
                 ?: assignmentPreview[Role.REPORTS]) else null
             val walkerSlots = bySlot.keys.count { it != reportsSlot }.coerceAtLeast(1)
-            val share = (pool + walkerSlots - 1) / walkerSlots   // ceil-split across the WALKING bots
+            // L1: during a blitz the walk covers the WHOLE catalog, so the "queued" number should reflect
+            // the remaining SHARD coverage (4096 − covered), not the steady-state manifest stale count —
+            // otherwise the pill and the 4096-shard bar disagree.
+            val blitzing = blitzActive()
+            val displayPool = if (blitzing) (4096 - blitzWalked.size).coerceAtLeast(0) else pool
+            val share = (displayPool + walkerSlots - 1) / walkerSlots   // ceil-split across the WALKING bots
             return bySlot.entries.sortedBy { it.key }.map { (slot, rolesOnSlot) ->
                 var c = 0; var rem = 0; var fl = 0; var rf = 0; var sh = 0; var rv = 0; var rr = 0
                 var status = ""; var run = false
@@ -571,7 +576,9 @@ object AvatarCatalogSweep {
                     filled = fl, refreshed = rf,
                     status = status,
                     running = run,
-                    helping = "",
+                    // L6: the Reports bot with no pending reports loans itself to the shard walk — surface
+                    // that loan (it walks like everyone else) instead of leaving the computed value dead.
+                    helping = if (isRepBot && slot != reportsSlot) "walk" else "",
                     shards = sh,
                     reportsVerified = rv,
                     reportsRemoved = rr,
@@ -1040,12 +1047,16 @@ object AvatarCatalogSweep {
                 if (chk.alive) noteAlive()
                 if (!chk.alive) {
                     if (canRemove()) { removes.add(e.fileId); p.removed++
-                        if (needsFill(e)) filledSinceManifest.incrementAndGet() else recheckedSinceManifest.incrementAndGet() }
+                        // L7: an entry can be BOTH unfilled and stale — decrement whichever backlog(s)
+                        // it counted against, not just one, so the liveness "queued" can reach 0.
+                        if (needsFill(e)) filledSinceManifest.incrementAndGet()
+                        if (e.checked < cutoff) recheckedSinceManifest.incrementAndGet() }
                     // else: suspected VRChat outage — defer the removal, next walk retries
                 } else if (needsFill(e)) {
                     val upd = fillRefresh(e, chk)
                     if (upd.fileId != e.fileId) removes.add(e.fileId)   // re-key on image change
                     upserts.add(upd); p.filled++; filledSinceManifest.incrementAndGet()
+                    if (e.checked < cutoff) recheckedSinceManifest.incrementAndGet()   // L7: also cleared a stale entry
                 } else {
                     val upd = liveRefresh(e, chk)
                     if (upd != null) { if (upd.fileId != e.fileId) removes.add(e.fileId); upserts.add(upd); p.refreshed++ }
@@ -1091,7 +1102,9 @@ object AvatarCatalogSweep {
         upserts: List<AvatarGlobalDb.Entry>, removes: List<String>,
         clears: List<String> = emptyList(), checked: List<String> = emptyList()
     ) {
-        for (e in upserts) { pendingRemoves.remove(e.fileId); pendingUpserts[e.fileId] = e }
+        // Also drop any queued `checked` for the same fileId — an upsert already persists (and bumps
+        // checked server-side), so a separate checked op for it in the same flush is redundant (L4).
+        for (e in upserts) { pendingRemoves.remove(e.fileId); pendingChecked.remove(e.fileId); pendingUpserts[e.fileId] = e }
         for (fid in removes) { pendingUpserts.remove(fid); pendingChecked.remove(fid); pendingRemoves.add(fid) }
         for (fid in clears) pendingClears.add(fid)
         for (fid in checked) if (!pendingUpserts.containsKey(fid) && !pendingRemoves.contains(fid)) pendingChecked.add(fid)

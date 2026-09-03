@@ -110,6 +110,7 @@ fun BotsTab() {
                 onToggleCrawl = { avtrdbCrawl = !avtrdbCrawl; prefs.edit().putBoolean("avtrdb_crawl_enabled", avtrdbCrawl).apply() },
                 roleSlots = roleSlots,
                 slotLabels = List(BotVrchatSession.SLOTS) { s -> bots.getOrNull(s)?.name ?: "" },
+                slotLoggedIn = List(BotVrchatSession.SLOTS) { s -> bots.getOrNull(s)?.loggedIn == true },
                 onRolePick = { roleOrdinal, slot ->
                     roleSlots = roleSlots.copyOf().also { it[roleOrdinal] = slot }
                     saveRoleSlots(prefs, roleSlots)
@@ -136,41 +137,21 @@ private fun agoLabel(fromMs: Long, now: Long): String {
 
 @Composable
 private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null, lastPush: Pair<String, Long>? = null, adminKey: String = "") {
-    var status by remember { mutableStateOf("loading…") }
-    var entries by remember { mutableStateOf("—") }
-    var pending by remember { mutableStateOf("—") }
-    var totals by remember { mutableStateOf("—") }
-    var lastFlush by remember { mutableStateOf("—") }
-    var adminKeySet by remember { mutableStateOf("—") }
+    // L3: read the ONE shared /health object BotController already polls (30s) instead of this card
+    // firing its own /health GET — one poll feeds the content signal, the report count, and this card.
+    val health by BotController.health.collectAsState()
+    val status = if (health != null) "live" else "loading…"
+    val entries = health?.optInt("entries")?.toString() ?: "—"
+    val pending = health?.let { "${it.optInt("pendingBatches")} batch / ${it.optInt("reports")} rep" } ?: "—"
+    val totals = health?.let { "＋${it.optInt("totalAdded")}  ·  －${it.optInt("totalRemoved")}" } ?: "—"
+    val lastFlush = health?.optString("lastFlush", "—") ?: "—"
+    val adminKeySet = health?.let { if (it.optBoolean("adminKeySet")) "set" else "NOT set" } ?: "—"
     var recent by remember { mutableStateOf<List<RecentBatch>>(emptyList()) }
     var expanded by remember { mutableStateOf<Int?>(null) }
     var tick by remember { mutableIntStateOf(0) }
-    // Live clock so relative-time labels tick and the card refreshes on its own (no manual refresh).
+    // Live clock so relative-time labels tick.
     var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) { while (true) { delay(2000); nowMs = System.currentTimeMillis() } }
-    LaunchedEffect(tick) {
-        while (true) {
-            runCatching {
-                withContext(Dispatchers.IO) {
-                    val conn = (java.net.URL("${com.vrca.vrchat.AvatarGlobalDb.WORKER_URL}/health")
-                        .openConnection() as java.net.HttpURLConnection).apply {
-                        connectTimeout = 10_000; readTimeout = 10_000
-                        setRequestProperty("User-Agent", "VRC-A")
-                    }
-                    conn.inputStream.bufferedReader().readText()
-                }
-            }.onSuccess { body ->
-                val j = JSONObject(body)
-                entries = j.optInt("entries").toString()
-                pending = "${j.optInt("pendingBatches")} batch / ${j.optInt("reports")} rep"
-                totals = "＋${j.optInt("totalAdded")}  ·  －${j.optInt("totalRemoved")}"
-                lastFlush = j.optString("lastFlush", "—")
-                adminKeySet = if (j.optBoolean("adminKeySet")) "set" else "NOT set"
-                status = "live"
-            }.onFailure { status = "unreachable (${it.javaClass.simpleName})" }
-            delay(15_000)   // auto-refreshes every 15s
-        }
-    }
     // Recent USER contributions — fetched from the admin-gated /admin/recent (NOT /health, so the
     // bot/client health polls stay tiny). One cheap KV read per 15s while this card is on screen.
     LaunchedEffect(tick, adminKey) {
@@ -206,7 +187,7 @@ private fun CatalogHealthCard(added24h: Pair<Int, Int>? = null, lastPush: Pair<S
         title = "Avatar catalog",
         icon = Icons.Filled.Storage,
         tone = AdminTone.Info,
-        trailing = { IconButton(onClick = { tick++ }) { Icon(Icons.Filled.Refresh, contentDescription = "Refresh") } }
+        trailing = { IconButton(onClick = { tick++; BotController.pokeHealth() }) { Icon(Icons.Filled.Refresh, contentDescription = "Refresh") } }
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             AdminLabeledRow("Worker", status)
@@ -264,8 +245,12 @@ private fun MaintenanceCard(
     sweepAlive: Boolean, sweepAgoMs: Long,
     paused: Boolean, onTogglePause: () -> Unit,
     avtrdbCrawl: Boolean, onToggleCrawl: () -> Unit,
-    roleSlots: IntArray, slotLabels: List<String>, onRolePick: (Int, Int) -> Unit
+    roleSlots: IntArray, slotLabels: List<String>, slotLoggedIn: List<Boolean> = emptyList(),
+    onRolePick: (Int, Int) -> Unit
 ) {
+    // L2: observe the sweep's push-error + crawl-status via BotController StateFlows (not raw @Volatile).
+    val pushError by BotController.pushError.collectAsState()
+    val crawlStatus by BotController.crawlStatus.collectAsState()
     AdminSectionCard(title = "Maintenance", icon = Icons.Filled.SportsEsports, tone = AdminTone.Warn) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             // Master pause: stop ALL bots so you can log every account in first, then
@@ -283,8 +268,8 @@ private fun MaintenanceCard(
                 Text("Paused — no bot is doing anything.", style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            if (AvatarCatalogSweep.pushError.isNotBlank()) {
-                Text(AvatarCatalogSweep.pushError, style = MaterialTheme.typography.bodySmall,
+            if (pushError.isNotBlank()) {
+                Text(pushError, style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error)
             }
             OutlinedTextField(
@@ -303,7 +288,7 @@ private fun MaintenanceCard(
             Divider()
 
             AvatarCatalogSweep.Role.values().forEach { role ->
-                RoleAssignRow(role, roleSlots.getOrElse(role.ordinal) { -1 }, slotLabels) { slot ->
+                RoleAssignRow(role, roleSlots.getOrElse(role.ordinal) { -1 }, slotLabels, slotLoggedIn) { slot ->
                     onRolePick(role.ordinal, slot)
                 }
             }
@@ -371,7 +356,7 @@ private fun MaintenanceCard(
                 ) else androidx.compose.material3.ButtonDefaults.buttonColors()
             ) { Text(if (avtrdbCrawl) "Absorbing avtrdb — ON (tap to stop)" else "Absorb avtrdb (crawl) — OFF") }
             Text(
-                "Crawl: ${AvatarCatalogSweep.avtrdbCrawlStatus}",
+                "Crawl: $crawlStatus",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -387,11 +372,17 @@ private fun MaintenanceCard(
 }
 
 @Composable
-private fun RoleAssignRow(role: AvatarCatalogSweep.Role, slot: Int, slotLabels: List<String>, onPick: (Int) -> Unit) {
+private fun RoleAssignRow(
+    role: AvatarCatalogSweep.Role, slot: Int, slotLabels: List<String>,
+    slotLoggedIn: List<Boolean> = emptyList(), onPick: (Int) -> Unit
+) {
     var open by remember { mutableStateOf(false) }
+    fun signedOut(s: Int): Boolean = slotLoggedIn.getOrNull(s) == false
     fun label(s: Int): String {
         val name = slotLabels.getOrNull(s)?.takeIf { it.isNotBlank() }
-        return "Bot ${s + 1}" + (name?.let { " · $it" } ?: "")
+        // L5: mark a slot whose bot isn't logged in — the assignment is stored but won't run until
+        // that bot signs in, so the button/menu shouldn't read like it's active.
+        return "Bot ${s + 1}" + (name?.let { " · $it" } ?: "") + (if (signedOut(s)) " (signed out)" else "")
     }
     Row(
         Modifier.fillMaxWidth(),
@@ -577,6 +568,9 @@ private fun RoleRow(v: AvatarCatalogSweep.RoleView) {
             // reports bot) over the shared shard pool — so it's labelled by what it DOES, not one role
             // that happened to be first. Pre-cutover keeps the per-role label + loan marker.
             val label = when {
+                // L6: distinguish a Reports bot actively verifying (reports queued) from one loaning
+                // itself to the shard walk (no reports pending → helping == "walk").
+                v.walkFolded && v.isReportsBot && v.helping == "walk" -> "Reports (loaning to walk)"
                 v.walkFolded && v.isReportsBot -> "Reports + shard walk"
                 v.walkFolded -> "Shard walk"
                 v.helping.isNotBlank() -> "${v.role.label}  →  helping ${v.helping}"

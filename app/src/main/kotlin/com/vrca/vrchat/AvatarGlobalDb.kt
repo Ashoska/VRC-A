@@ -318,6 +318,27 @@ object AvatarGlobalDb {
         } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
     }
 
+    /** ONE /health GET returning the whole status object — so the admin Bots tab can derive the
+     *  content signal, pending-report count AND the health-card fields from a SINGLE read per poll
+     *  instead of three separate /health GETs (the content-signal loop, the report-count poll, and
+     *  the card's own poll all hit /health independently — L3). Returns null on any failure. */
+    fun fetchHealth(): JSONObject? {
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL("$WORKER_URL/health").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                connectTimeout = 10_000; readTimeout = 10_000
+            }
+            if (conn.responseCode != 200) return null
+            JSONObject(conn.inputStream.bufferedReader().readText())
+        } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
+    }
+
+    /** The content signal (entries:totalAdded:totalRemoved) derived from an already-fetched /health
+     *  object — so a caller that fetched health once can reuse it instead of a second GET. */
+    fun contentSignalOf(health: JSONObject): String =
+        "${health.optInt("entries", -1)}:${health.optInt("totalAdded", 0)}:${health.optInt("totalRemoved", 0)}"
+
     /** A CONTENT signal (cheap /health read) that changes ONLY when the catalog's
      *  contents actually change — new avatars merged (`totalAdded`), removals
      *  (`totalRemoved` / `entries`). Unlike [workerLastFlush] (which advances every

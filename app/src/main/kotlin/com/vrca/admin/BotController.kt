@@ -66,6 +66,21 @@ object BotController {
     private val _sweepLastCycleAgoMs = MutableStateFlow(-1L)
     val sweepLastCycleAgoMs: StateFlow<Long> = _sweepLastCycleAgoMs
 
+    // L2: surface the non-observable @Volatile sweep fields as StateFlows so the Bots tab reacts to
+    // them directly instead of relying on a sibling value ticking to force a recomposition.
+    private val _pushError = MutableStateFlow("")
+    val pushError: StateFlow<String> = _pushError
+    private val _crawlStatus = MutableStateFlow("off")
+    val crawlStatus: StateFlow<String> = _crawlStatus
+
+    // L3: the ONE shared /health object, polled once per 30s (the content-signal loop below) — the
+    // Bots tab's health card + the report count both read THIS instead of each firing their own
+    // /health GET (three independent polls collapsed to one). Poked for an immediate refresh.
+    private val _health = MutableStateFlow<org.json.JSONObject?>(null)
+    val health: StateFlow<org.json.JSONObject?> = _health
+    private val healthPoke = MutableStateFlow(0)
+    fun pokeHealth() { healthPoke.value++ }
+
     private val started = AtomicBoolean(false)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     // A bot that made a successful authed API call within this window is shown "Authed" even
@@ -159,15 +174,20 @@ object BotController {
         AvatarGlobalDb.start(app)
         scope.launch {
             var seenSignal = ""
+            var lastPoke = healthPoke.value
             while (true) {
                 try {
+                    // ONE /health read feeds everything (L3): the content signal, the report count,
+                    // and the Bots-tab health card — instead of three independent /health GETs.
+                    val h = AvatarGlobalDb.fetchHealth()
+                    if (h != null) {
+                        _health.value = h
+                        pendingReports = h.optInt("reports", pendingReports)
+                    }
                     // Key on a CONTENT signal (entries:totalAdded:totalRemoved), NOT the
                     // 2-min flush timestamp — so the admin device re-pulls the full file
-                    // ONLY when avatars were actually added/removed. A newly-added avatar
-                    // reaches the FILL bot within one poll (~30s) of the flush that merged
-                    // it, and an idle catalog costs a cheap /health read instead of a 13MB
-                    // re-parse every 2 min.
-                    val sig = AvatarGlobalDb.workerContentSignal()
+                    // ONLY when avatars were actually added/removed.
+                    val sig = h?.let { AvatarGlobalDb.contentSignalOf(it) }
                     if (sig != null && sig != seenSignal) {
                         seenSignal = sig
                         AvatarGlobalDb.forceRefresh(app, cacheBust = sig)   // no-op post-cutover (memory-flat)
@@ -182,7 +202,11 @@ object BotController {
                         }
                     }
                 } catch (_: Throwable) { /* transient — retry next tick */ }
-                delay(30_000)
+                // Sleep up to 30s but wake early if the health card's refresh button poked us (L3),
+                // so the manual refresh is responsive without the card holding its own /health poll.
+                var waited = 0
+                while (waited < 30_000 && healthPoke.value == lastPoke) { delay(1_000); waited += 1_000 }
+                lastPoke = healthPoke.value
             }
         }
 
@@ -217,8 +241,7 @@ object BotController {
                         runCatching { AvatarCatalogSweep.kick(app, key, currentManual(prefs0(app))) }
                     }
                 } else { lastProgressMs = 0L; lastCheckedSum = -1 }
-                if (i % 6 == 0) pendingReports =
-                    runCatching { AvatarGlobalDb.pendingReportCount() }.getOrDefault(pendingReports)
+                // pendingReports now comes from the shared 30s /health poll (L3) — no separate GET here.
                 val vs = withContext(Dispatchers.Default) { AvatarCatalogSweep.roleViews(pendingReports) }
                 val bv = withContext(Dispatchers.Default) { AvatarCatalogSweep.blitzViews() }
                 _views.value = vs
@@ -234,6 +257,8 @@ object BotController {
                 _sweepLastCycleAgoMs.value =
                     if (AvatarCatalogSweep.lastCycleMs == 0L) -1L
                     else System.currentTimeMillis() - AvatarCatalogSweep.lastCycleMs
+                _pushError.value = AvatarCatalogSweep.pushError          // L2: observable now
+                _crawlStatus.value = AvatarCatalogSweep.avtrdbCrawlStatus
                 _bots.value = _bots.value.map { b ->
                     val li = BotVrchatSession.isLoggedIn(app, b.slot)
                     // Flip "Checking…" (UNKNOWN) to "Authed" the moment the bot proves auth via a
