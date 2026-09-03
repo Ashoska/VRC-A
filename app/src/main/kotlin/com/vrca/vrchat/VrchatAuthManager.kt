@@ -1524,6 +1524,13 @@ object VrchatAuthManager {
         }
 
     private enum class HitVerdict { SERVE, DEAD, RETRY, FALLTHROUGH }
+    /** Human-readable verdict for the per-user resolve trace. */
+    private fun verdictLabel(v: HitVerdict): String = when (v) {
+        HitVerdict.SERVE -> "LIVE (200) → serve"
+        HitVerdict.DEAD -> "DEAD/private (403/404) → grey + report"
+        HitVerdict.RETRY -> "transient (429/5xx) → retry, not cached"
+        HitVerdict.FALLTHROUGH -> "live but worn image no longer matches (stale entry) → resolve fresh"
+    }
 
     /** Verify a catalog-HIT avatar is safe to offer as clonable. SERVE = live+public (and, when the
      *  worn file id is known, its image still matches — not a stale re-keyed entry). DEAD = 403/404
@@ -1617,10 +1624,19 @@ object VrchatAuthManager {
         // instead of a second identical GET /users/{id}. `reused` is surfaced in the trace so the
         // diagnostics show when a call was saved vs a fresh fetch made.
         val reusedThumb = cachedWornThumb(userId)
-        val wornThumbUrl = reusedThumb ?: fetchUserInfo(context, userId)?.wornAvatarThumbUrl.orEmpty()
+        val freshInfo = if (reusedThumb != null) null else fetchUserInfo(context, userId)
+        val fetchFailed = reusedThumb == null && freshInfo == null
+        val wornThumbUrl = reusedThumb ?: freshInfo?.wornAvatarThumbUrl.orEmpty()
         val wornFileId = fileIdOf(wornThumbUrl)
-        step("worn image fileId: ${wornFileId ?: "none (hidden thumb / impostor / offline)"}" +
-            if (reusedThumb != null) " [reused /users cache]" else " [fresh /users fetch]")
+        // Distinguish a FAILED /users/{id} (rate-limited/network → worn image unknown, retry) from a
+        // genuinely absent thumbnail (hidden/impostor) — they used to look identical ("none") in the
+        // trace, hiding the #1 reason a resolve fails: rate-limiting.
+        step(when {
+            reusedThumb != null -> "worn image fileId: ${wornFileId ?: "none"}  [reused /users cache — saved a call]"
+            fetchFailed -> "GET /users/$userId FAILED (rate-limited / network) — worn image UNKNOWN this pass"
+            wornFileId != null -> "worn image fileId: $wornFileId  [fresh /users fetch]"
+            else -> "worn image: none (hidden thumb / impostor / no worn avatar)  [fresh /users fetch]"
+        })
         if (avatarName.isNotBlank()) step("log avatar name: \"$avatarName\"${if (author.isNotBlank()) " by $author" else ""}")
         // NAME-OPTIONAL: resolve purely from the worn image file id when there's no
         // log name (impostor'd player in a big instance).
@@ -1654,6 +1670,7 @@ object VrchatAuthManager {
             }
             // CONFIRM it's still wearable before offering it (no robot-tap on a since-dead/private entry).
             val (verdict, plats) = verifyCatalogHit(context, hit.avatarId, wornFileId)
+            step("  live-confirm (GET /avatars/${hit.avatarId}): ${verdictLabel(verdict)}")
             when (verdict) {
                 HitVerdict.SERVE -> {
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog (confirmed live)"
@@ -1697,6 +1714,7 @@ object VrchatAuthManager {
                     // time, but avatars go private/deleted later; without this, a since-dead/private entry
                     // shows clickable → robot). One GET, session-cached — the honest cost of "no robot tap".
                     val (verdict, plats) = verifyCatalogHit(context, e.avatarId, wornFileId)
+                    step("  live-confirm (GET /avatars/${e.avatarId}): ${verdictLabel(verdict)}")
                     when (verdict) {
                         HitVerdict.SERVE -> {
                             com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via global catalog (shard, confirmed live)"
@@ -1736,15 +1754,20 @@ object VrchatAuthManager {
                 // fall through (don't offer / don't pollute the catalog with a private avatar).
                 val info = fetchAvatarInfo(context, cand.id)
                 if (info != null && wornFileId in info.first) {
+                    step("  mirror match ${cand.id} confirmed live + image matches ✓")
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via image file id"
                     com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, cand.id, avatarName, author, cand.authorId, info.second)
                     return@withContext WornAvatarResult(cand.id, info.second, fileId = wornFileId)
                 }
+                step("  mirror match ${cand.id} REJECTED: " +
+                    if (info == null) "private/deleted (403/404)" else "live but image no longer matches")
             }
             // 0b. OFFICIAL: the author's public-avatars listing, matched by the worn
             //     image file id (also yields the avatar's platforms). Exact.
             step("→ VRChat author public-avatars listing (via /file owner)")
-            resolveViaAuthorAvatars(context, wornFileId)?.let { (id, plats) ->
+            val authorRes = resolveViaAuthorAvatars(context, wornFileId)
+            step("  " + com.vrca.vrchat.AvatarSearch.Diag.authorListing)   // WORKS/BLOCKED/IGNORED + counts
+            authorRes?.let { (id, plats) ->
                 com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via author listing"
                 com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, id, avatarName, author, "", plats)
                 return@withContext WornAvatarResult(id, plats, fileId = wornFileId)
@@ -1758,15 +1781,17 @@ object VrchatAuthManager {
         }
         // 1. NAME search across VARIANTS (the log name often carries a descriptor the
         //    DB doesn't store). Merge candidates deduped by avtr_ id.
-        step("→ name search (avtrdb + VRCX mirrors) over ${avatarNameVariants(avatarName).size} name variant(s)")
         val variants = avatarNameVariants(avatarName)
+        step("→ name search (avtrdb + VRCX mirrors) over variants: ${variants.joinToString(", ") { "\"$it\"" }}")
         val merged = LinkedHashMap<String, com.vrca.vrchat.AvatarSearch.Candidate>()
         for (v in variants) {
-            val found = try { com.vrca.vrchat.AvatarSearch.searchCandidates(v) } catch (e: Exception) { emptyList() }
+            val found = try { com.vrca.vrchat.AvatarSearch.searchCandidates(v) } catch (e: Exception) {
+                step("  variant \"$v\": search error ${e.javaClass.simpleName}"); emptyList() }
             for (c in found) merged.putIfAbsent(c.id, c)   // no cap — collect every candidate (free grabs)
         }
         val candidates = merged.values.toList()
-        step("  name candidates: ${candidates.size}")
+        val withImage = candidates.count { it.imageFileId != null }
+        step("  name candidates: ${candidates.size} ($withImage carry a raw image id, ${candidates.size - withImage} avtrdb-proxied need a VRChat confirm)")
         // FREE GRABS: every candidate is a real avatar — harvest ALL of them into the catalog in the
         // background (mirror candidates carry a file id → contributed directly for free; avtrdb ones are
         // resolved), not just the one we clone. Fire-and-forget, paced + deduped inside the harvester.
@@ -1800,10 +1825,13 @@ object VrchatAuthManager {
             for (c in ranked) {
                 val info = fetchAvatarInfo(context, c.id)
                 if (info != null && wornFileId in info.first) {
+                    step("  ✓ ${c.id} (\"${c.name}\") image matches → clone")
                     com.vrca.vrchat.AvatarSearch.Diag.lastReason = "via name confirm"
                     com.vrca.vrchat.AvatarGlobalDb.contribute(context, wornFileId, c.id, avatarName, c.author, c.authorId, info.second)
                     return@withContext WornAvatarResult(c.id, info.second, fileId = wornFileId)
                 }
+                step("  ✗ ${c.id} (\"${c.name}\"): " +
+                    if (info == null) "private/deleted (403/404)" else "different avatar (image id ≠ worn)")
                 kotlinx.coroutines.delay(250)
             }
             // We KNOW the worn image but no candidate's image matched it. Every
