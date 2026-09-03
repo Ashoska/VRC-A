@@ -85,6 +85,12 @@ object AvatarGlobalDb {
     // periodic loop is the backstop, and CONTRIBUTE_MAX_BATCH force-sends a big burst immediately.
     // NOT used by the bulk avtrdb crawler (localInsert=false) — that stays on the 2-min loop.
     private const val QUICK_FLUSH_MS = 60_000L
+    // Coalesce TRICKLES: only fire the debounced quick-flush once at least this many contributions have
+    // queued. A lone genuinely-new avatar (1-2 queued) rides the 2-min periodic loop instead of its own
+    // POST — the contributing device already sees it locally, and cross-user propagation is ~a minute
+    // either way, so this trades nothing for far fewer tiny KV writes on the Worker. Bursts still
+    // coalesce via the 60s debounce; the 1000-cap force-flushes a flood immediately.
+    private const val QUICK_FLUSH_MIN = 3
     @Volatile private var quickFlushJob: Job? = null
     // Paced DB-search seeding from favourites / worn avatars. Each name runs ONE
     // AvatarSearch.searchAll (avtrdb + 2 VRCX mirrors + our catalog), which contributes
@@ -311,6 +317,27 @@ object AvatarGlobalDb {
                 .takeIf { it.isNotBlank() }
         } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
     }
+
+    /** ONE /health GET returning the whole status object — so the admin Bots tab can derive the
+     *  content signal, pending-report count AND the health-card fields from a SINGLE read per poll
+     *  instead of three separate /health GETs (the content-signal loop, the report-count poll, and
+     *  the card's own poll all hit /health independently — L3). Returns null on any failure. */
+    fun fetchHealth(): JSONObject? {
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL("$WORKER_URL/health").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"; setRequestProperty("User-Agent", "VRC-A")
+                connectTimeout = 10_000; readTimeout = 10_000
+            }
+            if (conn.responseCode != 200) return null
+            JSONObject(conn.inputStream.bufferedReader().readText())
+        } catch (e: Exception) { null } finally { runCatching { conn?.disconnect() } }
+    }
+
+    /** The content signal (entries:totalAdded:totalRemoved) derived from an already-fetched /health
+     *  object — so a caller that fetched health once can reuse it instead of a second GET. */
+    fun contentSignalOf(health: JSONObject): String =
+        "${health.optInt("entries", -1)}:${health.optInt("totalAdded", 0)}:${health.optInt("totalRemoved", 0)}"
 
     /** A CONTENT signal (cheap /health read) that changes ONLY when the catalog's
      *  contents actually change — new avatars merged (`totalAdded`), removals
@@ -1029,6 +1056,7 @@ object AvatarGlobalDb {
             // HIT here, or the contribution is never queued (the batches regression).
             if (lookupShardedResult(app, fileId, checkLocalMap = false).status == ShardStatus.HIT) return@launch
             var overCap = false
+            var queueSize = 0
             queueMutex.withLock {
                 val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 val arr = JSONArray(prefs.getString(KEY_QUEUE, "[]"))
@@ -1047,16 +1075,18 @@ object AvatarGlobalDb {
                 prefs.edit().putString(KEY_QUEUE, arr.toString()).apply()
                 contributedCount++
                 lastContributed = "${name.ifBlank { avatarId }} (${nowShort()})"
-                overCap = arr.length() >= CONTRIBUTE_MAX_BATCH
+                queueSize = arr.length()
+                overCap = queueSize >= CONTRIBUTE_MAX_BATCH
             }
             // Hit the hard cap → flush NOW (cancel the pending debounce) so a big burst goes as one
             // bounded POST instead of growing unbounded or waiting out the settle window.
-            if (overCap) { quickFlushJob?.cancel(); flushQueue(app) }
+            if (overCap) { quickFlushJob?.cancel(); flushQueue(app); return@launch }
+            // User contributions get a debounced quick-flush so they reach the Worker in ~1 min (then
+            // the cron merges them), but ONLY once a few have queued (QUICK_FLUSH_MIN) — a lone new
+            // avatar rides the 2-min periodic loop instead of firing its own tiny POST. Bulk crawler
+            // contributions (localInsert=false) never quick-flush; they ride the 2-min loop.
+            if (localInsert && queueSize >= QUICK_FLUSH_MIN) scheduleQuickFlush(app)
         }
-        // User contributions get a debounced quick-flush so they reach the Worker in ~15s
-        // (then the 1-min cron merges them) instead of waiting up to 2 min for the periodic
-        // loop. Bulk crawler contributions (localInsert=false) skip this and ride the 2-min loop.
-        if (localInsert) scheduleQuickFlush(app)
         return true
     }
 
@@ -1102,13 +1132,19 @@ object AvatarGlobalDb {
                 if (name != null) put("name", name)
             })
             prefs.edit().putString(KEY_REPORTS, arr.toString()).apply()
-            flushQueue(app)
+            flushReports(app)   // reports only — don't force-drain the coalescing contribution queue
         }
     }
 
     // ---- worker POST ---------------------------------------------------------
 
+    /** Drain BOTH queues (contributions + reports). Used by the periodic/refresh loops + start. */
     private suspend fun flushQueue(context: Context) {
+        flushContributions(context)
+        flushReports(context)
+    }
+
+    private suspend fun flushContributions(context: Context) {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         // Contributions. DRAIN the queue under the lock (take ownership, clear it) so a
         // concurrent contribute can only append AFTER we've taken these — nothing is
@@ -1147,7 +1183,14 @@ object AvatarGlobalDb {
                 lastPost = "sent $sent/${items.size} at ${nowShort()} (retrying rest)"
             }
         }
-        // Reports (one POST each; small volume).
+    }
+
+    /** Drain ONLY the reports queue (one POST each; small volume). Kept separate from contributions
+     *  so a dead/private report (fired during resolution / on a rejected clone tap) POSTs itself
+     *  WITHOUT force-draining the contribution queue — that was bypassing the 60s coalescing debounce
+     *  and turning every report into an extra tiny /contribute POST. */
+    private suspend fun flushReports(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val reports = JSONArray(prefs.getString(KEY_REPORTS, "[]"))
         if (reports.length() > 0) {
             var remaining = JSONArray()
